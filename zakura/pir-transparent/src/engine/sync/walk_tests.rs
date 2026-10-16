@@ -394,8 +394,8 @@ impl RowSource for Direct<'_> {
 /// The directory phase, without the directory query: the entry's inline
 /// events committed and its walk recorded, as `retrieve_shard_into`
 /// leaves them. Returns the walks owed.
-fn directory_phase(
-    store: &mut MemoryStore,
+fn directory_phase<S: WalletStore>(
+    store: &mut S,
     directory: &Directory,
     manifest: &ShardManifest,
     scripts: &[Vec<u8>],
@@ -422,6 +422,7 @@ fn directory_phase(
                 revision_digest: entry.manifest_digest.clone(),
             }));
         commit.pending_upsert.push(PendingPages {
+            dummy_queries: None,
             id: None,
             shard_id: entry.shard_id,
             revision_digest: entry.manifest_digest.clone(),
@@ -2132,3 +2133,164 @@ fn activity_saved_before_a_budget_stop_reaches_the_gap_limit_rule() {
 // Shares only immutable shard construction and independent history helpers.
 #[path = "budget_tests.rs"]
 mod budget_tests;
+
+/// A stopped failed walk must remain retryable after losing all sync-local
+/// state. Partial cover traffic cannot increment the durable suppression count.
+fn check_bounded_dummy_replay<S: WalletStore>(
+    mut store: S,
+    reopen: impl FnOnce(S) -> S,
+    reason: IncompleteReason,
+) {
+    let blocks = vec![(
+        1_000,
+        (0..200)
+            .map(|nonce| (ScriptBytes::new(script(0)), receive(1_000, nonce)))
+            .collect(),
+    )];
+    let directories = build(&blocks);
+    let directory = &directories[0];
+    let manifest = manifest_of(directory);
+    let victim = script(0);
+    let ((child, row), head, bad) = rewritten_head(directory, &victim, |entry| {
+        entry
+            .with_link(RunLink {
+                prev_child: 0,
+                prev_row: 1,
+                older_runs: 1,
+            })
+            .unwrap()
+    });
+    assert!(head.fragment_count >= 3);
+    let owed = directory_phase(
+        &mut store,
+        directory,
+        &manifest,
+        std::slice::from_ref(&victim),
+    );
+    struct Prefix<'a> {
+        inner: Direct<'a>,
+        maximum: usize,
+        reason: IncompleteReason,
+    }
+    impl RowSource for Prefix<'_> {
+        fn stopped(&self) -> Option<IncompleteReason> {
+            (self.inner.requests.len() >= self.maximum).then_some(self.reason.clone())
+        }
+        fn fetch<T: WalletStore>(
+            &mut self,
+            store: &mut T,
+            requests: &[RowRequest],
+        ) -> Result<Vec<Reply>, SyncError> {
+            let count = requests
+                .len()
+                .min(self.maximum.saturating_sub(self.inner.requests.len()));
+            self.inner.fetch(store, &requests[..count])
+        }
+    }
+    let entry = entry_of(&manifest);
+    let mut first = Prefix {
+        inner: Direct::new(directory),
+        maximum: 2,
+        reason: reason.clone(),
+    };
+    first
+        .inner
+        .rewritten
+        .insert((u32::from(child), u64::from(row)), vec![bad.clone()]);
+    let mut failures = Failures::default();
+    let result = walk_chains(
+        &mut store,
+        &entry,
+        &manifest,
+        &owed,
+        &mut first,
+        &target_of(&manifest),
+        &mut failures,
+    )
+    .unwrap();
+    assert!(matches!(result, Some(Completion::Incomplete { .. })));
+    assert_eq!(
+        failures.owes(entry.shard_id, &entry.manifest_digest, &victim),
+        Some((child, head.fragment_count - 2)),
+        "only sent dummies are settled"
+    );
+    assert_eq!(
+        store
+            .entry_failures(entry.shard_id, &entry.manifest_digest, &victim)
+            .unwrap(),
+        0,
+        "unfinished cover traffic cannot suppress the retry"
+    );
+    let mut store = reopen(store);
+    let remaining = head.fragment_count - 2;
+    for sent in 0..remaining {
+        let mut source = Prefix {
+            inner: Direct::new(directory),
+            maximum: 1,
+            reason: reason.clone(),
+        };
+        // A restart must send only saved dummies, without reading the real
+        // failing cursor or depending on another malformed reply.
+        let owed = store.pending().unwrap();
+        assert_eq!(owed[0].dummy_queries.unwrap().remaining, remaining - sent);
+        let mut failures = Failures::default();
+        let result = walk_chains(
+            &mut store,
+            &entry,
+            &manifest,
+            &owed,
+            &mut source,
+            &target_of(&manifest),
+            &mut failures,
+        )
+        .unwrap();
+        assert_eq!(
+            source.inner.requests,
+            vec![RowRequest {
+                child: u32::from(child),
+                row: 0
+            }]
+        );
+        let last = sent + 1 == remaining;
+        if last {
+            assert_eq!(result, None);
+            assert!(failures.owed.is_empty());
+            assert_eq!(store.pending().unwrap()[0].dummy_queries, None);
+        } else {
+            assert!(matches!(result, Some(Completion::Incomplete { .. })));
+            assert_eq!(
+                store.pending().unwrap()[0].dummy_queries.unwrap().remaining,
+                remaining - sent - 1
+            );
+        }
+        assert_eq!(
+            store
+                .entry_failures(entry.shard_id, &entry.manifest_digest, &victim)
+                .unwrap(),
+            u32::from(last)
+        );
+    }
+}
+
+#[test]
+fn bounded_dummy_replay_survives_a_new_memory_sync() {
+    for reason in [IncompleteReason::QueryBudget, IncompleteReason::ByteBudget] {
+        check_bounded_dummy_replay(MemoryStore::new(), |store| store, reason);
+    }
+}
+
+#[cfg(feature = "engine-store")]
+#[test]
+fn bounded_dummy_replay_survives_sqlite_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("recovery.sqlite");
+    let store = crate::engine_store::SqliteStore::open(&path).unwrap();
+    check_bounded_dummy_replay(
+        store,
+        |store| {
+            drop(store);
+            crate::engine_store::SqliteStore::open(&path).unwrap()
+        },
+        IncompleteReason::ByteBudget,
+    );
+}

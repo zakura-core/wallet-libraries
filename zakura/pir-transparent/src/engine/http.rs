@@ -686,6 +686,8 @@ pub struct HttpFilterSource {
     /// fetch drops whatever the last walk left unused rather than hand it out
     /// under a map it was not fetched for.
     prefetched: std::collections::HashMap<u64, Vec<u8>>,
+    prefetched_paid: bool,
+    prefetch_failed_bytes: u64,
     /// Requests a prefetch keeps in flight.
     concurrency: usize,
 }
@@ -723,6 +725,8 @@ impl HttpFilterSource {
                 timeout: options.timeout,
             },
             prefetched: std::collections::HashMap::new(),
+            prefetched_paid: false,
+            prefetch_failed_bytes: 0,
             concurrency: FILTER_PREFETCH_CONCURRENCY,
         })
     }
@@ -816,6 +820,8 @@ impl FilterSource for HttpFilterSource {
     fn prefetch(&mut self, shard_ids: &[u64]) {
         // A new walk: what an earlier one left was fetched for its map.
         self.prefetched.clear();
+        self.prefetched_paid = false;
+        self.prefetch_failed_bytes = 0;
         if self.concurrency <= 1 || shard_ids.len() <= 1 {
             return;
         }
@@ -824,6 +830,7 @@ impl FilterSource for HttpFilterSource {
         wanted.dedup();
         let next = std::sync::atomic::AtomicUsize::new(0);
         let failed = std::sync::atomic::AtomicBool::new(false);
+        let failed_bytes = std::sync::atomic::AtomicU64::new(0);
         let fetched = std::sync::Mutex::new(Vec::new());
         std::thread::scope(|scope| {
             for _ in 0..self.concurrency.min(wanted.len()) {
@@ -847,20 +854,42 @@ impl FilterSource for HttpFilterSource {
                             self.retry,
                         ) {
                             Ok(bytes) => fetched.lock().expect("unpoisoned").push((id, bytes)),
-                            Err(_) => failed.store(true, std::sync::atomic::Ordering::Relaxed),
+                            Err(error) => {
+                                failed_bytes.fetch_add(
+                                    TransferFailure::downloaded(&error),
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                                failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
                         }
                     }
                 });
             }
         });
+        self.prefetch_failed_bytes = failed_bytes.into_inner();
         self.prefetched
             .extend(fetched.into_inner().expect("unpoisoned"));
     }
 
+    fn prefetch_charged(&mut self, shard_ids: &[u64]) -> u64 {
+        self.prefetch(shard_ids);
+        self.prefetched_paid = true;
+        self.prefetch_failed_bytes
+            + self
+                .prefetched
+                .values()
+                .map(|bytes| bytes.len() as u64)
+                .sum::<u64>()
+    }
+
     fn filter(&mut self, shard_id: u64) -> Result<(Vec<u8>, u64), BoxError> {
         if let Some(bytes) = self.prefetched.remove(&shard_id) {
-            let len = bytes.len() as u64;
-            return Ok((bytes, len));
+            let cost = if self.prefetched_paid {
+                0
+            } else {
+                bytes.len() as u64
+            };
+            return Ok((bytes, cost));
         }
         let bytes = execute(
             self.client
@@ -1207,10 +1236,15 @@ mod observation_tests {
                         .to_string();
                     let path = line.split(' ').nth(1).unwrap().to_string();
                     seen.lock().unwrap().push(path.clone());
+                    let status = if path.contains("/99/") {
+                        "500 Internal Server Error"
+                    } else {
+                        "200 OK"
+                    };
                     let body = path.into_bytes();
                     let _ = stream.write_all(
                         format!(
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             body.len()
                         )
                         .as_bytes(),
@@ -1284,6 +1318,41 @@ mod observation_tests {
             paths.lock().unwrap().len(),
             13,
             "concurrency 1 disables prefetch"
+        );
+
+        let paid = source.prefetch_charged(&[1, 2, 3]);
+        let expected: u64 = [1, 2, 3]
+            .iter()
+            .map(|id| format!("/v2/filters/shards/{id}/filter").len() as u64)
+            .sum();
+        assert_eq!(
+            paid, expected,
+            "all dispatched filters are charged immediately"
+        );
+        assert_eq!(
+            source.filter(1).unwrap().1,
+            0,
+            "consuming a prepaid filter is free"
+        );
+        // Abandon 2 and 3, as an early exit or a map refresh would.
+        source.prefetch_charged(&[]);
+        assert_eq!(
+            paid, expected,
+            "discarding unused replies cannot erase their charge"
+        );
+        assert!(
+            source.filter(2).unwrap().1 > 0,
+            "a fresh network request is charged"
+        );
+
+        let first = paths.lock().unwrap().len();
+        let paid = source.prefetch_charged(&[99, 100]);
+        let paths = paths.lock().unwrap();
+        assert!(paths[first..].iter().any(|path| path.contains("/99/")));
+        let delivered: u64 = paths[first..].iter().map(|path| path.len() as u64).sum();
+        assert_eq!(
+            paid, delivered,
+            "failed prefetch bodies are paid even when abandoned"
         );
     }
 

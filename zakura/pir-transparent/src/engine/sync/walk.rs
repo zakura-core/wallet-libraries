@@ -98,7 +98,27 @@ pub(super) fn walk_chains<S: WalletStore, R: RowSource>(
             done: false,
             dummies: None,
         };
-        if let Some(owed) = failures.owes(entry.shard_id, &entry.manifest_digest, &item.script) {
+        if let Some(cover) = item.dummy_queries {
+            walker.child(cover.child)?;
+            if cover.remaining == 0
+                || u64::from(cover.remaining) > walker.child(cover.child)?.query_rows() + 1
+            {
+                return Err(SyncError::Store(StoreError::Corrupt(
+                    "invalid pending cover count".into(),
+                )));
+            }
+            walk.dummies = Some((cover.child, cover.remaining));
+            failures.settle(entry.shard_id, &entry.manifest_digest, &item.script);
+            failures.owed.push((
+                entry.shard_id,
+                entry.manifest_digest.clone(),
+                item.script.clone(),
+                cover.child,
+                cover.remaining,
+            ));
+        } else if let Some(owed) =
+            failures.owes(entry.shard_id, &entry.manifest_digest, &item.script)
+        {
             // Failed earlier in this sync, before a retry: it still sends
             // what it owed.
             walk.dummies = Some(owed);
@@ -203,9 +223,24 @@ pub(super) fn walk_chains<S: WalletStore, R: RowSource>(
             }
             // A failed walk's dummies were this round's; their replies are
             // not read, and the walk ends.
-            if walk.dummies.take().is_some() {
-                failures.settle(entry.shard_id, &entry.manifest_digest, &walk.item.script);
-                walk.done = true;
+            if let Some((child, count)) = walk.dummies {
+                let sent = answers.len().saturating_sub(start).min(end - start) as u32;
+                let left = count - sent;
+                if left == 0 {
+                    walker.settle_failure(store, walk, failures)?;
+                    walk.dummies = None;
+                } else {
+                    walk.dummies = Some((child, left));
+                    walker.save_dummies(store, walk, child, left)?;
+                    failures.settle(entry.shard_id, &entry.manifest_digest, &walk.item.script);
+                    failures.owed.push((
+                        entry.shard_id,
+                        entry.manifest_digest.clone(),
+                        walk.item.script.clone(),
+                        child,
+                        left,
+                    ));
+                }
                 continue;
             }
             if start >= answers.len() && start != end {
@@ -519,7 +554,8 @@ impl Walker<'_> {
         }
         // The run's fragments this round asked for and a budget left unsent:
         // what the walk still owes if this run fails.
-        let unsent = (remaining - answers.len()) as u32;
+        let unsent = (remaining - answers.len()) as u32
+            + u32::from(next.is_empty() && older.is_none() && head.link.previous().is_some());
         let failing = |error: SyncError| Failure {
             error,
             child: cursor.child,
@@ -568,7 +604,7 @@ impl Walker<'_> {
                 Vec::new(),
             )?);
         }
-        check_run(self.child(cursor.child)?, &run, &walk.item.carried)?;
+        check_run(self.child(cursor.child)?, &run, &walk.item.carried).map_err(failing)?;
         walk.walked.push((cursor.child, run.clone()));
         match head.link.previous() {
             None => Ok(self.finish(store, walk, run, None)?),
@@ -654,6 +690,60 @@ impl Walker<'_> {
             return Err(error);
         };
         let entry = self.entry;
+        if dummies > 0 {
+            // Suppress another real walk in this call, but not across calls.
+            record_failure(
+                store,
+                &mut failures.entries,
+                entry.shard_id,
+                &entry.manifest_digest,
+                &walk.item.script,
+            )?;
+            self.save_dummies(store, walk, child, dummies)?;
+            walk.dummies = Some((child, dummies));
+            failures.owed.push((
+                entry.shard_id,
+                entry.manifest_digest.clone(),
+                walk.item.script.clone(),
+                child,
+                dummies,
+            ));
+        } else {
+            self.settle_failure(store, walk, failures)?;
+        }
+        Ok(())
+    }
+
+    /// Save only the unsent cover count alongside the existing validated cursor.
+    fn save_dummies<S: WalletStore>(
+        &self,
+        store: &mut S,
+        walk: &mut Walk,
+        child: u8,
+        remaining: u32,
+    ) -> Result<(), SyncError> {
+        walk.item.dummy_queries = Some(crate::engine::store::DummyQueries { child, remaining });
+        self.commit(
+            store,
+            &walk.item.script,
+            Vec::new(),
+            Some(walk.item.clone()),
+            None,
+            Vec::new(),
+        )
+    }
+
+    /// Count a failed entry only after its cover traffic completed. Until then
+    /// the existing pending record carries its unsent cover count, including
+    /// after reopening; a partial budget must never suppress that work.
+    fn settle_failure<S: WalletStore>(
+        &self,
+        store: &mut S,
+        walk: &mut Walk,
+        failures: &mut Failures,
+    ) -> Result<(), SyncError> {
+        let entry = self.entry;
+        walk.item.dummy_queries = None;
         commit_bounded(
             store,
             self.target_anchor,
@@ -666,6 +756,7 @@ impl Walker<'_> {
                 end_height: entry.end_height,
                 terminal_block_hash: entry.terminal_block_hash.clone(),
                 failed_entries: vec![walk.item.script.clone()],
+                pending_upsert: vec![walk.item.clone()],
                 ..Default::default()
             },
         )?;
@@ -676,18 +767,8 @@ impl Walker<'_> {
             &entry.manifest_digest,
             &walk.item.script,
         )?;
-        if dummies > 0 {
-            walk.dummies = Some((child, dummies));
-            failures.owed.push((
-                entry.shard_id,
-                entry.manifest_digest.clone(),
-                walk.item.script.clone(),
-                child,
-                dummies,
-            ));
-        } else {
-            walk.done = true;
-        }
+        failures.settle(entry.shard_id, &entry.manifest_digest, &walk.item.script);
+        walk.done = true;
         Ok(())
     }
 

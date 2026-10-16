@@ -89,7 +89,9 @@ impl WalletStore for MemoryStore {
             }
             Some(stored) if stored.continues(identity) => {
                 // A geometry the store had not seen may appear; record it.
-                self.state.identity = Some(identity.clone());
+                let mut identity = identity.clone();
+                identity.retain_seals(stored);
+                self.state.identity = Some(identity);
                 Ok(())
             }
             Some(stored) => Err(StoreError::SetMismatch {

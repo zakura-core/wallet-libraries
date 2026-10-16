@@ -75,6 +75,13 @@ impl SetIdentity {
         }
     }
 
+    /// Extends a compatible identity without forgetting previously bound seals.
+    pub(crate) fn retain_seals(&mut self, stored: &Self) {
+        for (name, seal) in &stored.seal {
+            self.seal.entry(name.clone()).or_insert(*seal);
+        }
+    }
+
     /// SHA-256 of the canonical serialization.
     pub fn digest(&self) -> String {
         hex::encode(Sha256::digest(
@@ -182,6 +189,14 @@ pub struct RunCursor {
     pub older_runs: Option<u8>,
 }
 
+/// Indistinguishable page queries still owed after an entry's content failed.
+/// Kept with the pending cursor so a budget, outage or restart cannot omit them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DummyQueries {
+    pub child: u8,
+    pub remaining: u32,
+}
+
 /// Page retrieval a wallet still owes for one script in one directory shard
 /// revision: the rest of its chain of runs.
 ///
@@ -208,6 +223,8 @@ pub struct PendingPages {
     /// only this script. They are revalidated on resume and cleared at the next run.
     pub fragments: Vec<Vec<u8>>,
     pub attempts: u32,
+    /// Cover traffic must finish before this failed entry can be suppressed.
+    pub dummy_queries: Option<DummyQueries>,
     pub target_anchor: Option<Anchor>,
 }
 
@@ -281,7 +298,18 @@ impl ShardCommit {
         let pending = self
             .pending_upsert
             .iter()
-            .map(|pending| encode_events(&pending.carried))
+            .map(|pending| {
+                if pending
+                    .dummy_queries
+                    .is_some_and(|cover| cover.remaining == 0)
+                    || pending.dummy_queries.is_some() && pending.target_anchor.is_none()
+                {
+                    return Err(StoreError::Corrupt(
+                        "invalid pending cover obligation".into(),
+                    ));
+                }
+                encode_events(&pending.carried)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let runs = self
             .cached_runs

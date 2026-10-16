@@ -314,6 +314,11 @@ impl ByteCharges {
         self.add_query(table, upload, download);
     }
 
+    /// Manifest bytes received ahead of the sequential verification step.
+    pub(crate) fn add_manifest_download(&mut self, cost: u64) {
+        self.manifest_bytes += cost;
+    }
+
     pub fn add_manifest(&mut self, cost: u64) {
         self.manifest_bytes += cost;
         self.manifests_checked += 1;
@@ -411,6 +416,14 @@ pub trait FilterSource {
     /// fetched for the map in hand then, and a re-cut gives their ids to other
     /// shards. The sync still checks every filter against the map.
     fn prefetch(&mut self, _shard_ids: &[u64]) {}
+
+    /// Prefetches and returns bytes paid now, including replies never consumed.
+    /// An implementation that returns a cost must return zero cost when those
+    /// replies are later consumed by `filter`. The default preserves lazy sources.
+    fn prefetch_charged(&mut self, shard_ids: &[u64]) -> u64 {
+        self.prefetch(shard_ids);
+        0
+    }
 
     /// Research-only parent discovery for uncached work. Default sources never
     /// skip child filters. Costs include manifest discovery even on fallback.
@@ -670,6 +683,9 @@ impl<T: FilterSource + ?Sized> FilterSource for Box<T> {
     }
     fn prefetch(&mut self, shard_ids: &[u64]) {
         (**self).prefetch(shard_ids)
+    }
+    fn prefetch_charged(&mut self, shard_ids: &[u64]) -> u64 {
+        (**self).prefetch_charged(shard_ids)
     }
 }
 

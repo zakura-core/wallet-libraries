@@ -116,6 +116,7 @@ pub fn commit(
 
 pub fn pending(script_tag: u8, revision: &str) -> PendingPages {
     PendingPages {
+        dummy_queries: None,
         id: None,
         shard_id: 1,
         revision_digest: revision.into(),
@@ -156,6 +157,8 @@ pub fn cached_run(child: &str, script_tag: u8, heights: &[u32]) -> CachedRun {
 /// bound is exercised cheaply.
 pub fn suite<S: WalletStore>(make: impl Fn() -> S) {
     an_empty_store_reports_nothing(&make);
+    omitted_geometries_keep_their_bound_seals(&make);
+    invalid_cover_obligations_do_not_change_the_store(&make);
     a_commit_is_idempotent_and_a_differing_repeat_is_refused_whole(&make);
     coverage_merges_settled_ranges_and_keeps_provisional_ones_apart(&make);
     rollback_removes_only_the_suffix(&make);
@@ -911,4 +914,42 @@ fn retiring_pending_work_preserves_shard_zero_failure_holds<S: WalletStore>(make
         .unwrap();
     assert!(store.pending().unwrap().is_empty());
     assert_eq!(store.entry_failures(0, "held", &script(1)).unwrap(), 3);
+}
+
+fn omitted_geometries_keep_their_bound_seals<S: WalletStore>(make: &impl Fn() -> S) {
+    let mut store = make();
+    let original = identity();
+    store.bind_set(&original).unwrap();
+    let mut empty = original.clone();
+    empty.seal.clear();
+    store.bind_set(&empty).unwrap();
+    assert_eq!(store.set_identity().unwrap(), Some(original.clone()));
+    let mut changed = original.clone();
+    changed.seal.values_mut().next().unwrap().max_scripts += 1;
+    assert!(matches!(
+        store.bind_set(&changed),
+        Err(StoreError::SetMismatch { .. })
+    ));
+    assert_eq!(store.set_identity().unwrap(), Some(original));
+}
+
+fn invalid_cover_obligations_do_not_change_the_store<S: WalletStore>(make: &impl Fn() -> S) {
+    let mut store = make();
+    store.bind_set(&identity()).unwrap();
+    for (count, anchor) in [(0, Some(Anchor::default())), (1, None)] {
+        let mut item = pending(1, "r1");
+        item.dummy_queries = Some(crate::engine::store::DummyQueries {
+            child: 0,
+            remaining: count,
+        });
+        item.target_anchor = anchor;
+        let before = store.last_commit().unwrap();
+        let result = store.commit_shard(ShardCommit {
+            pending_upsert: vec![item],
+            ..Default::default()
+        });
+        assert!(result.is_err());
+        assert_eq!(store.last_commit().unwrap(), before);
+        assert!(store.pending().unwrap().is_empty());
+    }
 }

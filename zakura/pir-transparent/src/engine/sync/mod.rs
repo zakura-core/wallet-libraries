@@ -626,6 +626,7 @@ pub fn sync_into<S: WalletStore>(
             ));
         }
         Acceptance::Unknown => {
+            store.add_scripts(&scripts.scripts())?;
             return incomplete_at(
                 store,
                 IncompleteReason::ChainUnknown {
@@ -640,6 +641,7 @@ pub fn sync_into<S: WalletStore>(
         .last()
         .is_none_or(|s| s.end_height < target_anchor.height)
     {
+        store.add_scripts(&scripts.scripts())?;
         return incomplete_at(
             store,
             IncompleteReason::PublicationBehind {
@@ -876,6 +878,13 @@ pub fn sync_into<S: WalletStore>(
         match map.shards.get(range.shard_id as usize) {
             Some(published) if published.manifest_digest == range.revision_digest => {
                 if published.sealed {
+                    fetch_manifest(
+                        published,
+                        &previous_digest_of(map, published.shard_id),
+                        map,
+                        transport,
+                        &mut charges,
+                    )?;
                     promote.push((range.shard_id, range.revision_digest.clone()));
                 }
             }
@@ -1096,7 +1105,7 @@ pub fn sync_into<S: WalletStore>(
         } else {
             // Every uncached filter in the walk is downloaded anyway; overlap
             // them rather than paying one round trip each.
-            filters.prefetch(&uncached);
+            charges.filter_bytes += filters.prefetch_charged(&uncached);
         }
         let mut index_iter: Vec<usize> = work.keys().copied().collect();
         if look_ahead && !filters.uses_parents() {
@@ -1142,7 +1151,11 @@ pub fn sync_into<S: WalletStore>(
                 &mut failures,
             );
             match result {
-                Ok(ShardRead::Done { matched }) => {
+                Ok(ShardRead::Done {
+                    matched,
+                    unproductive: count,
+                }) => {
+                    unproductive += count;
                     if !matched.is_empty() {
                         if !matched_shards.contains(&entry.shard_id) {
                             matched_shards.push(entry.shard_id);

@@ -16,9 +16,9 @@
 
 use crate::engine::ledger::{LedgerError, check_event_identities};
 use crate::engine::store::{
-    Anchor, CachedRun, CoverageKind, CoverageRange, PendingPages, RunCursor, ScriptEntry,
-    ScriptOrigin, SetIdentity, SetupBlob, SetupKey, ShardCommit, StoreError, StoredEvent,
-    WalletStore, merge_coverage,
+    Anchor, CachedRun, CoverageKind, CoverageRange, DummyQueries, PendingPages, RunCursor,
+    ScriptEntry, ScriptOrigin, SetIdentity, SetupBlob, SetupKey, ShardCommit, StoreError,
+    StoredEvent, WalletStore, merge_coverage,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::{Path, PathBuf};
@@ -31,6 +31,36 @@ pub const SCHEMA_VERSION: u32 = 7;
 
 /// Default bound on pending page retrievals a commit may leave.
 pub const DEFAULT_PENDING_LIMIT: usize = 4_096;
+
+// Existing schema-7 target_anchor JSON remains readable unchanged. New pending
+// work can carry an optional cover obligation beside the same height/hash;
+// absent fields mean no obligation, without altering any SQL object or version.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PendingContext {
+    #[serde(flatten)]
+    anchor: Anchor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dummy_queries: Option<DummyQueries>,
+}
+
+fn pending_context(pending: &PendingPages) -> Result<Option<String>, StoreError> {
+    if pending.dummy_queries.is_some() && pending.target_anchor.is_none() {
+        return Err(StoreError::Corrupt(
+            "cover queries have no target anchor".into(),
+        ));
+    }
+    pending
+        .target_anchor
+        .as_ref()
+        .map(|anchor| {
+            serde_json::to_string(&PendingContext {
+                anchor: anchor.clone(),
+                dummy_queries: pending.dummy_queries,
+            })
+            .map_err(|error| StoreError::Io(error.to_string()))
+        })
+        .transpose()
+}
 
 struct SpendRow {
     spending_txid: Vec<u8>,
@@ -473,9 +503,10 @@ impl WalletStore for SqliteStore {
     }
 
     fn bind_set(&mut self, identity: &SetIdentity) -> Result<(), StoreError> {
+        let mut retained = identity.clone();
         match self.set_identity()? {
             None => {}
-            Some(stored) if stored.continues(identity) => {}
+            Some(stored) if stored.continues(identity) => retained.retain_seals(&stored),
             Some(stored) => {
                 return Err(StoreError::SetMismatch {
                     stored: stored.digest(),
@@ -484,7 +515,7 @@ impl WalletStore for SqliteStore {
             }
         }
         let json =
-            serde_json::to_string(identity).map_err(|error| StoreError::Io(error.to_string()))?;
+            serde_json::to_string(&retained).map_err(|error| StoreError::Io(error.to_string()))?;
         self.set_meta("set_identity", &json)
     }
 
@@ -840,7 +871,7 @@ impl WalletStore for SqliteStore {
             match pending.id {
                 Some(id) => {
                     tx.execute(
-                        "UPDATE pending_work SET cursor_child = ?2, cursor_row = ?3, cursor_older_runs = ?4, carried = ?5, attempts = ?6, fragments = ?7 WHERE id = ?1",
+                        "UPDATE pending_work SET cursor_child = ?2, cursor_row = ?3, cursor_older_runs = ?4, carried = ?5, attempts = ?6, fragments = ?7, target_anchor = ?8 WHERE id = ?1",
                         params![
                             id as i64,
                             i64::from(cursor.child),
@@ -849,6 +880,7 @@ impl WalletStore for SqliteStore {
                             encoded,
                             pending.attempts as i64,
                             pending.fragments.concat(),
+                            pending_context(pending)?,
                         ],
                     )
                     .map_err(io)?;
@@ -865,7 +897,7 @@ impl WalletStore for SqliteStore {
                             i64::from(cursor.row),
                             cursor.older_runs.map(i64::from),
                             encoded,
-                            pending.target_anchor.as_ref().map(|a| serde_json::to_string(a).unwrap()),
+                            pending_context(pending)?,
                             pending.attempts as i64,
                             pending.fragments.concat(),
                         ],
@@ -1081,7 +1113,7 @@ impl WalletStore for SqliteStore {
                     row.get::<_, Option<i64>>(6)?,
                     row.get::<_, Vec<u8>>(7)?,
                     row.get::<_, i64>(8)? as u32,
-                    decode_anchor(row.get(9)?)?,
+                    row.get::<_, Option<String>>(9)?,
                     row.get::<_, Vec<u8>>(10)?,
                 ))
             })
@@ -1101,6 +1133,13 @@ impl WalletStore for SqliteStore {
                 target_anchor,
                 fragments,
             ) = row.map_err(io)?;
+            let context: Option<PendingContext> = target_anchor
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|error| StoreError::Corrupt(format!("pending context: {error}")))?;
+            let dummy_queries = context.as_ref().and_then(|context| context.dummy_queries);
+            let target_anchor = context.map(|context| context.anchor);
             let width = transparent_shard::PAGE_ROW_BYTES;
             if fragments.len() % width != 0 {
                 return Err(StoreError::Corrupt(
@@ -1109,6 +1148,7 @@ impl WalletStore for SqliteStore {
             }
             let corrupt = |_| StoreError::Corrupt("pending walk cursor out of range".into());
             pending.push(PendingPages {
+                dummy_queries,
                 id: Some(id),
                 shard_id,
                 revision_digest,
@@ -1281,6 +1321,26 @@ fn decode_anchor(raw: Option<String>) -> rusqlite::Result<Option<Anchor>> {
 #[cfg(test)]
 mod coverage_append_tests {
     use super::*;
+
+    #[test]
+    fn pending_context_accepts_old_json_and_preserves_the_anchor_shape() {
+        let old = r#"{"height":123,"hash":"block"}"#;
+        let mut context: PendingContext = serde_json::from_str(old).unwrap();
+        assert_eq!(context.dummy_queries, None);
+        assert_eq!(serde_json::to_string(&context).unwrap(), old);
+        context.dummy_queries = Some(DummyQueries {
+            child: 2,
+            remaining: 3,
+        });
+        let encoded = serde_json::to_string(&context).unwrap();
+        let anchor: Anchor = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            anchor, context.anchor,
+            "existing anchor readers still accept the envelope"
+        );
+        let decoded: PendingContext = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.dummy_queries, context.dummy_queries);
+    }
 
     /// Admission recognizes exactly the tables and indexes the schema creates.
     #[test]

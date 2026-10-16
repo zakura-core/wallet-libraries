@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve unsent page-cover queries across query/byte budgets, outages and SQLite reopen. The existing pending-work JSON gains an optional cover obligation; existing schema-7 records remain readable and no SQL schema, version or migration changes are required. Failure holds begin only after the cover queries finish.
+- Verify a sealed manifest before promoting provisional coverage, and retain previously bound seal parameters when a publication temporarily omits a geometry.
+- Include newly watched scripts in early progress, retain unproductive counts in mixed shards, and charge prefetched filters and manifests when transferred even if their replies are later discarded.
+- Reject recovered balances and transaction totals that overflow, including historical prefixes retained after rollback.
+
+### Changed
+
+- Custom engine stores must round-trip `PendingPages::dummy_queries` with their existing pending state. Eager `FilterSource` implementations can override `prefetch_charged` to report transfer costs before replies are consumed.
+
 ## [0.0.1-rc2] - 2026-10-16
 
 ### Fixed

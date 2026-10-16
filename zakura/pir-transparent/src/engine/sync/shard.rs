@@ -18,7 +18,10 @@ use transparent_shard::records::DirectoryEntry;
 
 pub(super) enum ShardRead {
     /// Every script in scope was covered; `matched` names those with history.
-    Done { matched: Vec<Vec<u8>> },
+    Done {
+        matched: Vec<Vec<u8>>,
+        unproductive: u64,
+    },
     /// The filter matched but nothing was found; coverage advanced anyway.
     Unproductive { count: u64 },
     /// A budget or refusal stopped the sync with the store consistent.
@@ -135,6 +138,7 @@ pub(super) fn read_shard_into<S: WalletStore>(
         )?;
         return Ok(ShardRead::Done {
             matched: Vec::new(),
+            unproductive: 0,
         });
     }
     // A geometry this build does not know is fatal the moment there is
@@ -182,6 +186,7 @@ pub(super) fn read_shard_into<S: WalletStore>(
         }
         return Ok(ShardRead::Done {
             matched: Vec::new(),
+            unproductive: 0,
         });
     }
 
@@ -220,37 +225,53 @@ pub(super) fn read_shard_into<S: WalletStore>(
     )?;
     match outcome {
         Some(stopped) => Ok(ShardRead::Stopped(stopped)),
-        None => {
-            // Which matched scripts actually held history is what the
-            // caller's gap-limit rule wants; the store knows.
-            let mut found = Vec::new();
-            let mut unproductive = 0u64;
-            let events = store.events()?;
-            for script in &matched_scripts {
-                // Only a failure under this revision hides the script's
-                // activity: one recorded under a withdrawn revision stays
-                // reported, but does not suppress what its replacement found.
-                if failures.entries.iter().any(|held| {
-                    held.shard_id == entry.shard_id
-                        && held.revision_digest == entry.manifest_digest
-                        && held.script == *script
-                }) {
-                    continue;
-                }
-                if holds_history(&events, script, entry, target_anchor.height) {
-                    found.push(script.clone());
-                } else {
-                    unproductive += 1;
-                }
-            }
-            if found.is_empty() {
-                Ok(ShardRead::Unproductive {
-                    count: unproductive,
-                })
-            } else {
-                Ok(ShardRead::Done { matched: found })
-            }
+        None => activity_after_read(
+            store,
+            entry,
+            target_anchor.height,
+            &matched_scripts,
+            &failures.entries,
+        ),
+    }
+}
+
+/// Reports both useful history and misses from the same completed shard.
+fn activity_after_read<S: WalletStore>(
+    store: &S,
+    entry: &transparent_filter::ShardMapEntry,
+    target_height: u64,
+    matched_scripts: &[Vec<u8>],
+    failures: &[super::FailedEntry],
+) -> Result<ShardRead, SyncError> {
+    let mut found = Vec::new();
+    let mut unproductive = 0u64;
+    let events = store.events()?;
+    for script in matched_scripts {
+        // Only a failure under this revision hides the script's
+        // activity: one recorded under a withdrawn revision stays
+        // reported, but does not suppress what its replacement found.
+        if failures.iter().any(|held| {
+            held.shard_id == entry.shard_id
+                && held.revision_digest == entry.manifest_digest
+                && held.script == *script
+        }) {
+            continue;
         }
+        if holds_history(&events, script, entry, target_height) {
+            found.push(script.clone());
+        } else {
+            unproductive += 1;
+        }
+    }
+    if found.is_empty() {
+        Ok(ShardRead::Unproductive {
+            count: unproductive,
+        })
+    } else {
+        Ok(ShardRead::Done {
+            matched: found,
+            unproductive,
+        })
     }
 }
 
@@ -645,6 +666,7 @@ pub(super) fn retrieve_shard_into<S: WalletStore, T: ShardTransport>(
                     }
                     match found.head() {
                         Some((child, row)) => pending_upsert.push(PendingPages {
+                            dummy_queries: None,
                             id: None,
                             shard_id,
                             revision_digest: revision.to_string(),
@@ -848,4 +870,57 @@ pub(super) fn finish_pages<S: WalletStore, T: ShardTransport>(
         target_anchor,
         failures,
     )
+}
+
+#[cfg(all(test, feature = "engine-conformance"))]
+mod activity_tests {
+    use super::*;
+    use crate::engine::{MemoryStore, testing};
+
+    #[test]
+    fn mixed_shards_report_history_and_unproductive_matches_together() {
+        let mut store = MemoryStore::new();
+        let scripts = vec![testing::script(1), testing::script(2)];
+        store
+            .commit_shard(testing::commit(
+                0,
+                "revision",
+                true,
+                (0, 99),
+                vec![testing::receive(1, 0, 7, 5)],
+                scripts.clone(),
+            ))
+            .unwrap();
+        let entry = transparent_filter::ShardMapEntry {
+            shard_id: 0,
+            geometry: "decoupled-2k-8k".into(),
+            start_height: 0,
+            end_height: 99,
+            parent_block_hash: "00".repeat(32),
+            terminal_block_hash: "00".repeat(32),
+            filter_hash: "00".repeat(32),
+            scripts: 2,
+            page_rows: 0,
+            txids: 1,
+            directory_segments: 1,
+            page_segments: 1,
+            manifest_digest: "revision".into(),
+            revision: 0,
+            sealed: true,
+        };
+        match activity_after_read(&store, &entry, 99, &scripts, &[]).unwrap() {
+            ShardRead::Done {
+                matched,
+                unproductive,
+            } => {
+                assert_eq!(matched, vec![testing::script(1)]);
+                assert_eq!(unproductive, 1);
+            }
+            _ => panic!("a mixed shard must retain both outcomes"),
+        }
+        match activity_after_read(&store, &entry, 99, &scripts[1..], &[]).unwrap() {
+            ShardRead::Unproductive { count } => assert_eq!(count, 1),
+            _ => panic!("a shard with only a miss has no recovered history"),
+        }
+    }
 }

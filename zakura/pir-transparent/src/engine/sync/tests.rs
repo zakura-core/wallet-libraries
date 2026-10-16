@@ -659,6 +659,7 @@ fn unfinished_work_keeps_its_events_only_over_an_accepted_target() {
         hash: "aa".repeat(32),
     };
     let item = PendingPages {
+        dummy_queries: None,
         id: Some(1),
         shard_id: 2,
         revision_digest: "11".repeat(32),
@@ -1285,5 +1286,107 @@ fn an_empty_sync_commits_its_accepted_target_but_early_stops_keep_retained_progr
         ));
         assert_eq!((report.covered_through, report.settled_through), (199, 199));
         assert_eq!(store.anchor().unwrap(), Some(target.clone()));
+        let mut with_new_script = store.snapshot();
+        let mut requested = StaticScripts(vec![ScriptEntry {
+            script: vec![9],
+            origin: crate::engine::store::ScriptOrigin::Imported,
+            required_from: 100,
+        }]);
+        let report = sync_into(
+            &mut with_new_script,
+            &publication,
+            0,
+            &geometry,
+            &chain,
+            &mut requested,
+            &mut NoTraffic,
+            &mut NoTraffic,
+            &WorkLimits::UNLIMITED,
+            &offered,
+        )
+        .unwrap();
+        assert_eq!(with_new_script.scripts().unwrap().len(), 1);
+        assert_eq!(
+            (report.covered_through, report.settled_through),
+            (99, 99),
+            "early progress must include the newly requested script's missing history"
+        );
     }
+}
+
+#[test]
+fn a_sealed_flag_alone_cannot_promote_provisional_history() {
+    use crate::engine::adapters::StaticScripts;
+    use crate::engine::client::Table;
+    use crate::engine::store::ScriptOrigin;
+    use crate::engine::transport::BoxError;
+    struct BadManifest;
+    impl FilterSource for BadManifest {
+        fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("no map refresh")
+        }
+        fn filter(&mut self, _: u64) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("already covered")
+        }
+    }
+    impl ShardTransport for BadManifest {
+        fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("no init")
+        }
+        fn manifest(&mut self, _: u64, _: &str) -> Result<(Vec<u8>, u64), BoxError> {
+            Ok((vec![], 7))
+        }
+        fn setup(&mut self, _: u64, _: &str, _: Table, _: u32) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("no setup")
+        }
+        fn query(&mut self, _: u64, _: &str, _: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
+            panic!("no query")
+        }
+    }
+    let publication = map(vec![entry(0, 100, 199, true)]);
+    let target = Anchor {
+        height: 199,
+        hash: publication.shards[0].terminal_block_hash.clone(),
+    };
+    let mut store = MemoryStore::new();
+    store
+        .add_scripts(&[ScriptEntry {
+            script: vec![9],
+            origin: ScriptOrigin::Imported,
+            required_from: 100,
+        }])
+        .unwrap();
+    store
+        .commit_shard(ShardCommit {
+            shard_id: 0,
+            revision_digest: publication.shards[0].manifest_digest.clone(),
+            sealed: false,
+            start_height: 100,
+            end_height: 199,
+            terminal_block_hash: target.hash.clone(),
+            covered_scripts: vec![vec![9]],
+            ..Default::default()
+        })
+        .unwrap();
+    let before = store.provisional().unwrap();
+    let result = sync_into(
+        &mut store,
+        &publication,
+        0,
+        &ServiceGeometry {
+            schema: transparent_shard::SCHEMA.into(),
+            geometries: vec![],
+        },
+        &StaticChain::from_map(&publication),
+        &mut StaticScripts(vec![]),
+        &mut BadManifest,
+        &mut BadManifest,
+        &WorkLimits::UNLIMITED,
+        &target,
+    );
+    assert!(
+        result.is_err(),
+        "a matching digest is insufficient without a verified sealed manifest"
+    );
+    assert_eq!(store.provisional().unwrap(), before);
 }
