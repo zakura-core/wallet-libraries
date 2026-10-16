@@ -378,7 +378,8 @@ pub fn sync_shards(
     wallet_scripts: &[ScriptBytes],
     limits: FilterLimits,
 ) -> Result<ShardSyncOutcome, FilterError> {
-    map.validate_supported().map_err(FilterError::Response)?;
+    map.validate_supported()
+        .map_err(|error| FilterError::Response(format!("shard map is malformed: {error}")))?;
     let genesis = BlockHash::from_display_hex(&map.genesis_hash)?;
     let total = map.shards.len() as u64;
     if start_shard > total {
