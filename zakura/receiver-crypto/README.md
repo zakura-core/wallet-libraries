@@ -15,6 +15,9 @@ remain distinct:
 - `witness` builds the common `IWPROOF1` proof file from a commitment history, and
   checks a downloaded one against a publication. A proof root is never trusted on
   its own: callers compare it with their own chain.
+- `witness::{combine, empty_root}` provides checked byte-array hashing for
+  external tree layouts: combine levels are 0 through 31, empty-root heights
+  are 0 through 32, and malformed node encodings are refused.
 
 `witness::Publication` carries the manifest fields a proof binds to. Callers
 validate the manifest and compute its revision with the receiver protocol package
