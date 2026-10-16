@@ -36,6 +36,43 @@ pub const PLACEMENT_REFRESH_AGE: Duration = Duration::from_secs(30);
 /// archives only while recent keeps this many.
 pub const MIN_RECENT_FLOOR: u64 = 10_000;
 
+// The wallet HTTP adapter already accepts at most 8 MiB for a query reply.
+// Enforce that budget before fetching any segment setup, including when a
+// caller supplies a different transport.
+const MAX_QUERY_REPLY_BYTES: usize = 8 << 20;
+
+fn supported_map(map: &DisplayRecentMap) -> bool {
+    map.schema == display::DISPLAY_SCHEMA
+        && map
+            .recent
+            .as_ref()
+            .is_none_or(|entry| display_by_name(&entry.geometry).is_some())
+}
+
+fn query_reply_bytes(response_bytes: usize, segments: u32) -> Result<usize, TxidError> {
+    response_bytes
+        .checked_add(16)
+        .and_then(|stride| stride.checked_mul(segments as usize))
+        .filter(|bytes| segments != 0 && *bytes <= MAX_QUERY_REPLY_BYTES)
+        .ok_or(TxidError::Protocol(ProtocolKind::Length))
+}
+
+fn check_manifest_segments(
+    manifest: &DisplayManifest,
+    geometry: &Geometry,
+) -> Result<(), TxidError> {
+    let slots = txid::slots_per_row(geometry.directory_row_bytes) as u64;
+    // Every overflow segment fills a row in every preceding segment. Even
+    // if all records collide in one row, the builder cannot need more than
+    // ceil(records / slots) segments. Empty buckets still have one segment.
+    if manifest.buckets.iter().any(|bucket| {
+        bucket.directory_segments.len() as u64 > bucket.records.div_ceil(slots).max(1)
+    }) {
+        return Err(TxidError::Protocol(ProtocolKind::Manifest));
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct InitTable {
     rows: u64,
@@ -437,7 +474,7 @@ impl TxidDisplayClient {
                 return Ok(Err(Attempt::Done(TxidLookup::Unsupported)));
             }
         }
-        if cached.map.schema != display::DISPLAY_SCHEMA {
+        if !supported_map(&cached.map) {
             return Ok(Err(Attempt::Done(TxidLookup::Unsupported)));
         }
         cached
@@ -587,10 +624,10 @@ impl TxidDisplayClient {
         if map.to_bytes() != reply.body {
             return Err(TxidError::Protocol(ProtocolKind::MapCanonical));
         }
-        // Shape rules describe only the schema this client understands.
-        // A canonical map advertising another schema reaches locate's
-        // Unsupported result before any chunk, manifest or private query.
-        if map.schema == display::DISPLAY_SCHEMA {
+        // Shape rules describe only formats this client understands.
+        // Unknown schemas or recent geometries reach locate's Unsupported
+        // result before any chunk, manifest or private query.
+        if supported_map(&map) {
             map.check_shape().map_err(protocol(ProtocolKind::Map))?;
         }
         let chain = Chain {
@@ -703,9 +740,10 @@ impl TxidDisplayClient {
         if manifest.canonical_bytes() != reply.body || !entry.describes(&manifest) {
             return Err(TxidError::Protocol(ProtocolKind::Manifest));
         }
-        manifest
+        let geometry = manifest
             .validate()
             .map_err(protocol(ProtocolKind::Manifest))?;
+        check_manifest_segments(&manifest, geometry)?;
         let manifest = Arc::new(manifest);
         self.manifests
             .insert(entry.manifest_digest.clone(), manifest.clone());
@@ -839,6 +877,7 @@ impl TxidDisplayClient {
         segments: u32,
     ) -> Result<Target, TxidError> {
         let profile = self.profile(&located.init, located.geometry, table.kind())?;
+        query_reply_bytes(profile.scheme.response_bytes, segments)?;
         let mut setups = Vec::with_capacity(segments as usize);
         for segment in 0..segments {
             setups.push(self.setup(
@@ -889,7 +928,11 @@ impl TxidDisplayClient {
             cancel,
             TxidRequest::new(Route::Query, path, body),
         )?;
-        if reply.body.len() != target.setups.len() * stride {
+        let expected = query_reply_bytes(
+            target.profile.scheme.response_bytes,
+            u32::try_from(target.setups.len()).map_err(protocol(ProtocolKind::Length))?,
+        )?;
+        if reply.body.len() != expected {
             return Err(TxidError::Protocol(ProtocolKind::Length));
         }
         let mut copies = Vec::with_capacity(target.setups.len());
@@ -1053,6 +1096,73 @@ mod tests {
         );
         assert!(sent(&mut transport).is_empty());
         assert!(transport.replies.is_empty());
+    }
+
+    #[test]
+    fn unknown_recent_geometry_stops_before_private_work_and_can_be_replaced() {
+        let supported = recent_map(100, 200, "txid-2k8");
+        let mut unknown = supported.clone();
+        unknown.recent.as_mut().unwrap().geometry = "txid-future".into();
+        assert!(unknown.check_shape().is_err());
+        let mut transport = Scripted::default();
+        transport
+            .replies
+            .extend([Ok(init_with(&["txid-2k8"])), served(&unknown)]);
+        let mut client = test_client();
+        for _ in 0..2 {
+            assert_eq!(
+                client.lookup(&mut transport, [1; 32], 150, &never),
+                Ok(TxidLookup::Unsupported)
+            );
+        }
+        assert_eq!(sent(&mut transport), [Route::Init, Route::Map]);
+        assert_eq!(client.map_sha256(), Some(unknown.sha256().as_str()));
+        assert!(client.chunks.is_empty());
+        assert!(client.manifests.is_empty());
+        assert!(client.setups.is_empty());
+        transport.replies.extend([served(&supported), busy()]);
+        client.refresh_map(&mut transport, &never).unwrap();
+        assert_eq!(
+            client.lookup(&mut transport, [1; 32], 150, &never),
+            Err(BUSY)
+        );
+        assert_eq!(sent(&mut transport), [Route::Map, Route::Manifest]);
+    }
+
+    #[test]
+    fn unknown_geometry_keeps_header_canonical_and_chain_checks() {
+        let supported = recent_map(100, 200, "txid-2k8");
+        for corruption in 0..3 {
+            let mut unknown = supported.clone();
+            unknown.recent.as_mut().unwrap().geometry = "txid-future".into();
+            if corruption == 2 {
+                unknown.genesis_hash = "11".repeat(32);
+            }
+            let mut response = served(&unknown).unwrap();
+            let expected = match corruption {
+                0 => {
+                    response.map_sha256 = None;
+                    ProtocolKind::MapHeader
+                }
+                1 => {
+                    response.body.push(b' ');
+                    response.map_sha256 = Some(hex::encode(Sha256::digest(&response.body)));
+                    ProtocolKind::MapCanonical
+                }
+                _ => ProtocolKind::Map,
+            };
+            let mut client = test_client();
+            let mut transport = Scripted::default();
+            transport.replies.extend([served(&supported), Ok(response)]);
+            client.refresh_map(&mut transport, &never).unwrap();
+            let held = client.map.clone().unwrap();
+            assert_eq!(
+                client.refresh_map(&mut transport, &never),
+                Err(TxidError::Protocol(expected))
+            );
+            assert!(Arc::ptr_eq(client.map.as_ref().unwrap(), &held));
+            assert_eq!(sent(&mut transport), [Route::Map, Route::Map]);
+        }
     }
 
     #[test]
@@ -2044,6 +2154,145 @@ mod tests {
                 [Route::Init, Route::Map, Route::Manifest]
             );
         }
+    }
+
+    /// Serves one manifest through either public index path. The next reply
+    /// (when present) stops at the first setup, so no native query is needed.
+    fn manifest_lookup(
+        manifest: &DisplayManifest,
+        stop_at_setup: bool,
+        profile: Option<Arc<TableProfile>>,
+    ) -> (Result<TxidLookup, TxidError>, Vec<Route>) {
+        let mut map = map(100);
+        let entry = DisplayMapEntry::from_manifest(manifest, &manifest.digest());
+        let mut transport = Scripted::default();
+        let mut init_reply = init_with(&[&manifest.geometry]);
+        if let Some(profile) = &profile {
+            let mut document: serde_json::Value = serde_json::from_slice(&init_reply.body).unwrap();
+            document["geometries"][0]["txdirectory"] = serde_json::json!({
+                "rows": profile.rows,
+                "row_bytes": profile.row_bytes,
+                "scheme": profile.scheme,
+                "setup_seed": display::setup_seed(manifest.display_geometry().unwrap(), DisplayKind::TxDirectory),
+            });
+            init_reply.body = document.to_string().into_bytes();
+        }
+        transport.replies.push_back(Ok(init_reply));
+        if manifest.sealed {
+            let chunk = DisplayIndexChunk {
+                schema: display::DISPLAY_SCHEMA.into(),
+                base_shard_id: 0,
+                shards: vec![entry],
+            };
+            map.archives = 1;
+            map.unsealed_start = 110;
+            map.chunks.push(display::DisplayChunkRef {
+                start_height: 100,
+                sha256: hex::encode(Sha256::digest(chunk.to_bytes())),
+            });
+            map.check_chunk(0, &chunk).unwrap();
+            transport.replies.extend([
+                served(&map),
+                Ok(TxidReply {
+                    body: chunk.to_bytes(),
+                    ..reply(200)
+                }),
+            ]);
+        } else {
+            map.recent = Some(entry);
+            transport.replies.push_back(served(&map));
+        }
+        map.check_shape().unwrap();
+        transport.replies.push_back(Ok(TxidReply {
+            body: manifest.canonical_bytes(),
+            ..reply(200)
+        }));
+        if stop_at_setup {
+            transport.replies.push_back(busy());
+        }
+        let mut client = test_client();
+        if let Some(profile) = profile {
+            client.profiles.lock().unwrap().insert(
+                (
+                    manifest.display_geometry().unwrap().name,
+                    DisplayKind::TxDirectory,
+                ),
+                profile,
+            );
+        }
+        let result = client.lookup(&mut transport, [1; 32], 105, &never);
+        (result, sent(&mut transport))
+    }
+
+    #[test]
+    fn impossible_segment_counts_stop_recent_and_archive_before_setup() {
+        for sealed in [false, true] {
+            for segments in [2, 50_000] {
+                let mut manifest = sample_manifest(sealed);
+                manifest.buckets[0].records = 1;
+                manifest.records = 1;
+                let segment = manifest.buckets[0].directory_segments[0].clone();
+                manifest.buckets[0].directory_segments = vec![segment; segments];
+                // The wire schema accepts this; the client must bound the
+                // work before trusting the count as a setup loop length.
+                manifest.validate().unwrap();
+                let (result, routes) = manifest_lookup(&manifest, false, None);
+                assert_eq!(result, Err(TxidError::Protocol(ProtocolKind::Manifest)));
+                let expected = if sealed {
+                    vec![Route::Init, Route::Map, Route::MapChunk, Route::Manifest]
+                } else {
+                    vec![Route::Init, Route::Map, Route::Manifest]
+                };
+                assert_eq!(routes, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn segment_download_budget_is_checked_before_setup_at_both_tiers() {
+        for geometry in display::DISPLAY_PROFILES {
+            let profile = Arc::new(
+                TableProfile::new(
+                    display::NATIVE_SCHEMA,
+                    geometry.name,
+                    DisplayKind::TxDirectory.as_str(),
+                    geometry.directory_rows,
+                    geometry.directory_row_bytes as u32,
+                )
+                .unwrap(),
+            );
+            let response_bytes = profile.scheme.response_bytes;
+            let cap = (MAX_QUERY_REPLY_BYTES / (16 + response_bytes)) as u32;
+            for sealed in [false, true] {
+                for (segments, accepted) in [(1, true), (cap, true), (cap + 1, false)] {
+                    let mut manifest = sample_manifest(sealed);
+                    manifest.geometry = geometry.name.into();
+                    manifest.layout = display::DisplayLayout::of(geometry);
+                    manifest.records = u64::from(segments)
+                        * txid::slots_per_row(geometry.directory_row_bytes) as u64;
+                    manifest.buckets[0].records = manifest.records;
+                    let mut segment = manifest.buckets[0].directory_segments[0].clone();
+                    segment.rows = geometry.directory_rows;
+                    segment.row_bytes = geometry.directory_row_bytes as u32;
+                    manifest.buckets[0].directory_segments = vec![segment; segments as usize];
+                    let (result, routes) =
+                        manifest_lookup(&manifest, accepted, Some(profile.clone()));
+                    if accepted {
+                        assert_eq!(result, Err(BUSY));
+                        assert_eq!(routes.last(), Some(&Route::Setup));
+                    } else {
+                        assert_eq!(result, Err(TxidError::Protocol(ProtocolKind::Length)));
+                        assert_eq!(routes.last(), Some(&Route::Manifest));
+                    }
+                    assert!(!routes.contains(&Route::Query));
+                }
+            }
+            assert!(query_reply_bytes(response_bytes, cap).is_ok());
+            assert!(query_reply_bytes(response_bytes, cap + 1).is_err());
+            assert!(query_reply_bytes(response_bytes, 0).is_err());
+        }
+        assert!(query_reply_bytes(usize::MAX, 1).is_err());
+        assert!(query_reply_bytes(usize::MAX / 2, 3).is_err());
     }
 
     #[test]
