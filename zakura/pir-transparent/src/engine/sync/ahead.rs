@@ -29,8 +29,8 @@
 //!   them from the same filter bytes, script lists, choice table and setup
 //!   cache the walk would use, and the walk consumes rather than repeats them.
 //!   No query is skipped because another response mentioned a script.
-//! - Charges: a stashed reply is charged when the walk consumes it, with what
-//!   the transport reported, so totals equal the sequential walk's.
+//! - Charges: every dispatched query is charged immediately, including a
+//!   failed reply or one the walk never consumes after an earlier failure.
 //! - Commits: still per shard, in shard order, by the walk.
 //!
 //! # What changes
@@ -244,6 +244,7 @@ pub(super) fn look_ahead<S: WalletStore, F: FilterSource, T: ShardTransport>(
     target_anchor: &Anchor,
     chain: &impl ChainView,
     failed: &[FailedEntry],
+    charges: &mut crate::engine::transport::ByteCharges,
 ) -> Result<(), SyncError> {
     // Match every shard the walk will reach, as it would. Filters not in the
     // store are taken from the source here and stashed for the walk, which
@@ -302,7 +303,13 @@ pub(super) fn look_ahead<S: WalletStore, F: FilterSource, T: ShardTransport>(
         // Entries the walk holds out of this sync are not queried.
         let mut matched = Vec::with_capacity(matches.len());
         for &i in &matches {
-            if !held(store, failed, entry.shard_id, &scripts[i])? {
+            if !held(
+                store,
+                failed,
+                entry.shard_id,
+                &entry.manifest_digest,
+                &scripts[i],
+            )? {
                 matched.push(scripts[i].clone());
             }
         }
@@ -457,6 +464,11 @@ pub(super) fn look_ahead<S: WalletStore, F: FilterSource, T: ShardTransport>(
         })
         .collect();
     let replies = transport.inner.batch(&requests);
+    for (request, reply) in requests.iter().zip(&replies) {
+        if let Some(reply) = reply {
+            charges.add_query_reply(Table::Directory, request.upload(), reply);
+        }
+    }
     drop(requests);
     // A revision's stash must be a prefix of what the walk will ask for it.
     // After an unsent query the walk prepares and sends that one and the rest

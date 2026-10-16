@@ -144,16 +144,19 @@ impl<T: ShardTransport> RowSource for PirRows<'_, T> {
                 .collect();
             let replies = self.transport.batch(&batch);
             drop(batch);
+            // Charge the whole dispatched batch before any refusal or decoding
+            // error can stop consumption of later replies.
+            for ((table, ..), (query, reply)) in planned.iter().zip(queries.iter().zip(&replies)) {
+                if let Some(reply) = reply {
+                    self.charges
+                        .add_query_reply(*table, query.body.len() as u64, reply);
+                }
+            }
             for (((table, segments, query_rows, within), query), reply) in
                 planned.into_iter().zip(queries).zip(replies)
             {
                 match reply {
                     Some(Ok((response, _))) => {
-                        self.charges.add_query(
-                            table,
-                            query.body.len() as u64,
-                            response.len() as u64,
-                        );
                         answers.push(
                             self.client
                                 .decode(revision, table, segments, query, &response)?,

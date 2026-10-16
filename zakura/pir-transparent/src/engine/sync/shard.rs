@@ -152,7 +152,13 @@ pub(super) fn read_shard_into<S: WalletStore>(
     // uncovered over this shard.
     let mut matched_scripts = Vec::with_capacity(matched_all.len());
     for script in matched_all {
-        if !hold(store, &mut failures.entries, entry.shard_id, &script)? {
+        if !hold(
+            store,
+            &mut failures.entries,
+            entry.shard_id,
+            &entry.manifest_digest,
+            &script,
+        )? {
             matched_scripts.push(script);
         }
     }
@@ -476,8 +482,8 @@ pub(super) fn retrieve_shard_into<S: WalletStore, T: ShardTransport>(
         .collect();
     let mut resumed = Vec::with_capacity(pending.len());
     for item in &pending {
-        if !held(store, &failures.entries, shard_id, &item.script)?
-            || failures.owes(shard_id, &item.script).is_some()
+        if !held(store, &failures.entries, shard_id, revision, &item.script)?
+            || failures.owes(shard_id, revision, &item.script).is_some()
         {
             resumed.push(item.clone());
         }
@@ -507,7 +513,7 @@ pub(super) fn retrieve_shard_into<S: WalletStore, T: ShardTransport>(
     let mut unowed = Vec::with_capacity(matched.len());
     for script in matched {
         if !pending.iter().any(|p| &p.script == script) {
-            let failed = held(store, &failures.entries, shard_id, script)?;
+            let failed = held(store, &failures.entries, shard_id, revision, script)?;
             unowed.push((script, failed));
         }
     }
@@ -689,7 +695,7 @@ pub(super) fn retrieve_shard_into<S: WalletStore, T: ShardTransport>(
         }
         committed?;
         for script in &failed_here {
-            record_failure(store, &mut failures.entries, shard_id, script)?;
+            record_failure(store, &mut failures.entries, shard_id, revision, script)?;
         }
         let owed: Vec<PendingPages> = store
             .pending()?

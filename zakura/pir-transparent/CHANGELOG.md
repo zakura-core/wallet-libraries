@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Scope content failure holds to the exact shard revision so a re-cut can reuse numeric shard ids without inheriting another shard's failures.
+- Complete empty-script recovery at its accepted target while retaining conservative progress when scripts are added or preflight stops early.
+- Charge failed and already dispatched private query attempts, including observed refusal bytes, before handling retries or decoding batch responses.
+
 - Report retained coverage after reopening, early sync stops, script additions and rollback by recomputing it from saved script ranges.
 
 - Apply the same checked event encoding to unfinished work and cached runs in both reference stores before accepting a commit.

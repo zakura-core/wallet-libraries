@@ -151,12 +151,12 @@ fn entry_failures_survive_reopening() {
     store.commit_shard(failed.clone()).unwrap();
     drop(store);
     let mut store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.entry_failures(4, &script(1)).unwrap(), 1);
+    assert_eq!(store.entry_failures(4, "r0", &script(1)).unwrap(), 1);
     store.commit_shard(failed).unwrap();
     drop(store);
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.entry_failures(4, &script(1)).unwrap(), 2);
-    assert_eq!(store.entry_failures(4, &script(2)).unwrap(), 0);
+    assert_eq!(store.entry_failures(4, "r0", &script(1)).unwrap(), 2);
+    assert_eq!(store.entry_failures(4, "r0", &script(2)).unwrap(), 0);
 }
 
 /// A walk's cursor and carried events, and the run cache, are on disk once
@@ -830,4 +830,37 @@ fn unresolved_outpoint_conflicts_are_rejected_when_a_later_batch_arrives() {
         Err(LedgerError::DoubleSpend(_, 0))
     ));
     assert_eq!(ledger.unresolved().len(), 1);
+}
+
+#[test]
+fn a_recut_reusing_a_failed_shard_id_starts_a_new_persisted_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("recut-failures.sqlite");
+    let mut store = SqliteStore::open(&path).unwrap();
+    store.bind_set(&identity()).unwrap();
+    let mut failed = commit(7, "old", true, (0, 99), vec![], vec![]);
+    failed.failed_entries = vec![script(1)];
+    for _ in 0..3 {
+        store.commit_shard(failed.clone()).unwrap();
+    }
+    drop(store);
+    // An older schema-7 writer had the same count and commit log, without
+    // an explicit revision binding in wallet_meta. Reopening recovers it.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "DELETE FROM wallet_meta WHERE key = 'failure_revision:7'",
+            [],
+        )
+        .unwrap();
+    let mut store = SqliteStore::open(&path).unwrap();
+    assert_eq!(store.entry_failures(7, "old", &script(1)).unwrap(), 3);
+    assert_eq!(store.entry_failures(7, "recut", &script(1)).unwrap(), 0);
+    let mut recut = commit(7, "recut", true, (200, 299), vec![], vec![]);
+    recut.failed_entries = vec![script(1)];
+    store.commit_shard(recut).unwrap();
+    drop(store);
+    let store = SqliteStore::open(&path).unwrap();
+    assert_eq!(store.entry_failures(7, "recut", &script(1)).unwrap(), 1);
+    assert_eq!(store.entry_failures(7, "old", &script(1)).unwrap(), 0);
 }

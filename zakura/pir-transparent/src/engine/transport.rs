@@ -211,6 +211,31 @@ fn found_in<E: std::error::Error + 'static>(error: &BoxError) -> Option<&E> {
     None
 }
 
+/// A failed transport attempt with response bytes the transport observed.
+///
+/// Wrap a refusal or another error after reading its response. The source is
+/// retained so revision recovery and overload handling still recognize it.
+#[derive(Debug, thiserror::Error)]
+#[error("{source}")]
+pub struct TransferFailure {
+    /// Response bytes already read before the attempt failed.
+    pub downloaded: u64,
+    /// The original transport failure or typed refusal.
+    #[source]
+    pub source: BoxError,
+}
+
+impl TransferFailure {
+    /// Retains observed response bytes and the original cause in a trait error.
+    pub fn boxed(downloaded: u64, source: BoxError) -> BoxError {
+        Box::new(Self { downloaded, source })
+    }
+
+    pub(crate) fn downloaded(error: &BoxError) -> u64 {
+        found_in::<Self>(error).map_or(0, |failure| failure.downloaded)
+    }
+}
+
 /// Bytes charged for one private table.
 ///
 /// Every field here is per table because the tables have different geometry —
@@ -276,6 +301,17 @@ impl ByteCharges {
         charges.query_upload += upload;
         charges.query_download += download;
         charges.queries += 1;
+    }
+
+    /// Charges one dispatched query, even if its reply failed. Upload size is
+    /// known locally; failed response bytes are counted when the transport
+    /// retained them in [`TransferFailure`].
+    pub(crate) fn add_query_reply(&mut self, table: Table, upload: u64, reply: &ShardReply) {
+        let download = match reply {
+            Ok((_, cost)) => *cost,
+            Err(error) => TransferFailure::downloaded(error),
+        };
+        self.add_query(table, upload, download);
     }
 
     pub fn add_manifest(&mut self, cost: u64) {
@@ -434,7 +470,10 @@ pub trait ShardTransport {
     ///
     /// The body is opaque and fixed length, and names a row within a segment
     /// rather than a segment: the answer carries one body per segment, in
-    /// segment order.
+    /// segment order. Every call counts as one query attempt and charges its
+    /// upload before handling a failure. When an error follows response bytes,
+    /// wrap it in [`TransferFailure`] so those bytes are charged too; keep any
+    /// typed refusal as its source so retries still recognize it.
     fn query(
         &mut self,
         shard_id: u64,

@@ -434,3 +434,96 @@ fn zero_pending_capacity_stops_before_setup_queries_or_partial_events() {
     assert!(store.pending().unwrap().is_empty());
     assert!(store.coverage(&script(1)).unwrap().is_empty());
 }
+
+#[test]
+fn a_failed_page_batch_charges_every_dispatched_query_before_returning() {
+    struct ConcurrentRefusal(Transport);
+    impl ShardTransport for ConcurrentRefusal {
+        fn concurrency(&self) -> usize {
+            2
+        }
+        fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            unreachable!()
+        }
+        fn manifest(&mut self, _: u64, _: &str) -> Result<(Vec<u8>, u64), BoxError> {
+            unreachable!()
+        }
+        fn setup(
+            &mut self,
+            id: u64,
+            revision: &str,
+            table: Table,
+            segment: u32,
+        ) -> Result<(Vec<u8>, u64), BoxError> {
+            self.0.setup(id, revision, table, segment)
+        }
+        fn query(&mut self, _: u64, _: &str, table: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
+            self.0.queries.push(table);
+            if self.0.queries.len() == 1 {
+                Err(crate::engine::transport::TransferFailure::boxed(
+                    17,
+                    crate::engine::transport::Overloaded { retry_after: None }.boxed(),
+                ))
+            } else {
+                Ok(vec![0; 23])
+            }
+        }
+        fn batch(
+            &mut self,
+            requests: &[crate::engine::transport::ShardRequest<'_>],
+        ) -> Vec<Option<crate::engine::transport::ShardReply>> {
+            requests
+                .iter()
+                .map(|request| {
+                    let crate::engine::transport::ShardRequest::Query {
+                        shard_id,
+                        revision,
+                        table,
+                        body,
+                    } = *request
+                    else {
+                        unreachable!()
+                    };
+                    Some(self.query(shard_id, revision, table, body).map(|bytes| {
+                        let cost = bytes.len() as u64;
+                        (bytes, cost)
+                    }))
+                })
+                .collect()
+        }
+    }
+    let fixture = small_fixture();
+    let manifest = manifest_of(&fixture.directory);
+    let entry = entry_of(&manifest);
+    let child = manifest.page_children[0].index;
+    let table = Table::Pages(child);
+    let mut clients = clients();
+    let query_rows = manifest.child(child).unwrap().query_rows() as usize;
+    let upload = clients
+        .pages
+        .prepare_prefix(&entry.manifest_digest, table, query_rows, 0)
+        .unwrap()
+        .body
+        .len() as u64;
+    let mut transport = ConcurrentRefusal(Transport::new());
+    let mut charges = ByteCharges::default();
+    let mut rows = PirRows {
+        entry: &entry,
+        manifest: &manifest,
+        client: &mut clients.pages,
+        transport: &mut transport,
+        charges: &mut charges,
+        limits: &WorkLimits::UNLIMITED,
+    };
+    assert!(matches!(
+        rows.fetch(
+            &mut MemoryStore::new(),
+            &[RowRequest { child, row: 0 }, RowRequest { child, row: 0 }]
+        ),
+        Err(SyncError::Client(ClientError::Overloaded(_)))
+    ));
+    assert_eq!(transport.0.queries, vec![table, table]);
+    assert_eq!(charges.queries(), 2);
+    assert_eq!(charges.query_upload(), 2 * upload);
+    assert_eq!(charges.query_download(), 17 + 23);
+}

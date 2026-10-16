@@ -168,7 +168,7 @@ pub fn suite<S: WalletStore>(make: impl Fn() -> S) {
     a_range_inside_one_already_held_changes_nothing(&make);
     a_walk_cursor_and_its_carried_events_round_trip(&make);
     the_run_cache_is_written_with_its_commit_and_never_rewritten(&make);
-    entry_failures_count_every_failed_commit_and_nothing_resets_them(&make);
+    entry_failures_are_scoped_to_the_committed_revision(&make);
 }
 
 fn an_empty_store_reports_nothing<S: WalletStore>(make: &impl Fn() -> S) {
@@ -795,29 +795,27 @@ fn the_run_cache_is_written_with_its_commit_and_never_rewritten<S: WalletStore>(
 }
 
 /// Each commit naming an entry in `failed_entries` adds one to that entry's
-/// count, keyed by shard and script. A refused commit adds nothing; a later
-/// success, a new revision of the shard and a rollback reset nothing.
-fn entry_failures_count_every_failed_commit_and_nothing_resets_them<S: WalletStore>(
-    make: &impl Fn() -> S,
-) {
+/// count, keyed by shard revision and script. A refused commit adds nothing;
+/// success and rollback preserve it, and a reused numeric id starts afresh.
+fn entry_failures_are_scoped_to_the_committed_revision<S: WalletStore>(make: &impl Fn() -> S) {
     let mut store = make();
     store.bind_set(&identity()).unwrap();
-    assert_eq!(store.entry_failures(1, &script(1)).unwrap(), 0);
+    assert_eq!(store.entry_failures(1, "r1", &script(1)).unwrap(), 0);
     let mut failed = commit(1, "r1", true, (0, 99), vec![], vec![script(2)]);
     failed.failed_entries = vec![script(1)];
     store.commit_shard(failed.clone()).unwrap();
-    assert_eq!(store.entry_failures(1, &script(1)).unwrap(), 1);
-    assert_eq!(store.entry_failures(1, &script(2)).unwrap(), 0);
-    assert_eq!(store.entry_failures(0, &script(1)).unwrap(), 0);
+    assert_eq!(store.entry_failures(1, "r1", &script(1)).unwrap(), 1);
+    assert_eq!(store.entry_failures(1, "r1", &script(2)).unwrap(), 0);
+    assert_eq!(store.entry_failures(0, "r1", &script(1)).unwrap(), 0);
     assert_eq!(store.coverage(&script(1)).unwrap(), vec![]);
     assert_eq!(store.coverage(&script(2)).unwrap().len(), 1);
 
-    // Under another revision of the same shard, it is the same entry.
-    let mut again = commit(1, "r2", false, (0, 120), vec![], vec![]);
+    // A second failed attempt under the same revision keeps counting.
+    let mut again = commit(1, "r1", false, (0, 120), vec![], vec![]);
     again.failed_entries = vec![script(1), script(3)];
     store.commit_shard(again).unwrap();
-    assert_eq!(store.entry_failures(1, &script(1)).unwrap(), 2);
-    assert_eq!(store.entry_failures(1, &script(3)).unwrap(), 1);
+    assert_eq!(store.entry_failures(1, "r1", &script(1)).unwrap(), 2);
+    assert_eq!(store.entry_failures(1, "r1", &script(3)).unwrap(), 1);
 
     // A refused commit records no failure.
     store
@@ -840,7 +838,7 @@ fn entry_failures_count_every_failed_commit_and_nothing_resets_them<S: WalletSto
     );
     refused.failed_entries = vec![script(1)];
     assert!(store.commit_shard(refused).is_err());
-    assert_eq!(store.entry_failures(2, &script(1)).unwrap(), 0);
+    assert_eq!(store.entry_failures(2, "r3", &script(1)).unwrap(), 0);
 
     // Success and rollback leave the count.
     store
@@ -855,5 +853,12 @@ fn entry_failures_count_every_failed_commit_and_nothing_resets_them<S: WalletSto
             "reorg",
         )
         .unwrap();
-    assert_eq!(store.entry_failures(1, &script(1)).unwrap(), 2);
+    assert_eq!(store.entry_failures(1, "r1", &script(1)).unwrap(), 2);
+    // A re-cut can assign this numeric id to a wholly different shard.
+    assert_eq!(store.entry_failures(1, "recut", &script(1)).unwrap(), 0);
+    let mut recut = commit(1, "recut", true, (200, 299), vec![], vec![]);
+    recut.failed_entries = vec![script(1)];
+    store.commit_shard(recut).unwrap();
+    assert_eq!(store.entry_failures(1, "recut", &script(1)).unwrap(), 1);
+    assert_eq!(store.entry_failures(1, "r1", &script(1)).unwrap(), 0);
 }

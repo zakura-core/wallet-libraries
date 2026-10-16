@@ -115,13 +115,17 @@ fn a_publication_change_resets_the_store_and_keeps_the_catalog() {
     let reset = store_rows(&adapter);
     assert_eq!(reset.len(), 11);
     for (table, rows) in reset {
-        let kept = table == "wallet_meta" || table == "failed_entries";
-        assert_eq!(rows, u64::from(kept), "{table}");
+        let expected = match table.as_str() {
+            "wallet_meta" => 3, // schema version and two shard revision bindings
+            "failed_entries" => 1,
+            _ => 0,
+        };
+        assert_eq!(rows, expected, "{table}");
     }
     assert_eq!(
         adapter
             .store
-            .entry_failures(tail.shard_id, &script)
+            .entry_failures(tail.shard_id, &tail.manifest_digest, &script)
             .unwrap(),
         1
     );

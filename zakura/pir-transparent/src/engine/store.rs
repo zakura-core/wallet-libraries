@@ -442,11 +442,15 @@ pub trait WalletStore {
     fn last_commit(&self) -> Result<u64, StoreError>;
 
     /// Content failures recorded for `script`'s directory entry in shard
-    /// `shard_id`, across every sync: the number of commits that named it in
-    /// [`ShardCommit::failed_entries`]. Never reset by a later success, a
-    /// new revision of the shard or a rollback, so the cap on attempts holds
-    /// whatever the service does in between.
-    fn entry_failures(&self, shard_id: u64, script: &[u8]) -> Result<u32, StoreError>;
+    /// `shard_id` under `revision`, across syncs and restarts. A success or
+    /// rollback under that revision preserves the count. A different manifest
+    /// starts a fresh count: a re-cut may reuse the id for unrelated content.
+    fn entry_failures(
+        &self,
+        shard_id: u64,
+        revision: &str,
+        script: &[u8],
+    ) -> Result<u32, StoreError>;
 }
 
 impl<T: WalletStore + ?Sized> WalletStore for Box<T> {
@@ -536,8 +540,13 @@ impl<T: WalletStore + ?Sized> WalletStore for Box<T> {
     fn last_commit(&self) -> Result<u64, StoreError> {
         (**self).last_commit()
     }
-    fn entry_failures(&self, shard_id: u64, script: &[u8]) -> Result<u32, StoreError> {
-        (**self).entry_failures(shard_id, script)
+    fn entry_failures(
+        &self,
+        shard_id: u64,
+        revision: &str,
+        script: &[u8],
+    ) -> Result<u32, StoreError> {
+        (**self).entry_failures(shard_id, revision, script)
     }
 }
 
