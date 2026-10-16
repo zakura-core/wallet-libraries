@@ -28,6 +28,8 @@ CONFIGS = {
     "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing"]),
     "pir-receiver": (["-p", "zakura-pir-receiver"], ["wallet"]),
     "receiver-wire": (["-p", "zakura-receiver-crypto", "--no-default-features"], []),
+    # The receiver PIR evaluator with its client: runs the golden vectors.
+    "receiver-pir-server": (["-p", "zakura-receiver-pir"], ["server"]),
     "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
     # The separate zakura/pir-chain workspace has its own lockfile. Its opt-in
     # RocksDB reader is tested here; fresh consumers check the feature off.
