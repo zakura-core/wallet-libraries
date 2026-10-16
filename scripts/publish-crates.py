@@ -82,12 +82,12 @@ def release_packages(root):
     for package in packages:
         for table in dependency_tables(package["manifest"]):
             for alias, dep in table.items():
-                if not isinstance(dep, dict):
-                    continue
+                if isinstance(dep, str):
+                    dep = {"version": dep}
                 if dep.get("workspace"):
                     dep = workspace["dependencies"][alias]
-                if not isinstance(dep, dict):
-                    continue
+                    if isinstance(dep, str):
+                        dep = {"version": dep}
                 name = dep.get("package", alias)
                 if wallet_pir_owned(root, name, dep):
                     raise ReleaseError(f"{package['name']} depends on the wallet-pir package {name}.")

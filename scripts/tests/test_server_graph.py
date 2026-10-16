@@ -29,6 +29,40 @@ class ServerBoundaryTests(unittest.TestCase):
             self.assertTrue(self.check(self.package(source=f"git+{url}?rev=abc#abc")))
             self.assertTrue(self.check(self.package(repository=url, source="registry+https://github.com/rust-lang/crates.io-index")))
 
+    def test_repository_urls_with_ssh_ports_cannot_hide_new_packages(self):
+        for owner in ("valargroup", "zakura-core"):
+            for url in (
+                f"git+ssh://git@github.com:22/{owner}/wallet-pir?rev=abc#def",
+                f"ssh://git@github.com:443/{owner}/wallet-pir.git",
+                f"git+ssh://git@ssh.github.com:443/{owner}/wallet-pir.git?rev=abc#def",
+                f"git@ssh.github.com:{owner}/wallet-pir.git",
+                f"git@github.com:{owner}/wallet-pir.git",
+                f"git@GITHUB.COM:{owner}/wallet-pir.git",
+                f"https://GITHUB.COM:443/{owner.upper()}/WALLET-PIR.git/",
+                f"git+https://github.com/{owner}/wallet%2Dpir?rev=abc#def",
+            ):
+                with self.subTest(url=url):
+                    self.assertTrue(self.check(self.package("future-wire", source=url)))
+                    self.assertTrue(self.check(self.package("future-wire", repository=url)))
+                    self.assertTrue(self.check(self.package(dependencies=[{"name": "future-wire", "source": url}])))
+                    with tempfile.TemporaryDirectory(dir=graph.ROOT) as directory:
+                        lockfile = Path(directory) / "Cargo.lock"
+                        lockfile.write_text(f'version = 4\n[[package]]\nname = "future-wire"\nversion = "0.1.0"\nsource = "{url}"\n')
+                        self.assertTrue(graph.lock_problems(lockfile, set()))
+
+    def test_neighbor_repositories_and_hosts_remain_allowed(self):
+        for url in (
+            None, "https://github.com/zakura-core/wallet-libraries",
+            "git+ssh://git@github.com:22/valargroup/wallet-pir-tools?rev=abc",
+            "https://example.com/valargroup/wallet-pir",
+            "https://github.com.example.com/valargroup/wallet-pir",
+            "ssh://git@ssh.github.com.example.com:443/valargroup/wallet-pir.git",
+            "https://github.com/unrelated/wallet-pir",
+            "https://example.com/github.com/valargroup/wallet-pir",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(graph.wallet_pir_owned(url))
+
     def test_inactive_dependency_declarations_are_checked(self):
         for kind, optional, target in ((None, False, None), (None, True, None), ("build", False, None), ("dev", False, None), (None, False, 'cfg(target_os = "windows")')):
             for name, source in (("receiver-wire", None), ("renamed-wire", "git+https://github.com/valargroup/wallet-pir?rev=abc")):
@@ -48,7 +82,7 @@ class ServerBoundaryTests(unittest.TestCase):
                 with self.subTest(name=name, kind=kind, optional=optional, target=target):
                     self.assertTrue(graph.problems({"packages": [package]}, set(), {"zakura-chain"}, wallet=True, ownership=False))
 
-    def run_probes(self, contaminated=None, root=None, locked=()):
+    def run_probes(self, contaminated=None, root=None, locked=(), ownership=False):
         consumers = {}
         def metadata(manifest, **kwargs):
             if manifest == graph.ROOT / "Cargo.toml":
@@ -56,7 +90,8 @@ class ServerBoundaryTests(unittest.TestCase):
             if manifest == graph.ROOT / "zakura/pir-chain/Cargo.toml":
                 return {"workspace_root": str(graph.ROOT / "zakura/pir-chain"), "workspace_members": ["server"], "packages": []}
             consumers[manifest.parent.name] = manifest.read_text()
-            packages = [self.package("zakura-chain")] if manifest.parent.name == contaminated else []
+            packages = [self.package("future-wire", repository="ssh://git@ssh.github.com:443/valargroup/wallet-pir") if ownership
+                        else self.package("zakura-chain")] if manifest.parent.name == contaminated else []
             return {"packages": packages}
         def lock_problems(lockfile, owned):
             return [f"{lockfile.name}: resolves wallet-pir package receiver-pir"] if lockfile.relative_to(graph.ROOT).as_posix() in locked else []
@@ -69,6 +104,11 @@ class ServerBoundaryTests(unittest.TestCase):
         for mode in ("facade-default", "facade-zakura", "facade-lrz"):
             with self.subTest(mode=mode), self.assertRaisesRegex(SystemExit, "server/node package"):
                 self.run_probes(contaminated=mode)
+
+    def test_facade_consumers_reject_transitive_wallet_pir_ownership(self):
+        for mode in ("facade-default", "facade-zakura", "facade-lrz"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(SystemExit, "package owned by wallet-pir"):
+                self.run_probes(contaminated=mode, ownership=True)
 
     def test_production_and_testing_server_consumers_are_both_exercised(self):
         consumers = self.run_probes()
