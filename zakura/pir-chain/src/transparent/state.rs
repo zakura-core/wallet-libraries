@@ -30,13 +30,20 @@
 //!
 //! # Coverage: a snapshot taken at open
 //!
-//! A secondary instance sees the primary's data as flushed when it opens, and
-//! this reader never catches up afterwards: it reads one fixed finalized
-//! snapshot, and a block the node commits later is [`StateError::MissingBlock`]
-//! until a new reader is opened. It trails the node's tip by whatever was still
-//! in the primary's memtable, and it does not see the non-finalized state at
-//! all. For a backfill of buried history, bounded by [`StateReader::tip_height`],
-//! that is irrelevant; near the tip a height is absent rather than wrong.
+//! A secondary instance sees what the primary had written when it opens —
+//! RocksDB replays the primary's write-ahead log at open, so a block committed
+//! but not yet flushed is included — and this reader never catches up
+//! afterwards: it reads one fixed finalized snapshot, and a block the node
+//! commits later is [`StateError::MissingBlock`] until a new reader is opened.
+//! It does not see the non-finalized state at all. For a backfill of buried
+//! history, bounded by [`StateReader::tip_height`], that is irrelevant; near the
+//! tip a height is absent rather than wrong.
+//!
+//! The snapshot is not indefinitely valid. The primary keeps compacting, and a
+//! secondary that has closed a table file the primary has since deleted cannot
+//! reopen it; the node's reads treat that as a broken database and panic. A long
+//! backfill should therefore open a fresh reader periodically, say every few
+//! thousand blocks, rather than hold one for the whole run.
 //!
 //! # Archive databases only
 //!

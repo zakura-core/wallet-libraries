@@ -179,3 +179,71 @@ async fn the_database_reader_agrees_with_rpc_and_refuses_missing_blocks() {
     let empty = tempfile::tempdir().unwrap();
     assert!(StateReader::open(empty.path(), Network::Mainnet).is_err());
 }
+
+/// Every file under `dir` with its contents, so a refused open can be shown to
+/// have left the node's database exactly as it was.
+fn files(dir: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut found = std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            found.extend(files(&path));
+        } else {
+            found.insert(path.clone(), std::fs::read(&path).unwrap());
+        }
+    }
+    found
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_database_carrying_either_pruning_marker_is_refused_at_open() {
+    type Mark = fn(&mut zakura_state::DiskWriteBatch, &zakura_state::ZakuraDb);
+    let markers: [(&str, Mark); 2] = [
+        ("raw transactions pruned", |batch, db| {
+            batch.prepare_pruning_marker_batch(db, zakura_chain::block::Height(1))
+        }),
+        ("transparent indexes skipped", |batch, db| {
+            batch.prepare_transparent_indexes_skipped_marker_batch(
+                db,
+                zakura_chain::block::Height(1),
+            )
+        }),
+    ];
+    for (name, mark) in markers {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            cache_dir: dir.path().to_path_buf(),
+            ephemeral: false,
+            ..Config::default()
+        };
+        let mut primary = FinalizedState::new(&config, &NodeNetwork::Mainnet).unwrap();
+        let genesis =
+            Block::zcash_deserialize(&zakura_test::vectors::BLOCK_MAINNET_GENESIS_BYTES[..])
+                .unwrap();
+        commit(&mut primary, &genesis);
+        let mut batch = zakura_state::DiskWriteBatch::new();
+        mark(&mut batch, &primary.db);
+        primary.db.write_batch(batch).unwrap();
+        // The node's own view of the marker, before the reader sees it.
+        let pruned = primary.db.lowest_retained_height().is_some();
+        let skipped = primary.db.transparent_indexes_skipped_from().is_some();
+        assert!(pruned != skipped, "{name}: exactly one marker is written");
+        let database = primary.db.path().to_path_buf();
+        drop(primary);
+        let before = files(&database);
+
+        // Refused with this crate's error rather than a panic, and without
+        // touching the primary's files.
+        let opened = StateReader::open(dir.path(), Network::Mainnet);
+        assert!(
+            matches!(opened, Err(StateError::NotArchive { .. })),
+            "{name}: {:?}",
+            opened.as_ref().err()
+        );
+        drop(opened);
+        assert!(
+            before == files(&database),
+            "{name}: the primary is unchanged"
+        );
+    }
+}

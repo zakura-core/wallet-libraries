@@ -24,7 +24,8 @@ node or Zakura Common types.
 - `rocksdb` (feature): `transparent::state::StateReader`, which opens an archive
   node's finalized state as a RocksDB secondary and reads the same transparent
   blocks from it. It reads the snapshot visible when it opened and never catches
-  up; open a new reader to see later blocks. A database that pruned raw
+  up; open a new reader to see later blocks, and reopen it periodically during a
+  long backfill, since the node's compaction can retire files it still names. A database that pruned raw
   transactions, or was written by a pruned checkpoint-syncing node, is refused with
   an error. Its errors carry only this crate's types. Its `zakura-state` revision
   must match the running node's format.
