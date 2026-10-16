@@ -19,18 +19,19 @@ thiserror = { version = "2", optional = true }
 zakura-one-time-ivk = { version = "=0.0.1-rc0", path = "../one-time-ivk", optional = true }
 zcash_client_backend = { workspace = true, features = ["orchard"], optional = true }
 zcash_protocol = { workspace = true, optional = true }
-# The receiver crates use the wallet-pir release aligned with Common 3.
-receiver-directory = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.7" }
-receiver-pir = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.7" }
+receiver-directory = { package = "zakura-receiver-directory", path = "../receiver-directory" }
+receiver-pir = { package = "zakura-receiver-pir", path = "../receiver-pir" }
+# Receiver validation and the common witness file the sweep checks payments against.
+zakura-receiver-crypto = { path = "../receiver-crypto" }
 
 [dev-dependencies]
-axum = "0.7"
+hex.workspace = true
 orchard.workspace = true
-receiver-pir = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.7", features = ["server"] }
-receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", tag = "transparent-v0.1.0-rc.7" }
+# The evaluator answers the tests' encrypted queries in process.
+receiver-pir = { package = "zakura-receiver-pir", path = "../receiver-pir", features = ["server"] }
 rusqlite = { workspace = true, features = ["hooks"] }
+serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
-tower = { workspace = true, features = ["util"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 zcash_client_sqlite = { path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "test-dependencies"] }
 zcash_primitives.workspace = true
