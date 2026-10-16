@@ -948,6 +948,9 @@ pub fn sync_into<S: WalletStore>(
     let mut active: Cow<'_, ShardMap> = Cow::Borrowed(map);
     let mut completion = Completion::Complete;
     let mut failures = Failures::default();
+    // The map is adopted: from here on a failing sync must not leave the
+    // filters and setups of revisions it no longer publishes behind.
+    prune_to(store, &active)?;
 
     'passes: for pass in 0..=MAX_DISCOVERY_PASSES {
         if pass == MAX_DISCOVERY_PASSES {
@@ -1194,6 +1197,7 @@ pub fn sync_into<S: WalletStore>(
                             pending: store.pending()?.len(),
                         };
                         active = Cow::Owned(fresh);
+                        prune_to(store, &active)?;
                         break 'passes;
                     }
                     refreshes += 1;
@@ -1205,6 +1209,7 @@ pub fn sync_into<S: WalletStore>(
                     else {
                         // The refreshed map no longer advertises this range.
                         active = Cow::Owned(fresh);
+                        prune_to(store, &active)?;
                         break;
                     };
                     if fresh.shards[resume].manifest_digest == stale.revision {
@@ -1228,6 +1233,7 @@ pub fn sync_into<S: WalletStore>(
                         replaced_revisions.push(stale.revision.clone());
                     }
                     active = Cow::Owned(fresh);
+                    prune_to(store, &active)?;
                     // Re-plan against the new map from this shard on.
                     let mut rest: Vec<usize> = (resume..active.shards.len())
                         .take_while(|i| active.shards[*i].start_height <= through)
@@ -1253,12 +1259,7 @@ pub fn sync_into<S: WalletStore>(
 
     // Prune against the map this pass ended on: a revision withdrawn during
     // the walk must leave no cached filter or setup either.
-    let queryable: Vec<&str> = active
-        .shards
-        .iter()
-        .map(|entry| entry.manifest_digest.as_str())
-        .collect();
-    store.prune_caches(&queryable)?;
+    prune_to(store, &active)?;
 
     let (covered_through, settled_through) = coverage_summary(store, target_anchor.height)?;
     if completion == Completion::Complete {
@@ -1369,6 +1370,17 @@ fn holds_history(
     events
         .iter()
         .any(|stored| stored.script == script && range.contains(&event_height(&stored.event)))
+}
+
+/// Deletes the cached filters and setups of every revision `map` does not
+/// publish. Called once a map is adopted, before anything is read under it.
+fn prune_to<S: WalletStore>(store: &mut S, map: &ShardMap) -> Result<(), SyncError> {
+    let queryable: Vec<&str> = map
+        .shards
+        .iter()
+        .map(|entry| entry.manifest_digest.as_str())
+        .collect();
+    Ok(store.prune_caches(&queryable)?)
 }
 
 fn previous_digest_of(map: &ShardMap, shard_id: u64) -> String {

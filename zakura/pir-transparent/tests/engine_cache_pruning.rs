@@ -18,7 +18,7 @@ use zakura_pir_transparent::engine::client::Table;
 use zakura_pir_transparent::engine::http::{HttpFilterSource, HttpOptions, HttpShardTransport};
 use zakura_pir_transparent::engine::store::{CachedRun, SetupKey, ShardCommit};
 use zakura_pir_transparent::engine::testing::cached_run;
-use zakura_pir_transparent::engine::transport::ShardTransport;
+use zakura_pir_transparent::engine::transport::{BoxError, ShardTransport};
 use zakura_pir_transparent::engine::{
     Anchor, Completion, MemoryStore, ScriptEntry, ScriptOrigin, StaticChain, StaticScripts,
     WalletStore, WorkLimits, parse_init, sync_into,
@@ -281,4 +281,149 @@ fn republished_tails_leave_only_the_current_revisions_cached() {
         cached_revisions(&path),
         [current_revisions.clone(), current_revisions]
     );
+}
+
+/// The service, except that every private query fails as an outage would:
+/// filters and setups are fetched and verified, and then the sync fails.
+struct QueriesFail(HttpShardTransport);
+
+impl ShardTransport for QueriesFail {
+    fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+        self.0.init()
+    }
+    fn manifest(&mut self, shard_id: u64, revision: &str) -> Result<(Vec<u8>, u64), BoxError> {
+        self.0.manifest(shard_id, revision)
+    }
+    fn setup(
+        &mut self,
+        shard_id: u64,
+        revision: &str,
+        table: Table,
+        segment: u32,
+    ) -> Result<(Vec<u8>, u64), BoxError> {
+        self.0.setup(shard_id, revision, table, segment)
+    }
+    fn query(&mut self, _: u64, _: &str, _: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
+        Err("the service is unavailable".into())
+    }
+}
+
+/// Syncs `store` to the publication's tail through `QueriesFail`, which
+/// fails the sync with the transport's error.
+fn failing_sync<S: WalletStore>(store: &mut S, served: &Served, chain: &mut StaticChain) {
+    let options = HttpOptions::default();
+    let mut filters = HttpFilterSource::new(&served.url, &options).unwrap();
+    let mut transport = QueriesFail(HttpShardTransport::new(&served.url, &options).unwrap());
+    let geometry = parse_init(&transport.init().unwrap().0).unwrap();
+    chain
+        .hashes
+        .extend(StaticChain::from_map(&served.map).hashes);
+    let tail = served.map.shards.last().unwrap();
+    let error = sync_into(
+        store,
+        &served.map,
+        0,
+        &geometry,
+        chain,
+        &mut StaticScripts(vec![ScriptEntry {
+            script: watched().as_slice().to_vec(),
+            origin: ScriptOrigin::Derived,
+            required_from: H0,
+        }]),
+        &mut filters,
+        &mut transport,
+        &WorkLimits::UNLIMITED,
+        &Anchor {
+            height: tail.end_height,
+            hash: tail.terminal_block_hash.clone(),
+        },
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("the service is unavailable"),
+        "the transport's own error is returned: {error}"
+    );
+}
+
+#[test]
+fn failed_syncs_leave_only_the_adopted_maps_revisions_cached() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("store.sqlite");
+    let mut server = Server::start();
+    let mut chain = StaticChain::default();
+
+    let mut served = vec![publish(&mut server, root.path(), 0)];
+    let sealed = served[0].map.shards[0].clone();
+    let (run, seeded) = unrevisioned(&sealed);
+    let mut sqlite = SqliteStore::open(&path).unwrap();
+    let mut memory = MemoryStore::new();
+    sqlite.commit_shard(seeded.clone()).unwrap();
+    memory.commit_shard(seeded).unwrap();
+    sync(&mut sqlite, &served[0], &mut chain);
+    sync(&mut memory, &served[0], &mut chain);
+
+    // Each growing tail's filter and setup are verified and cached before
+    // its query fails; the tails replaced before it must not stay behind.
+    for revision in 1..4u32 {
+        served.push(publish(&mut server, root.path(), revision));
+        let current = served.last().unwrap();
+        if revision == 3 {
+            drop(sqlite);
+            sqlite = SqliteStore::open(&path).unwrap();
+        }
+        failing_sync(&mut sqlite, current, &mut chain);
+        failing_sync(&mut memory, current, &mut chain);
+        let tail = &current.map.shards[1];
+        let replaced: Vec<&ShardMapEntry> = served[..served.len() - 1]
+            .iter()
+            .map(|earlier| &earlier.map.shards[1])
+            .collect();
+        for store in [&sqlite as &dyn WalletStore, &memory] {
+            assert_caches(store, &[&sealed, tail], &replaced, &run, &sealed);
+        }
+        let current_revisions: BTreeSet<String> = [&sealed, tail]
+            .map(|entry| entry.manifest_digest.clone())
+            .into();
+        assert_eq!(
+            cached_revisions(&path),
+            [current_revisions.clone(), current_revisions]
+        );
+    }
+
+    // A map the sync refuses before adopting it changes nothing cached.
+    let current = served.last().unwrap();
+    let tail = &current.map.shards[1];
+    let before = cached_revisions(&path);
+    refused_sync(&mut sqlite, current, &chain);
+    refused_sync(&mut memory, current, &chain);
+    for store in [&sqlite as &dyn WalletStore, &memory] {
+        assert_caches(store, &[&sealed, tail], &[], &run, &sealed);
+    }
+    assert_eq!(cached_revisions(&path), before);
+}
+
+/// Syncs to a target the publication's tail does not end on, which the sync
+/// refuses before it adopts the map.
+fn refused_sync<S: WalletStore>(store: &mut S, served: &Served, chain: &StaticChain) {
+    let options = HttpOptions::default();
+    let mut filters = HttpFilterSource::new(&served.url, &options).unwrap();
+    let mut transport = HttpShardTransport::new(&served.url, &options).unwrap();
+    let geometry = parse_init(&transport.init().unwrap().0).unwrap();
+    let (sealed, tail) = (&served.map.shards[0], &served.map.shards[1]);
+    sync_into(
+        store,
+        &served.map,
+        0,
+        &geometry,
+        chain,
+        &mut StaticScripts(Vec::new()),
+        &mut filters,
+        &mut transport,
+        &WorkLimits::UNLIMITED,
+        &Anchor {
+            height: tail.end_height,
+            hash: sealed.terminal_block_hash.clone(),
+        },
+    )
+    .unwrap_err();
 }
