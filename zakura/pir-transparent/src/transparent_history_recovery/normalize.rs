@@ -69,7 +69,7 @@ impl TransparentHistoryRecovery {
             }
             return self.issue_ready_batch(vec![], vec![], progress);
         };
-        map.check_shape().map_err(failure)?;
+        map.validate_supported().map_err(failure)?;
         let set = SetIdentity::of_schema(&map, SCHEMA);
         if !bound.continues(&set) {
             // `recover` checked the set before its sync, which refreshes only to

@@ -24,6 +24,7 @@ impl TransparentHistoryRecovery {
         map: &ShardMap,
         chain: &impl ChainView,
     ) -> Result<Option<RecoveryBatch<A>>, RecoveryError> {
+        map.validate_supported().map_err(failure)?;
         let set = SetIdentity::of_schema(map, SCHEMA);
         if !self
             .store
@@ -33,7 +34,6 @@ impl TransparentHistoryRecovery {
         {
             return Ok(None);
         }
-        map.check_shape().map_err(failure)?;
         // As the reference client refuses a map ending below the anchor the
         // wallet's chain still accepts, a map under another set ending there
         // is a replica that has not caught up, perhaps still serving the
