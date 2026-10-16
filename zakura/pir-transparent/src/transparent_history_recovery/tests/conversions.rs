@@ -72,6 +72,7 @@ fn failed_entries_are_counted_from_the_report() {
         .into_iter()
         .map(|(shard_id, failures)| crate::engine::FailedEntry {
             shard_id,
+            revision_digest: "revision".into(),
             script: vec![failures as u8],
             failures,
         })

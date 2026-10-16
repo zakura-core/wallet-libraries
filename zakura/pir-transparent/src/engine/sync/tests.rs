@@ -884,3 +884,95 @@ fn unsupported_maps_do_not_touch_transport_or_store_even_when_no_work_remains() 
         }
     }
 }
+
+#[test]
+fn an_empty_sync_commits_its_accepted_target_but_early_stops_keep_retained_progress() {
+    use crate::engine::adapters::StaticScripts;
+    use crate::engine::client::Table;
+    use crate::engine::transport::BoxError;
+    struct NoTraffic;
+    impl FilterSource for NoTraffic {
+        fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("no refresh")
+        }
+        fn filter(&mut self, _: u64) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("no filters for an empty wallet")
+        }
+    }
+    impl ShardTransport for NoTraffic {
+        fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("no init")
+        }
+        fn manifest(&mut self, _: u64, _: &str) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("no manifest")
+        }
+        fn setup(&mut self, _: u64, _: &str, _: Table, _: u32) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("no setup")
+        }
+        fn query(&mut self, _: u64, _: &str, _: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
+            panic!("no private queries")
+        }
+    }
+    let publication = map(vec![entry(0, 100, 199, true)]);
+    let target = Anchor {
+        height: 199,
+        hash: publication.shards[0].terminal_block_hash.clone(),
+    };
+    let geometry = ServiceGeometry {
+        schema: transparent_shard::SCHEMA.into(),
+        geometries: vec![],
+    };
+    let mut store = MemoryStore::new();
+    let report = sync_into(
+        &mut store,
+        &publication,
+        0,
+        &geometry,
+        &StaticChain::from_map(&publication),
+        &mut StaticScripts(vec![]),
+        &mut NoTraffic,
+        &mut NoTraffic,
+        &WorkLimits::UNLIMITED,
+        &target,
+    )
+    .unwrap();
+    assert_eq!(report.completion, Completion::Complete);
+    assert_eq!((report.covered_through, report.settled_through), (199, 199));
+    assert_eq!(store.anchor().unwrap(), Some(target.clone()));
+    let offered = Anchor {
+        height: 299,
+        hash: "ff".repeat(32),
+    };
+    for chain in [
+        StaticChain {
+            hashes: Default::default(),
+        },
+        StaticChain {
+            hashes: [(offered.height, offered.hash.clone())].into(),
+        },
+    ] {
+        let report = sync_into(
+            &mut store,
+            &publication,
+            0,
+            &geometry,
+            &chain,
+            &mut StaticScripts(vec![]),
+            &mut NoTraffic,
+            &mut NoTraffic,
+            &WorkLimits::UNLIMITED,
+            &offered,
+        )
+        .unwrap();
+        assert!(matches!(
+            report.completion,
+            Completion::Incomplete {
+                reason: IncompleteReason::ChainUnknown { .. }
+                    | IncompleteReason::PublicationBehind { .. },
+                ..
+            }
+        ));
+        assert_eq!((report.covered_through, report.settled_through), (199, 199));
+        assert_eq!(store.anchor().unwrap(), Some(target.clone()));
+    }
+}

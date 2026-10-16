@@ -1,6 +1,6 @@
 use super::{
     Completion, FailedEntry, IncompleteReason, MAX_CONTENT_FAILURES, SyncError, SyncReport,
-    WorkLimits, coverage_summary, provisional_of,
+    WorkLimits, provisional_of,
 };
 use crate::engine::adapters::{Acceptance, ChainView};
 use crate::engine::store::{Anchor, WalletStore};
@@ -50,23 +50,26 @@ impl From<SyncError> for Failure {
 #[derive(Default)]
 pub(super) struct Failures {
     pub(super) entries: Vec<FailedEntry>,
-    /// Shard id, script, page shard and the number of dummies owed.
-    pub(super) owed: Vec<(u64, Vec<u8>, u8, u32)>,
+    /// Shard id, revision, script, page shard and the number of dummies owed.
+    pub(super) owed: Vec<(u64, String, Vec<u8>, u8, u32)>,
 }
 
 impl Failures {
     /// The dummies the walk of `script`'s entry in `shard_id` still owes.
-    pub(super) fn owes(&self, shard_id: u64, script: &[u8]) -> Option<(u8, u32)> {
+    pub(super) fn owes(&self, shard_id: u64, revision: &str, script: &[u8]) -> Option<(u8, u32)> {
         self.owed
             .iter()
-            .find(|(shard, owner, ..)| *shard == shard_id && owner == script)
-            .map(|&(_, _, child, count)| (child, count))
+            .find(|(shard, digest, owner, ..)| {
+                *shard == shard_id && digest == revision && owner == script
+            })
+            .map(|&(_, _, _, child, count)| (child, count))
     }
 
     /// Records that the dummies `owes` names were sent.
-    pub(super) fn settle(&mut self, shard_id: u64, script: &[u8]) {
-        self.owed
-            .retain(|(shard, owner, ..)| !(*shard == shard_id && owner == script));
+    pub(super) fn settle(&mut self, shard_id: u64, revision: &str, script: &[u8]) {
+        self.owed.retain(|(shard, digest, owner, ..)| {
+            !(*shard == shard_id && digest == revision && owner == script)
+        });
     }
 }
 
@@ -79,12 +82,12 @@ pub(super) fn held<S: WalletStore>(
     store: &S,
     failed: &[FailedEntry],
     shard_id: u64,
+    revision: &str,
     script: &[u8],
 ) -> Result<bool, SyncError> {
-    Ok(failed
-        .iter()
-        .any(|entry| entry.shard_id == shard_id && entry.script == script)
-        || store.entry_failures(shard_id, script)? >= MAX_CONTENT_FAILURES)
+    Ok(failed.iter().any(|entry| {
+        entry.shard_id == shard_id && entry.revision_digest == revision && entry.script == script
+    }) || store.entry_failures(shard_id, revision, script)? >= MAX_CONTENT_FAILURES)
 }
 
 /// [`held`], listing an entry held for its failure count in the report the
@@ -93,20 +96,21 @@ pub(super) fn hold<S: WalletStore>(
     store: &S,
     failed: &mut Vec<FailedEntry>,
     shard_id: u64,
+    revision: &str,
     script: &[u8],
 ) -> Result<bool, SyncError> {
-    if failed
-        .iter()
-        .any(|entry| entry.shard_id == shard_id && entry.script == script)
-    {
+    if failed.iter().any(|entry| {
+        entry.shard_id == shard_id && entry.revision_digest == revision && entry.script == script
+    }) {
         return Ok(true);
     }
-    let failures = store.entry_failures(shard_id, script)?;
+    let failures = store.entry_failures(shard_id, revision, script)?;
     if failures < MAX_CONTENT_FAILURES {
         return Ok(false);
     }
     failed.push(FailedEntry {
         shard_id,
+        revision_digest: revision.to_string(),
         script: script.to_vec(),
         failures,
     });
@@ -118,16 +122,17 @@ pub(super) fn record_failure<S: WalletStore>(
     store: &S,
     failed: &mut Vec<FailedEntry>,
     shard_id: u64,
+    revision: &str,
     script: &[u8],
 ) -> Result<(), SyncError> {
-    let failures = store.entry_failures(shard_id, script)?;
-    match failed
-        .iter_mut()
-        .find(|entry| entry.shard_id == shard_id && entry.script == script)
-    {
+    let failures = store.entry_failures(shard_id, revision, script)?;
+    match failed.iter_mut().find(|entry| {
+        entry.shard_id == shard_id && entry.revision_digest == revision && entry.script == script
+    }) {
         Some(entry) => entry.failures = failures,
         None => failed.push(FailedEntry {
             shard_id,
+            revision_digest: revision.to_string(),
             script: script.to_vec(),
             failures,
         }),
@@ -174,14 +179,15 @@ pub(super) fn accepted_at(
 pub(super) fn chain_unknown<S: WalletStore>(
     store: &S,
     map: &ShardMap,
-    target_anchor: &Anchor,
+    _target_anchor: &Anchor,
     charges: ByteCharges,
     height: u64,
     rolled_back_to: Option<u64>,
     replaced_revisions: Vec<String>,
     first_commit: u64,
 ) -> Result<SyncReport, SyncError> {
-    let (covered, settled) = coverage_summary(store, target_anchor.height)?;
+    let progress = crate::engine::progress::summary(store)?;
+    let (covered, settled) = (progress.covered_through, progress.settled_through);
     Ok(SyncReport {
         ledger: store.ledger()?,
         charges,
@@ -227,4 +233,36 @@ pub(super) fn incomplete_at<S: WalletStore>(
         commits: 0,
         failed_entries: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::memory_store::MemoryStore;
+    use crate::engine::store::ShardCommit;
+
+    #[test]
+    fn a_reused_shard_id_does_not_inherit_a_durable_or_sync_local_hold() {
+        let mut store = MemoryStore::new();
+        let script = vec![1];
+        let bad = ShardCommit {
+            shard_id: 0,
+            revision_digest: "old".into(),
+            start_height: 0,
+            end_height: 99,
+            terminal_block_hash: "00".repeat(32),
+            sealed: true,
+            failed_entries: vec![script.clone()],
+            ..Default::default()
+        };
+        for _ in 0..MAX_CONTENT_FAILURES {
+            store.commit_shard(bad.clone()).unwrap();
+        }
+        store.commit_shard(ShardCommit::default()).unwrap();
+        let mut failed = vec![];
+        assert!(hold(&store, &mut failed, 0, "old", &script).unwrap());
+        assert!(!held(&store, &failed, 0, "recut", &script).unwrap());
+        assert!(!hold(&store, &mut failed, 0, "recut", &script).unwrap());
+        assert!(held(&store, &failed, 0, "old", &script).unwrap());
+    }
 }

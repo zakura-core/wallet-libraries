@@ -21,6 +21,8 @@ pub(crate) fn summary(store: &(impl WalletStore + ?Sized)) -> Result<DurableProg
 /// Recompute from current scripts and contiguous saved ranges. The anchor is
 /// only an upper bound, never evidence that a newly added script was covered.
 /// A normal sync supplies its accepted target; status uses retained endpoints.
+/// With no scripts those endpoints are vacuously covered. Adding a script
+/// requires its own saved ranges and can lower the summary again.
 pub(crate) fn coverage(
     store: &(impl WalletStore + ?Sized),
     through: Option<u64>,
@@ -40,7 +42,7 @@ pub(crate) fn coverage(
     let through = through.unwrap_or(retained);
     let floor = floor.min(through);
     if saved.is_empty() {
-        return Ok((floor, floor));
+        return Ok((through, through));
     }
     let mut covered = through;
     let mut settled = through;
@@ -84,4 +86,48 @@ pub(crate) fn provisional(
             },
         )
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::memory_store::MemoryStore;
+    use crate::engine::store::{Anchor, ScriptEntry, ScriptOrigin, SetIdentity};
+
+    #[test]
+    fn an_empty_wallet_covers_only_the_accepted_or_retained_endpoint() {
+        let mut store = MemoryStore::new();
+        let identity = SetIdentity {
+            shard_schema: transparent_shard::SCHEMA.into(),
+            network: "main".into(),
+            genesis_hash: "00".repeat(32),
+            profile: "zcash-transparent-range-v1".into(),
+            range_envelope_version: 1,
+            start_height: 100,
+            seal: BTreeMap::new(),
+        };
+        store.bind_set(&identity).unwrap();
+        let floor = identity.start_height.saturating_sub(1);
+        assert_eq!(coverage(&store, None).unwrap(), (floor, floor));
+        assert_eq!(coverage(&store, Some(199)).unwrap(), (199, 199));
+        store
+            .commit_anchor(
+                &Anchor {
+                    height: 199,
+                    hash: "h199".into(),
+                },
+                199,
+                199,
+            )
+            .unwrap();
+        assert_eq!(coverage(&store, None).unwrap(), (199, 199));
+        store
+            .add_scripts(&[ScriptEntry {
+                script: vec![1],
+                origin: ScriptOrigin::Imported,
+                required_from: identity.start_height,
+            }])
+            .unwrap();
+        assert_eq!(coverage(&store, None).unwrap(), (floor, floor));
+    }
 }

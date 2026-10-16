@@ -30,14 +30,14 @@ pub enum Outcome {
 /// and is not counted here. It carries counts only, so it may be logged whole.
 ///
 /// The reference client counts each entry's content failures in the companion
-/// and never resets them; at three an entry is no longer queried. Everything
+/// under its exact manifest revision; at three that revision is no longer queried. Everything
 /// else the pass read is settled, but the entry's script stays uncovered over
 /// its shard, so the account cannot be activated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FailedEntries {
     /// Entries this pass failed on content, or left unqueried at three failures.
     pub entries: usize,
-    /// Of those, the entries at three failures. Only a new companion queries them again.
+    /// Of those, the entries at three failures. A changed manifest revision starts a fresh count.
     pub held: usize,
 }
 

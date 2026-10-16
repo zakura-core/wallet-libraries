@@ -143,7 +143,7 @@ fn a_published_cache_upgrades_without_losing_recovery_state() {
     assert_eq!(store.pending().unwrap()[0].fragments.len(), 1);
     assert!(store.cached_run("child", &script(1)).unwrap().is_some());
     assert_eq!(store.last_commit().unwrap(), 21);
-    assert_eq!(store.entry_failures(1, &script(1)).unwrap(), 0);
+    assert_eq!(store.entry_failures(1, "r1", &script(1)).unwrap(), 0);
     assert_eq!(
         db.query_row("SELECT COUNT(*) FROM failed_entries", [], |row| row
             .get::<_, u64>(0))
@@ -158,7 +158,7 @@ fn a_published_cache_upgrades_without_losing_recovery_state() {
     let before_reopen = saved_rows(&db);
     drop(db);
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.entry_failures(1, &script(1)).unwrap(), 1);
+    assert_eq!(store.entry_failures(1, "r1", &script(1)).unwrap(), 1);
     assert_eq!(saved_rows(&Connection::open(&path).unwrap()), before_reopen);
 }
 

@@ -28,7 +28,7 @@ const _: () = assert!(crate::engine_store::SCHEMA_VERSION == 7);
 /// store keeps it across a rollback, and pruning leaves it alone: a superseded
 /// tail's sealed page shards are the replacement's too. Only a reset empties it.
 ///
-/// `failed_entries`, the content failures counted per shard and script, is not
+/// `failed_entries`, the content failures counted per shard revision and script, is not
 /// listed: a reset keeps it. A service that changes its publication set would
 /// otherwise earn every held entry three more attempts.
 const STORE_TABLES: [&str; 9] = [
@@ -47,7 +47,7 @@ const STORE_TABLES: [&str; 9] = [
 /// longer continues the one the store is bound to, in one transaction.
 ///
 /// Every store table, the run cache included, is emptied but for the content
-/// failure counts, and `wallet_meta` keeps only the schema version, so the next
+/// failure counts, and `wallet_meta` keeps the schema version and failure revision bindings, so the next
 /// sync binds the new set and retrieves from the floor.
 /// The recorded re-cut epoch is cleared with it: the empty store follows no
 /// map. The catalog stays: each source keeps its highest lineage, so a source
@@ -69,8 +69,11 @@ pub(crate) fn reset_store_keep_catalog(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failure)?;
-    tx.execute("DELETE FROM wallet_meta WHERE key<>'schema_version'", [])
-        .map_err(failure)?;
+    tx.execute(
+        "DELETE FROM wallet_meta WHERE key<>'schema_version' AND key NOT GLOB 'failure_revision:*'",
+        [],
+    )
+    .map_err(failure)?;
     for table in STORE_TABLES {
         tx.execute(&format!("DELETE FROM {table}"), [])
             .map_err(failure)?;

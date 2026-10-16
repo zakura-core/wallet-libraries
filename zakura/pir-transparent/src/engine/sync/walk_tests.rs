@@ -722,11 +722,21 @@ fn a_run_in_the_wrong_page_shard_is_refused() {
         failed,
         vec![FailedEntry {
             shard_id: manifest.shard_id,
+            revision_digest: entry_of(&manifest).manifest_digest,
             script: script.clone(),
             failures: 1,
         }]
     );
-    assert_eq!(store.entry_failures(manifest.shard_id, &script).unwrap(), 1);
+    assert_eq!(
+        store
+            .entry_failures(
+                manifest.shard_id,
+                &entry_of(&manifest).manifest_digest,
+                &script
+            )
+            .unwrap(),
+        1
+    );
     assert_eq!(store.pending().unwrap().len(), 1, "the walk stays owed");
     assert_eq!(store.coverage(&script).unwrap(), vec![]);
     // Refused again, and counted again, on the next attempt.
@@ -804,6 +814,7 @@ fn a_corrupt_fragment_fails_only_its_walk() {
         failed,
         vec![FailedEntry {
             shard_id: manifest.shard_id,
+            revision_digest: entry_of(&manifest).manifest_digest,
             script: victim.clone(),
             failures: 1,
         }]
@@ -826,7 +837,16 @@ fn a_corrupt_fragment_fails_only_its_walk() {
     );
     assert_eq!(pending[0].fragments.len(), 1, "the checked head is kept");
     assert_eq!(store.coverage(&victim).unwrap(), vec![]);
-    assert_eq!(store.entry_failures(manifest.shard_id, &victim).unwrap(), 1);
+    assert_eq!(
+        store
+            .entry_failures(
+                manifest.shard_id,
+                &entry_of(&manifest).manifest_digest,
+                &victim
+            )
+            .unwrap(),
+        1
+    );
 
     // The retry resumes after the kept head and, answered honestly,
     // finishes.
@@ -1252,7 +1272,11 @@ fn dummies_owed_before_an_overload_are_sent_on_the_retry() {
         SyncError::Client(ClientError::Overloaded(_))
     ));
     assert_eq!(
-        failures.owes(manifest.shard_id, &victim),
+        failures.owes(
+            manifest.shard_id,
+            &entry_of(&manifest).manifest_digest,
+            &victim
+        ),
         Some((child, head.fragment_count))
     );
 
@@ -1303,7 +1327,16 @@ fn dummies_owed_before_an_overload_are_sent_on_the_retry() {
     );
     assert!(failures.owed.is_empty());
     assert_eq!(failures.entries.len(), 1);
-    assert_eq!(store.entry_failures(manifest.shard_id, &victim).unwrap(), 1);
+    assert_eq!(
+        store
+            .entry_failures(
+                manifest.shard_id,
+                &entry_of(&manifest).manifest_digest,
+                &victim
+            )
+            .unwrap(),
+        1
+    );
 }
 
 /// A directory row whose content does not decode fails its entry, on

@@ -239,9 +239,13 @@ same order and commits everything else, and the batch settles it.
 `RecoveryBatch::failed_entries()` and `PassReport::failed_entries` count the
 failed entries (`FailedEntries`), naming no script. The entry's script stays
 uncovered over its shard, so the account cannot be activated. The companion
-counts content failures per entry and never resets them, not even when a
-publication change resets its store; at three the entry is no longer queried,
-and only a new companion asks it again. A content failure the client cannot
+counts content failures per entry under its exact manifest revision, across
+restarts and publication resets; at three that revision is no longer queried.
+A changed manifest starts a fresh count, so a re-cut that reuses numeric shard
+ids cannot hold an unrelated shard out of recovery. Historic format-7 counts
+without an explicit revision binding have ambiguous provenance and do not hold
+a current revision; its first revision-bearing commit starts a bound count.
+Housekeeping commits that retire pending work do not change that binding. A content failure the client cannot
 lay at one entry settles what the sync committed before it, as `Stalled`.
 Existing format-6 companions upgrade to format 7 in place on open. The empty
 failure-count table and version marker commit together; saved history, coverage,

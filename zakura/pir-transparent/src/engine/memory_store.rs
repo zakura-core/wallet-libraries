@@ -36,6 +36,7 @@ struct State {
     filters: BTreeMap<String, (String, bool, Vec<u8>)>,
     /// Content failures by shard id and script.
     failures: BTreeMap<(u64, Vec<u8>), u32>,
+    failure_revisions: BTreeMap<u64, String>,
     commits: u64,
 }
 
@@ -304,6 +305,16 @@ impl WalletStore for MemoryStore {
                 run.shard_id != commit.shard_id || !commit.covered_scripts.contains(script)
             });
         }
+        if !commit.revision_digest.is_empty()
+            && self.state.failure_revisions.get(&commit.shard_id) != Some(&commit.revision_digest)
+        {
+            self.state
+                .failures
+                .retain(|(shard, _), _| *shard != commit.shard_id);
+            self.state
+                .failure_revisions
+                .insert(commit.shard_id, commit.revision_digest.clone());
+        }
         for script in commit.failed_entries {
             *self
                 .state
@@ -479,7 +490,21 @@ impl WalletStore for MemoryStore {
         Ok(self.state.commits)
     }
 
-    fn entry_failures(&self, shard_id: u64, script: &[u8]) -> Result<u32, StoreError> {
+    fn entry_failures(
+        &self,
+        shard_id: u64,
+        revision: &str,
+        script: &[u8],
+    ) -> Result<u32, StoreError> {
+        if self
+            .state
+            .failure_revisions
+            .get(&shard_id)
+            .map(String::as_str)
+            != Some(revision)
+        {
+            return Ok(0);
+        }
         Ok(self
             .state
             .failures

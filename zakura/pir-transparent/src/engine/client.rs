@@ -402,7 +402,8 @@ impl TableClient {
 
     /// Keeps a query that was sent ahead of the walk, with its outcome, for
     /// the walk's next [`fetch_row`](Self::fetch_row) of that revision and
-    /// table.
+    /// table. The caller has already charged every dispatched query, including
+    /// ones the walk will not consume after an earlier error.
     ///
     /// Stashed queries are handed out once, in order, and only for the row
     /// they were prepared for: the first request that does not match drops
@@ -433,7 +434,7 @@ impl TableClient {
     ///
     /// The query selects among the first `query_rows`; see
     /// [`prepare_prefix`](Self::prepare_prefix). Uses a query a batch already
-    /// sent for this row when one is stashed; the charge is the same either way.
+    /// sent for this row when one is stashed; that query was charged at dispatch.
     #[allow(clippy::too_many_arguments)]
     pub fn fetch_row(
         &mut self,
@@ -468,11 +469,6 @@ impl TableClient {
                             return Err(classify_transport(error));
                         }
                     };
-                    charges.add_query(
-                        table,
-                        stashed.query.body.len() as u64,
-                        response.len() as u64,
-                    );
                     return self.decode(revision, table, segments, stashed.query, &response);
                 }
                 // Out of step with the walk: nothing further is trusted to
@@ -484,10 +480,14 @@ impl TableClient {
         }
         let query = self.prepare_prefix(revision, table, query_rows, row)?;
         let uploaded = query.body.len() as u64;
-        let response = transport
+        let reply = transport
             .query(shard_id, revision, table, &query.body)
-            .map_err(classify_transport)?;
-        charges.add_query(table, uploaded, response.len() as u64);
+            .map(|response| {
+                let cost = response.len() as u64;
+                (response, cost)
+            });
+        charges.add_query_reply(table, uploaded, &reply);
+        let (response, _) = reply.map_err(classify_transport)?;
         self.decode(revision, table, segments, query, &response)
     }
 }
@@ -529,6 +529,109 @@ mod tests {
 
     fn body_len(client: &TableClient, table: Table) -> usize {
         client.prepare("revision", table, 17).unwrap().body.len()
+    }
+
+    #[test]
+    fn failed_query_attempts_charge_upload_and_observed_response_bytes() {
+        use crate::engine::transport::TransferFailure;
+        struct Refusing;
+        impl ShardTransport for Refusing {
+            fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+                unreachable!()
+            }
+            fn manifest(&mut self, _: u64, _: &str) -> Result<(Vec<u8>, u64), BoxError> {
+                unreachable!()
+            }
+            fn setup(
+                &mut self,
+                _: u64,
+                _: &str,
+                _: Table,
+                _: u32,
+            ) -> Result<(Vec<u8>, u64), BoxError> {
+                unreachable!()
+            }
+            fn query(&mut self, _: u64, _: &str, _: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
+                Err(TransferFailure::boxed(
+                    17,
+                    Overloaded { retry_after: None }.boxed(),
+                ))
+            }
+        }
+        for table in [Table::Directory, Table::Pages(0)] {
+            let mut client = client(table, None);
+            let uploaded = body_len(&client, table) as u64;
+            let mut charges = ByteCharges::default();
+            for attempt in 1..=2 {
+                assert!(matches!(
+                    client.fetch_row(
+                        &mut Refusing,
+                        7,
+                        "revision",
+                        table,
+                        1,
+                        4096,
+                        17,
+                        &mut charges
+                    ),
+                    Err(ClientError::Overloaded(_))
+                ));
+                assert_eq!(charges.queries(), attempt);
+                assert_eq!(charges.query_upload(), attempt * uploaded);
+                assert_eq!(charges.query_download(), attempt * 17);
+            }
+        }
+    }
+
+    #[test]
+    fn a_stashed_failed_query_keeps_its_dispatch_charge_exactly_once() {
+        let table = Table::Directory;
+        let mut client = client(table, None);
+        let query = client.prepare("revision", table, 17).unwrap();
+        let upload = query.body.len() as u64;
+        let reply = Err(crate::engine::transport::TransferFailure::boxed(
+            17,
+            Overloaded { retry_after: None }.boxed(),
+        ));
+        let mut charges = ByteCharges::default();
+        charges.add_query_reply(table, upload, &reply);
+        client.stash("revision", table, 17, query, reply.map(|(bytes, _)| bytes));
+        let before = charges;
+        // A stashed error must be returned before making any new request.
+        struct Never;
+        impl ShardTransport for Never {
+            fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+                unreachable!()
+            }
+            fn manifest(&mut self, _: u64, _: &str) -> Result<(Vec<u8>, u64), BoxError> {
+                unreachable!()
+            }
+            fn setup(
+                &mut self,
+                _: u64,
+                _: &str,
+                _: Table,
+                _: u32,
+            ) -> Result<(Vec<u8>, u64), BoxError> {
+                unreachable!()
+            }
+            fn query(&mut self, _: u64, _: &str, _: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
+                panic!("the batch already sent this query")
+            }
+        }
+        assert!(matches!(
+            client.fetch_row(&mut Never, 7, "revision", table, 1, 4096, 17, &mut charges),
+            Err(ClientError::Overloaded(_))
+        ));
+        assert_eq!(charges, before);
+        assert_eq!(
+            (
+                charges.queries(),
+                charges.query_upload(),
+                charges.query_download()
+            ),
+            (1, upload, 17)
+        );
     }
 
     /// The directory and pages are queried at the 8-bit profile's 28 bits,

@@ -98,7 +98,7 @@ pub(super) fn walk_chains<S: WalletStore, R: RowSource>(
             done: false,
             dummies: None,
         };
-        if let Some(owed) = failures.owes(entry.shard_id, &item.script) {
+        if let Some(owed) = failures.owes(entry.shard_id, &entry.manifest_digest, &item.script) {
             // Failed earlier in this sync, before a retry: it still sends
             // what it owed.
             walk.dummies = Some(owed);
@@ -204,7 +204,7 @@ pub(super) fn walk_chains<S: WalletStore, R: RowSource>(
             // A failed walk's dummies were this round's; their replies are
             // not read, and the walk ends.
             if walk.dummies.take().is_some() {
-                failures.settle(entry.shard_id, &walk.item.script);
+                failures.settle(entry.shard_id, &entry.manifest_digest, &walk.item.script);
                 walk.done = true;
                 continue;
             }
@@ -673,13 +673,18 @@ impl Walker<'_> {
             store,
             &mut failures.entries,
             entry.shard_id,
+            &entry.manifest_digest,
             &walk.item.script,
         )?;
         if dummies > 0 {
             walk.dummies = Some((child, dummies));
-            failures
-                .owed
-                .push((entry.shard_id, walk.item.script.clone(), child, dummies));
+            failures.owed.push((
+                entry.shard_id,
+                entry.manifest_digest.clone(),
+                walk.item.script.clone(),
+                child,
+                dummies,
+            ));
         } else {
             walk.done = true;
         }

@@ -239,7 +239,7 @@ const MAX_DISCOVERY_PASSES: u32 = 16;
 ///
 /// A service can aim a bad reply at chosen rows and watch what the wallet
 /// does next. Each failure changes later traffic once (the entry is asked
-/// again, then not), so this is how many such observations an entry gives
+/// again, then not), so this is how many such observations a revision gives
 /// away; a service could deny the entry service anyway by corrupting it.
 pub const MAX_CONTENT_FAILURES: u32 = 3;
 
@@ -489,7 +489,7 @@ pub struct SyncReport {
     /// Store commits this sync made.
     pub commits: u64,
     /// Directory entries this sync failed on content or held back because
-    /// they had failed [`MAX_CONTENT_FAILURES`] times, by shard and script.
+    /// they had failed [`MAX_CONTENT_FAILURES`] times, by shard revision and script.
     pub failed_entries: Vec<FailedEntry>,
 }
 
@@ -497,6 +497,8 @@ pub struct SyncReport {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FailedEntry {
     pub shard_id: u64,
+    /// The exact manifest whose content failed.
+    pub revision_digest: String,
     pub script: Vec<u8>,
     /// Content failures the store holds for the entry, this sync's included.
     /// At [`MAX_CONTENT_FAILURES`] the entry is no longer queried.
@@ -957,8 +959,13 @@ pub fn sync_into<S: WalletStore>(
             // not walked again; one still owing dummies sends them.
             let mut kept = Vec::with_capacity(items.len());
             for item in items {
-                if !hold(store, &mut failures.entries, shard_id, &item.script)?
-                    || failures.owes(shard_id, &item.script).is_some()
+                if !hold(
+                    store,
+                    &mut failures.entries,
+                    shard_id,
+                    &digest,
+                    &item.script,
+                )? || failures.owes(shard_id, &digest, &item.script).is_some()
                 {
                     kept.push(item);
                 }
@@ -1087,6 +1094,7 @@ pub fn sync_into<S: WalletStore>(
                 target_anchor,
                 chain,
                 &failures.entries,
+                &mut charges,
             )?;
         }
         let mut position = 0usize;

@@ -246,6 +246,19 @@ impl SqliteStore {
         Ok(())
     }
 
+    fn failure_revision(conn: &Connection, shard_id: u64) -> Result<Option<String>, StoreError> {
+        // Historic aggregate counts can span multiple revisions. The latest
+        // commit cannot establish which revision caused those failures; only
+        // an explicit binding identifies counts safe to apply to a revision.
+        conn.query_row(
+            "SELECT value FROM wallet_meta WHERE key = ?1",
+            [format!("failure_revision:{shard_id}")],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(io)
+    }
+
     fn meta(&self, key: &str) -> Result<Option<String>, StoreError> {
         self.conn
             .query_row(
@@ -842,6 +855,23 @@ impl WalletStore for SqliteStore {
                 .map_err(io)?;
             }
         }
+        // The numeric id may now name another shard after a re-cut. Keep the
+        // revision binding and its counters in the same transaction as the commit.
+        if !commit.revision_digest.is_empty() {
+            let failure_key = format!("failure_revision:{}", commit.shard_id);
+            let held_revision = Self::failure_revision(&tx, commit.shard_id)?;
+            if held_revision.as_deref() != Some(commit.revision_digest.as_str()) {
+                tx.execute(
+                    "DELETE FROM failed_entries WHERE shard_id = ?1",
+                    [commit.shard_id as i64],
+                )
+                .map_err(io)?;
+            }
+            tx.execute(
+            "INSERT INTO wallet_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![failure_key, commit.revision_digest],
+        ).map_err(io)?;
+        }
         for script in &commit.failed_entries {
             tx.execute(
                 "INSERT INTO failed_entries (shard_id, script, failures) VALUES (?1, ?2, 1) \
@@ -1163,7 +1193,15 @@ impl WalletStore for SqliteStore {
             .map_err(io)
     }
 
-    fn entry_failures(&self, shard_id: u64, script: &[u8]) -> Result<u32, StoreError> {
+    fn entry_failures(
+        &self,
+        shard_id: u64,
+        revision: &str,
+        script: &[u8],
+    ) -> Result<u32, StoreError> {
+        if Self::failure_revision(&self.conn, shard_id)?.as_deref() != Some(revision) {
+            return Ok(0);
+        }
         self.conn
             .query_row(
                 "SELECT failures FROM failed_entries WHERE shard_id = ?1 AND script = ?2",
