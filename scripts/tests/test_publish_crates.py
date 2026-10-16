@@ -149,6 +149,9 @@ class PublishingTests(unittest.TestCase):
                 f"ssh://git@ssh.github.com:443/{owner}/wallet-pir",
                 f"git@github.com:{owner}/wallet-pir.git",
                 f" https://github.com/{owner}/wallet-pir ",
+                f"https://github.com/{owner}/x/../wallet-pir",
+                f"https://github.com/{owner}/%2e/wallet-pir",
+                f"https://github.com\\\\{owner}\\\\wallet-pir",
             ):
                 for inherited in (False, True):
                     self.check_forbidden_dependency(f'future-wire = {{ git = "{url}", version = "=0.1.0" }}', inherited)

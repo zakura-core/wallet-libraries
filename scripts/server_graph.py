@@ -28,6 +28,9 @@ def wallet_pir_owned(value):
         host, path = value.split(":", 1)
         if host.rsplit("@", 1)[-1].lower().rstrip(".") in GITHUB_HOSTS:
             value = f"ssh://{host}/{path}"
+    # URL parsing treats a backslash in an HTTP URL as a path separator.
+    if value.lower().startswith(("http://", "https://")):
+        value = value.replace("\\", "/")
     try:
         parsed = urlsplit(value)
         if (parsed.hostname or "").lower().rstrip(".") not in GITHUB_HOSTS:
@@ -35,8 +38,15 @@ def wallet_pir_owned(value):
     except ValueError:
         return False
     # Decode once, as URL parsing does; an encoded separator still names the repository.
-    path = "/".join(part for part in unquote(parsed.path).lower().split("/") if part)
-    return path.removesuffix(".git") in ("valargroup/wallet-pir", "zakura-core/wallet-pir")
+    # Resolve dot segments, encoded or not, as URL parsing does.
+    parts = []
+    for part in unquote(parsed.path).lower().split("/"):
+        if part == "..":
+            if parts:
+                parts.pop()
+        elif part and part != ".":
+            parts.append(part)
+    return "/".join(parts).removesuffix(".git") in ("valargroup/wallet-pir", "zakura-core/wallet-pir")
 
 
 def problems(metadata, owned, node_packages=(), wallet=False, ownership=True):

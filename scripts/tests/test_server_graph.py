@@ -46,6 +46,10 @@ class ServerBoundaryTests(unittest.TestCase):
                 f"https://github.com//{owner}/wallet-pir",
                 f"git@github.com:/{owner}/wallet-pir.git",
                 f" https://github.com/{owner}/wallet-pir ",
+                f"https://github.com/{owner}/./wallet-pir",
+                f"https://github.com/{owner}/other/../wallet-pir",
+                f"https://github.com/{owner}/%2e/wallet-pir",
+                f"https://github.com/{owner}/x/%2E%2E/wallet-pir",
             ):
                 with self.subTest(url=url):
                     self.assertTrue(self.check(self.package("future-wire", source=url)))
@@ -55,6 +59,14 @@ class ServerBoundaryTests(unittest.TestCase):
                         lockfile = Path(directory) / "Cargo.lock"
                         lockfile.write_text(f'version = 4\n[[package]]\nname = "future-wire"\nversion = "0.1.0"\nsource = "{url}"\n')
                         self.assertTrue(graph.lock_problems(lockfile, set()))
+
+    def test_backslash_separators_in_http_urls_name_the_repository(self):
+        # Cargo writes normalized lockfile sources, so only declarations can carry these.
+        for owner in ("valargroup", "zakura-core"):
+            url = f"https://github.com\\{owner}\\wallet-pir"
+            with self.subTest(url=url):
+                self.assertTrue(graph.wallet_pir_owned(url))
+                self.assertTrue(self.check(self.package(dependencies=[{"name": "future-wire", "source": url}])))
 
     def test_neighbor_repositories_and_hosts_remain_allowed(self):
         for url in (
@@ -68,6 +80,8 @@ class ServerBoundaryTests(unittest.TestCase):
             "https://github.com/valargroup/wallet-pirate",
             "https://github.com/valargroup/wallet%252Dpir",
             "https://github.com@example.com/valargroup/wallet-pir",
+            "https://github.com/valargroup/wallet-pir/../wallet-libraries",
+            "https://github.com/valargroup/%2e%2e/wallet-pir",
         ):
             with self.subTest(url=url):
                 self.assertFalse(graph.wallet_pir_owned(url))
