@@ -1230,4 +1230,50 @@ mod page_cover {
             assert_eq!(exchange.pages.get(), 0, "table {table}: no page query");
         }
     }
+
+    /// A directory setup reply padded past the size its scheme allows, here with
+    /// a field the setup's reader would ignore, fails the pass before any
+    /// directory query instead of being kept, as a page setup's would.
+    #[test]
+    fn an_oversized_directory_setup_fails_the_pass() {
+        let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+        /// Pads every directory setup reply with an extra field, and counts the
+        /// directory queries sent.
+        struct Padded {
+            inner: Loopback,
+            queries: std::cell::Cell<usize>,
+        }
+        impl HttpExchange for Padded {
+            fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
+                let mut reply = self.inner.send(request)?;
+                if request.path.contains("/query/directory") {
+                    self.queries.set(self.queries.get() + 1);
+                }
+                if request.path.contains("/setup/directory/") {
+                    let mut setup: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+                    setup["padding"] = serde_json::Value::String("x".repeat(64 << 10));
+                    reply.body = serde_json::to_vec(&setup).unwrap();
+                }
+                Ok(reply)
+            }
+        }
+        let end = H0 + 29;
+        let (_server, url, _dir) = serve(&[shard(H0, end, 10, history(1, H0 + 1, 3))]);
+        let mut wallet = Wallet::open(1, end, 7, config(1, QUERIES, PRIVATE_BYTES));
+        let exchange = Padded {
+            inner: Loopback::new(&url),
+            queries: std::cell::Cell::new(0),
+        };
+        let watch = wallet.watch();
+        let chain = Chain { tip: end };
+        let result = wallet.recovery.as_mut().unwrap().pass(
+            &watch,
+            &chain,
+            &exchange,
+            RESPONSE_LIMIT,
+            &|| false,
+        );
+        assert!(result.is_err(), "the oversized setup fails the pass");
+        assert_eq!(exchange.queries.get(), 0, "no directory query follows it");
+    }
 }

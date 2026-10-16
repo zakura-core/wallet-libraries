@@ -68,8 +68,9 @@ Per directory shard S, per pass:
    page tables, with every table growth added. A walk resumed by a later pass
    of the same session, after a budget stop or a content failure, sweeps the
    same C, so the service cannot intersect sets across syncs. A growing tail
-   republished over the same sealed tables keeps its C, less any table the new
-   revision leaves without rows. Reopening the companion
+   republished over the same sealed tables keeps its C; a sweep skips a table
+   the current revision leaves without rows, and sweeps it again once a later
+   revision fills it. Reopening the companion
    draws a new session. Nothing is stored.
 7. **Setups single out nothing.** The first time a session needs pages in a
    shard revision, the wrapper fetches the setup of every segment of every page
@@ -98,7 +99,7 @@ Per directory shard S, per pass:
     as the client requires of the real reply. This is checked before the
     sweep's next query is sent. Otherwise a service could fail one slot's
     reply and learn from the walk's reaction whether that slot was real. Each
-    page setup reply must be no longer than the estimate admitted for it
+    page or directory setup reply must be no longer than the estimate admitted for it
     before the next setup is fetched, and every fetched setup must check out
     as the client checks one it opens (its parameters decode, have the
     scheme's length and hash to the declared digest) before any sweep. A reply that fails this fails its

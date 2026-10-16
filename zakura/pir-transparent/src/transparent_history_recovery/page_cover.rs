@@ -414,11 +414,6 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
             let cover = draw(&mut self.session.rng, &tables, &known);
             self.session.covers.insert(cover_key, cover);
         }
-        // A cover kept across revisions drops a table a later revision of the
-        // tail left without rows: no query can address it.
-        if let Some(cover) = self.session.covers.get_mut(&cover_key) {
-            cover.retain(|table| tables.contains(table));
-        }
         if !self.session.setups.contains_key(&key) {
             self.fetch_setups(&key)?;
         }
@@ -529,7 +524,19 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
         };
         let (shard_id, key, sweep) = (work.shard_id, work.key, work.sweeps + 1);
         let revision_key = (shard_id, work.revision.clone());
-        let mut cover = self.session.covers[&key].clone();
+        // A cover kept across revisions skips a table this revision of the
+        // tail leaves without rows, which no query can address, and sweeps it
+        // again once a later revision fills it.
+        let queryable: BTreeSet<u32> = self.manifests[&revision_key]
+            .page_children
+            .iter()
+            .filter(|child| !child.page_segments.is_empty())
+            .map(|child| child.index)
+            .collect();
+        let mut cover: BTreeSet<u32> = self.session.covers[&key]
+            .intersection(&queryable)
+            .copied()
+            .collect();
         if let Some((table, _)) = real {
             cover.insert(table);
         }
@@ -553,8 +560,8 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
         }
         // Only admitted growth changes the session's cover. A refused larger
         // sweep must leave the old cover's reserved padding affordable.
-        if real.is_some() {
-            self.session.covers.insert(key, cover.clone());
+        if let (Some((table, _)), Some(kept)) = (real, self.session.covers.get_mut(&key)) {
+            kept.insert(table);
         }
         let mut reply = None;
         for table in sweep_order(&mut self.session.rng, &cover) {
@@ -707,6 +714,12 @@ impl<T: ShardTransport> ShardTransport for PageCover<'_, T> {
                 self.admit(0, estimate)?;
                 let (bytes, cost) = self.inner.setup(shard_id, revision, table, segment)?;
                 self.bytes += cost;
+                // As for page setups: a reply longer than admitted fails.
+                if estimate > 0 && cost > estimate {
+                    return Err(
+                        "page cover: a directory setup reply longer than its scheme allows".into(),
+                    );
+                }
                 Ok((bytes, cost))
             }
         }
