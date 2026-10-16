@@ -1,8 +1,9 @@
 //! NEAR Intents as the receiver directory's feed sees it: every address it was given,
 //! when, and in which role.
 
-use receiver_directory::{Receiver, snapshot::ProviderSet};
+use receiver_directory::{ReceiverBytes, snapshot::ProviderSet};
 use zakura_one_time_ivk::swap::RESTORE_WATCH_SECS;
+use zakura_receiver_crypto::Receiver;
 
 use super::chain::{DAY, MINUTE, T0};
 
@@ -115,11 +116,11 @@ impl Near {
 }
 
 /// `receivers` without repeats, in first-seen order.
-fn dedup(receivers: impl Iterator<Item = Receiver>) -> Vec<Receiver> {
-    let mut out: Vec<Receiver> = Vec::new();
+fn dedup(receivers: impl Iterator<Item = Receiver>) -> Vec<ReceiverBytes> {
+    let mut out: Vec<ReceiverBytes> = Vec::new();
     for receiver in receivers {
-        if !out.iter().any(|r| r.as_bytes() == receiver.as_bytes()) {
-            out.push(receiver);
+        if !out.contains(receiver.as_bytes()) {
+            out.push(*receiver.as_bytes());
         }
     }
     out

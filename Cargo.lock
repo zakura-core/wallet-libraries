@@ -7976,7 +7976,7 @@ dependencies = [
 name = "zakura-one-time-ivk-scenarios"
 version = "0.0.0"
 dependencies = [
- "axum",
+ "hex",
  "incrementalmerkletree 0.8.2",
  "rusqlite",
  "secrecy",
@@ -7984,7 +7984,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "tower",
  "zakura-client-backend",
  "zakura-client-sqlite",
  "zakura-keys",

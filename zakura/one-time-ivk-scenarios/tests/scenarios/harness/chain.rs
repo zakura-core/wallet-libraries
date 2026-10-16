@@ -15,8 +15,8 @@ use orchard::{
     keys::{FullViewingKey, Scope, SpendingKey},
     tree::MerkleHashOrchard,
 };
-use receiver_directory::{Payment, Receiver, Record};
 use transparent::{address::Script, sighash::TransparentAuthorizingContext};
+use zakura_receiver_crypto::{Payment, Receiver, Record};
 use zcash_client_backend::{
     data_api::{
         TransactionStatus,
