@@ -17,6 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 ORDER = (
     "zakura/pir-enhance-types",
     "zakura/pir-native",
+    "zakura/transparent-native",
+    "zakura/transparent-events",
+    "zakura/transparent-filter",
+    "zakura/transparent-shard",
+    "zakura/transparent-txid-client",
     "zakura/one-time-ivk",
     "zakura/near-intents",
     "librustzcash/pczt",

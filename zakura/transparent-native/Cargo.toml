@@ -1,7 +1,6 @@
 [package]
 name = "zakura-transparent-native"
 version = "0.0.1-rc0"
-publish = false
 description = "Transparent's native ReinspiRING two-mask PIR profiles, shared by the shard server and the wallet"
 edition.workspace = true
 rust-version.workspace = true
