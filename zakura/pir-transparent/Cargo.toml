@@ -44,11 +44,11 @@ same-file = { version = "1.0.6", optional = true }
 base64 = { workspace = true, optional = true }
 thiserror = "2"
 url = "2"
-transparent-events = { version = "=0.1.0-rc.4", optional = true }
-transparent-filter = { version = "=0.1.0-rc.4", optional = true }
-transparent-txid-client = { version = "=0.1.0-rc.4", optional = true }
-transparent-shard = { version = "=0.1.0-rc.4", optional = true }
-transparent-native = { version = "=0.1.0-rc.4", optional = true }
+transparent-events = { package = "zakura-transparent-events", version = "=0.0.1-rc0", path = "../transparent-events", optional = true }
+transparent-filter = { package = "zakura-transparent-filter", version = "=0.0.1-rc0", path = "../transparent-filter", optional = true }
+transparent-txid-client = { package = "zakura-transparent-txid-client", version = "=0.0.1-rc0", path = "../transparent-txid-client", optional = true }
+transparent-shard = { package = "zakura-transparent-shard", version = "=0.0.1-rc0", path = "../transparent-shard", optional = true }
+transparent-native = { package = "zakura-transparent-native", version = "=0.0.1-rc0", path = "../transparent-native", optional = true }
 transparent-shard-server = { version = "=0.1.0-rc.4", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
 axum = { version = "0.7", optional = true }
@@ -70,16 +70,16 @@ zcash_keys = { workspace = true, features = ["transparent-inputs"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking"] }
 # The end-to-end test publishes shards and serves them in process; it requires
 # `wallet`, which brings the event and filter crates.
-transparent-shard = { version = "=0.1.0-rc.4" }
+transparent-shard = { package = "zakura-transparent-shard", version = "=0.0.1-rc0", path = "../transparent-shard" }
 transparent-shard-server = { version = "=0.1.0-rc.4" }
 # The private-recovery test computes the pages query length a manifest fixes.
-transparent-native = { version = "=0.1.0-rc.4" }
+transparent-native = { package = "zakura-transparent-native", version = "=0.0.1-rc0", path = "../transparent-native" }
 axum = "0.7"
 tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
 regex = { workspace = true, features = ["std"] }
 # The txid display end-to-end test queries a recent shard of a few txids, below the client's
 # own floor, which the client's testing feature lowers.
-transparent-txid-client = { version = "=0.1.0-rc.4", features = ["testing"] }
+transparent-txid-client = { package = "zakura-transparent-txid-client", version = "=0.0.1-rc0", path = "../transparent-txid-client", features = ["testing"] }
 # The txid display end-to-end test drives the in-process server's router directly.
 tower = { version = "0.5", features = ["util"] }
 
