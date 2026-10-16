@@ -30,7 +30,7 @@ CONFIGS = {
     "transparent-engine-store": (["-p", "zakura-pir-transparent"], ["engine-store", "engine-conformance", "reqwest"]),
     "transparent-pir": (["-p", "zakura-pir-transparent"], ["wallet"]),
     "transparent-pir-sqlite": (["-p", "zakura-pir-transparent"], ["sqlite"]),
-    "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing"]),
+    "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing", "reqwest"]),
     "pir-receiver": (["-p", "zakura-pir-receiver"], ["wallet"]),
     "receiver-wire": (["-p", "zakura-receiver-crypto", "--no-default-features"], []),
     "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),

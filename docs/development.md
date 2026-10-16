@@ -29,7 +29,7 @@ python3 scripts/dev.py verify
 | `enhance-testing` | Enhance PIR; `testing` (the synthetic Ironwood output fixture service tests authenticate PIR-returned records with) |
 | `transparent-pir` | Transparent PIR adapter; `wallet` |
 | `transparent-pir-sqlite` | Transparent PIR adapter; `sqlite` (`wallet` plus the SQLite apply-and-acknowledge integration and the in-process end-to-end tests) |
-| `transparent-pir-testing` | Transparent PIR adapter; `sqlite` and `testing` (the test support applications build their recovery and txid display tests on) |
+| `transparent-pir-testing` | Transparent PIR adapter; `sqlite`, `testing` and `reqwest` (the test support applications build their recovery and txid display tests on; the private recovery and discovery tests go through the HTTP transport) |
 | `pir-receiver` | Receiver PIR; `wallet` (which enables the backend's `orchard`; its tests use SQLite with `orchard`) |
 | `receiver-wire` | Library-owned receiver codec with default features disabled |
 | `server` | Separate `zakura/pir-chain` workspace, including the node fixture helpers under `testing` and the opt-in RocksDB reader under `rocksdb`; `-p` retains this workspace and doctor checks its lockfile |
