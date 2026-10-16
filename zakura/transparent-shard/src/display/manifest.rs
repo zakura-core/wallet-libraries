@@ -193,6 +193,7 @@ impl DisplayManifest {
     }
 
     /// Internal consistency, checked before any table is opened.
+    /// Rejects reversed or unrepresentable block spans and overflowing record totals.
     pub fn validate(&self) -> Result<&'static Geometry, String> {
         let geometry = self
             .display_geometry()
@@ -206,9 +207,12 @@ impl DisplayManifest {
         if self.n_buckets == 0 || self.n_buckets > MAX_BUCKETS {
             return Err(format!("{} buckets", self.n_buckets));
         }
-        if self.end_height < self.start_height
-            || self.blocks != self.end_height - self.start_height + 1
-        {
+        let blocks = self
+            .end_height
+            .checked_sub(self.start_height)
+            .and_then(|span| span.checked_add(1))
+            .ok_or("display shard range")?;
+        if self.blocks != blocks {
             return Err("display shard range".into());
         }
         for hash in [
@@ -229,7 +233,7 @@ impl DisplayManifest {
         if self.buckets.len() != self.n_buckets as usize {
             return Err("bucket list length".into());
         }
-        let mut total = 0;
+        let mut total = 0u64;
         for (index, bucket) in self.buckets.iter().enumerate() {
             if bucket.bucket != index as u32 {
                 return Err(format!("bucket {index} is labelled {}", bucket.bucket));
@@ -238,7 +242,7 @@ impl DisplayManifest {
                 return Err(format!("bucket {index} placement seed"));
             }
             check_segments(&bucket.directory_segments, geometry)?;
-            total += bucket.records;
+            total = total.checked_add(bucket.records).ok_or("record total")?;
         }
         if total != self.records {
             return Err("record total".into());
@@ -615,6 +619,51 @@ mod tests {
 
     fn manifest() -> DisplayManifest {
         DisplayManifest::new(header(true), &TXID_2K8, &built())
+    }
+
+    #[test]
+    fn manifest_block_count_rejects_overflow_and_keeps_representable_limits() {
+        let mut m = manifest();
+        m.start_height = 0;
+        m.end_height = u64::MAX;
+        m.blocks = 0; // The value unchecked arithmetic would wrap to.
+        assert!(m.validate().is_err());
+        m.start_height = u64::MAX;
+        m.end_height = 0;
+        m.blocks = 1;
+        assert!(m.validate().is_err());
+        for (start, end, blocks) in [(1, u64::MAX, u64::MAX), (u64::MAX, u64::MAX, 1), (0, 0, 1)] {
+            m.start_height = start;
+            m.end_height = end;
+            m.blocks = blocks;
+            m.validate().unwrap();
+            m.blocks = blocks - 1;
+            assert!(m.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn manifest_record_total_rejects_overflow_and_keeps_representable_limits() {
+        let mut m = manifest();
+        assert_eq!(m.buckets.len(), 2);
+        for (first, second, total) in [(u64::MAX, u64::MAX, u64::MAX - 1), (u64::MAX, 1, 0)] {
+            m.buckets[0].records = first;
+            m.buckets[1].records = second;
+            m.records = total;
+            assert!(m.validate().is_err());
+        }
+        for (first, second, total) in [
+            (u64::MAX - 1, 1, u64::MAX),
+            (u64::MAX, 0, u64::MAX),
+            (0, 0, 0),
+        ] {
+            m.buckets[0].records = first;
+            m.buckets[1].records = second;
+            m.records = total;
+            m.validate().unwrap();
+            m.records = total ^ 1;
+            assert!(m.validate().is_err());
+        }
     }
 
     #[test]

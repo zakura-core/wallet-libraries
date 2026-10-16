@@ -5,6 +5,7 @@
 //! travel, by construction rather than by convention.
 
 use std::io::Read;
+use std::time::Duration;
 
 use crate::envelope::{FilterBatch, MAX_BATCH_BYTES};
 use crate::error::FilterError;
@@ -19,17 +20,20 @@ const MAX_ERROR_BYTES: u64 = 800;
 pub struct HttpTransport {
     base_url: String,
     client: reqwest::blocking::Client,
+    timeout: Duration,
 }
 
 impl HttpTransport {
     pub fn new(base_url: impl Into<String>) -> Result<Self, FilterError> {
+        let timeout = Duration::from_secs(120);
         let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(timeout)
             .build()
             .map_err(|error| FilterError::Response(error.to_string()))?;
         Ok(Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             client,
+            timeout,
         })
     }
 
@@ -42,6 +46,10 @@ impl HttpTransport {
         let response = self
             .client
             .get(&url)
+            // The request timeout reaches the asynchronous body reader as an
+            // absolute deadline. The blocking client's default alone is reset
+            // on each Read call and would allow a peer to drip bytes forever.
+            .timeout(self.timeout)
             .send()
             .map_err(|error| FilterError::Response(format!("{url}: {error}")))?;
         let status = response.status();
@@ -140,9 +148,15 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc;
     use std::thread::{self, JoinHandle};
-    use std::time::Duration;
 
     fn serve(handler: impl FnOnce(TcpStream) + Send + 'static) -> (HttpTransport, JoinHandle<()>) {
+        serve_with_timeout(Duration::from_secs(3), handler)
+    }
+
+    fn serve_with_timeout(
+        timeout: Duration,
+        handler: impl FnOnce(TcpStream) + Send + 'static,
+    ) -> (HttpTransport, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let worker = thread::spawn(move || {
@@ -166,9 +180,10 @@ mod tests {
             base_url: format!("http://{address}"),
             client: reqwest::blocking::Client::builder()
                 .no_proxy()
-                .timeout(Duration::from_secs(3))
+                .timeout(timeout)
                 .build()
                 .unwrap(),
+            timeout,
         };
         (transport, worker)
     }
@@ -228,6 +243,36 @@ mod tests {
             Err(FilterError::LimitExceeded(_))
         ));
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_slow_stream_cannot_extend_the_whole_request_deadline() {
+        let (transport, worker) = serve_with_timeout(Duration::from_millis(300), |mut stream| {
+            stream.set_nodelay(true).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            // Each chunk arrives within the blocking Read timeout, but the
+            // complete valid response takes longer than the request deadline.
+            for _ in 0..12 {
+                if stream.write_all(b"1\r\n \r\n").is_err() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            let body = br#"{"phase":"serving","detail":null,"covered_through":7,"tip_height":7,"filters_stored":2}"#;
+            if write!(stream, "{:x}\r\n", body.len()).is_ok() && stream.write_all(body).is_ok() {
+                let _ = stream.write_all(b"\r\n0\r\n\r\n");
+            }
+        });
+        let result = transport.health();
+        worker.join().unwrap();
+        assert!(
+            matches!(result, Err(FilterError::Response(_))),
+            "a slow but otherwise valid response must exceed the whole request deadline"
+        );
     }
 
     #[test]
