@@ -246,7 +246,7 @@ mod tests {
         let mut store = MemoryStore::new();
         let script = vec![1];
         let bad = ShardCommit {
-            shard_id: 7,
+            shard_id: 0,
             revision_digest: "old".into(),
             start_height: 0,
             end_height: 99,
@@ -258,10 +258,11 @@ mod tests {
         for _ in 0..MAX_CONTENT_FAILURES {
             store.commit_shard(bad.clone()).unwrap();
         }
+        store.commit_shard(ShardCommit::default()).unwrap();
         let mut failed = vec![];
-        assert!(hold(&store, &mut failed, 7, "old", &script).unwrap());
-        assert!(!held(&store, &failed, 7, "recut", &script).unwrap());
-        assert!(!hold(&store, &mut failed, 7, "recut", &script).unwrap());
-        assert!(held(&store, &failed, 7, "old", &script).unwrap());
+        assert!(hold(&store, &mut failed, 0, "old", &script).unwrap());
+        assert!(!held(&store, &failed, 0, "recut", &script).unwrap());
+        assert!(!hold(&store, &mut failed, 0, "recut", &script).unwrap());
+        assert!(held(&store, &failed, 0, "old", &script).unwrap());
     }
 }

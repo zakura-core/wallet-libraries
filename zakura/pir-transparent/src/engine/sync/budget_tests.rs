@@ -527,3 +527,69 @@ fn a_failed_page_batch_charges_every_dispatched_query_before_returning() {
     assert_eq!(charges.query_upload(), 2 * upload);
     assert_eq!(charges.query_download(), 17 + 23);
 }
+
+#[test]
+fn failed_setup_response_bytes_stop_the_next_attempt_at_the_byte_allowance() {
+    struct RefusingSetup {
+        calls: u32,
+    }
+    impl ShardTransport for RefusingSetup {
+        fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            unreachable!()
+        }
+        fn manifest(&mut self, _: u64, _: &str) -> Result<(Vec<u8>, u64), BoxError> {
+            unreachable!()
+        }
+        fn setup(&mut self, _: u64, _: &str, _: Table, _: u32) -> Result<(Vec<u8>, u64), BoxError> {
+            self.calls += 1;
+            Err(crate::engine::transport::TransferFailure::boxed(
+                17,
+                crate::engine::transport::Overloaded { retry_after: None }.boxed(),
+            ))
+        }
+        fn query(&mut self, _: u64, _: &str, _: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
+            unreachable!()
+        }
+    }
+    let mut transport = RefusingSetup { calls: 0 };
+    let mut store = MemoryStore::new();
+    let mut clients = clients();
+    let mut charges = ByteCharges::default();
+    let limits = WorkLimits {
+        max_queries: None,
+        max_private_bytes: Some(17),
+    };
+    assert!(matches!(
+        open_table(
+            &mut store,
+            "set",
+            7,
+            "revision",
+            Table::Directory,
+            1,
+            &mut clients.directory,
+            &mut transport,
+            &mut charges,
+            Some(&limits)
+        ),
+        Err(SyncError::Client(ClientError::Overloaded(_)))
+    ));
+    assert_eq!(charges.setup_bytes(), 17);
+    assert_eq!(charges.shards_opened(), 0);
+    assert!(
+        !open_table(
+            &mut store,
+            "set",
+            7,
+            "revision",
+            Table::Directory,
+            1,
+            &mut clients.directory,
+            &mut transport,
+            &mut charges,
+            Some(&limits)
+        )
+        .unwrap()
+    );
+    assert_eq!(transport.calls, 1);
+}

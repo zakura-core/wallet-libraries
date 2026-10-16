@@ -844,15 +844,6 @@ fn a_recut_reusing_a_failed_shard_id_starts_a_new_persisted_count() {
         store.commit_shard(failed.clone()).unwrap();
     }
     drop(store);
-    // An older schema-7 writer had the same count and commit log, without
-    // an explicit revision binding in wallet_meta. Reopening recovers it.
-    rusqlite::Connection::open(&path)
-        .unwrap()
-        .execute(
-            "DELETE FROM wallet_meta WHERE key = 'failure_revision:7'",
-            [],
-        )
-        .unwrap();
     let mut store = SqliteStore::open(&path).unwrap();
     assert_eq!(store.entry_failures(7, "old", &script(1)).unwrap(), 3);
     assert_eq!(store.entry_failures(7, "recut", &script(1)).unwrap(), 0);
@@ -863,4 +854,41 @@ fn a_recut_reusing_a_failed_shard_id_starts_a_new_persisted_count() {
     let store = SqliteStore::open(&path).unwrap();
     assert_eq!(store.entry_failures(7, "recut", &script(1)).unwrap(), 1);
     assert_eq!(store.entry_failures(7, "old", &script(1)).unwrap(), 0);
+}
+
+#[test]
+fn legacy_failure_counts_without_a_revision_binding_do_not_hold_the_latest_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy-failures.sqlite");
+    let mut store = SqliteStore::open(&path).unwrap();
+    store
+        .commit_shard(commit(7, "old", true, (0, 99), vec![], vec![]))
+        .unwrap();
+    store
+        .commit_shard(commit(7, "new", true, (0, 199), vec![], vec![]))
+        .unwrap();
+    drop(store);
+    // An older writer retained old failures after a successful new revision,
+    // and wrote neither a revision column nor an explicit metadata binding.
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute(
+        "DELETE FROM wallet_meta WHERE key = 'failure_revision:7'",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO failed_entries (shard_id, script, failures) VALUES (7, ?1, 3)",
+        [&script(1)],
+    )
+    .unwrap();
+    drop(db);
+    let mut store = SqliteStore::open(&path).unwrap();
+    assert_eq!(store.entry_failures(7, "new", &script(1)).unwrap(), 0);
+    assert_eq!(store.entry_failures(7, "old", &script(1)).unwrap(), 0);
+    let mut failed = commit(7, "new", true, (0, 199), vec![], vec![]);
+    failed.failed_entries = vec![script(1)];
+    store.commit_shard(failed).unwrap();
+    drop(store);
+    let store = SqliteStore::open(&path).unwrap();
+    assert_eq!(store.entry_failures(7, "new", &script(1)).unwrap(), 1);
 }

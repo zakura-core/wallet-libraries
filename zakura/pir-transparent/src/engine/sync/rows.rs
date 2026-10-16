@@ -266,9 +266,12 @@ pub(super) fn open_table<S: WalletStore>(
                 {
                     return Ok(false);
                 }
-                let (raw, cost) = transport
-                    .setup(shard_id, revision, table, segment)
-                    .map_err(|error| SyncError::from(classify_transport(error)))?;
+                let reply = transport.setup(shard_id, revision, table, segment);
+                if let Err(error) = &reply {
+                    charges.add_failed_setup(table, error);
+                }
+                let (raw, cost) =
+                    reply.map_err(|error| SyncError::from(classify_transport(error)))?;
                 charges.add_setup(table, cost);
                 let parsed: serde_json::Value = serde_json::from_slice(&raw)
                     .map_err(|error| SyncError::Transport(error.to_string()))?;

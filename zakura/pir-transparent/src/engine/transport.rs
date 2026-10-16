@@ -319,6 +319,11 @@ impl ByteCharges {
         self.manifests_checked += 1;
     }
 
+    /// Failed setup responses consume private bytes without opening a segment.
+    pub(crate) fn add_failed_setup(&mut self, table: Table, error: &BoxError) {
+        self.table_mut(table).setup_bytes += TransferFailure::downloaded(error);
+    }
+
     pub fn add_setup(&mut self, table: Table, cost: u64) {
         let charges = self.table_mut(table);
         charges.setup_bytes += cost;
@@ -458,6 +463,9 @@ pub trait ShardTransport {
     /// a segment's own bytes, so a republished tail has different setup under a
     /// different digest; addressing it by revision is what stops a wallet
     /// decoding new bytes against the parameters of the revision it cached.
+    /// Make one physical attempt per call; the wallet owns retries and checks
+    /// its private-byte allowance before the next attempt. Retain bytes read
+    /// on a failure in [`TransferFailure`].
     fn setup(
         &mut self,
         shard_id: u64,
@@ -471,7 +479,9 @@ pub trait ShardTransport {
     /// The body is opaque and fixed length, and names a row within a segment
     /// rather than a segment: the answer carries one body per segment, in
     /// segment order. Every call counts as one query attempt and charges its
-    /// upload before handling a failure. When an error follows response bytes,
+    /// upload before handling a failure. Make one physical attempt per call;
+    /// the wallet owns retries and checks work limits before the next group.
+    /// When an error follows response bytes,
     /// wrap it in [`TransferFailure`] so those bytes are charged too; keep any
     /// typed refusal as its source so retries still recognize it.
     fn query(

@@ -11,7 +11,7 @@ use crate::engine::client::Table;
 pub use crate::engine::init::parse_init;
 use crate::engine::sync::ServiceGeometry;
 use crate::engine::transport::{
-    BoxError, FilterSource, ShardReply, ShardRequest, ShardTransport, refusal,
+    BoxError, FilterSource, ShardReply, ShardRequest, ShardTransport, TransferFailure, refusal,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -173,6 +173,9 @@ fn execute(
             policy.response_limit,
         );
         let delay = result.as_ref().err().and_then(|error| {
+            let error = error
+                .downcast_ref::<TransferFailure>()
+                .map_or(error, |failure| &failure.source);
             if !retry_overload
                 && error
                     .downcast_ref::<HttpStatusError>()
@@ -264,9 +267,14 @@ fn response_body(
     }
     use std::io::Read;
     let mut bytes = Vec::new();
-    response.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if let Err(error) = response.take(limit as u64 + 1).read_to_end(&mut bytes) {
+        return Err(TransferFailure::boxed(bytes.len() as u64, error.into()));
+    }
     if bytes.len() > limit {
-        return Err("HTTP response exceeds size limit".into());
+        return Err(TransferFailure::boxed(
+            bytes.len() as u64,
+            "HTTP response exceeds size limit".into(),
+        ));
     }
     Ok(bytes)
 }
@@ -292,7 +300,13 @@ fn execute_once(
             .get("retry-after")
             .and_then(|h| h.to_str().ok())
             .map(str::to_owned);
-        let body = response_body(response, stage, response_limit)?;
+        let body = match response_body(response, stage, response_limit) {
+            Ok(body) => body,
+            Err(error) => {
+                bytes_down = TransferFailure::downloaded(&error);
+                return Err(error);
+            }
+        };
         bytes_down = body.len() as u64;
         if let Some((shard, revision)) = binding {
             if !code.is_success() {
@@ -351,7 +365,13 @@ fn execute_once(
             }),
         });
     }
-    result
+    result.map_err(|error| {
+        if bytes_down == 0 || TransferFailure::downloaded(&error) != 0 {
+            error
+        } else {
+            TransferFailure::boxed(bytes_down, error)
+        }
+    })
 }
 
 /// A public immutable resource downloaded with the same measured retry policy.
@@ -457,14 +477,16 @@ impl HttpShardTransport {
     }
 
     /// Opt into a bounded number of attempts per HTTP call (1–3). This is
-    /// separate from wallet-level overload retries and defaults to one attempt.
+    /// for init and manifests. Setup and private queries always make one
+    /// physical attempt; wallet-level refusal handling owns their retries.
     pub fn with_retry_attempts(mut self, attempts: usize) -> Self {
         self.retry.attempts = attempts.clamp(1, 3);
         self
     }
 
     /// Retry transient gateway/upload/connection failures without layering
-    /// additional overload retries on the wallet's refusal policy.
+    /// additional overload retries on the wallet's refusal policy. This applies
+    /// to init and manifests; setup and private queries always attempt once.
     pub fn with_transient_retry_attempts(mut self, attempts: usize) -> Self {
         self.retry.attempts = attempts.clamp(1, 3);
         self.retry.overload = false;
@@ -514,13 +536,26 @@ impl HttpShardTransport {
                 (shard_id, revision),
             ),
         };
+        // Wallet work limits and refusal handling own private retries. One
+        // trait call must represent one physical setup or query attempt.
+        let policy = if matches!(
+            request,
+            ShardRequest::Setup { .. } | ShardRequest::Query { .. }
+        ) {
+            RetryPolicy {
+                attempts: 1,
+                ..self.retry
+            }
+        } else {
+            self.retry
+        };
         let bytes = execute(
             builder,
             request.stage(),
             request.upload(),
             Some(binding),
             &self.observer,
-            self.retry,
+            policy,
         )?;
         let len = bytes.len() as u64;
         Ok((bytes, len))
@@ -897,6 +932,120 @@ mod observation_tests {
                     "{client_kind} {status}"
                 );
                 server.join().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn private_http_refusals_are_single_attempt_and_charge_their_bodies() {
+        use crate::engine::client::TableClient;
+        use crate::engine::transport::ByteCharges;
+        use transparent_native::TableProfile;
+        for status in [503, 410] {
+            for setup in [false, true] {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let address = listener.local_addr().unwrap();
+                listener.set_nonblocking(true).unwrap();
+                let server = std::thread::spawn(move || {
+                    let mut sent = 0;
+                    let mut deadline = Instant::now() + Duration::from_secs(5);
+                    while Instant::now() < deadline {
+                        match listener.accept() {
+                            Ok((mut stream, _)) => {
+                                let mut headers = Vec::new();
+                                stream
+                                    .set_read_timeout(Some(Duration::from_secs(2)))
+                                    .unwrap();
+                                while !headers.ends_with(b"\r\n\r\n") {
+                                    let mut byte = [0];
+                                    stream.read_exact(&mut byte).unwrap();
+                                    headers.push(byte[0]);
+                                }
+                                let length = String::from_utf8(headers)
+                                    .unwrap()
+                                    .lines()
+                                    .find_map(|line| {
+                                        let (name, value) = line.split_once(':')?;
+                                        name.eq_ignore_ascii_case("content-length")
+                                            .then(|| value.trim().parse::<usize>().unwrap())
+                                    })
+                                    .unwrap_or(0);
+                                stream.read_exact(&mut vec![0; length]).unwrap();
+                                write!(stream, "HTTP/1.1 {status} Test\r\nRetry-After: 0\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbusy").unwrap();
+                                sent += 1;
+                                deadline = Instant::now() + Duration::from_millis(200);
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(2))
+                            }
+                            Err(error) => panic!("{error}"),
+                        }
+                    }
+                    sent
+                });
+                let mut transport =
+                    HttpShardTransport::new(format!("http://{address}"), &HttpOptions::default())
+                        .unwrap()
+                        .with_retry_attempts(3);
+                let revision = "ab".repeat(32);
+                let mut charges = ByteCharges::default();
+                if setup {
+                    let error = transport
+                        .setup(7, &revision, Table::Directory, 0)
+                        .unwrap_err();
+                    charges.add_failed_setup(Table::Directory, &error);
+                    assert_eq!(charges.setup_bytes(), 4);
+                    assert_eq!(charges.shards_opened(), 0);
+                } else {
+                    let profile = TableProfile::new(
+                        transparent_shard::SCHEMA,
+                        "recent-4k",
+                        "directory",
+                        4096,
+                        4096,
+                    )
+                    .unwrap();
+                    let mut client = TableClient::new(
+                        Table::Directory,
+                        "recent-4k",
+                        4096,
+                        4096,
+                        &profile.scheme,
+                        None,
+                    )
+                    .unwrap();
+                    let upload = client
+                        .prepare(&revision, Table::Directory, 17)
+                        .unwrap()
+                        .body
+                        .len() as u64;
+                    assert!(
+                        client
+                            .fetch_row(
+                                &mut transport,
+                                7,
+                                &revision,
+                                Table::Directory,
+                                1,
+                                4096,
+                                17,
+                                &mut charges
+                            )
+                            .is_err()
+                    );
+                    assert_eq!(
+                        charges.queries(),
+                        1,
+                        "one query exhausts a one-query work allowance"
+                    );
+                    assert_eq!(charges.query_upload(), upload);
+                    assert_eq!(charges.query_download(), 4);
+                }
+                assert_eq!(
+                    server.join().unwrap(),
+                    1,
+                    "retry options must not hide private attempts from wallet limits"
+                );
             }
         }
     }

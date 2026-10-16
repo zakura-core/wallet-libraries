@@ -169,6 +169,7 @@ pub fn suite<S: WalletStore>(make: impl Fn() -> S) {
     a_walk_cursor_and_its_carried_events_round_trip(&make);
     the_run_cache_is_written_with_its_commit_and_never_rewritten(&make);
     entry_failures_are_scoped_to_the_committed_revision(&make);
+    retiring_pending_work_preserves_shard_zero_failure_holds(&make);
 }
 
 fn an_empty_store_reports_nothing<S: WalletStore>(make: &impl Fn() -> S) {
@@ -861,4 +862,30 @@ fn entry_failures_are_scoped_to_the_committed_revision<S: WalletStore>(make: &im
     store.commit_shard(recut).unwrap();
     assert_eq!(store.entry_failures(1, "recut", &script(1)).unwrap(), 1);
     assert_eq!(store.entry_failures(1, "r1", &script(1)).unwrap(), 0);
+}
+
+fn retiring_pending_work_preserves_shard_zero_failure_holds<S: WalletStore>(make: &impl Fn() -> S) {
+    let mut store = make();
+    let mut failed = commit(0, "held", true, (0, 99), vec![], vec![]);
+    failed.failed_entries = vec![script(1)];
+    for _ in 0..3 {
+        store.commit_shard(failed.clone()).unwrap();
+    }
+    let mut waiting = commit(5, "pending", false, (100, 199), vec![], vec![]);
+    waiting.pending_upsert = vec![pending(2, "pending")];
+    store.commit_shard(waiting).unwrap();
+    let ids = store
+        .pending()
+        .unwrap()
+        .into_iter()
+        .map(|item| item.id.unwrap())
+        .collect();
+    store
+        .commit_shard(ShardCommit {
+            pending_complete: ids,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(store.pending().unwrap().is_empty());
+    assert_eq!(store.entry_failures(0, "held", &script(1)).unwrap(), 3);
 }

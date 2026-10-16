@@ -305,7 +305,9 @@ impl WalletStore for MemoryStore {
                 run.shard_id != commit.shard_id || !commit.covered_scripts.contains(script)
             });
         }
-        if self.state.failure_revisions.get(&commit.shard_id) != Some(&commit.revision_digest) {
+        if !commit.revision_digest.is_empty()
+            && self.state.failure_revisions.get(&commit.shard_id) != Some(&commit.revision_digest)
+        {
             self.state
                 .failures
                 .retain(|(shard, _), _| *shard != commit.shard_id);

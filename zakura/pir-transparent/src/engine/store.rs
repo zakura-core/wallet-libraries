@@ -445,6 +445,8 @@ pub trait WalletStore {
     /// `shard_id` under `revision`, across syncs and restarts. A success or
     /// rollback under that revision preserves the count. A different manifest
     /// starts a fresh count: a re-cut may reuse the id for unrelated content.
+    /// Historic counters without a proven revision binding do not hold a
+    /// revision; a later revision-bearing commit establishes the binding.
     fn entry_failures(
         &self,
         shard_id: u64,
