@@ -1,7 +1,6 @@
 //! Pinned bytes for what receiver PIR adds to the shared `pir-native` profile (seeds,
 //! session ID, framing and row placement), from a request built without `Client`; a
 //! change that alters one needs a new protocol name, not a new pin.
-#[path = "../../receiver-directory/tests/common/mod.rs"]
 mod common;
 use common::{manifest, receiver, record};
 use ipir_sp::bits::u64s_to_contiguous_bytes;
