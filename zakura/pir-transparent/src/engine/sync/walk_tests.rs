@@ -1880,6 +1880,13 @@ fn activity_recovered_from_a_replacement_revision_advances_the_gap_limit() {
     .unwrap();
 
     assert!(exchange.next.borrow().is_none(), "A was withdrawn mid-sync");
+    assert!(
+        store
+            .filter(&digest_a, &map_a.shards[0].filter_hash)
+            .unwrap()
+            .is_none(),
+        "a revision withdrawn mid-sync leaves no cached filter"
+    );
     assert_eq!(report.replaced_revisions, vec![digest_a.clone()]);
     assert_eq!(
         report.failed_entries,

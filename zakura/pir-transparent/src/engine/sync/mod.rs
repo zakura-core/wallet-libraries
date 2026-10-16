@@ -923,15 +923,6 @@ pub fn sync_into<S: WalletStore>(
             ..Default::default()
         })?;
     }
-    // Filters and setups are cached by revision and read only under those the
-    // map publishes: a replaced revision's are never read again.
-    let queryable: Vec<&str> = map
-        .shards
-        .iter()
-        .map(|entry| entry.manifest_digest.as_str())
-        .collect();
-    store.prune_caches(&queryable)?;
-
     // Replies a lookahead sends early are held here until the walk asks for
     // them; see `ahead`. With nothing stashed both pass straight through.
     let transport = &mut ahead::Staged::new(transport);
@@ -1259,6 +1250,15 @@ pub fn sync_into<S: WalletStore>(
         }
         scripts_added += store.add_scripts(&added)?;
     }
+
+    // Prune against the map this pass ended on: a revision withdrawn during
+    // the walk must leave no cached filter or setup either.
+    let queryable: Vec<&str> = active
+        .shards
+        .iter()
+        .map(|entry| entry.manifest_digest.as_str())
+        .collect();
+    store.prune_caches(&queryable)?;
 
     let (covered_through, settled_through) = coverage_summary(store, target_anchor.height)?;
     if completion == Completion::Complete {
