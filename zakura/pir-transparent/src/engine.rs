@@ -36,8 +36,8 @@ pub use init::parse_init;
 pub use ledger::{ConfirmedSpend, Ledger, LedgerError, TransactionSummary, UnresolvedSpend, Utxo};
 pub use memory_store::MemoryStore;
 pub use store::{
-    Anchor, CoverageKind, CoverageRange, PendingPages, ScriptEntry, ScriptOrigin, SetIdentity,
-    SetupBlob, SetupKey, ShardCommit, StoreError, StoredEvent, WalletStore,
+    Anchor, CoverageKind, CoverageRange, DummyQueries, PendingPages, ScriptEntry, ScriptOrigin,
+    SetIdentity, SetupBlob, SetupKey, ShardCommit, StoreError, StoredEvent, WalletStore,
 };
 pub use sync::{
     Completion, FailedEntry, GeometryParams, IncompleteReason, MAX_CONTENT_FAILURES,

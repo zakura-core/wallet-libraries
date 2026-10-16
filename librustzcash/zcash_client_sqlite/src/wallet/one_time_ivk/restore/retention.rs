@@ -1,13 +1,19 @@
 //! Temporary spend evidence for notes that a restore sweep finds after ordinary scanning.
 use std::ops::Range;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::data_api::{scanning::ScanPriority, transparent_ledger::ChainPoint};
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
 use super::recovery;
 use crate::wallet::one_time_ivk::{account_key, corrupt, queue_rescan, restore_start};
 use crate::{AccountUuid, error::SqliteClientError, wallet, wallet::scanning::priority_code};
+
+/// The most retained Ironwood nullifiers one release frees. Freeing more at once makes the
+/// prune, in the release and in the next scan batch, hold the wallet's write lock for
+/// seconds; later releases continue where this one stopped. Counted in nullifiers rather
+/// than blocks, because Ironwood actions per block vary by an order of magnitude.
+const RELEASE_NULLIFIERS: u32 = 50_000;
 
 /// Retains `account`'s Ironwood spend evidence from its birthday, or Ironwood
 /// activation if later, until [`finish_nullifier_recovery`] releases it.
@@ -32,13 +38,26 @@ pub(in crate::wallet::one_time_ivk) fn retain_spend_history<P: Parameters>(
     Ok(())
 }
 
-/// Implements `OneTimeIvkRestoreWrite::finish_one_time_nullifier_recovery`.
+/// Implements `OneTimeIvkRestoreWrite::finish_one_time_nullifier_recovery`, freeing at
+/// most [`RELEASE_NULLIFIERS`] nullifiers per call.
 pub(crate) fn finish_nullifier_recovery<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     through: ChainPoint,
     now: i64,
+) -> Result<bool, SqliteClientError> {
+    release_spend_history(conn, params, account, through, now, RELEASE_NULLIFIERS)
+}
+
+/// [`finish_nullifier_recovery`], freeing at most `limit` retained nullifiers.
+pub(in crate::wallet::one_time_ivk) fn release_spend_history<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    account: AccountUuid,
+    through: ChainPoint,
+    now: i64,
+    limit: u32,
 ) -> Result<bool, SqliteClientError> {
     let (id, _) = account_key(conn, params, account)?;
     let enabled: bool = conn.query_row(
@@ -72,6 +91,28 @@ pub(crate) fn finish_nullifier_recovery<P: Parameters>(
         |r| r.get(0),
     )?;
     let next = pending.unwrap_or(u32::from(through.height).saturating_add(1));
+    let floor: u32 = conn.query_row(
+        "SELECT nullifier_retention_height FROM ironwood_one_time_spend_retention
+         WHERE account_id = ?1",
+        [id.0],
+        |r| r.get(0),
+    )?;
+    // At most `limit` rows of any pool lie below the bound, which the
+    // locator index answers without reading rows; below the pruning height they are all
+    // Ironwood. A release always passes at least one block.
+    let next = if next > floor {
+        let bound: Option<u32> = conn
+            .query_row(
+                "SELECT block_height FROM nullifier_map WHERE block_height >= ?1
+                 ORDER BY block_height LIMIT 1 OFFSET ?2",
+                params![floor, limit],
+                |r| r.get(0),
+            )
+            .optional()?;
+        bound.map_or(next, |bound| next.min(bound.max(floor + 1)))
+    } else {
+        next
+    };
     // Raising the floor ends any replay below it.
     conn.execute(
         "UPDATE ironwood_one_time_spend_retention SET nullifier_retention_height = ?2,

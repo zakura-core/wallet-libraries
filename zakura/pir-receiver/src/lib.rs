@@ -7,8 +7,16 @@
 //! it reads. Whether and when the wallet looks up is not hidden: it follows the
 //! publication's paid filter and retries failed lookups, so a dishonest directory that
 //! changes what it serves can test whether the wallet holds a receiver it chose. A
-//! publication is used only at a block the wallet scanned, and the wallet authenticates
-//! every payment with its derived key and its own chain before crediting it.
+//! sweep uses a publication only at a block the wallet scanned, and the wallet
+//! authenticates every payment with its derived key and its own chain before crediting
+//! it.
+//!
+//! `begin_early_restore` runs before a restore scan instead, and `EarlyRestore::look_up`
+//! looks up its paid keys while the scan runs. A payment found this way is an ordinary
+//! note from then on: its enhancement, scan priority and any rebroadcast follow as for
+//! any note. So when a directory's answer is wrong, traffic to the wallet's other
+//! services in that sync can differ from an honest answer's, another route to the test
+//! above.
 //!
 //! `fetch_seen` downloads the swap provider seen sets that a wallet checks before
 //! issuing a swap address. The `wallet` feature adds `sweep`, which runs these lookups
@@ -18,9 +26,13 @@
 //! `sweep` future at any await is safe: each wallet step commits on its own, and every
 //! begun attempt is already backed off.
 
+#[cfg(feature = "wallet")]
+mod early;
 mod seen;
 #[cfg(feature = "wallet")]
 mod sweep;
+#[cfg(feature = "wallet")]
+pub use early::{EarlyRestore, FIRST_WINDOW, GAP, LookedUp, MAX_KEYS, begin_early_restore};
 pub use seen::{Seen, fetch_seen};
 #[cfg(feature = "wallet")]
 pub use sweep::{Error, Swept, WriteLock, sweep};

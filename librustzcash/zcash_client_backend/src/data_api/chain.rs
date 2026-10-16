@@ -659,11 +659,12 @@ where
 
 /// [`scan_cached_blocks`], also trial-decrypting with the wallet's one-time keys.
 ///
-/// The keys come from [`OneTimeIvkRead::get_one_time_scanning_keys`], and the blocks are
+/// The keys come from [`OneTimeIvkRead::get_one_time_scanning_keys_for_range`] for the
+/// `limit` blocks from `from_height`, and the blocks are
 /// stored with [`OneTimeIvkWrite::put_blocks_with_one_time_ivks`]. A wallet with open
 /// one-time keys must be scanned with this function rather than [`scan_cached_blocks`].
 ///
-/// [`OneTimeIvkRead::get_one_time_scanning_keys`]: super::one_time_ivk::OneTimeIvkRead::get_one_time_scanning_keys
+/// [`OneTimeIvkRead::get_one_time_scanning_keys_for_range`]: super::one_time_ivk::OneTimeIvkRead::get_one_time_scanning_keys_for_range
 #[cfg(feature = "orchard")]
 #[tracing::instrument(skip(params, block_source, data_db, from_state))]
 #[allow(clippy::type_complexity)]
@@ -686,8 +687,9 @@ where
     let account_ufvks = data_db
         .get_unified_full_viewing_keys()
         .map_err(Error::Wallet)?;
+    let end = u32::from(from_height).saturating_add(u32::try_from(limit).unwrap_or(u32::MAX));
     let one_time_keys = data_db
-        .get_one_time_scanning_keys()
+        .get_one_time_scanning_keys_for_range(from_height..BlockHeight::from(end))
         .map_err(Error::Wallet)?;
     let one_time_key_ids = one_time_keys
         .iter()

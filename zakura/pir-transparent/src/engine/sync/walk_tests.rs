@@ -397,8 +397,8 @@ impl RowSource for Direct<'_> {
 /// The directory phase, without the directory query: the entry's inline
 /// events committed and its walk recorded, as `retrieve_shard_into`
 /// leaves them. Returns the walks owed.
-fn directory_phase(
-    store: &mut MemoryStore,
+fn directory_phase<S: WalletStore>(
+    store: &mut S,
     directory: &Directory,
     manifest: &ShardManifest,
     scripts: &[Vec<u8>],
@@ -425,6 +425,7 @@ fn directory_phase(
                 revision_digest: entry.manifest_digest.clone(),
             }));
         commit.pending_upsert.push(PendingPages {
+            dummy_queries: None,
             id: None,
             shard_id: entry.shard_id,
             revision_digest: entry.manifest_digest.clone(),
@@ -2126,6 +2127,596 @@ fn malformed_manifest_cases_do_not_change_the_shared_fixture() {
     );
 }
 
+/// An entry that failed on content under one revision of a shard does not
+/// hide what its replacement, read in the same sync, recovers for the same
+/// script: the activity reaches the gap-limit rule, which derives the next
+/// funded script, and that script's history is recovered in the same sync.
+/// The failure under the withdrawn revision is still reported.
+///
+/// Revision A of the tail publishes `first`'s directory entry malformed;
+/// `busy`'s history needs a page walk, and its first page query finds A
+/// withdrawn in favour of an honest revision B of the same range.
+#[cfg(feature = "testing")]
+#[test]
+fn activity_recovered_from_a_replacement_revision_advances_the_gap_limit() {
+    use crate::engine::adapters::StaticChain;
+    use crate::testing::service::{InProcess, SEAL, ShardSpec, publish, synthetic};
+    use crate::{
+        HttpExchange, HttpFailure, HttpMethod, HttpReply, HttpRequest, TransparentPirHttp,
+    };
+    use std::cell::RefCell;
+
+    /// The service, which serves `next` from the first page query on.
+    struct Republishing {
+        serving: RefCell<InProcess>,
+        next: RefCell<Option<InProcess>>,
+    }
+    impl HttpExchange for Republishing {
+        fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
+            if request.method == HttpMethod::Post && request.path.contains("/query/pages-") {
+                if let Some(next) = self.next.borrow_mut().take() {
+                    *self.serving.borrow_mut() = next;
+                }
+            }
+            let answered = self.serving.borrow().answer(
+                axum::http::Request::builder()
+                    .method(request.method.as_str())
+                    .uri(&request.path)
+                    .body(request.body.clone())
+                    .unwrap(),
+            );
+            let status = answered.status().as_u16();
+            let retry_after = answered
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let mut body = answered.into_body();
+            if !(200..300).contains(&status) {
+                body.truncate(request.error_limit);
+            }
+            Ok(HttpReply {
+                status,
+                retry_after,
+                map_sha256: None,
+                body,
+            })
+        }
+    }
+
+    /// Derives one script past the newest active one in `chain`.
+    struct GapLimit {
+        fixed: Vec<u8>,
+        chain: Vec<Vec<u8>>,
+        derived: usize,
+        reported: Vec<Vec<Vec<u8>>>,
+    }
+    impl GapLimit {
+        fn entry(script: &[u8]) -> ScriptEntry {
+            ScriptEntry {
+                script: script.to_vec(),
+                origin: ScriptOrigin::Derived,
+                required_from: START,
+            }
+        }
+    }
+    impl ScriptProvider for GapLimit {
+        fn scripts(&mut self) -> Vec<ScriptEntry> {
+            std::iter::once(&self.fixed)
+                .chain(&self.chain[..self.derived])
+                .map(|script| Self::entry(script))
+                .collect()
+        }
+        fn on_activity(&mut self, active: &[Vec<u8>]) -> Vec<ScriptEntry> {
+            self.reported.push(active.to_vec());
+            let wanted = self
+                .chain
+                .iter()
+                .rposition(|script| active.contains(script))
+                .map_or(0, |newest| (newest + 2).min(self.chain.len()));
+            if wanted <= self.derived {
+                return Vec::new();
+            }
+            let added = self.chain[self.derived..wanted]
+                .iter()
+                .map(|script| Self::entry(script))
+                .collect();
+            self.derived = wanted;
+            added
+        }
+    }
+
+    const START: u64 = 3_428_143;
+    const END: u64 = START + 99;
+    let (busy, first, second, third) = (script(70), script(71), script(72), script(73));
+    let mut events = vec![
+        (
+            ScriptBytes::new(first.clone()),
+            receive(START as u32 + 10, 1),
+        ),
+        (
+            ScriptBytes::new(second.clone()),
+            receive(START as u32 + 60, 2),
+        ),
+    ];
+    for n in 0..4 {
+        events.push((
+            ScriptBytes::new(busy.clone()),
+            receive(START as u32 + 20 + 10 * n, 10 + n),
+        ));
+    }
+    let revision = |revision: u32, supersedes: String, malformed: Vec<ScriptBytes>| ShardSpec {
+        revision,
+        supersedes,
+        malformed_entries: malformed,
+        ..ShardSpec::first(START, END, false, events.clone())
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (dir_a, dir_b) = (dir.path().join("a"), dir.path().join("b"));
+    let map_a = publish(
+        &dir_a,
+        &[revision(
+            0,
+            String::new(),
+            vec![ScriptBytes::new(first.clone())],
+        )],
+        SEAL,
+        synthetic,
+        vec![],
+    );
+    let digest_a = map_a.shards[0].manifest_digest.clone();
+    let map_b = publish(
+        &dir_b,
+        &[revision(1, digest_a.clone(), Vec::new())],
+        SEAL,
+        synthetic,
+        vec![],
+    );
+    assert_ne!(map_b.shards[0].manifest_digest, digest_a);
+
+    let exchange = Republishing {
+        serving: RefCell::new(InProcess::serve(&dir_a)),
+        next: RefCell::new(Some(InProcess::serve(&dir_b))),
+    };
+    let mut http = TransparentPirHttp::new(&exchange, 64 << 20);
+    let (mut filters, mut shards) = http.split();
+    let geometry = crate::engine::parse_init(&shards.init().unwrap().0).unwrap();
+    let mut gap = GapLimit {
+        fixed: busy.clone(),
+        chain: vec![first.clone(), second.clone(), third.clone()],
+        derived: 1,
+        reported: Vec::new(),
+    };
+    let target = Anchor {
+        height: END,
+        hash: map_a.shards[0].terminal_block_hash.clone(),
+    };
+    let mut store = MemoryStore::new();
+    let report = sync_into(
+        &mut store,
+        &map_a,
+        serde_json::to_vec(&map_a).unwrap().len() as u64,
+        &geometry,
+        &StaticChain::from_map(&map_a),
+        &mut gap,
+        &mut filters,
+        &mut shards,
+        &WorkLimits::UNLIMITED,
+        &target,
+    )
+    .unwrap();
+
+    assert!(exchange.next.borrow().is_none(), "A was withdrawn mid-sync");
+    assert!(
+        store
+            .filter(&digest_a, &map_a.shards[0].filter_hash)
+            .unwrap()
+            .is_none(),
+        "a revision withdrawn mid-sync leaves no cached filter"
+    );
+    assert_eq!(report.replaced_revisions, vec![digest_a.clone()]);
+    assert_eq!(
+        report.failed_entries,
+        vec![FailedEntry {
+            shard_id: 0,
+            revision_digest: digest_a,
+            script: first.clone(),
+            failures: 1,
+        }],
+        "the failure under the withdrawn revision is still reported"
+    );
+    assert!(
+        gap.reported[0].contains(&first),
+        "activity recovered from the replacement reaches the gap-limit rule: {:?}",
+        gap.reported
+    );
+    assert_eq!(
+        gap.derived, 3,
+        "the derived funded script advanced it again"
+    );
+    assert_eq!(stored(&store, &first), vec![receive(START as u32 + 10, 1)]);
+    assert_eq!(
+        stored(&store, &second),
+        vec![receive(START as u32 + 60, 2)],
+        "the gap-limit rule derived the next funded script in the same sync"
+    );
+    assert_eq!(stored(&store, &busy).len(), 4);
+    assert_eq!(report.completion, Completion::Complete);
+}
+
+/// Activity a budget-stopped sync saved reaches the gap-limit rule before a
+/// later sync completes. `first`'s history is committed by a call that then
+/// stops for its query budget; `other`, a separately watched script, is read
+/// by a later call. Only `first`'s activity derives `next`, whose received
+/// funds must be found before the wallet is told it is complete, across
+/// calls and a reopened SQLite store. An entry the service publishes
+/// malformed is never reported, though it matched.
+#[cfg(feature = "testing")]
+#[test]
+fn activity_saved_before_a_budget_stop_reaches_the_gap_limit_rule() {
+    use crate::engine::adapters::StaticChain;
+    use crate::engine_store::SqliteStore;
+    use crate::testing::service::{InProcess, SEAL, ShardSpec, publish, synthetic};
+    use crate::{HttpExchange, HttpFailure, HttpReply, HttpRequest, TransparentPirHttp};
+
+    struct Serving(InProcess);
+    impl HttpExchange for Serving {
+        fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
+            let answered = self.0.answer(
+                axum::http::Request::builder()
+                    .method(request.method.as_str())
+                    .uri(&request.path)
+                    .body(request.body.clone())
+                    .unwrap(),
+            );
+            let status = answered.status().as_u16();
+            let mut body = answered.into_body();
+            if !(200..300).contains(&status) {
+                body.truncate(request.error_limit);
+            }
+            Ok(HttpReply {
+                status,
+                retry_after: None,
+                map_sha256: None,
+                body,
+            })
+        }
+    }
+
+    /// Watches `first`, `other` and `broken`, and derives `next` once
+    /// `first` shows activity.
+    struct Extending {
+        watched: Vec<Vec<u8>>,
+        next: Vec<u8>,
+        derived: bool,
+        reported: Vec<Vec<u8>>,
+    }
+    impl Extending {
+        fn entry(script: &[u8]) -> ScriptEntry {
+            ScriptEntry {
+                script: script.to_vec(),
+                origin: ScriptOrigin::Derived,
+                required_from: START,
+            }
+        }
+    }
+    impl ScriptProvider for Extending {
+        fn scripts(&mut self) -> Vec<ScriptEntry> {
+            let derived = self.derived.then_some(&self.next);
+            self.watched
+                .iter()
+                .chain(derived)
+                .map(|s| Self::entry(s))
+                .collect()
+        }
+        fn on_activity(&mut self, active: &[Vec<u8>]) -> Vec<ScriptEntry> {
+            for script in active {
+                if !self.reported.contains(script) {
+                    self.reported.push(script.clone());
+                }
+            }
+            if self.derived || !active.contains(&self.watched[0]) {
+                return Vec::new();
+            }
+            self.derived = true;
+            vec![Self::entry(&self.next)]
+        }
+    }
+
+    const START: u64 = 3_428_143;
+    const END: u64 = START + 99;
+    let (first, other, broken, next) = (script(81), script(82), script(83), script(84));
+    let events = vec![
+        (
+            ScriptBytes::new(first.clone()),
+            receive(START as u32 + 10, 1),
+        ),
+        (
+            ScriptBytes::new(other.clone()),
+            receive(START as u32 + 30, 2),
+        ),
+        (
+            ScriptBytes::new(broken.clone()),
+            receive(START as u32 + 40, 3),
+        ),
+        (
+            ScriptBytes::new(next.clone()),
+            receive(START as u32 + 70, 4),
+        ),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(
+        &dir.path().join("service"),
+        &[ShardSpec {
+            malformed_entries: vec![ScriptBytes::new(broken.clone())],
+            ..ShardSpec::first(START, END, true, events)
+        }],
+        SEAL,
+        synthetic,
+        vec![],
+    );
+    let exchange = Serving(InProcess::serve(&dir.path().join("service")));
+    let mut http = TransparentPirHttp::new(&exchange, 64 << 20);
+    let (mut filters, mut shards) = http.split();
+    let geometry = crate::engine::parse_init(&shards.init().unwrap().0).unwrap();
+    let target = Anchor {
+        height: END,
+        hash: map.shards[0].terminal_block_hash.clone(),
+    };
+    let chain = StaticChain::from_map(&map);
+    let mut sync =
+        |store: &mut Box<dyn WalletStore>, provider: &mut Extending, limits: &WorkLimits| {
+            sync_into(
+                store,
+                &map,
+                0,
+                &geometry,
+                &chain,
+                provider,
+                &mut filters,
+                &mut shards,
+                limits,
+                &target,
+            )
+            .unwrap()
+        };
+    let provider = || Extending {
+        watched: vec![first.clone(), other.clone(), broken.clone()],
+        next: next.clone(),
+        derived: false,
+        reported: Vec::new(),
+    };
+    let found = |store: &dyn WalletStore, script: &[u8]| {
+        store
+            .events()
+            .unwrap()
+            .into_iter()
+            .filter(|stored| stored.script == script)
+            .count()
+    };
+    let budget_stop = |completion: &Completion| {
+        matches!(
+            completion,
+            Completion::Incomplete {
+                reason: IncompleteReason::QueryBudget,
+                ..
+            }
+        )
+    };
+
+    // One unlimited sync reports `first` and finds `next` in its second pass.
+    let mut unlimited = provider();
+    let mut store: Box<dyn WalletStore> = Box::new(MemoryStore::new());
+    let report = sync(&mut store, &mut unlimited, &WorkLimits::UNLIMITED);
+    assert!(!budget_stop(&report.completion));
+    assert_eq!(
+        unlimited.reported,
+        vec![first.clone(), other.clone(), next.clone()]
+    );
+    assert_eq!(found(&*store, &next), 1);
+
+    // One private query per call; the SQLite store is reopened for each call.
+    let limits = WorkLimits {
+        max_queries: Some(1),
+        max_private_bytes: None,
+    };
+    let path = dir.path().join("store.sqlite");
+    for sqlite in [false, true] {
+        let mut provider = provider();
+        let mut memory: Box<dyn WalletStore> = Box::new(MemoryStore::new());
+        let mut stops = 0;
+        loop {
+            assert!(stops < 32, "the limited calls finish");
+            let mut reopened: Box<dyn WalletStore>;
+            let store = if sqlite {
+                reopened = Box::new(SqliteStore::open(&path).unwrap());
+                &mut reopened
+            } else {
+                &mut memory
+            };
+            let report = sync(store, &mut provider, &limits);
+            if budget_stop(&report.completion) {
+                stops += 1;
+                continue;
+            }
+            assert!(provider.derived, "the saved activity derived `next`");
+            assert_eq!(found(&**store, &first), 1);
+            assert_eq!(
+                found(&**store, &next),
+                1,
+                "`next` is found before the calls finish"
+            );
+            assert!(
+                !provider.reported.contains(&broken),
+                "a malformed entry is never reported"
+            );
+            break;
+        }
+        assert!(stops > 1, "the calls stopped for their budget");
+    }
+}
+
 // Shares only immutable shard construction and independent history helpers.
 #[path = "budget_tests.rs"]
 mod budget_tests;
+
+/// A stopped failed walk must remain retryable after losing all sync-local
+/// state. Partial cover traffic cannot increment the durable suppression count.
+fn check_bounded_dummy_replay<S: WalletStore>(
+    mut store: S,
+    reopen: impl FnOnce(S) -> S,
+    reason: IncompleteReason,
+) {
+    let blocks = vec![(
+        1_000,
+        (0..200)
+            .map(|nonce| (ScriptBytes::new(script(0)), receive(1_000, nonce)))
+            .collect(),
+    )];
+    let directories = build(&blocks);
+    let directory = &directories[0];
+    let manifest = manifest_of(directory);
+    let victim = script(0);
+    let ((child, row), head, bad) = rewritten_head(directory, &victim, |entry| {
+        entry
+            .with_link(RunLink {
+                prev_child: 0,
+                prev_row: 1,
+                older_runs: 1,
+            })
+            .unwrap()
+    });
+    assert!(head.fragment_count >= 3);
+    let owed = directory_phase(
+        &mut store,
+        directory,
+        &manifest,
+        std::slice::from_ref(&victim),
+    );
+    struct Prefix<'a> {
+        inner: Direct<'a>,
+        maximum: usize,
+        reason: IncompleteReason,
+    }
+    impl RowSource for Prefix<'_> {
+        fn stopped(&self) -> Option<IncompleteReason> {
+            (self.inner.requests.len() >= self.maximum).then_some(self.reason.clone())
+        }
+        fn fetch<T: WalletStore>(
+            &mut self,
+            store: &mut T,
+            requests: &[RowRequest],
+        ) -> Result<Vec<Reply>, SyncError> {
+            let count = requests
+                .len()
+                .min(self.maximum.saturating_sub(self.inner.requests.len()));
+            self.inner.fetch(store, &requests[..count])
+        }
+    }
+    let entry = entry_of(&manifest);
+    let mut first = Prefix {
+        inner: Direct::new(directory),
+        maximum: 2,
+        reason: reason.clone(),
+    };
+    first
+        .inner
+        .rewritten
+        .insert((u32::from(child), u64::from(row)), vec![bad.clone()]);
+    let mut failures = Failures::default();
+    let result = walk_chains(
+        &mut store,
+        &entry,
+        &manifest,
+        &owed,
+        &mut first,
+        &target_of(&manifest),
+        &mut failures,
+    )
+    .unwrap();
+    assert!(matches!(result, Some(Completion::Incomplete { .. })));
+    assert_eq!(
+        failures.owes(entry.shard_id, &entry.manifest_digest, &victim),
+        Some((child, head.fragment_count - 2)),
+        "only sent dummies are settled"
+    );
+    assert_eq!(
+        store
+            .entry_failures(entry.shard_id, &entry.manifest_digest, &victim)
+            .unwrap(),
+        0,
+        "unfinished cover traffic cannot suppress the retry"
+    );
+    let mut store = reopen(store);
+    let remaining = head.fragment_count - 2;
+    for sent in 0..remaining {
+        let mut source = Prefix {
+            inner: Direct::new(directory),
+            maximum: 1,
+            reason: reason.clone(),
+        };
+        // A restart must send only saved dummies, without reading the real
+        // failing cursor or depending on another malformed reply.
+        let owed = store.pending().unwrap();
+        assert_eq!(owed[0].dummy_queries.unwrap().remaining, remaining - sent);
+        let mut failures = Failures::default();
+        let result = walk_chains(
+            &mut store,
+            &entry,
+            &manifest,
+            &owed,
+            &mut source,
+            &target_of(&manifest),
+            &mut failures,
+        )
+        .unwrap();
+        assert_eq!(
+            source.inner.requests,
+            vec![RowRequest {
+                child: u32::from(child),
+                row: 0
+            }]
+        );
+        let last = sent + 1 == remaining;
+        if last {
+            assert_eq!(result, None);
+            assert!(failures.owed.is_empty());
+            assert_eq!(store.pending().unwrap()[0].dummy_queries, None);
+        } else {
+            assert!(matches!(result, Some(Completion::Incomplete { .. })));
+            assert_eq!(
+                store.pending().unwrap()[0].dummy_queries.unwrap().remaining,
+                remaining - sent - 1
+            );
+        }
+        assert_eq!(
+            store
+                .entry_failures(entry.shard_id, &entry.manifest_digest, &victim)
+                .unwrap(),
+            u32::from(last)
+        );
+    }
+}
+
+#[test]
+fn bounded_dummy_replay_survives_a_new_memory_sync() {
+    for reason in [IncompleteReason::QueryBudget, IncompleteReason::ByteBudget] {
+        check_bounded_dummy_replay(MemoryStore::new(), |store| store, reason);
+    }
+}
+
+#[cfg(feature = "engine-store")]
+#[test]
+fn bounded_dummy_replay_survives_sqlite_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("recovery.sqlite");
+    let store = crate::engine_store::SqliteStore::open(&path).unwrap();
+    check_bounded_dummy_replay(
+        store,
+        |store| {
+            drop(store);
+            crate::engine_store::SqliteStore::open(&path).unwrap()
+        },
+        IncompleteReason::ByteBudget,
+    );
+}

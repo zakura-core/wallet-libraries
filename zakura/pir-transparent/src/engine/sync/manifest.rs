@@ -16,24 +16,19 @@ use transparent_shard::manifest::ShardManifest;
 /// same digest, shard id and start height, sealed, ending on the same block.
 /// That keeps a wallet's history across the re-cut without re-reading it.
 ///
-/// The block a range ends on is its source anchor, the published endpoint,
-/// when the store kept one, which every store since schema 2 does. A range
-/// without one matches a declaration when it ends inside the declared range,
-/// or at its end on the declared block. A range with an endpoint but cut
-/// short of its shard's end by a target or a rollback is left to the chain
-/// checks, as is anything the map's sealed shards do not cover.
+/// The publication a range is matched by is its source anchor, the endpoint
+/// it was published with, when the store kept one, which every store since
+/// schema 2 does: a range cut short of its shard's end by a target or a
+/// rollback still names the whole publication it was read from, and is
+/// vouched for only while the map or a declaration names that same one. A
+/// range without one matches a declaration when it ends inside the declared
+/// range, or at its end on the declared block. Anything the map's sealed
+/// shards do not cover is left to the chain checks.
 pub(super) fn vouches_for(
     map: &ShardMap,
     declared: &BTreeMap<&str, &transparent_filter::SupersededShard>,
     range: &CoverageRange,
 ) -> bool {
-    if range
-        .source_anchor
-        .as_ref()
-        .is_some_and(|source| source.height != range.end_height)
-    {
-        return true;
-    }
     let Some(entry) = map.shard_for_height(range.start_height) else {
         return true;
     };
@@ -79,6 +74,12 @@ pub(super) enum Rewrite {
     /// The wallet's chain rejects the block the range rests on: a reorg,
     /// rolled back like any other.
     Reorg,
+    /// The wallet's chain rejects the block the range's publication ended on
+    /// but not the block its coverage, cut short by a target or a rollback,
+    /// rests on: a reorg above what the wallet covered, which the publisher
+    /// followed. The covered part came from a publication of a branch the
+    /// chain left, so it is read again from the one now covering it.
+    Rederive,
     /// The wallet's chain accepts both the block the range rests on and the
     /// one the shard now covering its start ends on: the publisher
     /// contradicts itself on the chain the wallet follows. Retrying does not
@@ -92,8 +93,14 @@ pub(super) enum Rewrite {
 }
 
 /// Judges a settled range `vouches_for` refused, by what the wallet's chain
-/// says about the block it rests on and about the block the map's shard now
-/// covering its start ends on.
+/// says about the block its publication ended on and about the block the
+/// map's shard now covering its start ends on.
+///
+/// The publication's end, the range's source anchor, is what is judged, not
+/// the block the range's coverage rests on: a range cut short by a target
+/// rests on a block of the wallet's own chain whatever happened above it, so
+/// judging that would call a publisher that followed a reorg above the old
+/// target a contradiction.
 ///
 /// Sealing is not delayed for finality, so a publisher can follow a reorg
 /// through a just-sealed shard before the wallet's chain does. Only when the
@@ -105,9 +112,22 @@ pub(super) fn judge_rewrite(
     target: &Anchor,
     chain: &impl ChainView,
 ) -> Rewrite {
-    match chain.is_accepted(range.end_height, &range.terminal_block_hash) {
-        Acceptance::Rejected => Rewrite::Reorg,
-        Acceptance::Unknown => Rewrite::Unsettled(range.end_height),
+    let (source_height, source_hash) = match &range.source_anchor {
+        Some(source) => (source.height, &source.hash),
+        None => (range.end_height, &range.terminal_block_hash),
+    };
+    match chain.is_accepted(source_height, source_hash) {
+        Acceptance::Rejected => {
+            if (source_height, source_hash) == (range.end_height, &range.terminal_block_hash)
+                || chain.is_accepted(range.end_height, &range.terminal_block_hash)
+                    == Acceptance::Rejected
+            {
+                Rewrite::Reorg
+            } else {
+                Rewrite::Rederive
+            }
+        }
+        Acceptance::Unknown => Rewrite::Unsettled(source_height),
         Acceptance::Accepted => match map.shard_for_height(range.start_height) {
             Some(entry)
                 if entry.sealed
@@ -134,10 +154,15 @@ pub(super) fn fetch_manifest(
     transport: &mut impl ShardTransport,
     charges: &mut ByteCharges,
 ) -> Result<ShardManifest, SyncError> {
+    let prepaid = transport.manifest_prepaid(entry.shard_id, &entry.manifest_digest);
     let (raw, cost) = transport
         .manifest(entry.shard_id, &entry.manifest_digest)
         .map_err(|error| SyncError::from(classify_transport(error)))?;
-    charges.add_manifest(cost);
+    if prepaid {
+        charges.add_manifest_download(cost);
+    } else {
+        charges.add_manifest(cost);
+    }
     verify_manifest(&raw, entry, previous_digest, map)
 }
 

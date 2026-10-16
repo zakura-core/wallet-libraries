@@ -224,10 +224,27 @@ fn sealed_coverage_is_vouched_for_by_height_or_by_declaration() {
     longer.end_height += 1;
     longer.source_anchor.as_mut().unwrap().height += 1;
     assert!(!vouches(&declared, &longer));
-    // A range cut short of its shard is left to the chain checks.
+    // A range cut short of its shard by a target is matched by the
+    // publication it was read from, named by its source anchor: kept while
+    // the map or a declaration names that publication, and judged otherwise.
     let mut clipped = held(&before.shards[1]);
     clipped.end_height -= 10;
-    assert!(vouches(&undeclared, &clipped));
+    clipped.terminal_block_hash = "cc".repeat(32);
+    assert!(vouches(&before, &clipped));
+    assert!(vouches(&declared, &clipped));
+    assert!(!vouches(&undeclared, &clipped));
+    let mut replaced = before.clone();
+    replaced.shards[1].manifest_digest = "dd".repeat(32);
+    assert!(
+        !vouches(&replaced, &clipped),
+        "the same range on the same block, silently republished"
+    );
+    let mut declared_elsewhere = declared.clone();
+    declared_elsewhere.recuts[0].superseded[0].terminal_block_hash = "ee".repeat(32);
+    assert!(
+        !vouches(&declared_elsewhere, &clipped),
+        "a declaration ending on another block than the publication read"
+    );
     // Without a source anchor, the covered endpoint must be the declared
     // one; the published revision itself is still matched by digest.
     let mut legacy = held(&before.shards[1]);
@@ -337,6 +354,300 @@ fn a_rewrite_is_refused_only_when_both_blocks_are_on_the_wallets_chain() {
     );
 }
 
+/// A settled range cut short of its shard by a target, or by a rollback,
+/// is judged by the block its publication ended on, its source anchor, not
+/// the block its coverage rests on, which is the wallet's own. The same
+/// shard republished on the same chain is a contradiction; republished on a
+/// branch the chain moved to above the covered part, it is re-derived, not
+/// refused; with the publication's end unknown to the chain it waits.
+#[test]
+fn a_clipped_range_is_judged_by_its_publications_endpoint() {
+    let stored = entry(1, 200, 249, true);
+    let covered = Anchor {
+        height: 240,
+        hash: "c0".repeat(32),
+    };
+    let clipped = CoverageRange {
+        script: vec![1],
+        start_height: 200,
+        end_height: covered.height,
+        kind: CoverageKind::Settled,
+        shard_id: 1,
+        revision_digest: stored.manifest_digest.clone(),
+        terminal_block_hash: covered.hash.clone(),
+        source_anchor: Some(Anchor {
+            height: 249,
+            hash: stored.terminal_block_hash.clone(),
+        }),
+    };
+    let target = Anchor {
+        height: 260,
+        hash: "cc".repeat(32),
+    };
+    let chain = |at_249: Option<&str>, at_240: &str| StaticChain {
+        hashes: [(240, at_240.to_string()), (260, target.hash.clone())]
+            .into_iter()
+            .chain(at_249.map(|hash| (249, hash.to_string())))
+            .collect(),
+    };
+    // Same range, same block, another digest: the publisher alone.
+    let mut silent = stored.clone();
+    silent.manifest_digest = "aa".repeat(32);
+    let same_chain = map(vec![entry(0, 100, 199, true), silent]);
+    assert_eq!(
+        judge_rewrite(
+            &same_chain,
+            &clipped,
+            &target,
+            &chain(Some(&stored.terminal_block_hash), &covered.hash)
+        ),
+        Rewrite::Contradiction
+    );
+    // A fork above the old target the publisher followed: the old
+    // publication's end is off the chain, the covered part is not.
+    let mut forked = stored.clone();
+    forked.manifest_digest = "aa".repeat(32);
+    forked.terminal_block_hash = "bb".repeat(32);
+    let fork = map(vec![entry(0, 100, 199, true), forked]);
+    assert_eq!(
+        judge_rewrite(
+            &fork,
+            &clipped,
+            &target,
+            &chain(Some(&"bb".repeat(32)), &covered.hash)
+        ),
+        Rewrite::Rederive
+    );
+    // A reorg below the covered part as well is an ordinary reorg.
+    assert_eq!(
+        judge_rewrite(
+            &fork,
+            &clipped,
+            &target,
+            &chain(Some(&"bb".repeat(32)), &"c1".repeat(32))
+        ),
+        Rewrite::Reorg
+    );
+    // Clipped by a rollback to an ancestor rather than a target, the same.
+    let mut rolled = clipped.clone();
+    rolled.end_height = 230;
+    rolled.terminal_block_hash = "c3".repeat(32);
+    let ancestor = StaticChain {
+        hashes: [
+            (230, "c3".repeat(32)),
+            (249, "bb".repeat(32)),
+            (260, target.hash.clone()),
+        ]
+        .into(),
+    };
+    assert_eq!(
+        judge_rewrite(&fork, &rolled, &target, &ancestor),
+        Rewrite::Rederive
+    );
+    // The chain does not know the publication's end yet: wait for it.
+    assert_eq!(
+        judge_rewrite(&fork, &clipped, &target, &chain(None, &covered.hash)),
+        Rewrite::Unsettled(249)
+    );
+    // A replacement past the target cannot be checked yet either.
+    let early = Anchor {
+        height: 245,
+        hash: "ee".repeat(32),
+    };
+    assert_eq!(
+        judge_rewrite(
+            &same_chain,
+            &clipped,
+            &early,
+            &chain(Some(&stored.terminal_block_hash), &covered.hash)
+        ),
+        Rewrite::Unsettled(249)
+    );
+}
+
+/// The whole sync over a store holding coverage clipped inside a sealed
+/// shard: a silent same-chain replacement of that shard is refused before
+/// any traffic, an exact declared re-cut keeps the coverage, and a
+/// republication on a fork above the old target rolls the covered part back
+/// for re-reading instead of being refused.
+#[test]
+fn a_sync_rechecks_clipped_coverage_against_the_current_publication() {
+    use crate::engine::adapters::StaticScripts;
+    use crate::engine::client::Table;
+    use crate::engine::transport::BoxError;
+    struct Offline;
+    impl FilterSource for Offline {
+        fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            Err("offline".into())
+        }
+        fn filter(&mut self, _: u64) -> Result<(Vec<u8>, u64), BoxError> {
+            Err("offline".into())
+        }
+    }
+    impl ShardTransport for Offline {
+        fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            Err("offline".into())
+        }
+        fn manifest(&mut self, _: u64, _: &str) -> Result<(Vec<u8>, u64), BoxError> {
+            Err("offline".into())
+        }
+        fn setup(&mut self, _: u64, _: &str, _: Table, _: u32) -> Result<(Vec<u8>, u64), BoxError> {
+            Err("offline".into())
+        }
+        fn query(&mut self, _: u64, _: &str, _: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
+            Err("offline".into())
+        }
+    }
+    let mut first = map(vec![
+        entry(0, 100, 199, true),
+        entry(1, 200, 249, true),
+        entry(2, 250, 299, true),
+    ]);
+    for index in 1..first.shards.len() {
+        first.shards[index].parent_block_hash = first.shards[index - 1].terminal_block_hash.clone();
+    }
+    let old_target = Anchor {
+        height: 240,
+        hash: "c0".repeat(32),
+    };
+    let target = Anchor {
+        height: 299,
+        hash: first.shards[2].terminal_block_hash.clone(),
+    };
+    let geometry = ServiceGeometry {
+        schema: transparent_shard::SCHEMA.into(),
+        geometries: vec![],
+    };
+    let held = || {
+        let mut store = MemoryStore::new();
+        store
+            .bind_set(&SetIdentity::of_schema(&first, &geometry.schema))
+            .unwrap();
+        store
+            .add_scripts(&[ScriptEntry {
+                script: vec![1],
+                origin: ScriptOrigin::Derived,
+                required_from: 100,
+            }])
+            .unwrap();
+        for (shard, end, hash) in [
+            (
+                &first.shards[0],
+                199,
+                first.shards[0].terminal_block_hash.clone(),
+            ),
+            (&first.shards[1], old_target.height, old_target.hash.clone()),
+        ] {
+            store
+                .commit_shard(ShardCommit {
+                    source_anchor: Some(Anchor {
+                        height: shard.end_height,
+                        hash: shard.terminal_block_hash.clone(),
+                    }),
+                    shard_id: shard.shard_id,
+                    revision_digest: shard.manifest_digest.clone(),
+                    sealed: true,
+                    start_height: shard.start_height,
+                    end_height: end,
+                    terminal_block_hash: hash,
+                    covered_scripts: vec![vec![1]],
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        store
+            .commit_anchor(&old_target, old_target.height, old_target.height)
+            .unwrap();
+        store
+    };
+    let chain_with = |at_249: &str| StaticChain {
+        hashes: [
+            (199, first.shards[0].terminal_block_hash.clone()),
+            (old_target.height, old_target.hash.clone()),
+            (249, at_249.to_string()),
+            (299, target.hash.clone()),
+        ]
+        .into(),
+    };
+    let run = |store: &mut MemoryStore, map: &ShardMap, chain: &StaticChain| {
+        sync_into(
+            store,
+            map,
+            0,
+            &geometry,
+            chain,
+            &mut StaticScripts(vec![]),
+            &mut Offline,
+            &mut Offline,
+            &WorkLimits::UNLIMITED,
+            &target,
+        )
+    };
+
+    // Republished on the same chain under another digest.
+    let mut same_chain = first.clone();
+    same_chain.shards[1].manifest_digest = "aa".repeat(32);
+    let mut store = held();
+    let before = format!("{store:?}");
+    let same = chain_with(&first.shards[1].terminal_block_hash);
+    assert!(matches!(
+        run(&mut store, &same_chain, &same),
+        Err(SyncError::SealedRewrite {
+            start_height: 200,
+            ..
+        })
+    ));
+    assert_eq!(format!("{store:?}"), before);
+
+    // The same replacement declared exactly: the coverage is kept.
+    let mut declared = same_chain.clone();
+    declared.recuts.push(transparent_filter::Recut {
+        epoch: 1,
+        from_height: 200,
+        superseded: vec![transparent_filter::SupersededShard {
+            shard_id: 1,
+            geometry: first.shards[1].geometry.clone(),
+            start_height: 200,
+            end_height: 249,
+            terminal_block_hash: first.shards[1].terminal_block_hash.clone(),
+            manifest_digest: first.shards[1].manifest_digest.clone(),
+            revision: 0,
+            sealed: true,
+        }],
+    });
+    let mut store = held();
+    let _ = run(&mut store, &declared, &same);
+    assert!(
+        store
+            .coverage(&[1])
+            .unwrap()
+            .iter()
+            .any(|range| range.end_height == old_target.height
+                && range.revision_digest == first.shards[1].manifest_digest),
+        "a declared re-cut of the publication read keeps its coverage"
+    );
+
+    // Republished on a fork above the old target that the chain followed.
+    let mut fork = first.clone();
+    fork.shards[1].manifest_digest = "aa".repeat(32);
+    fork.shards[1].terminal_block_hash = "bb".repeat(32);
+    fork.shards[2].parent_block_hash = "bb".repeat(32);
+    let mut store = held();
+    let outcome = run(&mut store, &fork, &chain_with(&"bb".repeat(32)));
+    assert!(
+        !matches!(outcome, Err(SyncError::SealedRewrite { .. })),
+        "a fork above the old target is not the publisher's contradiction"
+    );
+    assert!(
+        store
+            .coverage(&[1])
+            .unwrap()
+            .iter()
+            .all(|range| range.end_height <= 199),
+        "the part read from the abandoned publication is re-derived"
+    );
+}
+
 /// Unfinished pages under a revision the map no longer publishes keep
 /// what they saved only for a declared sealed re-cut whose item's own
 /// target the chain still accepts; nothing else the declaration says is
@@ -348,6 +659,7 @@ fn unfinished_work_keeps_its_events_only_over_an_accepted_target() {
         hash: "aa".repeat(32),
     };
     let item = PendingPages {
+        dummy_queries: None,
         id: Some(1),
         shard_id: 2,
         revision_digest: "11".repeat(32),
@@ -974,5 +1286,107 @@ fn an_empty_sync_commits_its_accepted_target_but_early_stops_keep_retained_progr
         ));
         assert_eq!((report.covered_through, report.settled_through), (199, 199));
         assert_eq!(store.anchor().unwrap(), Some(target.clone()));
+        let mut with_new_script = store.snapshot();
+        let mut requested = StaticScripts(vec![ScriptEntry {
+            script: vec![9],
+            origin: crate::engine::store::ScriptOrigin::Imported,
+            required_from: 100,
+        }]);
+        let report = sync_into(
+            &mut with_new_script,
+            &publication,
+            0,
+            &geometry,
+            &chain,
+            &mut requested,
+            &mut NoTraffic,
+            &mut NoTraffic,
+            &WorkLimits::UNLIMITED,
+            &offered,
+        )
+        .unwrap();
+        assert_eq!(with_new_script.scripts().unwrap().len(), 1);
+        assert_eq!(
+            (report.covered_through, report.settled_through),
+            (99, 99),
+            "early progress must include the newly requested script's missing history"
+        );
     }
+}
+
+#[test]
+fn a_sealed_flag_alone_cannot_promote_provisional_history() {
+    use crate::engine::adapters::StaticScripts;
+    use crate::engine::client::Table;
+    use crate::engine::store::ScriptOrigin;
+    use crate::engine::transport::BoxError;
+    struct BadManifest;
+    impl FilterSource for BadManifest {
+        fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("no map refresh")
+        }
+        fn filter(&mut self, _: u64) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("already covered")
+        }
+    }
+    impl ShardTransport for BadManifest {
+        fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("no init")
+        }
+        fn manifest(&mut self, _: u64, _: &str) -> Result<(Vec<u8>, u64), BoxError> {
+            Ok((vec![], 7))
+        }
+        fn setup(&mut self, _: u64, _: &str, _: Table, _: u32) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("no setup")
+        }
+        fn query(&mut self, _: u64, _: &str, _: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
+            panic!("no query")
+        }
+    }
+    let publication = map(vec![entry(0, 100, 199, true)]);
+    let target = Anchor {
+        height: 199,
+        hash: publication.shards[0].terminal_block_hash.clone(),
+    };
+    let mut store = MemoryStore::new();
+    store
+        .add_scripts(&[ScriptEntry {
+            script: vec![9],
+            origin: ScriptOrigin::Imported,
+            required_from: 100,
+        }])
+        .unwrap();
+    store
+        .commit_shard(ShardCommit {
+            shard_id: 0,
+            revision_digest: publication.shards[0].manifest_digest.clone(),
+            sealed: false,
+            start_height: 100,
+            end_height: 199,
+            terminal_block_hash: target.hash.clone(),
+            covered_scripts: vec![vec![9]],
+            ..Default::default()
+        })
+        .unwrap();
+    let before = store.provisional().unwrap();
+    let result = sync_into(
+        &mut store,
+        &publication,
+        0,
+        &ServiceGeometry {
+            schema: transparent_shard::SCHEMA.into(),
+            geometries: vec![],
+        },
+        &StaticChain::from_map(&publication),
+        &mut StaticScripts(vec![]),
+        &mut BadManifest,
+        &mut BadManifest,
+        &WorkLimits::UNLIMITED,
+        &target,
+    );
+    assert!(
+        result.is_err(),
+        "a matching digest is insufficient without a verified sealed manifest"
+    );
+    assert_eq!(store.provisional().unwrap(), before);
 }

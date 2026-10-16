@@ -599,6 +599,36 @@ pub fn sync_into<S: WalletStore>(
     limits: &WorkLimits,
     target_anchor: &Anchor,
 ) -> Result<SyncReport, SyncError> {
+    sync_into_tracking(
+        store,
+        map,
+        map_bytes,
+        geometry,
+        chain,
+        scripts,
+        filters,
+        transport,
+        limits,
+        target_anchor,
+        &mut None,
+    )
+}
+
+/// Retains an adopted map even when a later request ends this call in error.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sync_into_tracking<S: WalletStore>(
+    store: &mut S,
+    map: &ShardMap,
+    map_bytes: u64,
+    geometry: &ServiceGeometry,
+    chain: &impl ChainView,
+    scripts: &mut impl ScriptProvider,
+    filters: &mut impl FilterSource,
+    transport: &mut impl ShardTransport,
+    limits: &WorkLimits,
+    target_anchor: &Anchor,
+    adopted_map: &mut Option<ShardMap>,
+) -> Result<SyncReport, SyncError> {
     if !transparent_shard::manifest::supported_schema(&geometry.schema) {
         return Err(SyncError::Schema {
             served: geometry.schema.clone(),
@@ -626,6 +656,7 @@ pub fn sync_into<S: WalletStore>(
             ));
         }
         Acceptance::Unknown => {
+            store.add_scripts(&scripts.scripts())?;
             return incomplete_at(
                 store,
                 IncompleteReason::ChainUnknown {
@@ -640,6 +671,7 @@ pub fn sync_into<S: WalletStore>(
         .last()
         .is_none_or(|s| s.end_height < target_anchor.height)
     {
+        store.add_scripts(&scripts.scripts())?;
         return incomplete_at(
             store,
             IncompleteReason::PublicationBehind {
@@ -781,12 +813,22 @@ pub fn sync_into<S: WalletStore>(
     // unknown block does.
     let mut contradiction: Option<&CoverageRange> = None;
     let mut unplaced: Option<u64> = None;
+    let mut rederive_from: Option<u64> = None;
+    let mut rederived: Vec<String> = Vec::new();
     for range in rewritten
         .iter()
         .filter(|range| ancestor.is_none_or(|kept| range.end_height <= kept))
     {
         match judge_rewrite(map, range, target_anchor, chain) {
             Rewrite::Reorg => {}
+            Rewrite::Rederive => {
+                rederive_from = Some(
+                    rederive_from.map_or(range.start_height, |held| held.min(range.start_height)),
+                );
+                if !rederived.contains(&range.revision_digest) {
+                    rederived.push(range.revision_digest.clone());
+                }
+            }
             Rewrite::Contradiction => {
                 if contradiction.is_none_or(|held| held.start_height > range.start_height) {
                     contradiction = Some(range);
@@ -817,8 +859,15 @@ pub fn sync_into<S: WalletStore>(
     }
 
     // Provisional reconciliation. A tail revision the map has moved past is
-    // truncated and re-derived; one the map has sealed is promoted.
-    let mut truncate_from: Option<u64> = None;
+    // truncated and re-derived; one the map has sealed is promoted. A settled
+    // range whose publication the chain left above its coverage is re-derived
+    // the same way.
+    let mut truncate_from: Option<u64> = rederive_from;
+    for revision in rederived {
+        if !replaced_revisions.contains(&revision) {
+            replaced_revisions.push(revision);
+        }
+    }
     let mut promote: Vec<(u64, String)> = Vec::new();
     // A partially retrieved revision may have events and pending pages but no
     // completed coverage yet. Unfinished work under a revision the map no
@@ -859,6 +908,13 @@ pub fn sync_into<S: WalletStore>(
         match map.shards.get(range.shard_id as usize) {
             Some(published) if published.manifest_digest == range.revision_digest => {
                 if published.sealed {
+                    fetch_manifest(
+                        published,
+                        &previous_digest_of(map, published.shard_id),
+                        map,
+                        transport,
+                        &mut charges,
+                    )?;
                     promote.push((range.shard_id, range.revision_digest.clone()));
                 }
             }
@@ -906,7 +962,6 @@ pub fn sync_into<S: WalletStore>(
             ..Default::default()
         })?;
     }
-
     // Replies a lookahead sends early are held here until the walk asks for
     // them; see `ahead`. With nothing stashed both pass straight through.
     let transport = &mut ahead::Staged::new(transport);
@@ -932,6 +987,9 @@ pub fn sync_into<S: WalletStore>(
     let mut active: Cow<'_, ShardMap> = Cow::Borrowed(map);
     let mut completion = Completion::Complete;
     let mut failures = Failures::default();
+    // The map is adopted: from here on a failing sync must not leave the
+    // filters and setups of revisions it no longer publishes behind.
+    prune_to(store, &active)?;
 
     'passes: for pass in 0..=MAX_DISCOVERY_PASSES {
         if pass == MAX_DISCOVERY_PASSES {
@@ -1077,7 +1135,7 @@ pub fn sync_into<S: WalletStore>(
         } else {
             // Every uncached filter in the walk is downloaded anyway; overlap
             // them rather than paying one round trip each.
-            filters.prefetch(&uncached);
+            charges.filter_bytes += filters.prefetch_charged(&uncached);
         }
         let mut index_iter: Vec<usize> = work.keys().copied().collect();
         if look_ahead && !filters.uses_parents() {
@@ -1123,7 +1181,11 @@ pub fn sync_into<S: WalletStore>(
                 &mut failures,
             );
             match result {
-                Ok(ShardRead::Done { matched }) => {
+                Ok(ShardRead::Done {
+                    matched,
+                    unproductive: count,
+                }) => {
+                    unproductive += count;
                     if !matched.is_empty() {
                         if !matched_shards.contains(&entry.shard_id) {
                             matched_shards.push(entry.shard_id);
@@ -1177,7 +1239,9 @@ pub fn sync_into<S: WalletStore>(
                             },
                             pending: store.pending()?.len(),
                         };
+                        *adopted_map = Some(fresh.clone());
                         active = Cow::Owned(fresh);
+                        prune_to(store, &active)?;
                         break 'passes;
                     }
                     refreshes += 1;
@@ -1188,7 +1252,9 @@ pub fn sync_into<S: WalletStore>(
                         .position(|candidate| candidate.shard_id == entry.shard_id)
                     else {
                         // The refreshed map no longer advertises this range.
+                        *adopted_map = Some(fresh.clone());
                         active = Cow::Owned(fresh);
+                        prune_to(store, &active)?;
                         break;
                     };
                     if fresh.shards[resume].manifest_digest == stale.revision {
@@ -1211,7 +1277,9 @@ pub fn sync_into<S: WalletStore>(
                     if !replaced_revisions.contains(&stale.revision) {
                         replaced_revisions.push(stale.revision.clone());
                     }
+                    *adopted_map = Some(fresh.clone());
                     active = Cow::Owned(fresh);
+                    prune_to(store, &active)?;
                     // Re-plan against the new map from this shard on.
                     let mut rest: Vec<usize> = (resume..active.shards.len())
                         .take_while(|i| active.shards[*i].start_height <= through)
@@ -1228,12 +1296,27 @@ pub fn sync_into<S: WalletStore>(
         // Anything read ahead and not consumed belongs to this pass only.
         ahead::clear(transport, filters, &mut clients);
 
+        if pass == 0 {
+            // A call that stopped for its budget, or failed, after saving a
+            // script's history never reported that activity, and coverage now
+            // keeps the history from being read again. Report what the store
+            // holds, as a completed read of it would have.
+            for script in saved_activity(store, &failures.entries, target_anchor.height)? {
+                if !active_scripts.contains(&script) {
+                    active_scripts.push(script);
+                }
+            }
+        }
         let added = scripts.on_activity(&active_scripts);
         if added.is_empty() {
             break;
         }
         scripts_added += store.add_scripts(&added)?;
     }
+
+    // Prune against the map this pass ended on: a revision withdrawn during
+    // the walk must leave no cached filter or setup either.
+    prune_to(store, &active)?;
 
     let (covered_through, settled_through) = coverage_summary(store, target_anchor.height)?;
     if completion == Completion::Complete {
@@ -1344,6 +1427,48 @@ fn holds_history(
     events
         .iter()
         .any(|stored| stored.script == script && range.contains(&event_height(&stored.event)))
+}
+
+/// Deletes the cached filters and setups of every revision `map` does not
+/// publish. Called once a map is adopted, before anything is read under it.
+fn prune_to<S: WalletStore>(store: &mut S, map: &ShardMap) -> Result<(), SyncError> {
+    let queryable: Vec<&str> = map
+        .shards
+        .iter()
+        .map(|entry| entry.manifest_digest.as_str())
+        .collect();
+    Ok(store.prune_caches(&queryable)?)
+}
+
+/// The scripts with saved history through `through`, in the store's order,
+/// leaving out history saved under an entry [`held`] out of this sync. Each
+/// event is judged under the revision it was saved by, so history a re-cut
+/// kept, already checked when read, is still reported.
+fn saved_activity<S: WalletStore>(
+    store: &S,
+    failed: &[FailedEntry],
+    through: u64,
+) -> Result<Vec<Vec<u8>>, SyncError> {
+    let mut active: Vec<Vec<u8>> = Vec::new();
+    let mut judged: BTreeMap<(u64, String, Vec<u8>), bool> = BTreeMap::new();
+    for stored in store.events()? {
+        if event_height(&stored.event) > through || active.contains(&stored.script) {
+            continue;
+        }
+        let key = (stored.shard_id, stored.revision_digest, stored.script);
+        let excluded = match judged.get(&key) {
+            Some(&excluded) => excluded,
+            None => {
+                let excluded = held(store, failed, key.0, &key.1, &key.2)?;
+                judged.insert(key.clone(), excluded);
+                excluded
+            }
+        };
+        if !excluded {
+            active.push(key.2);
+        }
+    }
+    Ok(active)
 }
 
 fn previous_digest_of(map: &ShardMap, shard_id: u64) -> String {

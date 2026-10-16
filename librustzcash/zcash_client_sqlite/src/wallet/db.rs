@@ -2001,7 +2001,7 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_PAYMENT_RECOVERY: &str = "CREATE TABLE 
                 block_hash BLOB NOT NULL CHECK (length(block_hash) = 32),
                 tx_index INTEGER NOT NULL CHECK (tx_index BETWEEN 0 AND 65535),
                 position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 4294967295),
-                encrypted_note BLOB NOT NULL CHECK (length(encrypted_note) = 148),
+                encrypted_note BLOB NOT NULL CHECK (length(encrypted_note) = 148), witness BLOB CHECK (length(witness) = 1024), scan_hint INTEGER NOT NULL DEFAULT 0 CHECK (scan_hint IN (0, 1)),
                 PRIMARY KEY (txid, action_index)
             )";
 
@@ -2034,13 +2034,26 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_SWEEPS: &str = "CREATE TABLE ironwood_o
                 next_attempt_at INTEGER NOT NULL DEFAULT 0,
                 done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295),
                 content_failures INTEGER NOT NULL DEFAULT 0 CHECK (content_failures >= 0)
-            )";
+            , provisional INTEGER NOT NULL DEFAULT 0 CHECK (provisional IN (0, 1)))";
 
 /// Accounts whose seed has no one-time key history to restore (see
 /// `WalletDb::mark_one_time_account_fresh`).
 pub(super) const TABLE_IRONWOOD_ONE_TIME_FRESH_ACCOUNTS: &str =
     "CREATE TABLE ironwood_one_time_fresh_accounts (
                 account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE
+            )";
+
+/// An account's early restore (see `one_time_ivk::restore::early`): from `restore_from`,
+/// against a receiver-directory publication ending at the anchor. `state` is 0 until the
+/// scan stores the anchor block, then 1 if the block matches or 2 if it does not.
+pub(super) const TABLE_IRONWOOD_ONE_TIME_RESTORES: &str =
+    "CREATE TABLE ironwood_one_time_restores (
+                account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+                restore_from INTEGER NOT NULL CHECK (restore_from BETWEEN 0 AND 4294967295),
+                anchor_height INTEGER NOT NULL CHECK (anchor_height BETWEEN 0 AND 4294967295),
+                anchor_hash BLOB NOT NULL CHECK (length(anchor_hash) = 32),
+                anchor_tree_size INTEGER NOT NULL CHECK (anchor_tree_size >= 0),
+                state INTEGER NOT NULL DEFAULT 0 CHECK (state IN (0, 1, 2))
             )";
 
 pub(super) const TABLE_IRONWOOD_ONE_TIME_SPEND_RETENTION: &str =

@@ -335,6 +335,7 @@ fn revisions(batch: &RecoveryBatch<u32>) -> Vec<RecoveryRevision> {
 /// from the newest run, at `row` of the first page shard.
 fn store_page(entry: &ShardMapEntry, script: &[u8], row: u32) -> PendingPages {
     PendingPages {
+        dummy_queries: None,
         id: None,
         shard_id: entry.shard_id,
         revision_digest: entry.manifest_digest.clone(),

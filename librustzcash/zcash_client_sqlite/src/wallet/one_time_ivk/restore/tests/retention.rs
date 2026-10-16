@@ -94,9 +94,80 @@ fn completed_recovery_survives_reopen_and_retains_the_next_large_batch() {
     let above = |db: &Db| value::<u32>(&db.conn, sql, [u32::from(original.height)]);
     let db = st.wallet_mut().db_mut();
     assert_eq!(above(db), 201);
+    // Empty blocks hold no nullifiers, so one release frees them all.
     assert!(finish(db, account, through));
     assert_eq!(above(db), crate::PRUNING_DEPTH + 1);
     assert_eq!(notes(&st, through.height).len(), 1);
+}
+
+/// A release frees at most its limit of retained Ironwood nullifiers, so a large backlog
+/// takes several releases, each pruning a bounded batch, until release reaches the tip.
+#[test]
+fn a_release_frees_a_bounded_batch_of_nullifiers() {
+    const LIMIT: u32 = 4;
+    let (mut st, _, original) = swept();
+    let account = st.test_account().unwrap().id();
+    assert!(finish(st.wallet_mut().db_mut(), account, original));
+    let foreign = IronwoodFvk(FullViewingKey::from(
+        &orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap(),
+    ));
+    let amount = Zatoshis::const_from_u64(10_000);
+    for _ in 0..12 {
+        st.generate_next_block(&foreign, AddressType::DefaultExternal, amount);
+    }
+    for _ in 0..crate::PRUNING_DEPTH + 1 {
+        st.generate_empty_block();
+    }
+    let blocks = 12 + crate::PRUNING_DEPTH as usize + 1;
+    st.scan_cached_blocks_with_one_time_ivks(original.height + 1, blocks);
+    let through = tip(&st);
+    let sql = "SELECT COUNT(*) FROM nullifier_map WHERE spend_pool = ?1 AND block_height > ?2";
+    let pool = crate::wallet::encoding::pool_code(zcash_protocol::PoolType::IRONWOOD);
+    let retained = |db: &Db| value::<u32>(&db.conn, sql, params![pool, u32::from(original.height)]);
+    let db = st.wallet_mut().db_mut();
+    let mut left = retained(db);
+    assert!(left > 2 * LIMIT, "{left} nullifiers retained");
+    let at = clock_now();
+    let mut releases = 0;
+    loop {
+        releases += 1;
+        let done = tx(db, |c, p| {
+            store::restore::retention::release_spend_history(c, p, account, through, at, LIMIT)
+        })
+        .unwrap();
+        let now = retained(db);
+        assert!(left - now <= LIMIT, "freed {} at once", left - now);
+        left = now;
+        if done {
+            break;
+        }
+    }
+    assert!(releases > 2);
+    assert_eq!(retained_from(db), Some(through.height + 1));
+}
+
+/// Lowering an account's birthday reruns its finished restore sweeps, since a sweep that
+/// finished under the later birthday ignored payments before it.
+#[test]
+fn lowering_a_birthday_reruns_finished_sweeps() {
+    let (mut st, _, _) = swept();
+    let account = st.test_account().unwrap().id();
+    let birthday = st.test_account().unwrap().birthday().height();
+    let due = "SELECT COUNT(*) FROM ironwood_one_time_sweeps WHERE done_height IS NULL";
+    assert_eq!(value::<u32>(st.wallet().conn(), due, []), 0);
+    st.wallet_mut()
+        .rewind_to_chain_state(
+            zcash_client_backend::data_api::chain::ChainState::empty(
+                birthday - 10,
+                BlockHash([0; 32]),
+            ),
+            std::collections::HashSet::from([account]),
+        )
+        .unwrap();
+    let all = "SELECT COUNT(*) FROM ironwood_one_time_sweeps";
+    let swept = value::<u32>(st.wallet().conn(), all, []);
+    assert!(swept > 0);
+    assert_eq!(value::<u32>(st.wallet().conn(), due, []), swept);
 }
 
 /// Unfinished sweeps and queued candidates hold spend evidence: from the candidate's
@@ -266,10 +337,10 @@ fn retention_waits_for_internal_memos_until_their_blocks_are_scanned() {
     assert!(finish(db, account, through));
 }
 
-/// Completion rewinds with the chain, its replay recording rescanned blocks again, and
-/// the rewound sweeps hold evidence until they rerun.
+/// A rewind on the same chain leaves released evidence released, since its sweeps stay
+/// finished, while ordinary nullifier tracking still covers the rescanned blocks.
 #[test]
-fn retention_rewinds_and_resumes_for_new_blocks() {
+fn a_rewind_on_the_same_chain_keeps_evidence_released() {
     let (mut st, _, original) = swept();
     let account = st.test_account().unwrap().id();
     assert!(finish(st.wallet_mut().db_mut(), account, original));
@@ -280,13 +351,13 @@ fn retention_rewinds_and_resumes_for_new_blocks() {
     assert!(finish(db, account, tip));
     assert_eq!(retained_from(db), Some(tip.height + 1));
     st.truncate_to_height_retaining_cache(original.height);
-    assert_eq!(retained_from(st.wallet().db()), Some(original.height + 1));
+    // Rescanning the same chain keeps every sweep finished, so nothing needs evidence.
+    assert_eq!(retained_from(st.wallet().db()), Some(tip.height + 1));
     st.scan_cached_blocks_with_one_time_ivks(tip.height, 1);
     let db = st.wallet_mut().db_mut();
     let sql = "SELECT COUNT(*) FROM ironwood_nullifier_scan_blocks WHERE height = ?1";
+    // Ordinary nullifier retention still covers the pruning window.
     assert_eq!(value::<u32>(&db.conn, sql, [u32::from(tip.height)]), 1);
-    assert!(!finish(db, account, tip));
-    finish_sweeps(db, account, tip);
     assert!(finish(db, account, tip));
 }
 

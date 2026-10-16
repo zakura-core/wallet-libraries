@@ -11,6 +11,10 @@
 //! with [`OneTimeIvkRestoreWrite::queue_directory_lookup`], then calls
 //! [`OneTimeIvkRestoreWrite::apply_one_time_sweep`]. Each step commits atomically, so
 //! a caller may stop between any two.
+//!
+//! A wallet that has scanned nothing of an account's history yet can instead run an
+//! early restore (see [`OneTimeIvkRestoreWrite::begin_one_time_early_restore`]), so
+//! payments appear as the scan covers them rather than after it.
 
 use std::num::NonZeroU32;
 
@@ -60,6 +64,32 @@ pub struct DirectoryPayment {
     pub ephemeral_key: [u8; 32],
     /// The first 52 bytes of the note ciphertext.
     pub ciphertext_prefix: [u8; 52],
+}
+
+/// The end of a receiver-directory publication as its manifest declares it, which an
+/// early restore uses before the wallet has scanned that block (see
+/// [`OneTimeIvkRestoreWrite::begin_one_time_early_restore`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublicationEnd {
+    /// The last block the publication covers.
+    pub height: BlockHeight,
+    /// That block's hash, in internal byte order.
+    pub hash: [u8; 32],
+    /// The Ironwood note commitment tree size after that block.
+    pub tree_size: u64,
+}
+
+/// What a publication's public filters say about one key an early restore registers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EarlyRestoreKey {
+    /// The key.
+    pub key: KeyId,
+    /// A swap provider's seen set holds its receiver.
+    pub seen: bool,
+    /// The paid filter holds its receiver, so a lookup may find payments.
+    pub paid: bool,
+    /// A swap may still pay it, so it scans the blocks after the publication.
+    pub recent: bool,
 }
 
 /// Why a restore sweep step must wait for more scanning or a newer publication. The
@@ -124,6 +154,32 @@ pub trait OneTimeIvkRestoreRead: OneTimeIvkRead {
         account: Self::AccountId,
         height: BlockHeight,
     ) -> Result<Vec<DiscoveryWork>, Self::Error>;
+
+    /// Where `account`'s early restore would start, if it can have one: the account has
+    /// one-time key history to restore, none of the blocks from that height on has been
+    /// scanned since the account was added, it has no early restore yet, and no restore
+    /// sweep of it is pending. Stores without early restore return `None`.
+    fn one_time_early_restore_start(
+        &self,
+        account: Self::AccountId,
+    ) -> Result<Option<BlockHeight>, Self::Error> {
+        let _ = account;
+        Ok(None)
+    }
+
+    /// The receivers of `account`'s keys of `purpose` at `count` indices from `from`,
+    /// without registering them, for an early restore's lookahead. Stores without early
+    /// restore return none.
+    fn one_time_receivers(
+        &self,
+        account: Self::AccountId,
+        purpose: zakura_one_time_ivk::Purpose,
+        from: u64,
+        count: u32,
+    ) -> Result<Vec<DiscoveryWork>, Self::Error> {
+        let _ = (account, purpose, from, count);
+        Ok(Vec::new())
+    }
 }
 
 /// One-time IVK restore writes: key recovery, restore sweeps (see the
@@ -229,8 +285,9 @@ pub trait OneTimeIvkRestoreWrite: OneTimeIvkWrite + OneTimeIvkRestoreRead {
 
     /// Releases retained Ironwood nullifiers at `through` once no restore sweep needs them,
     /// and only while `through` is still the wallet's fully scanned chain tip. Missing
-    /// memos, pending sweeps and queued payments protect their evidence. Returns true when
-    /// release reaches the tip.
+    /// memos, pending sweeps and queued payments protect their evidence. Each call frees a
+    /// bounded span of blocks, so pruning stays short, and later calls continue. Returns
+    /// true when release reaches the tip.
     ///
     /// Restore discovery (see [`Self::maintain_one_time_ivks`]) runs first, in the same
     /// transaction, so a payment at the lookahead's edge cannot race with pruning.
@@ -239,4 +296,52 @@ pub trait OneTimeIvkRestoreWrite: OneTimeIvkWrite + OneTimeIvkRestoreRead {
         account: <Self as WalletRead>::AccountId,
         through: ChainPoint,
     ) -> Result<bool, <Self as WalletRead>::Error>;
+
+    /// Starts `account`'s early restore against the publication ending at `end`, unless
+    /// [`OneTimeIvkRestoreRead::one_time_early_restore_start`] no longer allows one, and
+    /// returns whether it started. It also refuses an `end` below that start, or above the
+    /// wallet's chain tip or with no tip known, since the scan might never store block
+    /// `end.height` to check it.
+    ///
+    /// Registers each of `keys`, which the caller read from that publication's filters.
+    /// A seen or paid key is never issued again and advances allocation. A recent key
+    /// scans from the block after `end`. A paid key's restore stays pending until
+    /// [`Self::record_one_time_early_lookup`] records its lookup and the scan settles its
+    /// payments; any other is done at `end`. The publication stays provisional until the
+    /// scan stores block `end.height`: a matching hash and tree size accept it, and keys
+    /// that neither scan nor wait for payments close there. A mismatch discards the keys
+    /// it registered that hold no payment and that its filters marked neither seen nor
+    /// paid, and falls back to restore sweeps for the rest.
+    ///
+    /// Stores without early restore return false.
+    fn begin_one_time_early_restore(
+        &mut self,
+        account: <Self as WalletRead>::AccountId,
+        end: PublicationEnd,
+        keys: &[EarlyRestoreKey],
+    ) -> Result<bool, <Self as WalletRead>::Error> {
+        let _ = (account, end, keys);
+        Ok(false)
+    }
+
+    /// Records the payments the early restore's publication lists for paid key `key`,
+    /// authenticating each with the key. A payment whose block the scan has yet to reach
+    /// is found there by trial decryption with `key`; one in a block already scanned is
+    /// inserted with its inclusion path from `witness` once the scan covers every block
+    /// from it on. `witness` returns the 32 sibling hashes for a commitment tree position
+    /// and note commitment, or `None` when the publication has none.
+    ///
+    /// A payment before the account's restore start, one that fails authentication, or
+    /// a key the publication later fails to confirm leaves the key to a restore sweep.
+    /// Stores without early restore ignore the lookup.
+    fn record_one_time_early_lookup(
+        &mut self,
+        account: <Self as WalletRead>::AccountId,
+        key: KeyId,
+        payments: &[DirectoryPayment],
+        witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        let _ = (account, key, payments, witness);
+        Ok(())
+    }
 }

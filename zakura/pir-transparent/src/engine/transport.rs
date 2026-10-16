@@ -357,6 +357,11 @@ impl ByteCharges {
         self.add_query(table, upload, download);
     }
 
+    /// Manifest bytes received ahead of the sequential verification step.
+    pub(crate) fn add_manifest_download(&mut self, cost: u64) {
+        self.manifest_bytes += cost;
+    }
+
     pub fn add_manifest(&mut self, cost: u64) {
         self.manifest_bytes += cost;
         self.manifests_checked += 1;
@@ -455,6 +460,14 @@ pub trait FilterSource {
     /// shards. The sync still checks every filter against the map.
     fn prefetch(&mut self, _shard_ids: &[u64]) {}
 
+    /// Prefetches and returns bytes paid now, including replies never consumed.
+    /// An implementation that returns a cost must return zero cost when those
+    /// replies are later consumed by `filter`. The default preserves lazy sources.
+    fn prefetch_charged(&mut self, shard_ids: &[u64]) -> u64 {
+        self.prefetch(shard_ids);
+        0
+    }
+
     /// Research-only parent discovery for uncached work. Default sources never
     /// skip child filters. Costs include manifest discovery even on fallback.
     fn prepare_parents(
@@ -504,6 +517,14 @@ pub trait ShardTransport {
     /// with the map before using anything the manifest says, so a transport
     /// need not verify anything itself. Refusals are recognised as for setup.
     fn manifest(&mut self, shard_id: u64, revision: &str) -> Result<(Vec<u8>, u64), BoxError>;
+
+    /// Whether the next manifest reply already has a transfer receipt in the
+    /// sync's charges. Staged transports return true until that reply is taken;
+    /// ordinary transports retain the default. This prevents counting a
+    /// prefetched manifest twice while keeping discarded replies accounted for.
+    fn manifest_prepaid(&self, _shard_id: u64, _revision: &str) -> bool {
+        false
+    }
 
     /// One segment's published setup for one table, as JSON, with its cost.
     ///
@@ -726,6 +747,9 @@ impl<T: FilterSource + ?Sized> FilterSource for Box<T> {
     fn prefetch(&mut self, shard_ids: &[u64]) {
         (**self).prefetch(shard_ids)
     }
+    fn prefetch_charged(&mut self, shard_ids: &[u64]) -> u64 {
+        (**self).prefetch_charged(shard_ids)
+    }
 }
 
 impl<T: ShardTransport + ?Sized> ShardTransport for Box<T> {
@@ -735,6 +759,10 @@ impl<T: ShardTransport + ?Sized> ShardTransport for Box<T> {
     fn manifest(&mut self, shard_id: u64, revision: &str) -> Result<(Vec<u8>, u64), BoxError> {
         (**self).manifest(shard_id, revision)
     }
+    fn manifest_prepaid(&self, shard_id: u64, revision: &str) -> bool {
+        (**self).manifest_prepaid(shard_id, revision)
+    }
+
     fn setup(
         &mut self,
         shard_id: u64,

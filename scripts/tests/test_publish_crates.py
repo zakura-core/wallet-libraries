@@ -133,11 +133,85 @@ class PublishingTests(unittest.TestCase):
             for inherited in (False, True):
                 self.check_forbidden_dependency(declaration, inherited)
 
-    def check_forbidden_dependency(self, declaration, inherited):
+    def test_wallet_pir_repository_spellings_are_refused(self):
+        # An unlisted package name leaves only the repository identity to refuse it.
+        for owner in ("valargroup", "zakura-core"):
+            for url in (
+                f"https://github.com/{owner}/wallet%2Dpir",
+                f"https://%67ithub.com/{owner}/wallet-pir.git",
+                f"https://github.com/{owner}/ignored/../wallet-pir.git",
+                f"https://github.com/{owner}%2Fwallet-pir",
+                f"https://github.com/{owner}/wallet-pir%2Egit",
+                f"https://GITHUB.COM:443/{owner.upper()}/WALLET-PIR.git/",
+                f"https://www.github.com/{owner}/wallet-pir",
+                f"https://github.com./{owner}/wallet-pir",
+                f"https://github.com//{owner}/wallet-pir",
+                f"git+https://github.com/{owner}/wallet-pir?branch=main#0123abc",
+                f"ssh://git@github.com/{owner}/wallet-pir.git",
+                f"ssh://git@ssh.github.com:443/{owner}/wallet-pir",
+                f"git@github.com:{owner}/wallet-pir.git",
+                f" https://github.com/{owner}/wallet-pir ",
+            ):
+                for inherited in (False, True):
+                    self.check_forbidden_dependency(f'future-wire = {{ git = "{url}", version = "=0.1.0" }}', inherited)
+
+    def test_backslash_separated_repository_urls_are_refused(self):
+        # Cargo parses special-scheme URLs as WHATWG URLs, where a backslash is a slash.
+        urls = []
+        for owner in ("valargroup", "zakura-core"):
+            urls += [f"https:\\\\github.com\\{owner}\\wallet-pir", f"https://github.com\\{owner}\\wallet-pir.git",
+                     f"https://github.com\\{owner}/wallet-pir", f"git+https://github.com/{owner}\\wallet-pir"]
+        for url in urls:
+            escaped = url.replace("\\", "\\\\")
+            for declaration in (f'future-wire = {{ git = "{escaped}", version = "=1.0.0" }}',
+                                f'future-wire = {{ git = "{escaped}", version = "=1.0.0", optional = true }}',
+                                f'renamed = {{ package = "future-wire", git = "{escaped}", version = "=1.0.0" }}'):
+                for inherited in (False, True):
+                    self.check_forbidden_dependency(declaration, inherited)
+
+    def test_cargo_normalized_backslash_sources_match_the_raw_predicate(self):
+        # Independent oracle: Cargo's own source normalization, offline and without building.
+        url = "https://github.com\\valargroup\\wallet-pir"
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "Cargo.toml"
+            manifest.write_text('[package]\nname = "probe"\nversion = "0.0.0"\n[lib]\npath = "lib.rs"\n'
+                                f"[dependencies]\nfuture-wire = {{ git = '{url}', version = '=1.0.0' }}\n")
+            output = subprocess.check_output(["cargo", "metadata", "--no-deps", "--offline", "--format-version", "1",
+                                              "--manifest-path", str(manifest)], text=True)
+        source = json.loads(output)["packages"][0]["dependencies"][0]["source"]
+        self.assertEqual(source, "git+https://github.com/valargroup/wallet-pir")
+        self.assertTrue(release.server_graph.wallet_pir_owned(source))
+        self.assertTrue(release.server_graph.wallet_pir_owned(url))
+
+    def test_neighbouring_git_repositories_remain_release_prerequisites(self):
+        for url in (
+            "https://evil.example\\github.com\\valargroup\\wallet-pir",
+            "https://github.com\\valargroup\\wallet-pir-extra",
+            "https://github.com\\other\\wallet-pir",
+            "https://github.com/valargroup/wallet-pir-extra",
+            "https://github.com/valargroup/wallet-pirate",
+            "https://github.com/other/wallet-pir",
+            "https://github.com/valargroup/wallet%252Dpir",
+            "https://github.com.evil.example/valargroup/wallet-pir",
+            "https://%67ithub.com.evil.example/valargroup/wallet-pir",
+            "https://github.com/valargroup/wallet-pir/../ordinary",
+            "https://evil.example/github.com/valargroup/wallet-pir",
+            "https://github.com@evil.example/valargroup/wallet-pir",
+            "https://github.com/zcash/librustzcash",
+        ):
+            for inherited in (False, True):
+                escaped = url.replace("\\", "\\\\")
+                declaration = f'external = {{ git = "{escaped}", version = "=0.1.0" }}'
+                for table, root in self.release_roots(declaration, inherited):
+                    with self.subTest(url=url, inherited=inherited, table=table), \
+                            patch.object(release, "ORDER", ("first",)):
+                        self.assertEqual(release.release_packages(root)[1], [("external", "0.1.0")])
+
+    def release_roots(self, declaration, inherited):
         alias = declaration.split(" =", 1)[0]
         for table in ("dependencies", "dev-dependencies", "build-dependencies", 'target."cfg(unix)".dependencies',
                       'target."cfg(unix)".dev-dependencies', 'target."cfg(unix)".build-dependencies'):
-            with self.subTest(declaration=declaration, inherited=inherited, table=table), tempfile.TemporaryDirectory() as directory:
+            with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 (root / "manifests").mkdir()
                 (root / "manifests/sources.toml").write_text(
@@ -148,9 +222,14 @@ class PublishingTests(unittest.TestCase):
                     + (f'{alias} = {{ workspace = true }}\n' if inherited else declaration + "\n"))
                 (root / "Cargo.toml").write_text('[workspace]\nmembers = ["first"]\n[workspace.dependencies]\n'
                                                      + (declaration + '\n' if inherited else ''))
-                with patch.object(release, "ORDER", ("first",)), \
-                        self.assertRaisesRegex(release.ReleaseError, "depends on the wallet-pir package"):
-                    release.release_packages(root)
+                yield table, root
+
+    def check_forbidden_dependency(self, declaration, inherited):
+        for table, root in self.release_roots(declaration, inherited):
+            with self.subTest(declaration=declaration, inherited=inherited, table=table), \
+                    patch.object(release, "ORDER", ("first",)), \
+                    self.assertRaisesRegex(release.ReleaseError, "depends on the wallet-pir package"):
+                release.release_packages(root)
 
     def test_string_dependencies_keep_release_version_and_order_checks(self):
         for inherited in (False, True):

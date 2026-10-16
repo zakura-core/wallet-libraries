@@ -66,6 +66,27 @@ pub const RPC_RESPONSE_BYTES: usize = (zakura_chain::block::MAX_BLOCK_BYTES
 const _: () =
     assert!(RPC_RESPONSE_BYTES > 2 * zakura_chain::block::MAX_BLOCK_BYTES as usize + 64 * 1024);
 
+/// Whole-response bound for Enhance, Status and Transparent, including batches.
+const SHARED_RPC_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct HttpPolicy {
+    connection_timeout: Option<std::time::Duration>,
+    request_timeout: std::time::Duration,
+    response_limit: usize,
+}
+
+const RECEIVER_POLICY: HttpPolicy = HttpPolicy {
+    connection_timeout: Some(std::time::Duration::from_secs(20)),
+    request_timeout: std::time::Duration::from_secs(120),
+    response_limit: RPC_RESPONSE_BYTES,
+};
+const FIXED_COOKIE_POLICY: HttpPolicy = HttpPolicy {
+    connection_timeout: None,
+    request_timeout: std::time::Duration::from_secs(120),
+    response_limit: SHARED_RPC_RESPONSE_BYTES,
+};
+
 /// How a client authenticates.
 #[derive(Clone)]
 enum Credentials {
@@ -83,8 +104,8 @@ pub struct NodeClient {
     http: reqwest::Client,
     url: String,
     credentials: Credentials,
-    /// The response bound, when one applies.
-    limit: Option<usize>,
+    /// The whole-response bound for singles and batches.
+    limit: usize,
     /// The JSON-RPC request ID, which names the caller in node logs.
     id: &'static str,
 }
@@ -137,35 +158,48 @@ impl NodeClient {
     /// sends no credentials for `None`, for a node whose RPC disables authentication.
     /// Every response is read up to [`RPC_RESPONSE_BYTES`].
     pub fn new(url: String, cookie: Option<&Path>) -> Result<Self, NodeError> {
-        Ok(Self {
-            http: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .timeout(std::time::Duration::from_secs(120))
-                .build()?,
+        Self::configured(
             url,
-            credentials: cookie.map_or(Credentials::None, |path| {
+            cookie.map_or(Credentials::None, |path| {
                 Credentials::CookieFile(path.to_owned())
             }),
-            limit: Some(RPC_RESPONSE_BYTES),
-            id: "receiver-indexer",
-        })
+            "receiver-indexer",
+            RECEIVER_POLICY,
+        )
     }
 
     /// A client for the node at `rpc_url` with the credentials the cookie file at
     /// `cookie_path` holds now. A refused credential is [`NodeError::InvalidCookie`].
+    /// Singles and whole batches are limited to 64 MiB per response.
     pub fn from_cookie_file(
         rpc_url: impl Into<String>,
         cookie_path: impl AsRef<Path>,
     ) -> Result<Self, NodeError> {
         let (username, password) = read_cookie(cookie_path.as_ref())?;
+        Self::configured(
+            rpc_url.into(),
+            Credentials::Fixed { username, password },
+            "enhance-pir",
+            FIXED_COOKIE_POLICY,
+        )
+    }
+
+    fn configured(
+        url: String,
+        credentials: Credentials,
+        id: &'static str,
+        policy: HttpPolicy,
+    ) -> Result<Self, NodeError> {
+        let mut http = reqwest::Client::builder().timeout(policy.request_timeout);
+        if let Some(timeout) = policy.connection_timeout {
+            http = http.connect_timeout(timeout);
+        }
         Ok(Self {
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()?,
-            url: rpc_url.into(),
-            credentials: Credentials::Fixed { username, password },
-            limit: None,
-            id: "enhance-pir",
+            http: http.build()?,
+            url,
+            credentials,
+            limit: policy.response_limit,
+            id,
         })
     }
 
@@ -272,10 +306,7 @@ impl NodeClient {
             return Err(NodeError::InvalidCookie);
         }
         let response = response.error_for_status()?;
-        match self.limit {
-            Some(limit) => read_limited(response, limit).await,
-            None => Ok(response.bytes().await?.to_vec()),
-        }
+        read_limited(response, self.limit).await
     }
 
     /// One JSON-RPC 1.0 call to the node.
@@ -540,5 +571,211 @@ pub(crate) mod tests {
             rpc.block_hash_display(1).await,
             Err(NodeError::Oversized(RPC_RESPONSE_BYTES))
         ));
+    }
+    /// A real HTTP peer with exact framing, including deliberately broken bodies.
+    async fn raw_node(headers: String, body: Vec<u8>, delay: std::time::Duration) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut buffer).await.unwrap();
+                if n == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..n]);
+                if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            if socket.write_all(headers.as_bytes()).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(delay).await;
+            let _ = socket.write_all(&body).await;
+            let _ = socket.shutdown().await;
+        });
+        url
+    }
+
+    #[test]
+    fn production_deadlines_and_response_bounds_are_explicit() {
+        use std::time::Duration;
+        assert_eq!(
+            RECEIVER_POLICY.connection_timeout,
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(RECEIVER_POLICY.request_timeout, Duration::from_secs(120));
+        assert_eq!(RECEIVER_POLICY.response_limit, RPC_RESPONSE_BYTES);
+        assert_eq!(FIXED_COOKIE_POLICY.connection_timeout, None);
+        assert_eq!(
+            FIXED_COOKIE_POLICY.request_timeout,
+            Duration::from_secs(120)
+        );
+        assert_eq!(FIXED_COOKIE_POLICY.response_limit, 64 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn exact_limit_and_unannounced_bodies_obey_the_same_bound() {
+        let body = br#"{"result":7,"error":null}"#.to_vec();
+        for declared in [false, true] {
+            for limit in [body.len(), body.len() - 1] {
+                let length = if declared {
+                    format!("Content-Length: {}\r\n", body.len())
+                } else {
+                    String::new()
+                };
+                let url = raw_node(
+                    format!("HTTP/1.1 200 OK\r\n{length}Connection: close\r\n\r\n"),
+                    body.clone(),
+                    std::time::Duration::ZERO,
+                )
+                .await;
+                let client = NodeClient::configured(
+                    url,
+                    Credentials::None,
+                    "receiver-indexer",
+                    HttpPolicy {
+                        response_limit: limit,
+                        ..RECEIVER_POLICY
+                    },
+                )
+                .unwrap();
+                let result = client.tip_height().await;
+                if limit == body.len() {
+                    assert_eq!(result.unwrap(), 7);
+                } else {
+                    assert!(matches!(result, Err(NodeError::Oversized(bound)) if bound == limit));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_and_truncated_bodies_are_refused() {
+        for (body, length) in [
+            (b"{".to_vec(), 1),
+            (br#"{"result":7,"error":null}"#.to_vec(), 100),
+        ] {
+            let url = raw_node(
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"),
+                body,
+                std::time::Duration::ZERO,
+            )
+            .await;
+            assert!(matches!(
+                NodeClient::new(url, None).unwrap().tip_height().await,
+                Err(NodeError::Decode(_)) | Err(NodeError::Http(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_total_deadline_covers_a_body_after_headers_arrive() {
+        use std::time::Duration;
+        let body = br#"{"result":7,"error":null}"#.to_vec();
+        let url = raw_node(
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()),
+            body,
+            Duration::from_millis(300),
+        )
+        .await;
+        let client = NodeClient::configured(
+            url,
+            Credentials::None,
+            "receiver-indexer",
+            HttpPolicy {
+                request_timeout: Duration::from_millis(30),
+                ..RECEIVER_POLICY
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(client.tip_height().await, Err(NodeError::Http(error)) if error.is_timeout())
+        );
+    }
+
+    #[tokio::test]
+    async fn the_connection_deadline_covers_a_stalled_tls_handshake() {
+        use std::time::{Duration, Instant};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("https://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+        let client = NodeClient::configured(
+            url,
+            Credentials::None,
+            "receiver-indexer",
+            HttpPolicy {
+                connection_timeout: Some(Duration::from_millis(30)),
+                request_timeout: Duration::from_secs(5),
+                ..RECEIVER_POLICY
+            },
+        )
+        .unwrap();
+        let start = Instant::now();
+        assert!(
+            matches!(client.tip_height().await, Err(NodeError::Http(error)) if error.is_timeout())
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "connection must expire before the total deadline"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn batch_answers_are_ordered_and_bad_ids_fail_the_whole_batch() {
+        let valid = json!([{"id":1,"error":{"code":-5,"message":"missing"}}, {"id":0,"result":7}]);
+        let cases = vec![
+            (valid, true),
+            (json!([{"id":0,"result":7},{"id":0,"result":8}]), false),
+            (json!([{"id":0,"result":7}]), false),
+            (json!([{"id":0,"result":7},{"id":2,"result":8}]), false),
+            (json!([{"id":0,"result":7},{"id":-1,"result":8}]), false),
+            (json!([{"id":0,"result":7},{"id":"1","result":8}]), false),
+            (json!([{"id":0,"result":7},{"id":1.0,"result":8}]), false),
+            (json!([{"id":0,"result":7},{"id":null,"result":8}]), false),
+            (json!([{"id":0,"result":7},{"result":8}]), false),
+        ];
+        for (answer, valid) in cases {
+            let url = serve(Router::new().route(
+                "/",
+                post(move |Json(request): Json<serde_json::Value>| {
+                    assert_eq!(request[0]["jsonrpc"], "2.0");
+                    assert_eq!(request[0]["id"], 0);
+                    assert_eq!(request[1]["id"], 1);
+                    let answer = answer.clone();
+                    async move { Json(answer) }
+                }),
+            ))
+            .await;
+            let result = NodeClient::new(url, None)
+                .unwrap()
+                .batch::<u64>("getblockcount", vec![json!([]), json!([])])
+                .await;
+            if valid {
+                assert_eq!(result.unwrap(), vec![Ok(7), Err((-5, "missing".into()))]);
+            } else {
+                assert!(matches!(result, Err(NodeError::Batch(_))));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_whole_batch_rpc_error_keeps_its_code() {
+        let url = serve(Router::new().route(
+            "/",
+            post(|| async { Json(json!({"error":{"code":-32600,"message":"bad batch"}})) }),
+        ))
+        .await;
+        assert!(
+            matches!(NodeClient::new(url, None).unwrap().batch::<u64>("getblockcount", vec![json!([])]).await, Err(NodeError::Rpc(-32600, message)) if message == "bad batch")
+        );
     }
 }

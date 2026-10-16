@@ -4,6 +4,7 @@ use super::*;
 use crate::wallet::one_time_ivk::tests::*;
 
 pub(in crate::wallet::one_time_ivk) mod apply;
+mod early;
 mod payments;
 mod planner;
 mod retention;
