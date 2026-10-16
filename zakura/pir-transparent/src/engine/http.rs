@@ -491,7 +491,11 @@ impl HttpShardTransport {
             | ShardRequest::Setup { revision, .. }
             | ShardRequest::Query { revision, .. } => revision,
         };
-        if revision.len() != 64 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if revision.len() != 64
+            || !revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
             return Err("revision digest must contain exactly 64 hexadecimal characters".into());
         }
         let url = format!("{}{}", self.base, request.route());
@@ -909,6 +913,7 @@ mod observation_tests {
             "a".repeat(63),
             "a".repeat(65),
             "g".repeat(64),
+            "A".repeat(64),
             format!("{}?x=1", "a".repeat(64)),
         ] {
             assert!(
