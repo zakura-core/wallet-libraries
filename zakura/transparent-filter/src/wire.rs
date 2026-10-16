@@ -222,6 +222,30 @@ pub const MAX_SUPERSEDED: usize = 65_536;
 pub const MAX_DECLARED_HEIGHT: u64 = u32::MAX as u64;
 
 impl ShardMap {
+    /// Checks that this map is well formed and uses a supported range envelope
+    /// and filter profile. Call before accepting publication identity, reporting
+    /// coverage, or planning requests, including passes with no remaining work.
+    /// Unknown versions and profiles are refused without interpreting their data.
+    pub fn validate_supported(&self) -> Result<&'static crate::profile::RangeProfile, String> {
+        self.check_shape()?;
+        self.check_supported_format()
+    }
+
+    /// Checks only the advertised envelope version and registered filter
+    /// profile, independently of the number of shards or re-cut declarations.
+    /// This is suitable for each batch after [`Self::validate_supported`] has
+    /// admitted the whole map; it does not establish gapless map coverage.
+    pub fn check_supported_format(&self) -> Result<&'static crate::profile::RangeProfile, String> {
+        if self.range_envelope_version != crate::envelope::RANGE_ENVELOPE_VERSION {
+            return Err(format!(
+                "unsupported range envelope version {}",
+                self.range_envelope_version
+            ));
+        }
+        crate::profile::range_profile(&self.profile)
+            .ok_or_else(|| format!("unsupported shard filter profile {:?}", self.profile))
+    }
+
     /// The revision a declared re-cut superseded under `digest`, if any.
     ///
     /// A scan of every declaration: for one lookup. Anything looking up many
@@ -314,7 +338,7 @@ impl ShardMap {
                     shard.geometry
                 ));
             }
-            if shard.manifest_digest.len() != 64 {
+            if !is_digest(&shard.manifest_digest) {
                 return Err(format!(
                     "shard {index} has no manifest digest to identify its revision"
                 ));
@@ -573,6 +597,56 @@ mod tests {
             shards,
             recuts,
         }
+    }
+
+    #[test]
+    fn acceptance_requires_supported_versions_profiles_and_valid_shape() {
+        let (_, valid) = before_and_after();
+        for profile in [crate::RANGE_PROFILE_V1, crate::RANGE_PROFILE_V2] {
+            let mut map = valid.clone();
+            map.profile = profile.name.into();
+            assert_eq!(map.validate_supported().unwrap(), &profile);
+        }
+        let mut unsupported = valid.clone();
+        unsupported.range_envelope_version += 1;
+        unsupported.check_shape().unwrap();
+        assert!(unsupported
+            .validate_supported()
+            .unwrap_err()
+            .contains("envelope version"));
+        unsupported = valid.clone();
+        unsupported.profile = "unknown-range-profile".into();
+        unsupported.check_shape().unwrap();
+        assert!(unsupported
+            .validate_supported()
+            .unwrap_err()
+            .contains("filter profile"));
+        unsupported = valid;
+        unsupported.shards.clear();
+        assert!(unsupported
+            .validate_supported()
+            .unwrap_err()
+            .contains("empty"));
+    }
+
+    #[test]
+    fn current_revision_digests_must_be_canonical_hex_before_admission() {
+        let (_, valid) = before_and_after();
+        for digest in [
+            "A".repeat(64),
+            "g".repeat(64),
+            format!("../{}", "a".repeat(61)),
+            format!("{}?x=1", "a".repeat(60)),
+            format!("{}#tag", "a".repeat(60)),
+            format!("{}%2f", "a".repeat(61)),
+        ] {
+            assert_eq!(digest.len(), 64);
+            let mut map = valid.clone();
+            map.shards[0].manifest_digest = digest;
+            assert!(map.check_shape().unwrap_err().contains("manifest digest"));
+            assert!(map.validate_supported().is_err());
+        }
+        valid.validate_supported().unwrap();
     }
 
     /// Before: 0 [1,10], 1 [11,20], 2 [21,30], 3 [31,40], tail 4 [41,45].
