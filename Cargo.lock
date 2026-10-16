@@ -8270,10 +8270,13 @@ version = "0.0.1-rc1"
 name = "zakura-pir-native"
 version = "0.0.1-rc1"
 dependencies = [
+ "hex",
  "ipir-sp",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
+ "rayon",
  "reinspiring",
+ "sha2 0.10.9",
 ]
 
 [[package]]
