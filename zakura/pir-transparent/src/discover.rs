@@ -121,7 +121,7 @@ pub fn discover_active_addresses<F: FilterSource, T: ShardTransport>(
     refuse_parent_filters(filters)?;
     let (raw_map, map_bytes) = filters.shard_map().map_err(failure)?;
     let map: ShardMap = serde_json::from_slice(&raw_map).map_err(failure)?;
-    map.validate_supported().map_err(failure)?;
+    map.check_shape().map_err(failure)?;
     check_publication_limits(&map, floor, limits.shards)?;
     ensure_mainnet_publication(&map)?;
     // The sync plans each script from the map's start when that is above its

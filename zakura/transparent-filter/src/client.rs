@@ -768,7 +768,7 @@ mod tests {
     use crate::build_filter::{build_range_filter, build_range_filter_for};
     use crate::envelope::{RangeFilterBatch, RangeFilterRecord, RANGE_ENVELOPE_VERSION};
     use crate::profile::{
-        MAINNET_GENESIS_DISPLAY, RANGE_PROFILE, RANGE_PROFILE_V1, RANGE_PROFILE_V2,
+        RangeProfile, MAINNET_GENESIS_DISPLAY, RANGE_PROFILE, RANGE_PROFILE_V1, RANGE_PROFILE_V2,
     };
     use crate::wire::{SealParameters, ShardMapEntry};
 
