@@ -8045,7 +8045,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-transparent"
-version = "0.0.1-rc1"
+version = "0.0.1-rc2"
 dependencies = [
  "axum",
  "base64 0.22.1",
