@@ -1,0 +1,6 @@
+first pass: PassReport { state: Ready, progress: Progress { covered_through: 3428392, outcome: Stalled }, commits: 3, retired: 0, publication_changed: false, failed_entries: FailedEntries { entries: 1, held: 0 } }
+first settlement: ApplyStats { applied: 3, qualified: 3, window_grew: true }
+budgeted pass 1: PassReport { state: Pending, progress: Progress { covered_through: 3428392, outcome: More }, commits: 0, retired: 0, publication_changed: false, failed_entries: FailedEntries { entries: 1, held: 0 } }
+budgeted pass 2: PassReport { state: Pending, progress: Progress { covered_through: 3428392, outcome: More }, commits: 0, retired: 0, publication_changed: false, failed_entries: FailedEntries { entries: 1, held: 1 } }
+budgeted pass 3: PassReport { state: Ready, progress: Progress { covered_through: 3428392, outcome: More }, commits: 3, retired: 1, publication_changed: false, failed_entries: FailedEntries { entries: 1, held: 1 } }
+second commits, unacknowledged: ApplyStats { applied: 3, qualified: 3, window_grew: false }

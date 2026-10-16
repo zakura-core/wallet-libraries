@@ -1,0 +1,56 @@
+[package]
+name = "zakura-transparent-private-compat"
+version = "0.0.0"
+publish = false
+description = "Cross-version checks between the Transparent private-mode crates and the release they replaced"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+
+[features]
+# The baseline packages, for `capture` and the live cross-version tests.
+live-baseline = ["dep:base-recovery", "dep:base-events", "dep:base-filter", "dep:base-shard", "dep:base-native", "dep:base-txid", "dep:base-sqlite", "dep:base-backend"]
+
+# The baseline: the six Transparent packages at the last wallet-libraries commit
+# before they were consolidated, pinned by commit so `capture` reproduces the
+# frozen files under `baseline/`.
+[dependencies]
+base-recovery = { package = "zakura-pir-transparent", git = "https://github.com/zakura-core/wallet-libraries.git", rev = "1c1bd327e493b740f8ffbd109039acb88a45e100", optional = true, features = ["sqlite", "testing", "reqwest"] }
+base-events = { package = "zakura-transparent-events", git = "https://github.com/zakura-core/wallet-libraries.git", rev = "1c1bd327e493b740f8ffbd109039acb88a45e100", optional = true }
+base-filter = { package = "zakura-transparent-filter", git = "https://github.com/zakura-core/wallet-libraries.git", rev = "1c1bd327e493b740f8ffbd109039acb88a45e100", optional = true }
+base-shard = { package = "zakura-transparent-shard", git = "https://github.com/zakura-core/wallet-libraries.git", rev = "1c1bd327e493b740f8ffbd109039acb88a45e100", optional = true }
+base-native = { package = "zakura-transparent-native", git = "https://github.com/zakura-core/wallet-libraries.git", rev = "1c1bd327e493b740f8ffbd109039acb88a45e100", optional = true }
+base-txid = { package = "zakura-transparent-txid-client", git = "https://github.com/zakura-core/wallet-libraries.git", rev = "1c1bd327e493b740f8ffbd109039acb88a45e100", optional = true, features = ["testing"] }
+base-sqlite = { package = "zakura-client-sqlite", git = "https://github.com/zakura-core/wallet-libraries.git", rev = "1c1bd327e493b740f8ffbd109039acb88a45e100", optional = true, features = ["orchard", "transparent-inputs", "test-dependencies", "unstable"] }
+base-backend = { package = "zakura-client-backend", git = "https://github.com/zakura-core/wallet-libraries.git", rev = "1c1bd327e493b740f8ffbd109039acb88a45e100", optional = true, features = ["orchard", "test-dependencies"] }
+transparent = { package = "zakura-transparent", version = "3.0.0" }
+zcash_primitives = { package = "zakura-primitives", version = "3.0.0" }
+zcash_protocol = { package = "zakura-protocol", version = "3.0.0", features = ["local-consensus"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+tempfile = "3"
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking"] }
+rand_chacha = "0.3"
+uuid = "1"
+
+[[bin]]
+name = "capture"
+required-features = ["live-baseline"]
+
+# Its own workspace and lockfile, like `zakura/pir-chain`: the root workspace never
+# resolves the baseline's copies of these packages.
+[workspace]
+resolver = "2"
+members = ["."]
+
+# Real PIR runs in every check; dependencies are optimized so it finishes.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.test.package."*"]
+opt-level = 3
