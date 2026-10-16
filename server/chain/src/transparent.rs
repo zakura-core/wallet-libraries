@@ -456,6 +456,14 @@ impl OutputCache {
     fn insert_transaction(&mut self, transaction: &Transaction) {
         let txid = transaction.hash();
         let outputs = transaction.outputs();
+        // Eviction removes a transaction's outputs together, so a held first output
+        // means the whole transaction is held and already charged once.
+        if self.outputs.contains_key(&OutPoint {
+            hash: txid,
+            index: 0,
+        }) {
+            return;
+        }
         for (index, output) in outputs.iter().enumerate() {
             self.outputs.insert(
                 OutPoint {
@@ -971,5 +979,21 @@ mod tests {
             cache.get(&outpoint_of(&third, 0)),
             Some(&third.outputs()[0])
         );
+    }
+
+    /// Seeing a held transaction again, as a retried block or a prefetch of a
+    /// transaction the block itself created does, charges it only once.
+    #[test]
+    fn a_repeated_transaction_is_charged_once() {
+        let mut cache = OutputCache::new(5);
+        let first = wide_transaction(0, 3);
+        cache.insert_transaction(&first);
+        cache.insert_transaction(&first);
+        assert_eq!((cache.count, cache.order.len()), (3, 1));
+        let second = wide_transaction(1, 2);
+        cache.insert_transaction(&second);
+        assert_eq!((cache.count, cache.len()), (5, 5));
+        assert!(cache.get(&outpoint_of(&first, 2)).is_some());
+        assert!(cache.get(&outpoint_of(&second, 1)).is_some());
     }
 }
