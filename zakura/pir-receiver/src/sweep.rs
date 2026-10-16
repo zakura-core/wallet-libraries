@@ -3,13 +3,15 @@
 use std::num::NonZeroU32;
 
 use receiver_directory::{
-    Receiver,
     filter::{Filters, PAID, RECENT},
     snapshot::FilterSet,
-    witness::WitnessSnapshot,
 };
 use receiver_pir::{AcceptedCoverage, transport::DirectoryClient};
 use zakura_one_time_ivk::{KeyId, swap::RESTORE_WATCH_SECS};
+use zakura_receiver_crypto::{
+    Receiver,
+    witness::{Publication, WitnessSnapshot},
+};
 use zcash_client_backend::data_api::{
     WalletRead,
     one_time_ivk::restore::{
@@ -20,7 +22,7 @@ use zcash_client_backend::data_api::{
 };
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
-use crate::{DirectoryError, Transport, seen::seen_sets};
+use crate::{DirectoryError, Transport, checked, seen::seen_sets};
 
 /// A wallet's account identifier.
 type AccountId<W> = <W as WalletRead>::AccountId;
@@ -323,9 +325,9 @@ impl<'a, T: Transport> Directory<'a, T> {
     async fn check<E>(&mut self, work: &[DiscoveryWork], now: i64) -> Result<Vec<Check>, Error<E>> {
         let receivers = work
             .iter()
-            .map(|item| Receiver::from_bytes(item.receiver))
+            .map(|item| Receiver::from_bytes(item.receiver).map(|r| *r.as_bytes()))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(DirectoryError::from)?;
+            .map_err(checked)?;
         if self.filters.is_none() {
             // Filters are fetched before a session takes the transport.
             let transport = self.transport.as_ref().expect("no session yet");
@@ -389,6 +391,8 @@ impl<'a, T: Transport> Directory<'a, T> {
         )
         .await?;
         let witnesses = client.witnesses().await?;
+        let publication = publication(client.manifest())?;
+        let witnesses = WitnessSnapshot::decode(&witnesses, &publication).map_err(checked)?;
         self.session = Some(Session { client, witnesses });
         Ok(())
     }
@@ -430,16 +434,16 @@ where
     let anchor = directory.anchor;
     let paid = check.paid;
     let payments: Vec<_> = if paid {
-        let receiver = Receiver::from_bytes(item.receiver).map_err(DirectoryError::from)?;
+        let receiver = Receiver::from_bytes(item.receiver).map_err(checked)?;
         let accepted = directory.accepted;
         let session = directory.session.as_mut().expect("opened for paid keys");
         session
             .client
-            .lookup(receiver, accepted)
+            .lookup(*receiver.as_bytes(), accepted)
             .await?
             .into_iter()
             .map(directory_payment)
-            .collect()
+            .collect::<Result<_, _>>()?
     } else {
         Vec::new()
     };
@@ -465,9 +469,28 @@ where
     }
 }
 
-/// A directory payment as the wallet takes it.
-fn directory_payment(payment: receiver_directory::Payment) -> DirectoryPayment {
-    DirectoryPayment {
+/// The fields of the session's validated manifest that its witness file binds to.
+fn publication(manifest: &receiver_pir::Manifest) -> Result<Publication, DirectoryError> {
+    let directory = &manifest.directory;
+    directory.validate()?;
+    Ok(Publication {
+        genesis: directory.genesis,
+        directory_revision: directory.revision()?,
+        end_height: directory.end_height,
+        end_hash: directory.end_hash,
+        start_position: directory.start_position,
+        end_position: directory.end_position,
+        records: directory.records,
+    })
+}
+
+/// A directory payment as the wallet takes it, after checking that its note
+/// commitment and Action nullifier are canonical and its ephemeral key valid. The
+/// directory crates parse records structurally only.
+fn directory_payment(
+    payment: receiver_directory::Payment,
+) -> Result<DirectoryPayment, DirectoryError> {
+    zakura_receiver_crypto::Payment {
         height: payment.height,
         block_hash: payment.block_hash,
         txid: payment.txid,
@@ -479,6 +502,20 @@ fn directory_payment(payment: receiver_directory::Payment) -> DirectoryPayment {
         ephemeral_key: payment.ephemeral_key,
         ciphertext_prefix: payment.ciphertext_prefix,
     }
+    .check()
+    .map_err(checked)?;
+    Ok(DirectoryPayment {
+        height: payment.height,
+        block_hash: payment.block_hash,
+        txid: payment.txid,
+        tx_index: payment.tx_index,
+        action_index: payment.action_index,
+        position: payment.position,
+        action_nullifier: payment.action_nullifier,
+        cmx: payment.cmx,
+        ephemeral_key: payment.ephemeral_key,
+        ciphertext_prefix: payment.ciphertext_prefix,
+    })
 }
 
 #[cfg(test)]

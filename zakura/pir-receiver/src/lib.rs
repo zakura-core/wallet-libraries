@@ -29,6 +29,18 @@ pub use receiver_pir::{Error as DirectoryError, transport::Transport};
 /// The directory format and client underneath, for callers that need them directly.
 pub use {receiver_directory, receiver_pir};
 
+/// The directory error for data a receiver check refuses: the same error the
+/// directory's own decoding gave when it checked receivers, payments and witnesses.
+#[cfg(feature = "wallet")]
+pub(crate) fn checked(error: zakura_receiver_crypto::Error) -> DirectoryError {
+    use zakura_receiver_crypto::Error;
+    DirectoryError::Directory(match error {
+        Error::Malformed => receiver_directory::Error::Malformed,
+        Error::Coverage => receiver_directory::Error::Coverage,
+        Error::Capacity => receiver_directory::Error::Capacity,
+    })
+}
+
 /// Zcash mainnet's genesis block hash, in internal byte order, which its directory
 /// publications commit to.
 pub const MAINNET_GENESIS: [u8; 32] = [

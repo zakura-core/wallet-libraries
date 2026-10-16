@@ -2,11 +2,11 @@
 use std::collections::BTreeMap;
 
 use receiver_directory::{
-    Receiver,
     filter::{Filter, RECENT, SEEN},
     snapshot::FilterSet,
 };
 use receiver_pir::transport::DirectoryClient;
+use zakura_receiver_crypto::Receiver;
 
 use crate::{DirectoryError, Transport};
 
@@ -38,7 +38,7 @@ impl Seen {
     pub fn contains(&self, receivers: &[[u8; 43]]) -> Vec<bool> {
         let parsed: Vec<_> = receivers
             .iter()
-            .map(|r| Receiver::from_bytes(*r).ok())
+            .map(|r| Receiver::from_bytes(*r).ok().map(|r| *r.as_bytes()))
             .collect();
         let valid: Vec<_> = parsed.iter().flatten().copied().collect();
         let mut held = vec![false; valid.len()];
