@@ -1865,6 +1865,55 @@ mod tests {
     }
 
     #[test]
+    fn remote_manifest_arithmetic_overflow_is_rejected_before_setup() {
+        for overflow_span in [true, false] {
+            let mut manifest = sample_manifest(false);
+            if overflow_span {
+                manifest.start_height = 0;
+                manifest.end_height = u64::MAX;
+                manifest.blocks = 0;
+            } else {
+                let mut second = manifest.buckets[0].clone();
+                second.bucket = 1;
+                second.records = u64::MAX;
+                manifest.buckets[0].records = u64::MAX;
+                manifest.buckets.push(second);
+                manifest.n_buckets = 2;
+                manifest.records = u64::MAX - 1;
+            }
+            let mut map = recent_map(100, 109, "txid-2k8");
+            map.start_height = manifest.start_height;
+            map.unsealed_start = manifest.start_height;
+            map.seal.n_recent = manifest.n_buckets;
+            map.recent = Some(DisplayMapEntry::from_manifest(
+                &manifest,
+                &manifest.digest(),
+            ));
+            map.check_shape().unwrap();
+            let mut transport = Scripted::default();
+            transport.replies.extend([
+                Ok(init_with(&["txid-2k8"])),
+                served(&map),
+                Ok(TxidReply {
+                    body: manifest.canonical_bytes(),
+                    ..reply(200)
+                }),
+            ]);
+            let mut client = test_client();
+            assert_eq!(
+                client.lookup(&mut transport, [1; 32], 105, &never),
+                Err(TxidError::Protocol(ProtocolKind::Manifest))
+            );
+            assert!(client.manifests.is_empty());
+            assert!(client.setups.is_empty());
+            assert_eq!(
+                sent(&mut transport),
+                [Route::Init, Route::Map, Route::Manifest]
+            );
+        }
+    }
+
+    #[test]
     fn a_cached_manifest_must_still_describe_the_entry() {
         let manifest = sample_manifest(false);
         let digest = manifest.digest();
