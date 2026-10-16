@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Validate display revision digests as canonical lowercase SHA-256 hexadecimal and expose structural checks independent of geometry support.
+
 - Reject display manifests whose block spans or bucket record totals overflow.
 
 ### Added
