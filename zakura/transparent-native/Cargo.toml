@@ -17,7 +17,7 @@ name = "transparent_native"
 
 [dependencies]
 hex = { workspace = true, features = ["std"] }
-zakura-pir-native = { version = "=0.0.1-rc1", path = "../pir-native" }
+zakura-pir-native = { version = "=0.0.1-rc2", path = "../pir-native" }
 rayon.workspace = true
 serde = { workspace = true, features = ["std"] }
 serde_json.workspace = true
