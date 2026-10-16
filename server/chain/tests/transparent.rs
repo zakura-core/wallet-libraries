@@ -6,8 +6,8 @@ use zakura_server_chain::{
     NodeClient,
     testing::*,
     transparent::{
-        BoxError, ExtractError, Fee, FetchedBlock, Output, OutputCache, PreviousOutputs,
-        read_transaction,
+        BoxError, CompactBlock, CompactTransaction, ExtractError, Fee, FetchedBlock, Output,
+        OutputCache, PreviousOutputs, read_transaction,
     },
 };
 
@@ -299,4 +299,99 @@ impl PreviousOutputs for AnyOutput {
             script: vec![0x51],
         }))
     }
+}
+
+/// Where `field` sits in `raw`; every compact field is a copy of bytes on chain.
+fn offset(raw: &[u8], field: &[u8]) -> usize {
+    raw.windows(field.len())
+        .position(|window| window == field)
+        .expect("compact field bytes appear in the raw block")
+}
+
+/// Each shielded field is the block's own bytes, in the order the transaction
+/// encodes them: a Sapling output's note commitment, ephemeral key and the first
+/// 52 bytes of its ciphertext are adjacent, and an Action's nullifier sits two
+/// 32-byte fields before its commitment, which its ephemeral key and ciphertext
+/// prefix follow.
+fn assert_fields_are_on_chain(raw: &[u8], block: &CompactBlock) {
+    for tx in &block.transactions {
+        for nullifier in &tx.sapling_spends {
+            offset(raw, nullifier);
+        }
+        for output in &tx.sapling_outputs {
+            assert_eq!(
+                (
+                    output.cmu.len(),
+                    output.ephemeral_key.len(),
+                    output.ciphertext.len()
+                ),
+                (32, 32, 52)
+            );
+            offset(
+                raw,
+                &[&output.cmu[..], &output.ephemeral_key, &output.ciphertext].concat(),
+            );
+        }
+        for action in tx.orchard_actions.iter().chain(&tx.ironwood_actions) {
+            assert_eq!(action.ciphertext.len(), 52);
+            let at = offset(
+                raw,
+                &[&action.cmx[..], &action.ephemeral_key, &action.ciphertext].concat(),
+            );
+            assert_eq!(raw[at - 64..at - 32], action.nullifier[..]);
+        }
+    }
+}
+
+/// The tree sizes start from the caller's and advance by the block's commitments.
+#[test]
+fn compact_blocks_advance_every_tree_from_the_given_sizes() {
+    let raw = hex::decode(include_str!("fixtures/compact-mainnet-1687106.hex").trim()).unwrap();
+    let block = FetchedBlock::from_exact_bytes(&raw).unwrap();
+    let mut counts = [100, 200, 300];
+    let compact = block.compact(1687106, &mut counts).unwrap();
+    let sum = |pool: fn(&CompactTransaction) -> usize| {
+        compact.transactions.iter().map(pool).sum::<usize>() as u32
+    };
+    let sapling = sum(|t| t.sapling_outputs.len());
+    let orchard = sum(|t| t.orchard_actions.len());
+    assert!(sapling > 0 && orchard > 0);
+    assert_eq!(sum(|t| t.ironwood_actions.len()), 0);
+    assert_eq!(counts, [100 + sapling, 200 + orchard, 300]);
+    assert_eq!(
+        (
+            compact.sapling_tree_size,
+            compact.orchard_tree_size,
+            compact.ironwood_tree_size
+        ),
+        (counts[0], counts[1], counts[2])
+    );
+    assert_fields_are_on_chain(&raw, &compact);
+
+    // Ironwood, from the refund block the receiver tests use.
+    let refund = receiver::RefundBlock::new(9);
+    let raw = refund.bytes();
+    let block = FetchedBlock::from_exact_bytes(&raw).unwrap();
+    let mut counts = [5, 6, 7];
+    let compact = block.compact(9, &mut counts).unwrap();
+    let ironwood = compact
+        .transactions
+        .iter()
+        .map(|t| t.ironwood_actions.len())
+        .collect::<Vec<_>>();
+    assert!(ironwood.iter().all(|n| *n > 0), "{ironwood:?}");
+    assert_eq!(counts, [5, 6, 7 + ironwood.iter().sum::<usize>() as u32]);
+    assert_eq!(compact.ironwood_tree_size, counts[2]);
+    assert_fields_are_on_chain(&raw, &compact);
+    assert_eq!(compact.time, block.time() as u32);
+    assert_eq!(
+        (compact.height, compact.hash, compact.prev_hash),
+        (9, refund.hash(), block.parent())
+    );
+
+    // A tree that would overflow in the refund, after the coinbase has already
+    // added to it, fails the block and leaves every size where it was.
+    let mut full = [5, 6, u32::MAX - ironwood[0] as u32];
+    assert!(block.compact(9, &mut full).is_err());
+    assert_eq!(full, [5, 6, u32::MAX - ironwood[0] as u32]);
 }
