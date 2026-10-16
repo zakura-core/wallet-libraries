@@ -1,0 +1,40 @@
+[package]
+name = "zakura-transparent-txid-client"
+version = "0.0.1-rc0"
+# Kept at 2021 from wallet-pir so the moved code compiles unchanged.
+edition = "2021"
+description = "Synchronous, transport-agnostic wallet client for the tiered txid display PIR publication"
+rust-version.workspace = true
+license = "MIT"
+repository.workspace = true
+readme = "README.md"
+categories.workspace = true
+keywords = ["zcash", "privacy", "pir"]
+
+[lib]
+# The library keeps wallet-pir's crate name, so `transparent_txid_client::` paths
+# are unchanged for its consumers.
+name = "transparent_txid_client"
+path = "src/lib.rs"
+
+[features]
+# Test hooks: a configurable placement refresh age and the cached revision
+# list. Not for wallets.
+testing = []
+
+# No HTTP stack and no async runtime: the wallet supplies the transport.
+[dependencies]
+base64 = "0.22"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+transparent-events = { package = "zakura-transparent-events", version = "=0.0.1-rc0", path = "../transparent-events" }
+transparent-native = { package = "zakura-transparent-native", version = "=0.0.1-rc0", path = "../transparent-native" }
+transparent-shard = { package = "zakura-transparent-shard", version = "=0.0.1-rc0", path = "../transparent-shard" }
+
+[dev-dependencies]
+flate2 = "1"
+# Only for the `txid-quality-canary` example's blocking HTTPS transport.
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
