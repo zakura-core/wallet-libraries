@@ -93,11 +93,11 @@ required-features = ["sqlite"]
 
 [[test]]
 name = "private_recovery"
-required-features = ["sqlite", "testing"]
+required-features = ["sqlite", "testing", "reqwest"]
 
 [[test]]
 name = "private_discovery"
-required-features = ["testing"]
+required-features = ["testing", "reqwest"]
 
 [[test]]
 name = "detail_run"
