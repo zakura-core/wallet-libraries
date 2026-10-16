@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc2] - 2026-10-16
+
 ### Added
 
 - The server-side operations of the profile, moved from wallet-pir's
