@@ -86,6 +86,12 @@ impl<T: ShardTransport> RowSource for PirRows<'_, T> {
         let revision = self.entry.manifest_digest.as_str();
         let geometry = transparent_shard::layout::by_name(&self.entry.geometry)
             .ok_or_else(|| SyncError::UnknownGeometry(self.entry.geometry.clone()))?;
+        let mut tables: Vec<u32> = requests.iter().map(|request| request.child).collect();
+        tables.sort_unstable();
+        tables.dedup();
+        if !tables.is_empty() {
+            self.transport.page_round(shard_id, revision, &tables);
+        }
         let set_digest = store
             .set_identity()?
             .map(|identity| identity.digest())
@@ -118,8 +124,9 @@ impl<T: ShardTransport> RowSource for PirRows<'_, T> {
                     self.charges,
                     None,
                 );
+                // Nothing of the round is sent yet: a stopped setup stops it whole.
                 if unless_budget(&mut self.stop, opened)?.is_none() {
-                    break;
+                    return Ok(Vec::new());
                 }
                 let (_, within) =
                     transparent_shard::layout::split_row(request.row, geometry.page_rows);

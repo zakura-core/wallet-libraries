@@ -153,6 +153,10 @@ impl<T: ShardTransport> ShardTransport for Staged<'_, T> {
         self.inner.query(shard_id, revision, table, body)
     }
 
+    fn page_round(&mut self, shard_id: u64, revision: &str, tables: &[u32]) {
+        self.inner.page_round(shard_id, revision, tables)
+    }
+
     fn concurrency(&self) -> usize {
         self.inner.concurrency()
     }

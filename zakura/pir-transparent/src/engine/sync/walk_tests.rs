@@ -1724,6 +1724,151 @@ fn a_budget_stop_at_a_page_setup_ends_the_round_without_an_error() {
     }
 }
 
+/// A shard transport that records what it is asked, in order: each round it
+/// is told of, each setup and each query. It serves a well-formed setup for
+/// the page tables in `serves` and declines every other with a byte budget
+/// stop; it refuses every query.
+struct Scripted {
+    serves: Vec<u32>,
+    public_bytes: usize,
+    concurrency: usize,
+    asked: Vec<String>,
+}
+
+impl ShardTransport for Scripted {
+    fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+        Ok((Vec::new(), 0))
+    }
+
+    fn manifest(&mut self, _: u64, _: &str) -> Result<(Vec<u8>, u64), BoxError> {
+        Err("no manifests".into())
+    }
+
+    fn setup(&mut self, _: u64, _: &str, table: Table, _: u32) -> Result<(Vec<u8>, u64), BoxError> {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        self.asked.push(format!("setup {}", table.name()));
+        let Table::Pages(child) = table else {
+            return Err("only page setups".into());
+        };
+        if !self.serves.contains(&child) {
+            return Err(crate::engine::transport::BudgetStop::Bytes.boxed());
+        }
+        let params = vec![7u8; self.public_bytes];
+        let setup = serde_json::json!({
+            "public_params": base64::engine::general_purpose::STANDARD.encode(&params),
+            "public_params_sha256": hex::encode(sha2::Sha256::digest(&params)),
+        });
+        let bytes = serde_json::to_vec(&setup)?;
+        let cost = bytes.len() as u64;
+        Ok((bytes, cost))
+    }
+
+    fn query(&mut self, _: u64, _: &str, table: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
+        self.asked.push(format!("query {}", table.name()));
+        Err("no queries".into())
+    }
+
+    fn page_round(&mut self, _: u64, _: &str, tables: &[u32]) {
+        self.asked.push(format!("round {tables:?}"));
+    }
+
+    fn concurrency(&self) -> usize {
+        self.concurrency
+    }
+}
+
+/// [`PirRows::fetch`] over `transport` for `requests` in the first fixture
+/// shard, without limits.
+fn fetch_with(
+    transport: &mut Scripted,
+    requests: &[RowRequest],
+) -> (Result<usize, String>, Option<IncompleteReason>) {
+    let (_, directories) = fixture();
+    let manifest = manifest_of(&directories[0]);
+    let entry = entry_of(&manifest);
+    let profile = TableProfile::new(
+        transparent_shard::SCHEMA,
+        "recent-4k",
+        Table::Pages(0).kind(),
+        4_096,
+        4_096,
+    )
+    .unwrap();
+    transport.public_bytes = profile.scheme.public_bytes;
+    let mut client = TableClient::new(
+        Table::Pages(0),
+        "recent-4k",
+        4_096,
+        4_096,
+        &profile.scheme,
+        None,
+    )
+    .unwrap();
+    let mut charges = ByteCharges::default();
+    let limits = WorkLimits::UNLIMITED;
+    let mut rows = PirRows {
+        entry: &entry,
+        manifest: &manifest,
+        client: &mut client,
+        transport,
+        charges: &mut charges,
+        limits: &limits,
+        stop: None,
+    };
+    let fetched = rows
+        .fetch(&mut MemoryStore::new(), requests)
+        .map(|replies| replies.len())
+        .map_err(|error| error.to_string());
+    (fetched, rows.stopped())
+}
+
+/// A round tells the transport every page table it addresses, once and in
+/// table order, before it asks for any setup or query.
+#[test]
+fn a_round_announces_its_tables_before_sending_anything() {
+    let mut transport = Scripted {
+        serves: Vec::new(),
+        public_bytes: 0,
+        concurrency: 1,
+        asked: Vec::new(),
+    };
+    let requests = [
+        RowRequest { child: 1, row: 0 },
+        RowRequest { child: 0, row: 3 },
+        RowRequest { child: 1, row: 1 },
+    ];
+    let (fetched, stopped) = fetch_with(&mut transport, &requests);
+    assert_eq!(fetched, Ok(0));
+    assert_eq!(stopped, Some(IncompleteReason::ByteBudget));
+    assert_eq!(transport.asked, ["round [0, 1]", "setup pages-1"]);
+}
+
+/// In a concurrent round, a setup declined for the budget stops the round
+/// before any query is sent, even for the rows whose setups were already
+/// opened: nothing of the round had been sent, so nothing of it is.
+#[test]
+fn a_budget_stop_while_planning_a_concurrent_round_sends_no_query() {
+    let mut transport = Scripted {
+        serves: vec![0],
+        public_bytes: 0,
+        concurrency: 2,
+        asked: Vec::new(),
+    };
+    let requests = [
+        RowRequest { child: 0, row: 0 },
+        RowRequest { child: 1, row: 0 },
+    ];
+    let (fetched, stopped) = fetch_with(&mut transport, &requests);
+    assert_eq!(fetched, Ok(0));
+    assert_eq!(stopped, Some(IncompleteReason::ByteBudget));
+    assert_eq!(
+        transport.asked,
+        ["round [0, 1]", "setup pages-0", "setup pages-1"],
+        "no query after the declined setup"
+    );
+}
+
 /// A budget stop ends the shard's work as an incomplete sync naming the
 /// budget, once: it is not retried or waited on as a capacity refusal is.
 #[test]

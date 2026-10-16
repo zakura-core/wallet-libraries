@@ -538,6 +538,18 @@ pub trait ShardTransport {
         body: &[u8],
     ) -> Result<Vec<u8>, BoxError>;
 
+    /// Announces a round of page queries before any of it is sent: the
+    /// directory shard revision and the distinct page tables the round's
+    /// queries address, its real queries and the dummies it owes alike.
+    ///
+    /// The default ignores it. A transport that adds cover around the walk's
+    /// requests can use it to know every table the round needs, including
+    /// the heads of walks the directory phase just found, before it chooses
+    /// what to cover. It must send nothing here.
+    fn page_round(&mut self, shard_id: u64, revision: &str, tables: &[u32]) {
+        let _ = (shard_id, revision, tables);
+    }
+
     /// Requests this transport keeps in flight when handed a [`batch`].
     ///
     /// One, the default, means the sync issues every request itself, one at a
@@ -738,6 +750,9 @@ impl<T: ShardTransport + ?Sized> ShardTransport for Box<T> {
         body: &[u8],
     ) -> Result<Vec<u8>, BoxError> {
         (**self).query(shard_id, revision, table, body)
+    }
+    fn page_round(&mut self, shard_id: u64, revision: &str, tables: &[u32]) {
+        (**self).page_round(shard_id, revision, tables)
     }
     fn concurrency(&self) -> usize {
         (**self).concurrency()
