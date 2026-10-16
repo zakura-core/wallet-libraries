@@ -30,7 +30,9 @@
 //! stale map fetches it again, a geometry init lacks fetches init and the map
 //! again, and each new map keeps only the manifests and setups of revisions
 //! it names. A map of another chain (network or genesis hash) is refused.
-//! A lookup sends at most 2 map, 3 init and 2 query requests.
+//! A lookup sends at most 2 map, 3 init and 2 query requests. Before fetching
+//! setups, it refuses segment counts impossible for the manifest's bucket
+//! records and directory replies exceeding the wallet's 8 MiB response budget.
 //!
 //! Any validation failure is [`TxidError::Protocol`], never
 //! [`TxidLookup::Absent`].
