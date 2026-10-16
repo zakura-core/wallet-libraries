@@ -30,11 +30,20 @@
 //!
 //! # Coverage
 //!
-//! A secondary instance sees the primary's flushed data, so it trails the tip
-//! by whatever is still in the primary's memtable, and it does not see the
-//! non-finalized state at all. For a backfill of buried history that is
-//! irrelevant. Near the tip it means a height can be briefly absent, which
-//! surfaces as [`StateError::MissingBlock`] rather than as a wrong answer.
+//! A secondary instance sees what the primary had written when it last caught
+//! up, and it does not see the non-finalized state at all. Opening catches up
+//! once; after that the reader catches up again in [`StateReader::tip_height`],
+//! and in a block read that finds nothing, before it answers. A long-lived
+//! reader that polls the tip, or retries a missing height, therefore sees the
+//! blocks the node finalizes after it opened. Near the tip a height can still be
+//! briefly absent, which surfaces as [`StateError::MissingBlock`] rather than as
+//! a wrong answer; a failed catch-up is [`StateError::CatchUp`], never a stale
+//! answer presented as current.
+//!
+//! Catching up only adds finalized blocks, so a read that overlaps a catch-up
+//! on another thread sees each block either entirely or not at all, and a block
+//! it has seen never changes. Reads at heights the reader has already seen never
+//! catch up, so a backfill of buried history pays nothing for this.
 
 use super::{
     BoxError, ExtractError, FetchedBlock, Output as ChainOutput, PreviousOutputs, TransparentBlock,
@@ -59,6 +68,10 @@ pub enum StateError {
     NoTip,
     #[error("height {0} does not fit a block height")]
     HeightRange(u64),
+    /// The secondary instance could not replay what the node wrote since it last
+    /// caught up, so it cannot say whether a newer block exists.
+    #[error("could not catch up with the node's state database: {0}")]
+    CatchUp(#[source] BoxError),
 }
 
 /// A read-only view of a running node's finalized state.
@@ -106,8 +119,10 @@ impl StateReader {
         })
     }
 
-    /// The highest finalized height the secondary can see.
+    /// The node's finalized tip, after catching up with what the node has written
+    /// since this reader last did.
     pub fn tip_height(&self) -> Result<u64, StateError> {
+        self.catch_up()?;
         self.db
             .finalized_tip_height()
             .map(|height| u64::from(height.0))
@@ -117,16 +132,15 @@ impl StateReader {
     /// The hash of a finalized block, in protocol byte order.
     pub fn block_hash(&self, height: u64) -> Result<[u8; 32], StateError> {
         let height = to_height(height)?;
-        self.db
-            .hash(height)
+        self.read(|db| db.hash(height))?
             .map(|hash| hash.0)
             .ok_or(StateError::MissingBlock(u64::from(height.0)))
     }
 
     /// The full finalized block at `height`.
     pub fn fetch_block(&self, height: u64) -> Result<FetchedBlock, StateError> {
-        self.db
-            .block(HashOrHeight::Height(to_height(height)?))
+        let block_height = to_height(height)?;
+        self.read(|db| db.block(HashOrHeight::Height(block_height)))?
             .map(FetchedBlock)
             .ok_or(StateError::MissingBlock(height))
     }
@@ -139,10 +153,26 @@ impl StateReader {
     /// Returned in Unix seconds.
     pub fn block_time(&self, height: u64) -> Result<i64, StateError> {
         let block_height = to_height(height)?;
-        self.db
-            .block_header(HashOrHeight::Height(block_height))
+        self.read(|db| db.block_header(HashOrHeight::Height(block_height)))?
             .map(|header| header.time.timestamp())
             .ok_or(StateError::MissingBlock(height))
+    }
+
+    /// `read`'s answer, catching up with the node and asking again when the first
+    /// answer is nothing: the block may have been finalized since the last catch-up.
+    fn read<T>(&self, read: impl Fn(&ZakuraDb) -> Option<T>) -> Result<Option<T>, StateError> {
+        if let Some(found) = read(&self.db) {
+            return Ok(Some(found));
+        }
+        self.catch_up()?;
+        Ok(read(&self.db))
+    }
+
+    /// Replays what the node has written since this secondary last caught up.
+    fn catch_up(&self) -> Result<(), StateError> {
+        self.db
+            .try_catch_up_with_primary()
+            .map_err(|error| StateError::CatchUp(error.into()))
     }
 
     /// One block's transparent parts, resolving spent outputs from the same database.
@@ -154,6 +184,7 @@ impl StateReader {
     pub fn transparent_block(&self, height: u64) -> Result<TransparentBlock, ExtractError> {
         let block = self.fetch_block(height).map_err(|error| match error {
             StateError::HeightRange(height) => ExtractError::Height(height),
+            StateError::CatchUp(source) => ExtractError::Database(source),
             _ => ExtractError::MissingBlock(height),
         })?;
         let event_height = u32::try_from(height).map_err(|_| ExtractError::Height(height))?;

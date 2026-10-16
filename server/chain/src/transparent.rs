@@ -154,6 +154,9 @@ pub enum ExtractError {
     /// The node's database holds no finalized block at this height (yet).
     #[error("the node holds no finalized block at height {0}")]
     MissingBlock(u64),
+    /// The node's database could not be read, so whether the block exists is unknown.
+    #[error("the node's database could not be read: {0}")]
+    Database(#[source] BoxError),
     #[error(transparent)]
     Node(#[from] NodeError),
 }

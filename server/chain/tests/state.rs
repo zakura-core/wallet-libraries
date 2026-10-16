@@ -165,3 +165,47 @@ async fn the_database_reader_agrees_with_rpc_and_refuses_missing_blocks() {
     let empty = tempfile::tempdir().unwrap();
     assert!(StateReader::open(empty.path(), Network::Mainnet).is_err());
 }
+
+/// A reader opened before the node finalizes more blocks sees them on its next
+/// tip poll, and a read of a height that was missing finds it once it exists.
+#[test]
+fn an_open_reader_follows_blocks_the_node_finalizes_later() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        cache_dir: dir.path().to_path_buf(),
+        ephemeral: false,
+        ..Config::default()
+    };
+    let mut primary = FinalizedState::new(&config, &NodeNetwork::Mainnet).unwrap();
+    let genesis =
+        Block::zcash_deserialize(&zakura_test::vectors::BLOCK_MAINNET_GENESIS_BYTES[..]).unwrap();
+    commit(&mut primary, &genesis);
+    let reader = StateReader::open(dir.path(), Network::Mainnet).unwrap();
+    assert_eq!(reader.tip_height().unwrap(), 0);
+    assert!(matches!(
+        reader.fetch_block(1),
+        Err(StateError::MissingBlock(1))
+    ));
+
+    let mined = coinbase(1, &[(50_000, P2PKH)]);
+    let first = child(&genesis, std::slice::from_ref(&mined));
+    commit(&mut primary, &first);
+    // The tip poll catches up.
+    assert_eq!(reader.tip_height().unwrap(), 1);
+    assert_eq!(reader.block_hash(1).unwrap(), first.hash().0);
+
+    let parent = transfer(vec![spend(&mined, 0)], &[(49_000, ODD)]);
+    let second = child(&first, &[coinbase(2, &[(1, P2PKH)]), parent]);
+    commit(&mut primary, &second);
+    // So does a read of a height that was missing, without polling the tip first;
+    // the block's spent output resolves through the same refreshed view.
+    let read = reader.transparent_block(2).unwrap();
+    assert_eq!((read.hash, read.parent), (second.hash().0, first.hash().0));
+    assert_eq!(read.transactions[1].fee, Fee::Exact(1_000));
+    assert_eq!(read.transactions[1].inputs[0].spent.script, P2PKH);
+    assert_eq!(reader.tip_height().unwrap(), 2);
+    assert!(matches!(
+        reader.block_time(3),
+        Err(StateError::MissingBlock(3))
+    ));
+}

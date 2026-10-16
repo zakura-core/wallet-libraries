@@ -24,6 +24,9 @@ node or Zakura Common types.
 - `rocksdb` (feature): `transparent::state::StateReader`, which opens an archive
   node's finalized state as a RocksDB secondary and reads the same transparent
   blocks from it. Its `zakura-state` revision must match the running node's format.
+  A long-lived reader catches up with the node when it reads the tip and when a
+  block read finds nothing, so polling the tip or retrying a missing height sees
+  blocks finalized after it opened; a failed catch-up is an error, not a stale answer.
 - `testing` (feature): synthetic transactions, block envelopes and a JSON-RPC node
   double built with the node's own encoders, for service tests.
 
