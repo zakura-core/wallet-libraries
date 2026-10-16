@@ -43,7 +43,7 @@ fn a_publication_change_resets_the_store_and_keeps_the_catalog() {
         vec![receive, spend],
     );
     events.covered_scripts.clear();
-    events.cached_runs = vec![transparent_wallet::store::CachedRun {
+    events.cached_runs = vec![crate::engine::store::CachedRun {
         child_digest: "cd".repeat(32),
         script: script.clone(),
         shard_id: sealed.shard_id,

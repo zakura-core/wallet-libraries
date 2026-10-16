@@ -48,7 +48,7 @@ fn normalized_events_preserve_attribution_and_local_shard_anchor_after_reopen() 
     });
     adapter
         .store
-        .commit_shard(transparent_wallet::ShardCommit {
+        .commit_shard(crate::engine::ShardCommit {
             source_anchor: None,
             shard_id: entry.shard_id,
             revision_digest: entry.manifest_digest.clone(),
@@ -286,7 +286,7 @@ fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
     let entry = &publication.shards[0];
     adapter
         .store
-        .commit_shard(transparent_wallet::ShardCommit {
+        .commit_shard(crate::engine::ShardCommit {
             source_anchor: None,
             shard_id: entry.shard_id,
             revision_digest: entry.manifest_digest.clone(),
@@ -376,7 +376,7 @@ fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
     let entry = &publication.shards[0];
     adapter
         .store
-        .commit_shard(transparent_wallet::ShardCommit {
+        .commit_shard(crate::engine::ShardCommit {
             source_anchor: None,
             shard_id: entry.shard_id,
             revision_digest: entry.manifest_digest.clone(),

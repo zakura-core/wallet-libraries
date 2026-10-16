@@ -1,6 +1,6 @@
 //! The wallet's own scanned chain as the independent view a pass is checked against.
 
-use transparent_wallet::{Acceptance, Anchor, ChainView};
+use crate::engine::{Acceptance, Anchor, ChainView};
 use zcash_client_backend::data_api::{WalletRead, transparent_ledger::ChainPoint};
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::BlockHeight;

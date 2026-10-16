@@ -15,12 +15,12 @@ mod sync_inputs;
 #[cfg(test)]
 mod tests;
 
+use crate::engine::transport::{FilterSource, ShardTransport};
+use crate::engine::{ChainView, SetIdentity, SyncError, WorkLimits};
+use crate::engine_store::SqliteStore;
 use rusqlite::Connection;
 use std::{any::Any, path::Path, time::Duration};
 use transparent_filter::ShardMap;
-use transparent_wallet::transport::{FilterSource, ShardTransport};
-use transparent_wallet::{ChainView, SetIdentity, SyncError, WorkLimits};
-use transparent_wallet_store::SqliteStore;
 use zcash_client_backend::data_api::transparent_ledger::TransparentAddressWatchSet;
 
 pub(crate) use preflight::{
@@ -215,7 +215,7 @@ impl TransparentHistoryRecovery {
             max_queries: Some(self.config.queries),
             max_private_bytes: Some(self.config.private_bytes),
         };
-        let synced = match transparent_wallet::sync_into(
+        let synced = match crate::engine::sync_into(
             &mut self.store,
             &map,
             map_fetch_bytes,

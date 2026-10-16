@@ -25,7 +25,7 @@ use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, error::Error, fs, path::PathBuf, time::Duration};
 use transparent::address::TransparentAddress;
-use transparent_wallet::{ChainView, StaticChain};
+use zakura_pir_transparent::engine::{ChainView, StaticChain};
 use zakura_pir_transparent::{
     BatchState, HoldCause, HttpExchange, HttpFailure, HttpMethod, HttpReply, HttpRequest,
     PassLimits, PassPlan, Retry, Step, TransparentHistoryRecovery,
@@ -336,7 +336,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let watch = plan.watch();
             if watch.target.unwrap().height != BlockHeight::from(through)
                 || chain.is_accepted(u64::from(through), &watch.target.unwrap().hash.to_string())
-                    != transparent_wallet::Acceptance::Accepted
+                    != zakura_pir_transparent::engine::Acceptance::Accepted
             {
                 return Err("wallet target differs from independent chain".into());
             }

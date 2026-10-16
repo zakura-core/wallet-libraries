@@ -22,7 +22,7 @@ use transparent_filter::{
     BlockHash, FilterLimits, ScriptBytes, ShardKey, ShardMap, match_range_scripts, range_profile,
     validate_range_filter,
 };
-use transparent_wallet::http::{HttpFilterSource, HttpOptions, HttpShardTransport};
+use zakura_pir_transparent::engine::http::{HttpFilterSource, HttpOptions, HttpShardTransport};
 use zakura_pir_transparent::{Discovery, DiscoveryLimits, Outcome, discover_active_addresses};
 
 /// The first height the fixture publishes, a mainnet height.

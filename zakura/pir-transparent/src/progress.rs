@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use transparent_wallet::{Completion, IncompleteReason, MAX_CONTENT_FAILURES, SyncReport};
+use crate::engine::{Completion, IncompleteReason, MAX_CONTENT_FAILURES, SyncReport};
 
 /// Why a pass stopped. Only [`Outcome::Complete`] covers the whole target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
