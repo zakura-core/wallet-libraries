@@ -338,7 +338,7 @@ impl ShardMap {
                     shard.geometry
                 ));
             }
-            if shard.manifest_digest.len() != 64 {
+            if !is_digest(&shard.manifest_digest) {
                 return Err(format!(
                     "shard {index} has no manifest digest to identify its revision"
                 ));
@@ -627,6 +627,26 @@ mod tests {
             .validate_supported()
             .unwrap_err()
             .contains("empty"));
+    }
+
+    #[test]
+    fn current_revision_digests_must_be_canonical_hex_before_admission() {
+        let (_, valid) = before_and_after();
+        for digest in [
+            "A".repeat(64),
+            "g".repeat(64),
+            format!("../{}", "a".repeat(61)),
+            format!("{}?x=1", "a".repeat(60)),
+            format!("{}#tag", "a".repeat(60)),
+            format!("{}%2f", "a".repeat(61)),
+        ] {
+            assert_eq!(digest.len(), 64);
+            let mut map = valid.clone();
+            map.shards[0].manifest_digest = digest;
+            assert!(map.check_shape().unwrap_err().contains("manifest digest"));
+            assert!(map.validate_supported().is_err());
+        }
+        valid.validate_supported().unwrap();
     }
 
     /// Before: 0 [1,10], 1 [11,20], 2 [21,30], 3 [31,40], tail 4 [41,45].
