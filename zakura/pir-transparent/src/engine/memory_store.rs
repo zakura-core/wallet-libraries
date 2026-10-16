@@ -153,6 +153,7 @@ impl WalletStore for MemoryStore {
     }
 
     fn commit_shard(&mut self, commit: ShardCommit) -> Result<u64, StoreError> {
+        let _ = commit.encode_events()?;
         transparent_events::check_transaction_consistency(
             self.state
                 .receives

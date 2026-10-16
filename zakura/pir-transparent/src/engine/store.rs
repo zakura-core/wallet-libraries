@@ -265,7 +265,32 @@ pub struct ShardCommit {
     pub failed_entries: Vec<Vec<u8>>,
 }
 
+/// Ledger-event bytes, framed pending-event lists, then framed cached-run lists.
+pub(crate) type EncodedCommitEvents = (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>);
+
 impl ShardCommit {
+    /// Check every staged event before either store changes its state. SQLite
+    /// reuses these exact bytes; the memory store discards them after checking.
+    /// This includes unfinished work that has not entered the ledger yet.
+    pub(crate) fn encode_events(&self) -> Result<EncodedCommitEvents, StoreError> {
+        let events = self
+            .events
+            .iter()
+            .map(|stored| encode_event(stored.event))
+            .collect::<Result<Vec<_>, _>>()?;
+        let pending = self
+            .pending_upsert
+            .iter()
+            .map(|pending| encode_events(&pending.carried))
+            .collect::<Result<Vec<_>, _>>()?;
+        let runs = self
+            .cached_runs
+            .iter()
+            .map(|run| encode_events(&run.events))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((events, pending, runs))
+    }
+
     /// Whether this commit covers its `covered_scripts` over the whole of a
     /// sealed shard, so no later walk of the shard is expected for them and
     /// the store drops their cached runs in it. Coverage clipped to a wallet
@@ -277,6 +302,23 @@ impl ShardCommit {
                 .as_ref()
                 .is_none_or(|source| source.height == self.end_height)
     }
+}
+
+fn encode_event(event: TransparentEvent) -> Result<Vec<u8>, StoreError> {
+    event
+        .to_bytes()
+        .map_err(|error| StoreError::Corrupt(error.to_string()))
+}
+
+/// Events, each framed by its length, after a version tag.
+fn encode_events(events: &[TransparentEvent]) -> Result<Vec<u8>, StoreError> {
+    let mut out = b"EV3\0".to_vec();
+    for event in events {
+        let raw = encode_event(*event)?;
+        out.extend_from_slice(&(raw.len() as u16).to_le_bytes());
+        out.extend_from_slice(&raw);
+    }
+    Ok(out)
 }
 
 /// Published setup for one table segment, kept for reuse.
