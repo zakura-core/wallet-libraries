@@ -40,10 +40,12 @@ Per directory shard S, per pass:
    the wrapper sends none either.
 2. **A cover set C is chosen when S first needs pages.** For N of at most 3, C
    is every page table. Otherwise its size is 3 with odds 0.7, and uniform from
-   4 to N with odds 0.3. C holds the table of that first request, every table
-   the store's pending page work in S already starts in, and uniformly random
-   other tables up to the size. When the known tables outnumber the size, C is
-   the known tables.
+   4 to N with odds 0.3. C holds every table the walk's first round in S
+   addresses (the engine names a round's tables to the transport before
+   sending any of it, so this includes the heads of walks the directory phase
+   just found), every table the store's pending page work in S already starts
+   in, and uniformly random other tables up to the size. When the known tables
+   outnumber the size, C is the known tables.
 3. **Every real page query becomes a sweep over C.** One query to each table
    of C, in a fresh uniformly random order, the real query in its table's slot
    and a dummy everywhere else. A dummy is a fresh query for row 0 of its
@@ -66,7 +68,8 @@ Per directory shard S, per pass:
    page tables, with every table growth added. A walk resumed by a later pass
    of the same session, after a budget stop or a content failure, sweeps the
    same C, so the service cannot intersect sets across syncs. A growing tail
-   republished over the same sealed tables keeps its C. Reopening the companion
+   republished over the same sealed tables keeps its C, less any table the new
+   revision leaves without rows. Reopening the companion
    draws a new session. Nothing is stored.
 7. **Setups single out nothing.** The first time a session needs pages in a
    shard revision, the wrapper fetches the setup of every segment of every page
@@ -96,7 +99,9 @@ Per directory shard S, per pass:
     sweep's next query is sent. Otherwise a service could fail one slot's
     reply and learn from the walk's reaction whether that slot was real. Each
     page setup reply must be no longer than the estimate admitted for it
-    before the next setup is fetched. A reply that fails this fails its
+    before the next setup is fetched, and every fetched setup must check out
+    as the client checks one it opens (its parameters decode, have the
+    scheme's length and hash to the declared digest) before any sweep. A reply that fails this fails its
     request and ends padding for the pass; a wrong epoch also makes the next
     attempt fetch every setup again. The check is the same in every slot and
     reads nothing past the headers.
@@ -211,6 +216,13 @@ service's headroom above 20 QPS, and the 20 QPS gate under v12.
   after a refused real sweep the walk retries the shard, after a refused cover
   sweep the wallet moves on. A budget stop is not a refusal and is never sent:
   the service sees the pass end between sweeps.
+- **A real slot an active service corrupts.** Rule 10 checks every reply's
+  framing, not its content: a dummy's row is never decoded. A service that
+  keeps one table's headers intact but garbles its responses learns from the
+  walk whether that table was real, because a real reply then fails on
+  content and ends its walk, which changes how many sweeps follow. Closing
+  this would mean decoding and checking every dummy row, or a sweep count per
+  shard that does not depend on the walk; neither is built.
 - **Import discovery** (`discover.rs`) sends its own syncs without cover.
 
 ## 5. What this does not build

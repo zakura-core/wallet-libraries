@@ -153,16 +153,33 @@ pub(crate) fn padded(sweeps: u64) -> u64 {
     sweeps.next_power_of_two()
 }
 
-/// The parameter epoch a page setup reply names: the first eight bytes of its
-/// parameters' digest, as the client derives it when it opens the segment.
-fn setup_epoch(setup: &[u8]) -> Result<[u8; 8], BoxError> {
-    let parsed: serde_json::Value = serde_json::from_slice(setup)?;
-    let digest = parsed["public_params_sha256"]
+/// Checks a page setup reply as the client checks the setup of a table it
+/// opens, whether or not the walk will open this one: its parameters decode,
+/// have the scheme's length, and hash to the digest it declares. Returns the
+/// parameter epoch every reply made under it carries, the digest's first
+/// eight bytes. Every table's setup passes the same check, so a service
+/// cannot learn which table is real from a setup only the walk would refuse.
+fn setup_epoch(setup: &[u8], public_bytes: usize) -> Result<[u8; 8], BoxError> {
+    use base64::Engine as _;
+    let refused = || -> BoxError { "page cover: a page setup that does not check out".into() };
+    let parsed: serde_json::Value = serde_json::from_slice(setup).map_err(|_| refused())?;
+    let params = parsed["public_params"]
         .as_str()
-        .and_then(|digest| hex::decode(digest.get(..16)?).ok())
-        .ok_or("page cover: a page setup without a parameter digest")?;
+        .and_then(|params| {
+            base64::engine::general_purpose::STANDARD
+                .decode(params)
+                .ok()
+        })
+        .ok_or_else(refused)?;
+    let digest = Sha256::digest(&params);
+    let declared = parsed["public_params_sha256"]
+        .as_str()
+        .ok_or_else(refused)?;
+    if params.len() != public_bytes || hex::encode(digest) != declared {
+        return Err(refused());
+    }
     let mut epoch = [0u8; 8];
-    epoch.copy_from_slice(&digest);
+    epoch.copy_from_slice(&digest[..8]);
     Ok(epoch)
 }
 
@@ -213,7 +230,8 @@ pub(crate) struct PageCover<'a, T> {
     session: &'a mut CoverSession,
     geometry: &'a ServiceGeometry,
     limits: WorkLimits,
-    /// The page tables pending work already names, per shard revision.
+    /// The page tables pending work already names, and those each page round
+    /// announced, per shard revision: what a cover drawn there must hold.
     pending: HashMap<(u64, String), BTreeSet<u32>>,
     /// Manifests this pass fetched, per shard revision.
     manifests: HashMap<(u64, String), ShardManifest>,
@@ -396,6 +414,11 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
             let cover = draw(&mut self.session.rng, &tables, &known);
             self.session.covers.insert(cover_key, cover);
         }
+        // A cover kept across revisions drops a table a later revision of the
+        // tail left without rows: no query can address it.
+        if let Some(cover) = self.session.covers.get_mut(&cover_key) {
+            cover.retain(|table| tables.contains(table));
+        }
         if !self.session.setups.contains_key(&key) {
             self.fetch_setups(&key)?;
         }
@@ -433,7 +456,10 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
             if cost > per_segment {
                 return Err("page cover: a page setup reply longer than its scheme allows".into());
             }
-            epochs.insert((table, segment), setup_epoch(&bytes)?);
+            epochs.insert(
+                (table, segment),
+                setup_epoch(&bytes, params.pages_scheme.public_bytes)?,
+            );
             setups.insert((table, segment), (bytes, cost));
         }
         self.session
@@ -626,6 +652,17 @@ impl<'a, T: ShardTransport> PageCover<'a, T> {
 }
 
 impl<T: ShardTransport> ShardTransport for PageCover<'_, T> {
+    /// A round's tables are known before any of them is asked for: a cover
+    /// drawn for this revision's shard from now on holds them all, so the
+    /// heads of walks the directory phase just found do not show as growth.
+    /// Sends nothing.
+    fn page_round(&mut self, shard_id: u64, revision: &str, tables: &[u32]) {
+        self.pending
+            .entry((shard_id, revision.to_owned()))
+            .or_default()
+            .extend(tables.iter().copied());
+    }
+
     fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
         self.end_work();
         self.inner.init()

@@ -1139,4 +1139,95 @@ mod page_cover {
             );
         }
     }
+
+    /// Two scripts whose heads the same directory lookup finds, in `pages-1` and
+    /// `pages-7` of a shard of ten tables, are covered from the first sweep: the
+    /// first round names both tables before anything is sent, so the cover holds
+    /// both and never grows. Before, the cover was drawn from the first query's
+    /// table alone, and the other head's table often joined it visibly.
+    #[test]
+    fn heads_found_together_share_the_first_cover() {
+        let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+        let end = H0 + 99;
+        let mut events = history(1, H0 + 11, 3);
+        events.extend(history(2, H0 + 71, 3));
+        let (_server, url, _dir) = serve(&[shard(H0, end, 10, events)]);
+        for seed in 0..8 {
+            let mut wallet = Wallet::open(1, end, seed, config(1, QUERIES, PRIVATE_BYTES));
+            wallet.also = vec![2];
+            let (report, sent) = wallet.pass(&url);
+            assert_eq!(report.progress.outcome, Outcome::Complete);
+            let queries = page_queries(&sent, 0);
+            let cover = tables(&queries);
+            assert!(
+                cover.is_superset(&BTreeSet::from([1, 7])),
+                "seed {seed}: {queries:?}"
+            );
+            // Whole sweeps over one cover: no sweep added a table.
+            sweeps(&queries, &cover);
+            for owner in [1, 2] {
+                assert_eq!(
+                    wallet.recovered(owner),
+                    (3, 0),
+                    "seed {seed}, owner {owner}"
+                );
+            }
+        }
+    }
+
+    /// A service that sends one page table a setup whose parameters do not hash
+    /// to its declared digest learns nothing about which table is real: whichever
+    /// table it picks, the pass fails before any page query. Before, a bad setup
+    /// for a table only covered went unchecked and the sweeps went ahead, while
+    /// one for the real table stopped the walk.
+    #[test]
+    fn a_bad_setup_for_any_table_stops_the_pass_before_its_sweeps() {
+        let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+        /// Corrupts the declared digest of page table `table`'s setup, and
+        /// counts the page queries sent.
+        struct BadSetup {
+            inner: Loopback,
+            table: u32,
+            pages: std::cell::Cell<usize>,
+        }
+        impl HttpExchange for BadSetup {
+            fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
+                let mut reply = self.inner.send(request)?;
+                if request.method == HttpMethod::Post && request.path.contains("/query/pages-") {
+                    self.pages.set(self.pages.get() + 1);
+                }
+                if request
+                    .path
+                    .contains(&format!("/setup/pages-{}/", self.table))
+                {
+                    let mut setup: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+                    setup["public_params_sha256"] = serde_json::Value::String("00".repeat(32));
+                    reply.body = serde_json::to_vec(&setup).unwrap();
+                }
+                Ok(reply)
+            }
+        }
+        let end = H0 + 29;
+        let (_server, url, _dir) = serve(&[shard(H0, end, 10, history(1, H0 + 1, 3))]);
+        // The history's run is in pages-0; every table is covered.
+        for table in 0..3 {
+            let mut wallet = Wallet::open(1, end, 7, config(1, QUERIES, PRIVATE_BYTES));
+            let exchange = BadSetup {
+                inner: Loopback::new(&url),
+                table,
+                pages: std::cell::Cell::new(0),
+            };
+            let watch = wallet.watch();
+            let chain = Chain { tip: end };
+            let result = wallet.recovery.as_mut().unwrap().pass(
+                &watch,
+                &chain,
+                &exchange,
+                RESPONSE_LIMIT,
+                &|| false,
+            );
+            assert!(result.is_err(), "table {table}: the pass fails");
+            assert_eq!(exchange.pages.get(), 0, "table {table}: no page query");
+        }
+    }
 }
