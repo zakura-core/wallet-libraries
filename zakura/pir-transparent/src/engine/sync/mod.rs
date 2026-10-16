@@ -923,6 +923,14 @@ pub fn sync_into<S: WalletStore>(
             ..Default::default()
         })?;
     }
+    // Filters and setups are cached by revision and read only under those the
+    // map publishes: a replaced revision's are never read again.
+    let queryable: Vec<&str> = map
+        .shards
+        .iter()
+        .map(|entry| entry.manifest_digest.as_str())
+        .collect();
+    store.prune_caches(&queryable)?;
 
     // Replies a lookahead sends early are held here until the walk asks for
     // them; see `ahead`. With nothing stashed both pass straight through.
