@@ -183,6 +183,12 @@ pub struct CheckedShard {
 /// Checks a shard batch against the request, the published map, and the
 /// wallet's accepted chain.
 ///
+/// The caller must first admit the whole map with [`ShardMap::validate_supported`]
+/// before deriving coverage from any batches. This function checks the advertised
+/// format and the requested records only, so processing successive batches does
+/// not repeatedly scan every shard or re-cut declaration. [`sync_shards`] performs
+/// that admission once before requesting any batches, including an empty pass.
+///
 /// With content-sealed shards a wallet cannot recompute where a shard should
 /// begin and end, so the published map takes the place that height arithmetic
 /// held for per-block filters. Three separate things are checked, and all three
@@ -205,7 +211,9 @@ pub fn check_range_batch(
     chain: &impl AcceptedChain,
     limits: FilterLimits,
 ) -> Result<Vec<CheckedShard>, FilterError> {
-    let profile = map.validate_supported().map_err(FilterError::Response)?;
+    let profile = map
+        .check_supported_format()
+        .map_err(FilterError::Response)?;
     if map.profile != request.profile {
         return Err(FilterError::Response(
             "requested profile differs from the shard map".into(),
@@ -975,6 +983,13 @@ mod tests {
                 )
                 .is_err());
             }
+        }
+        for mutate in [
+            (|map: &mut ShardMap| map.range_envelope_version += 1) as fn(&mut ShardMap),
+            |map: &mut ShardMap| map.profile = "unknown-range-profile".into(),
+        ] {
+            let mut map = valid.clone();
+            mutate(&mut map);
             let request = ShardRangeRequest {
                 genesis: mainnet_genesis(),
                 profile: map.profile.clone(),
@@ -996,6 +1011,47 @@ mod tests {
             let (map, _, _) = shard_fixture_for(1, profile);
             assert_eq!(map.validate_supported().unwrap(), profile);
         }
+    }
+
+    /// Whole-map admission owns shape checks. Rechecking them per batch would
+    /// scan unrelated shards and turn a full sync into repeated whole-map work.
+    #[test]
+    fn batch_validation_only_visits_requested_shards_after_admission() {
+        let (mut map, records, chain) = shard_fixture(2);
+        map.validate_supported().unwrap();
+        let request = ShardRangeRequest {
+            genesis: mainnet_genesis(),
+            profile: map.profile.clone(),
+            start_shard: 0,
+            count: 1,
+        };
+        let batch = RangeFilterBatch {
+            version: RANGE_ENVELOPE_VERSION,
+            genesis: request.genesis,
+            profile: request.profile.clone(),
+            start_shard: 0,
+            records: records[..1].to_vec(),
+        };
+        assert_eq!(
+            check_range_batch(&batch, &request, &map, &chain, FilterLimits::default())
+                .unwrap()
+                .len(),
+            1
+        );
+        // A newly offered map with broken unrelated history must fail admission.
+        // Batch checking itself must remain local to the requested interval.
+        map.shards[1].directory_segments = 0;
+        assert!(map.validate_supported().is_err());
+        assert_eq!(
+            check_range_batch(&batch, &request, &map, &chain, FilterLimits::default())
+                .unwrap()
+                .len(),
+            1
+        );
+        map.shards[0].filter_hash = "00".repeat(32);
+        assert!(
+            check_range_batch(&batch, &request, &map, &chain, FilterLimits::default()).is_err()
+        );
     }
 
     #[test]

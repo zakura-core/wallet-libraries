@@ -228,6 +228,14 @@ impl ShardMap {
     /// Unknown versions and profiles are refused without interpreting their data.
     pub fn validate_supported(&self) -> Result<&'static crate::profile::RangeProfile, String> {
         self.check_shape()?;
+        self.check_supported_format()
+    }
+
+    /// Checks only the advertised envelope version and registered filter
+    /// profile, independently of the number of shards or re-cut declarations.
+    /// This is suitable for each batch after [`Self::validate_supported`] has
+    /// admitted the whole map; it does not establish gapless map coverage.
+    pub fn check_supported_format(&self) -> Result<&'static crate::profile::RangeProfile, String> {
         if self.range_envelope_version != crate::envelope::RANGE_ENVELOPE_VERSION {
             return Err(format!(
                 "unsupported range envelope version {}",
