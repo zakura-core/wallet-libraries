@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Verify the server ownership boundary and fresh wallet/server consumer graphs."""
 import json
+import posixpath
 from pathlib import Path
 import subprocess
 import tempfile
@@ -30,12 +31,13 @@ def wallet_pir_owned(value):
             value = f"ssh://{host}/{path}"
     try:
         parsed = urlsplit(value)
-        if (parsed.hostname or "").lower().rstrip(".") not in GITHUB_HOSTS:
+        if unquote(parsed.hostname or "").lower().rstrip(".") not in GITHUB_HOSTS:
             return False
     except ValueError:
         return False
-    # Decode once, as URL parsing does; an encoded separator still names the repository.
-    path = "/".join(part for part in unquote(parsed.path).lower().split("/") if part)
+    # Git accepts escaped hostnames and resolves dot segments in HTTP paths.
+    # Decode once: double escaping names a different path on GitHub.
+    path = posixpath.normpath(unquote(parsed.path).lower()).strip("/")
     return path.removesuffix(".git") in ("valargroup/wallet-pir", "zakura-core/wallet-pir")
 
 

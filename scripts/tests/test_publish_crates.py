@@ -138,6 +138,8 @@ class PublishingTests(unittest.TestCase):
         for owner in ("valargroup", "zakura-core"):
             for url in (
                 f"https://github.com/{owner}/wallet%2Dpir",
+                f"https://%67ithub.com/{owner}/wallet-pir.git",
+                f"https://github.com/{owner}/ignored/../wallet-pir.git",
                 f"https://github.com/{owner}%2Fwallet-pir",
                 f"https://github.com/{owner}/wallet-pir%2Egit",
                 f"https://GITHUB.COM:443/{owner.upper()}/WALLET-PIR.git/",
@@ -160,6 +162,8 @@ class PublishingTests(unittest.TestCase):
             "https://github.com/other/wallet-pir",
             "https://github.com/valargroup/wallet%252Dpir",
             "https://github.com.evil.example/valargroup/wallet-pir",
+            "https://%67ithub.com.evil.example/valargroup/wallet-pir",
+            "https://github.com/valargroup/wallet-pir/../ordinary",
             "https://evil.example/github.com/valargroup/wallet-pir",
             "https://github.com@evil.example/valargroup/wallet-pir",
             "https://github.com/zcash/librustzcash",
