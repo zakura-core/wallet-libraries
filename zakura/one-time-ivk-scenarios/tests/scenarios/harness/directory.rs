@@ -1,5 +1,5 @@
-//! The receiver directory, served in process over the real receiver routes and real
-//! PIR.
+//! The receiver directory, served in process over the receiver routes and real PIR.
+//! The service's own HTTP router is tested against these clients in wallet-pir.
 
 use std::{
     cell::OnceCell,
@@ -7,16 +7,16 @@ use std::{
     sync::Mutex,
 };
 
-use axum::{Router, body::Body, http::Request};
 use receiver_directory::{
-    Record,
+    RawRecord,
     snapshot::{Manifest, PROFILE, Snapshot},
-    witness::WitnessSnapshot,
 };
 use receiver_pir::{MIN_ROWS, server::Server};
-use receiver_pir_server::{Publication, Publications, router_with_publications};
-use tower::ServiceExt as _;
 use zakura_pir_receiver::{DirectoryError, Transport};
+use zakura_receiver_crypto::{
+    Record,
+    witness::{Publication, WitnessSnapshot},
+};
 
 use super::{
     chain::{ACTIVATION, Chain, GENESIS},
@@ -52,7 +52,7 @@ pub struct Options {
 
 /// A directory serving one publication, with injectable failures.
 pub struct Directory {
-    router: Router,
+    routes: Routes,
     requests: Mutex<Vec<String>>,
     faults: Mutex<VecDeque<u16>>,
     targeted: Mutex<Vec<Fault>>,
@@ -108,8 +108,18 @@ impl Directory {
             filters: Vec::new(),
             filters_sha256: [0; 32],
         };
+        // The publisher validated every record before writing its row slot.
+        let raw: Vec<RawRecord> = records
+            .iter()
+            .map(|r| {
+                let slot = r.encode().expect("a valid record");
+                RawRecord::decode(&slot)
+                    .expect("a row slot")
+                    .expect("a record")
+            })
+            .collect();
         let snapshot =
-            Snapshot::build(manifest, &records, &near.sets(now)).expect("a valid publication");
+            Snapshot::build(manifest, &raw, &near.sets(now)).expect("a valid publication");
         let commitments = &chain.commitments()[..usize::try_from(end_position).expect("fits")];
         let positions = records
             .iter()
@@ -117,16 +127,13 @@ impl Directory {
             .collect();
         // A chain without Ironwood outputs has no witnesses to serve.
         let witnesses = (!commitments.is_empty()).then(|| {
-            WitnessSnapshot::build(&snapshot.manifest, commitments, &positions)
+            WitnessSnapshot::build(&publication(&snapshot.manifest), commitments, &positions)
                 .expect("witnesses build")
                 .encode()
         });
         let server = Server::new(snapshot).expect("the PIR server prepares");
-        let publication = Publication::new(server, witnesses).expect("a publication");
-        let publications = Publications::default();
-        assert!(publications.publish(publication, publications.epoch()));
         Self {
-            router: router_with_publications(publications),
+            routes: Routes::new(server, witnesses),
             requests: Mutex::new(Vec::new()),
             faults: Mutex::new(VecDeque::new()),
             targeted: Mutex::new(Vec::new()),
@@ -205,24 +212,13 @@ impl Directory {
         let status = match self.fault_for(&request) {
             Some(status) => status,
             None => {
-                let request = Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .body(Body::from(body))
-                    .expect("a valid request");
-                let response = self
-                    .router
-                    .clone()
-                    .oneshot(request)
-                    .await
-                    .expect("routes answer");
-                let status = response.status().as_u16();
-                let body = axum::body::to_bytes(response.into_body(), limit)
-                    .await
-                    .map_err(|_| DirectoryError::Transport("response over its limit".into()))?;
+                let (status, body) = self.routes.answer(method, path, &body);
+                if body.len() > limit {
+                    return Err(DirectoryError::Transport("response over its limit".into()));
+                }
                 if status == 200 {
                     self.bytes.lock().unwrap().1 += body.len() as u64;
-                    return Ok(body.to_vec());
+                    return Ok(body);
                 }
                 status
             }
@@ -232,6 +228,74 @@ impl Directory {
         match status {
             409 | 410 => Err(DirectoryError::Revision),
             status => Err(DirectoryError::Transport(format!("HTTP {status}"))),
+        }
+    }
+}
+
+/// The fields of `manifest` its witness file binds to.
+fn publication(manifest: &Manifest) -> Publication {
+    Publication {
+        genesis: manifest.genesis,
+        directory_revision: manifest.revision().expect("a valid manifest"),
+        end_height: manifest.end_height,
+        end_hash: manifest.end_hash,
+        start_position: manifest.start_position,
+        end_position: manifest.end_position,
+        records: manifest.records,
+    }
+}
+
+/// One publication's receiver routes, answered as the receiver service answers them:
+/// its manifest, PIR setup, rows, filters and witnesses, and real PIR evaluation of
+/// each encrypted query. A session it does not serve is gone (410).
+struct Routes {
+    server: Server,
+    id: String,
+    witnesses: Option<Vec<u8>>,
+}
+
+impl Routes {
+    fn new(server: Server, witnesses: Option<Vec<u8>>) -> Self {
+        Self {
+            id: hex::encode(server.id()),
+            server,
+            witnesses,
+        }
+    }
+
+    /// The status and body for `method` on `path`.
+    fn answer(&self, method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
+        let route = path.strip_prefix("/v1/receiver/").unwrap_or(path);
+        if (method, route) == ("POST", "query") {
+            return match self.server.respond(body) {
+                Ok(response) => (200, response),
+                Err(receiver_pir::Error::Revision) => (410, Vec::new()),
+                Err(receiver_pir::Error::Malformed) => (400, Vec::new()),
+                Err(_) => (500, Vec::new()),
+            };
+        }
+        if (method, route) == ("GET", "init") {
+            let manifest = serde_json::to_vec(self.server.manifest()).expect("a manifest");
+            return (200, manifest);
+        }
+        let Some((material, id)) = route.split_once('/').filter(|_| method == "GET") else {
+            return (404, Vec::new());
+        };
+        if hex::decode(id).ok().filter(|id| id.len() == 32).is_none() {
+            return (400, Vec::new());
+        }
+        if id != self.id {
+            return (410, Vec::new());
+        }
+        match material {
+            "public" => (200, self.server.public().to_vec()),
+            "rows" => (200, self.server.rows().to_vec()),
+            "filters" => (200, self.server.filters().to_vec()),
+            "witness" => match &self.witnesses {
+                Some(bytes) => (200, bytes.clone()),
+                None => (503, Vec::new()),
+            },
+            _ => (404, Vec::new()),
         }
     }
 }
