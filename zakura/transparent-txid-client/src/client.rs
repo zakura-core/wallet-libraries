@@ -622,11 +622,13 @@ impl TxidDisplayClient {
         if map.to_bytes() != reply.body {
             return Err(TxidError::Protocol(ProtocolKind::MapCanonical));
         }
-        // Shape rules describe only formats this client understands.
-        // Unknown schemas or recent geometries reach locate's Unsupported
-        // result before any chunk, manifest or private query.
-        if supported_map(&map) {
-            map.check_shape().map_err(protocol(ProtocolKind::Map))?;
+        // Shape rules describe only schemas this client understands. Within
+        // one, every entry is admitted, canonical digests included, before
+        // the map is cached or names a path; an unknown recent geometry then
+        // reaches locate's Unsupported result before any chunk, manifest or
+        // private query.
+        if map.schema == display::DISPLAY_SCHEMA {
+            map.check_format().map_err(protocol(ProtocolKind::Map))?;
         }
         let chain = Chain {
             network: map.network.clone(),
@@ -703,8 +705,9 @@ impl TxidDisplayClient {
             }
         };
         // Checked on every use: a cached chunk may sit at another position
-        // of a newer map.
-        map.check_chunk(index, &chunk)
+        // of a newer map. An archive geometry newer than this client is
+        // classified by locate as Unsupported, not refused here as malformed.
+        map.check_chunk_format(index, &chunk)
             .map_err(protocol(ProtocolKind::Map))?;
         self.chunks.insert(digest.clone(), chunk.clone());
         Ok(chunk)
@@ -1160,6 +1163,193 @@ mod tests {
             );
             assert!(Arc::ptr_eq(client.map.as_ref().unwrap(), &held));
             assert_eq!(sent(&mut transport), [Route::Map, Route::Map]);
+        }
+    }
+
+    /// A map of two sealed archives over 100..=104 and 105..=109 in
+    /// `geometry`, and the one index chunk listing them.
+    fn archive_map(geometry: &str) -> (DisplayRecentMap, DisplayIndexChunk) {
+        let archive = |shard_id: u64, start: u64, end: u64| DisplayMapEntry {
+            sealed: true,
+            revision: 0,
+            shard_id,
+            ..recent_map(start, end, geometry).recent.unwrap()
+        };
+        let mut second = archive(1, 105, 109);
+        second.parent_block_hash = hex_of("block 104");
+        let chunk = DisplayIndexChunk {
+            schema: display::DISPLAY_SCHEMA.into(),
+            base_shard_id: 0,
+            shards: vec![archive(0, 100, 104), second],
+        };
+        let mut map = map(100);
+        map.archives = 2;
+        map.unsealed_start = 110;
+        map.chunks.push(display::DisplayChunkRef {
+            start_height: 100,
+            sha256: chunk.sha256(),
+        });
+        (map, chunk)
+    }
+
+    fn chunk_reply(chunk: &DisplayIndexChunk) -> Result<TxidReply, TransportError> {
+        Ok(TxidReply {
+            body: chunk.to_bytes(),
+            ..reply(200)
+        })
+    }
+
+    /// 64 characters each, so only digest syntax can refuse them.
+    fn noncanonical_digests() -> [String; 3] {
+        [
+            format!("{}/../{}", "a".repeat(30), "b".repeat(30)),
+            format!("{}?x", "a".repeat(62)),
+            "AB".repeat(32),
+        ]
+    }
+
+    #[test]
+    fn unknown_archive_geometry_is_unsupported_before_manifest_setup_or_query() {
+        let (map, chunk) = archive_map("txid-future");
+        map.check_shape().unwrap();
+        assert!(map.check_chunk(0, &chunk).is_err());
+        let mut transport = Scripted::default();
+        transport.replies.extend([
+            Ok(init_with(&["txid-2k8"])),
+            served(&map),
+            chunk_reply(&chunk),
+        ]);
+        let mut client = test_client();
+        assert_eq!(
+            client.lookup(&mut transport, [1; 32], 107, &never),
+            Ok(TxidLookup::Unsupported)
+        );
+        assert_eq!(
+            sent(&mut transport),
+            [Route::Init, Route::Map, Route::MapChunk]
+        );
+        assert!(client.manifests.is_empty());
+        assert!(client.setups.is_empty());
+        // The authenticated chunk is cached; a second lookup sends nothing.
+        assert_eq!(
+            client.lookup(&mut transport, [2; 32], 102, &never),
+            Ok(TxidLookup::Unsupported)
+        );
+        assert!(sent(&mut transport).is_empty());
+    }
+
+    #[test]
+    fn unknown_archive_geometry_keeps_digest_header_canonical_and_chain_checks() {
+        for corruption in 0..5 {
+            let (mut map, mut chunk) = archive_map("txid-future");
+            let mut map_response = served(&map).unwrap();
+            let mut chunk_response = chunk_reply(&chunk).unwrap();
+            let mut routes = vec![Route::Init, Route::Map, Route::MapChunk];
+            let expected = match corruption {
+                // The chunk is not the one the map names.
+                0 => {
+                    chunk_response.body = {
+                        chunk.shards[0].records += 1;
+                        chunk.to_bytes()
+                    };
+                    ProtocolKind::Map
+                }
+                // The map header does not match the map.
+                1 => {
+                    map_response.map_sha256 = Some("ab".repeat(32));
+                    routes.pop();
+                    ProtocolKind::MapHeader
+                }
+                // A noncanonical chunk under its own digest.
+                2 => {
+                    chunk_response.body.push(b' ');
+                    map.chunks[0].sha256 = hex::encode(Sha256::digest(&chunk_response.body));
+                    map_response = served(&map).unwrap();
+                    ProtocolKind::MapCanonical
+                }
+                // The second archive does not chain to the first.
+                3 => {
+                    chunk.shards[1].parent_block_hash = hex_of("elsewhere");
+                    map.chunks[0].sha256 = chunk.sha256();
+                    map_response = served(&map).unwrap();
+                    chunk_response = chunk_reply(&chunk).unwrap();
+                    ProtocolKind::Map
+                }
+                // An archive manifest digest that is not canonical.
+                _ => {
+                    chunk.shards[1].manifest_digest = "AB".repeat(32);
+                    map.chunks[0].sha256 = chunk.sha256();
+                    map_response = served(&map).unwrap();
+                    chunk_response = chunk_reply(&chunk).unwrap();
+                    ProtocolKind::Map
+                }
+            };
+            let mut transport = Scripted::default();
+            transport
+                .replies
+                .extend([Ok(init_with(&["txid-2k8"])), Ok(map_response)]);
+            if routes.len() == 3 {
+                transport.replies.push_back(Ok(chunk_response));
+            }
+            let mut client = test_client();
+            assert_eq!(
+                client.lookup(&mut transport, [1; 32], 107, &never),
+                Err(TxidError::Protocol(expected)),
+                "{corruption}"
+            );
+            assert_eq!(sent(&mut transport), routes, "{corruption}");
+            assert!(client.chunks.is_empty(), "{corruption}");
+            assert!(client.manifests.is_empty(), "{corruption}");
+        }
+    }
+
+    #[test]
+    fn noncanonical_recent_digests_are_refused_before_caching_or_any_manifest_path() {
+        for geometry in ["txid-2k8", "txid-future"] {
+            for digest in noncanonical_digests() {
+                let mut bad = recent_map(100, 200, geometry);
+                bad.recent.as_mut().unwrap().manifest_digest = digest.clone();
+                let mut transport = Scripted::default();
+                transport
+                    .replies
+                    .extend([Ok(init_with(&["txid-2k8"])), served(&bad)]);
+                let mut client = test_client();
+                assert_eq!(
+                    client.lookup(&mut transport, [1; 32], 150, &never),
+                    Err(TxidError::Protocol(ProtocolKind::Map)),
+                    "{geometry} {digest}"
+                );
+                assert_eq!(sent(&mut transport), [Route::Init, Route::Map]);
+                assert!(client.map.is_none());
+                assert!(client.manifests.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn noncanonical_archive_digests_are_refused_before_caching_or_any_manifest_path() {
+        for digest in noncanonical_digests() {
+            let (mut map, mut chunk) = archive_map("txid-2k8");
+            chunk.shards[1].manifest_digest = digest.clone();
+            map.chunks[0].sha256 = chunk.sha256();
+            let mut transport = Scripted::default();
+            transport.replies.extend([
+                Ok(init_with(&["txid-2k8"])),
+                served(&map),
+                chunk_reply(&chunk),
+            ]);
+            let mut client = test_client();
+            assert_eq!(
+                client.lookup(&mut transport, [1; 32], 107, &never),
+                Err(TxidError::Protocol(ProtocolKind::Map)),
+                "{digest}"
+            );
+            assert_eq!(
+                sent(&mut transport),
+                [Route::Init, Route::Map, Route::MapChunk]
+            );
+            assert!(client.chunks.is_empty());
+            assert!(client.manifests.is_empty());
         }
     }
 

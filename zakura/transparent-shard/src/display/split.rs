@@ -24,7 +24,8 @@
 //! compact JSON in declaration order.
 
 use super::manifest::{
-    check_chain, check_entry, check_recent, check_recent_parent, find_by_height,
+    check_chain, check_geometry, check_listed_entry, check_recent, check_recent_parent,
+    find_by_height, is_digest,
 };
 use super::seal::DisplaySealParams;
 use super::{DisplayMap, DisplayMapEntry, DISPLAY_SCHEMA};
@@ -46,13 +47,6 @@ pub fn index_file(sha256: &str) -> String {
 /// The base shard id of the index chunk holding `shard_id`.
 pub fn chunk_base(shard_id: u64) -> u64 {
     shard_id - shard_id % INDEX_CHUNK_SHARDS
-}
-
-fn is_digest(text: &str) -> bool {
-    text.len() == 64
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// One index chunk as the recent map names it.
@@ -263,6 +257,15 @@ impl DisplayRecentMap {
 
     /// Checks the recent map is well formed before anything is fetched.
     pub fn check_shape(&self) -> Result<(), String> {
+        self.check_format()?;
+        self.recent.as_ref().map_or(Ok(()), check_geometry)
+    }
+
+    /// [`Self::check_shape`] without requiring the recent shard's geometry
+    /// to be one this build reads. Every other rule, including canonical
+    /// digests, still applies; a client admitting a map through this must
+    /// classify each entry's geometry before using the entry.
+    pub fn check_format(&self) -> Result<(), String> {
         if self.schema != DISPLAY_SCHEMA {
             return Err(format!(
                 "unsupported recent display map schema {:?}",
@@ -329,7 +332,7 @@ impl DisplayRecentMap {
             return Err("display map sealed height".into());
         }
         if let Some(recent) = &self.recent {
-            check_entry(&self.seal, recent)?;
+            check_listed_entry(&self.seal, recent)?;
             if recent.sealed || recent.shard_id != archive_end {
                 return Err("recent display shard id or seal".into());
             }
@@ -343,6 +346,19 @@ impl DisplayRecentMap {
     /// against the neighbouring chunk starts and the recent shard. The digest
     /// is the caller's to compare.
     pub fn check_chunk(&self, index: usize, chunk: &DisplayIndexChunk) -> Result<(), String> {
+        self.check_chunk_format(index, chunk)?;
+        chunk.shards.iter().try_for_each(check_geometry)
+    }
+
+    /// [`Self::check_chunk`] without requiring each archive's geometry to be
+    /// one this build reads. The address, ids, entry rules, chain and edges
+    /// are all still checked; a client admitting a chunk through this must
+    /// classify an archive's geometry before using it.
+    pub fn check_chunk_format(
+        &self,
+        index: usize,
+        chunk: &DisplayIndexChunk,
+    ) -> Result<(), String> {
         let reference = self
             .chunks
             .get(index)
@@ -361,7 +377,7 @@ impl DisplayRecentMap {
                     shard.shard_id
                 ));
             }
-            check_entry(&self.seal, shard)?;
+            check_listed_entry(&self.seal, shard)?;
             if let Some(previous) = position.checked_sub(1).map(|p| &chunk.shards[p]) {
                 check_chain(previous, shard)?;
             }
@@ -568,6 +584,73 @@ mod tests {
         assert_ne!(dropped.chunks[0].sha256, sealed.chunks[0].sha256);
         assert_eq!(dropped.chunks[1].sha256, sealed.chunks[1].sha256);
         assert_eq!(dropped.recent.chunk_ids(0), 1..32);
+    }
+
+    /// 64 characters each, so only digest syntax can refuse them.
+    fn noncanonical_digests() -> [String; 4] {
+        [
+            format!("{}/../{}", "a".repeat(30), "b".repeat(30)),
+            format!("{}?x", "a".repeat(62)),
+            "AB".repeat(32),
+            format!("{}g", "a".repeat(63)),
+        ]
+    }
+
+    #[test]
+    fn noncanonical_manifest_digests_are_refused_in_recent_and_archive_entries() {
+        let split = map(3, 40).split().unwrap();
+        for digest in noncanonical_digests() {
+            assert_eq!(digest.len(), 64);
+            let mut recent = split.recent.clone();
+            recent.recent.as_mut().unwrap().manifest_digest = digest.clone();
+            assert!(recent.check_format().is_err(), "{digest}");
+            assert!(recent.check_shape().is_err(), "{digest}");
+
+            let mut chunk = split.chunks[0].chunk.clone();
+            chunk.shards[2].manifest_digest = digest.clone();
+            assert!(
+                split.recent.check_chunk_format(0, &chunk).is_err(),
+                "{digest}"
+            );
+            assert!(split.recent.check_chunk(0, &chunk).is_err(), "{digest}");
+
+            let mut full = map(3, 40);
+            full.shards[5].manifest_digest = digest.clone();
+            assert!(full.check_shape().is_err(), "{digest}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_geometry_is_separated_from_every_other_entry_rule() {
+        let split = map(3, 40).split().unwrap();
+
+        let mut recent = split.recent.clone();
+        recent.recent.as_mut().unwrap().geometry = "txid-future".into();
+        recent.check_format().unwrap();
+        assert!(recent.check_shape().is_err());
+
+        let mut chunk = split.chunks[0].chunk.clone();
+        chunk.shards[2].geometry = "txid-future".into();
+        split.recent.check_chunk_format(0, &chunk).unwrap();
+        assert!(split.recent.check_chunk(0, &chunk).is_err());
+
+        // Unknown geometry relaxes nothing else: tables, seal, chain and edges.
+        type Mutation = Box<dyn Fn(&mut DisplayIndexChunk)>;
+        let broken: Vec<Mutation> = vec![
+            Box::new(|c| c.shards[2].n_buckets = 2),
+            Box::new(|c| c.shards[2].revision = 1),
+            Box::new(|c| c.shards[2].parent_block_hash = "ee".repeat(32)),
+            Box::new(|c| c.shards[2].shard_id += 1),
+            Box::new(|c| c.base_shard_id += 1),
+            Box::new(|c| {
+                c.shards.pop();
+            }),
+        ];
+        for (index, mutate) in broken.iter().enumerate() {
+            let mut bad = chunk.clone();
+            mutate(&mut bad);
+            assert!(split.recent.check_chunk_format(0, &bad).is_err(), "{index}");
+        }
     }
 
     #[test]
