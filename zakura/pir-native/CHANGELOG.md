@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Added
+
+- The server-side operations of the profile, moved from wallet-pir's
+  `pir-native` so one copy serves clients and servers: `Profile`, `P16` and
+  the 8-bit `P8`; `hint`, `preprocess`, `publish`, `pack` and `response`;
+  `parse_with`, `parse_bits`, `parse_accepted`, `parse_selection`,
+  `accepted_query_bits` and `accepted_query_shape`; `prepare_dithered_with`;
+  the `Entry` trait; re-exported `NativeKeys` and `NativePreprocessed`; and
+  the `P_BITS`, `GADGET_BITS`, `ELL`, `INSTANCE_BYTES`,
+  `BLOCK_PUBLIC_BYTES`, `BLOCK_RESPONSE_BYTES` and `PREPARED_*` constants.
+  `Profile::public_query_masks` returns a refused shape as an error; the free
+  `public_query_masks` still panics on one.
+
+### Changed
+
+- The free functions are wrappers over `P16`, and `test_server::Database`
+  builds its hint, preprocessing, published masks and responses with the
+  crate's server operations while keeping its own scalar scan. Request bytes,
+  their randomness consumption, and response and published bytes are
+  unchanged; `tests/golden.rs` pins them.
+
 ## [0.0.1-rc1] - 2026-10-13
 
 ### Packaging
