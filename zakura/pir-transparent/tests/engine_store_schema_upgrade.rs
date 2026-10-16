@@ -32,8 +32,8 @@ fn populated_cache6(path: &Path) -> Connection {
         .unwrap();
     }
     let script = script(1);
-    let received = receive(1, 0, 5_000, 10).event.to_bytes();
-    let spent = spend(1, 1, 0, 3, 20).event.to_bytes();
+    let received = receive(1, 0, 5_000, 10).event.to_bytes().unwrap();
+    let spent = spend(1, 1, 0, 3, 20).event.to_bytes().unwrap();
     let mut framed = b"EV3\0".to_vec();
     framed.extend_from_slice(&(received.len() as u16).to_le_bytes());
     framed.extend_from_slice(&received);

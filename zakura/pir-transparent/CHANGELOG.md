@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject invalid event encodings before changing the SQLite store, including unfinished walks and cached page runs.
+
 ### Changed
 
 - A publication ending below the wallet's target retains its public retry wait
