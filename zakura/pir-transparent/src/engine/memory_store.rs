@@ -486,6 +486,15 @@ impl WalletStore for MemoryStore {
         Ok(())
     }
 
+    fn prune_caches(&mut self, queryable: &[&str]) -> Result<(), StoreError> {
+        let kept = |revision: &str| queryable.contains(&revision);
+        self.state
+            .setups
+            .retain(|key, _| kept(&key.revision_digest));
+        self.state.filters.retain(|revision, _| kept(revision));
+        Ok(())
+    }
+
     fn last_commit(&self) -> Result<u64, StoreError> {
         Ok(self.state.commits)
     }

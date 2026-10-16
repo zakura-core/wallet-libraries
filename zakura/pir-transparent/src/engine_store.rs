@@ -346,6 +346,22 @@ impl SqliteStore {
     }
 }
 
+/// Deletes the filter and setup cache rows under any revision but those in
+/// `queryable`. The engine's sync and the catalog's pass both prune with it.
+pub(crate) fn prune_revision_caches(conn: &Connection, queryable: &[&str]) -> rusqlite::Result<()> {
+    let named = serde_json::to_string(queryable)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    for table in ["filter_cache", "setup_cache"] {
+        conn.execute(
+            &format!(
+                "DELETE FROM {table} WHERE revision_digest NOT IN (SELECT value FROM json_each(?1))"
+            ),
+            [&named],
+        )?;
+    }
+    Ok(())
+}
+
 /// The names of the tables and indexes [`SCHEMA`] creates.
 fn owned_names() -> impl Iterator<Item = &'static str> {
     SCHEMA.lines().filter_map(|line| {
@@ -1203,6 +1219,15 @@ impl WalletStore for SqliteStore {
             )
             .map(|_| ())
             .map_err(io)
+    }
+
+    fn prune_caches(&mut self, queryable: &[&str]) -> Result<(), StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(io)?;
+        prune_revision_caches(&tx, queryable).map_err(io)?;
+        tx.commit().map_err(io)
     }
 
     fn last_commit(&self) -> Result<u64, StoreError> {
