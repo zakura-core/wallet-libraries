@@ -15,7 +15,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = {
-    "default": (["--workspace", "--exclude", "zakura-wallet-lib", "--exclude", "zakura-pir-enhance", "--exclude", "zakura-pir-transparent", "--exclude", "zakura-pir-receiver", "--exclude", "zakura-one-time-ivk-scenarios"], []),
+    "default": (["--workspace", "--exclude", "zakura-wallet-lib", "--exclude", "zakura-pir-enhance", "--exclude", "zakura-pir-transparent", "--exclude", "zakura-pir-receiver", "--exclude", "zakura-pir-transparent-events", "--exclude", "zakura-pir-transparent-filter", "--exclude", "zakura-pir-transparent-native", "--exclude", "zakura-pir-transparent-shard", "--exclude", "zakura-pir-transparent-txid-client", "--exclude", "zakura-pir-transparent-wallet", "--exclude", "zakura-pir-transparent-wallet-store", "--exclude", "zakura-receiver-directory", "--exclude", "zakura-receiver-pir"], []),
     "orchard": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "test-dependencies"]),
     "transparent": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "test-dependencies", "unstable"]),
     "transparent-import": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "transparent-key-import", "test-dependencies", "unstable"]),
@@ -28,7 +28,11 @@ CONFIGS = {
     "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing"]),
     "pir-receiver": (["-p", "zakura-pir-receiver"], ["wallet"]),
     "receiver-wire": (["-p", "zakura-receiver-crypto", "--no-default-features"], []),
-    "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
+    # The transparent PIR protocol, client and store crates, with every feature their
+    # dependents enable: the filter CLI, the reference HTTP adapters and test hooks.
+    "transparent-client": (["-p", "zakura-pir-transparent-events", "-p", "zakura-pir-transparent-filter", "-p", "zakura-pir-transparent-native", "-p", "zakura-pir-transparent-shard", "-p", "zakura-pir-transparent-txid-client", "-p", "zakura-pir-transparent-wallet", "-p", "zakura-pir-transparent-wallet-store"], ["zakura-pir-transparent-filter/cli", "zakura-pir-transparent-wallet/reqwest", "zakura-pir-transparent-wallet/testing", "zakura-pir-transparent-txid-client/testing"]),
+    # The receiver directory protocol crates, with the directory store and the PIR evaluator.
+    "receiver-client": (["-p", "zakura-receiver-directory", "-p", "zakura-receiver-pir"], ["zakura-receiver-directory/store", "zakura-receiver-pir/server"]),
     # The server-only workspace, with its own lockfile; see server/Cargo.toml. The
     # opt-in RocksDB reader is tested here; fresh consumers check the feature off.
     "server": (["--manifest-path", "server/Cargo.toml", "--workspace"], ["testing", "rocksdb"]),

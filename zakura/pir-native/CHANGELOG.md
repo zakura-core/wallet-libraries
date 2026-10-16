@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Changed
+
+- This is now the one native implementation the PIR services and the Zakura
+  clients share: wallet-pir's `pir-native` merged into it, with its golden,
+  dithered and 8-bit profile tests. `public_query_masks` returns a `Result`, and
+  the length helpers are `const fn`. `decode_cols` refuses zero columns.
+- `test_server` runs on the shared server functions instead of its own copy.
+
+### Added
+
+- The server operations and the 8-bit profile: `Profile`, `P16`, `P8`, `hint`,
+  `preprocess`, `publish`, `parse_with`, `parse_bits`, `parse_accepted`,
+  `parse_selection`, `accepted_query_bits`, `accepted_query_shape`, `pack`,
+  `response`, `prepare_dithered_with`, the `Entry` trait and the per-block size
+  constants.
+
 ## [0.0.1-rc1] - 2026-10-13
 
 ### Packaging

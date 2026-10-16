@@ -296,7 +296,9 @@ fn carry_filters(
 ///   the map's own hashes; only block 0 has no map entry, so
 ///   [`Self::hash_at`] answers it with the genesis hash.
 ///
-/// Re-verify these call sites on every wallet-pir pin bump.
+/// The line numbers are as audited at wallet-pir 06a972db, before `transparent-wallet`
+/// moved to `zakura/pir-transparent-wallet` and its sync module was split by stage.
+/// Re-verify these call sites whenever that crate changes.
 struct PublicationChain {
     chain: StaticChain,
 }

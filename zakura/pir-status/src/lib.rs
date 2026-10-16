@@ -450,7 +450,8 @@ impl Client {
                 native_setup_seed(&manifest.network, &manifest.salt),
                 ROWS,
                 COLS,
-            ),
+            )
+            .expect("fixed native profile"),
             public: public.to_vec(),
             manifest,
         })

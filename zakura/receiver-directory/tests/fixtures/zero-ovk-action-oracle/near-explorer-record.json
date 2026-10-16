@@ -1,0 +1,13 @@
+{
+  "source": "NEAR Intents explorer API GET https://explorer.near-intents.org/api/v0/transactions?search=2060cf68088b55dcd9e2f91556c72528e1ab8c6834ea3f71b8c80fca9fc51653 (partner-key authenticated), fetched 2026-10-09; public fields only",
+  "depositAddress": "t1KxWFGRZ99tVQ4Zn51tYFt5gCvLNccCU4J",
+  "status": "REFUNDED",
+  "refundType": "ORIGIN_CHAIN",
+  "refundReason": "PARTIAL_DEPOSIT",
+  "originAsset": "nep141:zec.omft.near",
+  "createdAt": "2026-09-25T18:48:12.794Z",
+  "originChainTxHashes": ["2060cf68088b55dcd9e2f91556c72528e1ab8c6834ea3f71b8c80fca9fc51653"],
+  "refundTo": "u16uf673jt0zjpt3qaqm0lm50rwq4cytevj3gyzdrpmuyqyhq3qpdtvwelpsw0e0gl02qjwwh2e3nn2cgezyl4ppdwkd4nx2yrsu4msqw8",
+  "refundTo_orchard_receiver_hex": "42cd776949bba6f2164b347ebdbf9c225028ed0f5b6eaa3a402f3322c6aadfbde6288d167dbcaed0fdf01e",
+  "decoder": "ua.py (standalone Python bech32m + F4Jumble/BLAKE2b unified-address decoder, no code shared with this repository); command: python3 -c \"import ua; print(dict(ua.receivers('<refundTo>'))[3].hex())\""
+}

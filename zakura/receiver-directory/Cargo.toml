@@ -1,0 +1,31 @@
+[package]
+name = "zakura-receiver-directory"
+version = "0.0.1-rc0"
+publish = false
+edition = "2021"
+rust-version.workspace = true
+license = "MIT"
+repository.workspace = true
+description = "Receiver directory publications: record placement, storage and structural parsing"
+
+[lib]
+name = "receiver_directory"
+path = "src/lib.rs"
+
+[features]
+store = ["dep:rusqlite"]
+
+[dependencies]
+zakura-receiver-crypto = { version = "=0.0.1-rc0", path = "../receiver-crypto", default-features = false }
+# Pinned exactly, as in `transparent-filter`: the filter bytes are what every wallet
+# tests, so the encoder may not move without revalidation.
+bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
+
+[dev-dependencies]
+hex = "0.4"
+tempfile = "3"

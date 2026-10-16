@@ -1,0 +1,25 @@
+[package]
+name = "zakura-pir-transparent-wallet-store"
+version = "0.0.1-rc0"
+edition = "2021"
+rust-version.workspace = true
+description = "SQLite store for transparent PIR wallet recovery progress and history"
+license = "MIT"
+repository.workspace = true
+
+[lib]
+name = "transparent_wallet_store"
+path = "src/lib.rs"
+
+[dependencies]
+transparent-shard = { package = "zakura-pir-transparent-shard", version = "=0.0.1-rc0", path = "../pir-transparent-shard" }
+hex = "0.4"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json = "1"
+thiserror = "2"
+transparent-events = { package = "zakura-pir-transparent-events", version = "=0.0.1-rc0", path = "../pir-transparent-events" }
+transparent-wallet = { package = "zakura-pir-transparent-wallet", version = "=0.0.1-rc0", path = "../pir-transparent-wallet" }
+
+[dev-dependencies]
+tempfile = "3"
+transparent-wallet = { package = "zakura-pir-transparent-wallet", version = "=0.0.1-rc0", path = "../pir-transparent-wallet", features = ["testing"] }

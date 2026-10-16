@@ -23,8 +23,16 @@ members = [
     "zakura/one-time-ivk",
     "zakura/pir-receiver",
     "zakura/near-intents",
-    "zakura/one-time-ivk-scenarios",
     "zakura/receiver-crypto",
+    "zakura/pir-transparent-events",
+    "zakura/pir-transparent-filter",
+    "zakura/pir-transparent-native",
+    "zakura/pir-transparent-shard",
+    "zakura/pir-transparent-txid-client",
+    "zakura/pir-transparent-wallet",
+    "zakura/pir-transparent-wallet-store",
+    "zakura/receiver-directory",
+    "zakura/receiver-pir",
 ]
 
 resolver = "2"

@@ -1,0 +1,16 @@
+[package]
+name = "zakura-pir-transparent-events"
+version = "0.0.1-rc0"
+edition = "2021"
+rust-version.workspace = true
+description = "Transparent PIR event records and codecs shared by the publisher, server and wallet"
+license = "MIT"
+repository.workspace = true
+
+[lib]
+name = "transparent_events"
+path = "src/lib.rs"
+
+[dependencies]
+hex = "0.4"
+thiserror = "2"

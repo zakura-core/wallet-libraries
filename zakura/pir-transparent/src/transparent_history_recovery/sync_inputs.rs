@@ -110,7 +110,9 @@ impl<F: FilterSource> FilterSource for RecordingFilterSource<'_, F> {
 ///
 /// Nothing below the floor is exported or cataloged (see `normalize`), and the
 /// target and every shard anchor are checked against the caller's chain alone.
-/// Re-verify these call sites on every wallet-pir pin bump.
+/// The line numbers are as audited at wallet-pir 06a972db, before `transparent-wallet`
+/// moved to `zakura/pir-transparent-wallet` and its sync module was split by stage.
+/// Re-verify these call sites whenever that crate changes.
 pub(super) struct FloorAcceptingChain<'a, C> {
     pub(super) chain: &'a C,
     /// The floor: every block below it is accepted.

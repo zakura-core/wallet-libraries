@@ -27,7 +27,7 @@ pub use sweep::{Error, Swept, WriteLock, sweep};
 
 pub use receiver_pir::{Error as DirectoryError, transport::Transport};
 /// The directory format and client underneath, for callers that need them directly.
-pub use {receiver_directory, receiver_pir};
+pub use {receiver_directory, receiver_pir, zakura_receiver_crypto};
 
 /// Zcash mainnet's genesis block hash, in internal byte order, which its directory
 /// publications commit to.

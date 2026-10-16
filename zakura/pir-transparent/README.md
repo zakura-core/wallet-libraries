@@ -474,7 +474,7 @@ included every event or reported every value honestly.
 | No features (default) | Recovery and display APIs are disabled |
 | `wallet` | Recovery, catalog-backed companions, discovery, transports, and display lookup/translation |
 | `sqlite` | Includes `wallet`; adds SQLite settlement, explicit trust, and write gates |
-| `testing` | Includes `wallet`; supplies synthetic batches, a txid publication and a real shard service in process (`testing::service`, with the wallet-pir crates it publishes with re-exported) for application tests; keep out of production builds |
+| `testing` | Includes `wallet`; supplies synthetic batches and a txid publication, with the event, filter and shard crates re-exported, for application tests; keep out of production builds. A real shard service in process is wallet-pir's, which serves these crates and runs the end-to-end recovery and discovery tests against them |
 
 Run the relevant development configuration from the repository root:
 

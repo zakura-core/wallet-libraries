@@ -19,8 +19,12 @@ Applications supply:
 - the wallet's consensus parameters, the network's genesis hash (`MAINNET_GENESIS` on
   mainnet) and the clock.
 
-`tests/sweep.rs` serves a directory in process through the receiver service's own
-routes and real PIR, and checks each of those rules against restored SQLite wallets.
+The directory's server is wallet-pir's. wallet-pir's wallet interoperability
+suite (`shared/wallet-interop`, its `receiver_sweep` test) serves a directory in
+process through the receiver service's own routes and real PIR, and checks each of
+those rules against restored SQLite wallets built on this crate. Receivers, payment
+records and the common witness file are checked here with `zakura-receiver-crypto`
+before use, as the structural protocol crates leave them unchecked.
 
 ## Validation
 

@@ -404,7 +404,8 @@ mod tests {
                 native_setup_seed(&NETWORK, &SALT),
                 ROWS,
                 COLS,
-            );
+            )
+            .expect("fixed native profile");
             let db = Database::new(db, &masks, native_packing_seed(&NETWORK, &SALT));
             let manifest = Manifest {
                 protocol: PROTOCOL.into(),

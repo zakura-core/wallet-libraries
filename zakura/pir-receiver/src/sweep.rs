@@ -3,12 +3,15 @@
 use std::num::NonZeroU32;
 
 use receiver_directory::{
-    Receiver,
+    ReceiverBytes,
     filter::{Filters, PAID, RECENT},
     snapshot::FilterSet,
-    witness::WitnessSnapshot,
 };
 use receiver_pir::{AcceptedCoverage, transport::DirectoryClient};
+use zakura_receiver_crypto::{
+    Receiver,
+    witness::{Publication, WitnessSnapshot},
+};
 use zakura_one_time_ivk::{KeyId, swap::RESTORE_WATCH_SECS};
 use zcash_client_backend::data_api::{
     WalletRead,
@@ -323,9 +326,9 @@ impl<'a, T: Transport> Directory<'a, T> {
     async fn check<E>(&mut self, work: &[DiscoveryWork], now: i64) -> Result<Vec<Check>, Error<E>> {
         let receivers = work
             .iter()
-            .map(|item| Receiver::from_bytes(item.receiver))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(DirectoryError::from)?;
+            .map(|item| Receiver::from_bytes(item.receiver).map(|r| *r.as_bytes()))
+            .collect::<Result<Vec<ReceiverBytes>, _>>()
+            .map_err(directory_error)?;
         if self.filters.is_none() {
             // Filters are fetched before a session takes the transport.
             let transport = self.transport.as_ref().expect("no session yet");
@@ -389,6 +392,8 @@ impl<'a, T: Transport> Directory<'a, T> {
         )
         .await?;
         let witnesses = client.witnesses().await?;
+        let witnesses = WitnessSnapshot::decode(&witnesses, &publication(&self.manifest)?)
+            .map_err(directory_error)?;
         self.session = Some(Session { client, witnesses });
         Ok(())
     }
@@ -430,16 +435,16 @@ where
     let anchor = directory.anchor;
     let paid = check.paid;
     let payments: Vec<_> = if paid {
-        let receiver = Receiver::from_bytes(item.receiver).map_err(DirectoryError::from)?;
+        let receiver = Receiver::from_bytes(item.receiver).map_err(directory_error)?;
         let accepted = directory.accepted;
         let session = directory.session.as_mut().expect("opened for paid keys");
         session
             .client
-            .lookup(receiver, accepted)
+            .lookup(*receiver.as_bytes(), accepted)
             .await?
             .into_iter()
             .map(directory_payment)
-            .collect()
+            .collect::<Result<_, _>>()?
     } else {
         Vec::new()
     };
@@ -465,9 +470,37 @@ where
     }
 }
 
-/// A directory payment as the wallet takes it.
-fn directory_payment(payment: receiver_directory::Payment) -> DirectoryPayment {
-    DirectoryPayment {
+/// The receiver cryptography's refusal, as the directory error the protocol crates
+/// give for the same data.
+fn directory_error(error: zakura_receiver_crypto::Error) -> DirectoryError {
+    match error {
+        zakura_receiver_crypto::Error::Malformed => receiver_directory::Error::Malformed,
+        zakura_receiver_crypto::Error::Coverage => receiver_directory::Error::Coverage,
+        zakura_receiver_crypto::Error::Capacity => receiver_directory::Error::Capacity,
+    }
+    .into()
+}
+
+/// The fields of a session's validated manifest that its common witness file binds to.
+fn publication(manifest: &receiver_pir::Manifest) -> Result<Publication, DirectoryError> {
+    let directory = &manifest.directory;
+    Ok(Publication {
+        genesis: directory.genesis,
+        directory_revision: directory.revision()?,
+        end_height: directory.end_height,
+        end_hash: directory.end_hash,
+        start_position: directory.start_position,
+        end_position: directory.end_position,
+        records: directory.records,
+    })
+}
+
+/// A directory payment as the wallet takes it, once its note commitment, Action
+/// nullifier and ephemeral key are valid; any other refuses the whole lookup.
+fn directory_payment(
+    payment: receiver_directory::Payment,
+) -> Result<DirectoryPayment, DirectoryError> {
+    zakura_receiver_crypto::Payment {
         height: payment.height,
         block_hash: payment.block_hash,
         txid: payment.txid,
@@ -479,6 +512,20 @@ fn directory_payment(payment: receiver_directory::Payment) -> DirectoryPayment {
         ephemeral_key: payment.ephemeral_key,
         ciphertext_prefix: payment.ciphertext_prefix,
     }
+    .check()
+    .map_err(directory_error)?;
+    Ok(DirectoryPayment {
+        height: payment.height,
+        block_hash: payment.block_hash,
+        txid: payment.txid,
+        tx_index: payment.tx_index,
+        action_index: payment.action_index,
+        position: payment.position,
+        action_nullifier: payment.action_nullifier,
+        cmx: payment.cmx,
+        ephemeral_key: payment.ephemeral_key,
+        ciphertext_prefix: payment.ciphertext_prefix,
+    })
 }
 
 #[cfg(test)]

@@ -31,6 +31,7 @@ pub fn packing_setup() -> NativeSetup {
 /// First-dimension query masks for `shard`, over the maximal shard shape.
 pub fn query_masks(shard: u64) -> Vec<Vec<u64>> {
     public_query_masks(crate::types::setup_seed(shard), MAX_ROWS, COLS)
+        .expect("fixed native profile")
 }
 
 /// Decode an Enhance row, truncated to its logical width.
