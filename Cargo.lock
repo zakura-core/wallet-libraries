@@ -8375,6 +8375,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "zakura-receiver-directory"
+version = "0.0.1-rc0"
+dependencies = [
+ "bitcoin",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "zakura-receiver-crypto",
+]
+
+[[package]]
+name = "zakura-receiver-pir"
+version = "0.0.1-rc0"
+dependencies = [
+ "hex",
+ "ipir-sp",
+ "rand 0.8.8",
+ "rand_chacha 0.3.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "zakura-pir-native",
+ "zakura-receiver-directory",
+]
+
+[[package]]
 name = "zakura-reddsa"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
