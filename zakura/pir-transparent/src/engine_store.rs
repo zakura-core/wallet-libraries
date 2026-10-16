@@ -375,24 +375,7 @@ fn kind_str(kind: CoverageKind) -> &'static str {
     }
 }
 
-/// Events, each framed by its length, after a version tag.
-fn encode_events(events: &[TransparentEvent]) -> Result<Vec<u8>, StoreError> {
-    let mut out = b"EV3\0".to_vec();
-    for event in events {
-        let raw = encode_event(*event)?;
-        out.extend_from_slice(&(raw.len() as u16).to_le_bytes());
-        out.extend_from_slice(&raw);
-    }
-    Ok(out)
-}
-
-fn encode_event(event: TransparentEvent) -> Result<Vec<u8>, StoreError> {
-    event
-        .to_bytes()
-        .map_err(|error| StoreError::Corrupt(error.to_string()))
-}
-
-/// Decodes [`encode_events`], refusing more than `limit` events.
+/// Decodes version-tagged event lists, refusing more than `limit` events.
 fn decode_events(bytes: &[u8], limit: usize) -> Result<Vec<TransparentEvent>, StoreError> {
     let mut remaining = bytes
         .strip_prefix(b"EV3\0")
@@ -599,24 +582,7 @@ impl WalletStore for SqliteStore {
     }
 
     fn commit_shard(&mut self, commit: ShardCommit) -> Result<u64, StoreError> {
-        // Encode every event before opening the write transaction, including
-        // unfinished walks and cached runs that do not enter the ledger yet.
-        // Invalid metadata must not persist bytes that reopening would refuse.
-        let encoded_events = commit
-            .events
-            .iter()
-            .map(|stored| encode_event(stored.event))
-            .collect::<Result<Vec<_>, _>>()?;
-        let encoded_pending = commit
-            .pending_upsert
-            .iter()
-            .map(|pending| encode_events(&pending.carried))
-            .collect::<Result<Vec<_>, _>>()?;
-        let encoded_runs = commit
-            .cached_runs
-            .iter()
-            .map(|run| encode_events(&run.events))
-            .collect::<Result<Vec<_>, _>>()?;
+        let (encoded_events, encoded_pending, encoded_runs) = commit.encode_events()?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)

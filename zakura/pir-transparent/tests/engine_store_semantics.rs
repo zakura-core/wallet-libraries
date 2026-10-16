@@ -540,6 +540,9 @@ fn invalid_saved_events_leave_every_table_unchanged_and_allow_a_valid_retry() {
         );
         initial.pending_upsert.push(pending(1, "r0"));
         initial.cached_runs.push(cached_run("held-child", 1, &[20]));
+        let mut memory = MemoryStore::new();
+        memory.bind_set(&identity()).unwrap();
+        memory.commit_shard(initial.clone()).unwrap();
         store.commit_shard(initial).unwrap();
         store
             .commit_anchor(
@@ -598,10 +601,14 @@ fn invalid_saved_events_leave_every_table_unchanged_and_allow_a_valid_retry() {
                 })
             }
         }
+        let before_memory = format!("{memory:?}");
         let before = database_rows(&path);
         let before_events = store.events().unwrap();
         let before_pending = store.pending().unwrap();
-        assert!(store.commit_shard(invalid).is_err());
+        let memory_error = memory.commit_shard(invalid.clone()).unwrap_err();
+        let sqlite_error = store.commit_shard(invalid).unwrap_err();
+        assert_eq!(memory_error.to_string(), sqlite_error.to_string());
+        assert_eq!(format!("{memory:?}"), before_memory);
         assert_eq!(database_rows(&path), before);
         assert_eq!(store.events().unwrap(), before_events);
         assert_eq!(store.pending().unwrap(), before_pending);
@@ -610,7 +617,10 @@ fn invalid_saved_events_leave_every_table_unchanged_and_allow_a_valid_retry() {
         assert_eq!(database_rows(&path), before);
         assert_eq!(store.events().unwrap(), before_events);
         assert_eq!(store.pending().unwrap(), before_pending);
+        memory.commit_shard(valid.clone()).unwrap();
         store.commit_shard(valid.clone()).unwrap();
+        assert_eq!(store.events().unwrap(), memory.events().unwrap());
+        assert_eq!(store.pending().unwrap(), memory.pending().unwrap());
         assert_ne!(database_rows(&path), before);
         assert_eq!(store.events().unwrap().len(), 2);
         assert_eq!(
