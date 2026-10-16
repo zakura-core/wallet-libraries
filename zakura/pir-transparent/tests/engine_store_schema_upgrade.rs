@@ -347,6 +347,29 @@ fn orphaned_store_tables_without_metadata_are_refused_without_modification() {
 }
 
 #[test]
+fn store_names_in_another_case_are_refused_without_modification() {
+    // SQLite resolves names case-insensitively, so the schema's `IF NOT
+    // EXISTS` and every later query would reach these objects as the store's.
+    for batch in [
+        "CREATE TABLE SCRIPTS (other TEXT); INSERT INTO SCRIPTS VALUES ('kept');",
+        "CREATE TABLE Run_Cache (other TEXT); INSERT INTO Run_Cache VALUES ('kept');",
+        "CREATE TABLE application (x TEXT); INSERT INTO application VALUES ('kept');
+         CREATE INDEX Spends_By_Transaction ON application(x);",
+        "CREATE TABLE WALLET_META (key TEXT PRIMARY KEY, value TEXT);
+         INSERT INTO WALLET_META VALUES ('anchor', 'kept');",
+        "CREATE TABLE Wallet_Meta (key TEXT PRIMARY KEY, value TEXT);
+         INSERT INTO Wallet_Meta VALUES ('schema_version', '5');",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(batch).unwrap();
+        drop(db);
+        assert_refused_unchanged(&path);
+    }
+}
+
+#[test]
 fn unrelated_tables_in_the_file_still_open_as_a_fresh_store() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("cache.sqlite");

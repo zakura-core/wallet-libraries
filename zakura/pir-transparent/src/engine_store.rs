@@ -388,10 +388,15 @@ fn admit(conn: &Connection) -> Result<Option<String>, StoreError> {
         .map_err(io)?
         .collect::<Result<_, _>>()
         .map_err(io)?;
-    if !held.iter().any(|name| name == "wallet_meta") {
+    // SQLite resolves names without regard to ASCII case, so `SCRIPTS` is the
+    // table the schema's `IF NOT EXISTS` and every later query would reach.
+    if !held
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case("wallet_meta"))
+    {
         return match held
             .iter()
-            .find(|name| owned_names().any(|owned| owned == name.as_str()))
+            .find(|name| owned_names().any(|owned| owned.eq_ignore_ascii_case(name)))
         {
             Some(orphan) => Err(StoreError::Corrupt(format!(
                 "store table {orphan} without the store's metadata"
