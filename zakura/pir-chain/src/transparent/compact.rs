@@ -59,13 +59,15 @@ pub struct CompactBlock {
 
 impl FetchedBlock {
     /// This block at `height` as a compact block. `counts` holds the Sapling, Orchard
-    /// and Ironwood tree sizes before it and is advanced past it.
+    /// and Ironwood tree sizes before it and is advanced past it only on success; an
+    /// error leaves all three unchanged.
     pub fn compact(
         &self,
         height: u64,
         counts: &mut [u32; 3],
     ) -> Result<CompactBlock, Box<dyn std::error::Error + Send + Sync>> {
         let block = &self.0;
+        let mut after = *counts;
         let mut transactions = Vec::new();
         for (index, tx) in block.transactions.iter().enumerate() {
             let inputs = tx
@@ -109,7 +111,7 @@ impl FetchedBlock {
                 .ironwood_actions()
                 .map(action)
                 .collect::<Result<Vec<_>, _>>()?;
-            for (count, n) in counts.iter_mut().zip([
+            for (count, n) in after.iter_mut().zip([
                 sapling_outputs.len(),
                 orchard_actions.len(),
                 ironwood_actions.len(),
@@ -129,16 +131,18 @@ impl FetchedBlock {
                 ironwood_actions,
             });
         }
-        Ok(CompactBlock {
+        let compact = CompactBlock {
             height,
             hash: block.hash().0,
             prev_hash: block.header.previous_block_hash.0,
             time: u32::try_from(block.header.time.timestamp())?,
             transactions,
-            sapling_tree_size: counts[0],
-            orchard_tree_size: counts[1],
-            ironwood_tree_size: counts[2],
-        })
+            sapling_tree_size: after[0],
+            orchard_tree_size: after[1],
+            ironwood_tree_size: after[2],
+        };
+        *counts = after;
+        Ok(compact)
     }
 }
 

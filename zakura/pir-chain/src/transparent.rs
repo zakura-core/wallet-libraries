@@ -453,6 +453,14 @@ impl OutputCache {
     fn insert_transaction(&mut self, transaction: &Transaction) {
         let txid = transaction.hash();
         let outputs = transaction.outputs();
+        // Eviction removes a transaction's outputs together, so a held first output
+        // means the whole transaction is held and already charged once.
+        if self.outputs.contains_key(&OutPoint {
+            hash: txid,
+            index: 0,
+        }) {
+            return;
+        }
         for (index, output) in outputs.iter().enumerate() {
             self.outputs.insert(
                 OutPoint {
@@ -569,8 +577,10 @@ impl NodeClient {
         let client = self.clone();
         let block = fetched.clone();
         // Extraction is synchronous and may block on straggler lookups, so it must
-        // not run on an async worker thread.
-        let mut owned = std::mem::replace(cache, OutputCache::new(1));
+        // not run on an async worker thread. Cancelling this future while the
+        // extraction runs loses the moved cache's entries, not its budget.
+        let capacity = cache.capacity;
+        let mut owned = std::mem::replace(cache, OutputCache::new(capacity));
         let (result, lookups, cache_hits, owned) = tokio::task::spawn_blocking(move || {
             let mut previous = RpcPreviousOutputs {
                 client: &client,
@@ -968,5 +978,72 @@ mod tests {
             cache.get(&outpoint_of(&third, 0)),
             Some(&third.outputs()[0])
         );
+    }
+
+    /// Seeing a held transaction again, as a retried block or a prefetch of a
+    /// transaction the block itself created does, charges it only once.
+    #[test]
+    fn a_repeated_transaction_is_charged_once() {
+        let mut cache = OutputCache::new(5);
+        let first = wide_transaction(0, 3);
+        cache.insert_transaction(&first);
+        cache.insert_transaction(&first);
+        assert_eq!((cache.count, cache.order.len()), (3, 1));
+        let second = wide_transaction(1, 2);
+        cache.insert_transaction(&second);
+        assert_eq!((cache.count, cache.len()), (5, 5));
+        assert!(cache.get(&outpoint_of(&first, 2)).is_some());
+        assert!(cache.get(&outpoint_of(&second, 1)).is_some());
+    }
+
+    /// Dropping a block read while its extraction waits on a straggler lookup
+    /// leaves the caller's cache with the budget it was given.
+    #[cfg(feature = "testing")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_block_read_keeps_the_cache_budget() {
+        use crate::testing::{self, SharedChain};
+        let chain = SharedChain::default();
+        let (url, _) = testing::serve_chain(chain.clone()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let rpc = NodeClient::from_cookie_file(url, testing::cookie(dir.path())).unwrap();
+        let one = testing::transfer(vec![testing::spend_outpoint([1; 32], 0)], &[(10, &[0x51])]);
+        let three = testing::transfer(
+            vec![testing::spend_outpoint([2; 32], 0)],
+            &[(10, &[0x52]), (1, &[0x52]), (1, &[0x52])],
+        );
+        let spender = testing::transfer(
+            vec![testing::spend(&one, 0), testing::spend(&three, 0)],
+            &[(15, &[0x53])],
+        );
+        {
+            let mut c = chain.lock().unwrap();
+            c.add_transaction(&one);
+            c.add_transaction(&three);
+            c.push_block(1, &[testing::coinbase(1, &[(1, &[0x54])]), spender], 0);
+            c.tip = 1;
+            // The pre-pass fetches both parents; the second evicts the first from a
+            // three-output budget, so extraction looks it up again, and is held there.
+            c.hold_lookup = Some(2);
+        }
+        let mut cache = OutputCache::new(3);
+        {
+            let read = rpc.transparent_block(1, rpc.fetch_block(1).await.unwrap(), &mut cache);
+            tokio::pin!(read);
+            tokio::select! {
+                _ = &mut read => panic!("the held lookup cannot complete"),
+                waited = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                    while chain.lock().unwrap().held_lookups == 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                }) => waited.expect("the extraction reaches the held lookup"),
+            }
+        }
+        chain.lock().unwrap().hold_lookup = None;
+        assert_eq!(cache.capacity, 3);
+        let read = rpc
+            .transparent_block(1, rpc.fetch_block(1).await.unwrap(), &mut cache)
+            .await
+            .unwrap();
+        assert_eq!(read.transactions[1].fee, Fee::Exact(10 + 10 - 15));
     }
 }

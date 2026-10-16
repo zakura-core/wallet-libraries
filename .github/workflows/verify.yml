@@ -61,6 +61,10 @@ jobs:
             fetch-depth: 0
     env:
       WALLET_LIB_BUILD_ROOT: ${{ github.workspace }}/target/dev-lanes
+      # The server graph's fresh RocksDB consumer builds librocksdb-sys; see the
+      # server test lane below.
+      CFLAGS: ${{ matrix.check == 'server-graph' && '-mpclmul' || '' }}
+      CXXFLAGS: ${{ matrix.check == 'server-graph' && '-mpclmul' || '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
