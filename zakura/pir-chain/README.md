@@ -7,7 +7,14 @@ node or Zakura Common types.
 
 - `rpc`: the node JSON-RPC client. `NodeClient::new` rereads a cookie file on every
   request and bounds every response; `NodeClient::from_cookie_file` reads it once.
-  Nodes rank by tip on a checked network.
+  Nodes rank by tip on a checked network. Every request has a 120-second total
+  deadline, including connection establishment and streaming the response body.
+  Receiver has a separate 20-second connection timeout and its chain-derived
+  response bound. Fixed-cookie clients (Enhance, Status and Transparent) have no
+  separate connection timeout and now limit each whole response, including a
+  batch, to 64 MiB. Responses without Content-Length obey the same bound.
+  Batch replies must contain each issued integer ID exactly once and are returned
+  in request order. The transport does not retry or split batches.
 - `hash`: conversions between the node's display order and protocol order.
 - `receiver`: Ironwood blocks checked against their headers and the node's tree
   sizes, every Action's note position (coinbase included), the payments
