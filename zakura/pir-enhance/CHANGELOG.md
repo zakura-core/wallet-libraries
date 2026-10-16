@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc4] - 2026-10-16
+
+### Changed
+
+- Updated the native PIR dependency to `0.0.1-rc2`.
+
 ### Removed
 
 - `PreparedWork::waiting`, following removal of the randomized first-query delay.

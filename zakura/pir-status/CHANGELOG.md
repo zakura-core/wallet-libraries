@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc2] - 2026-10-16
+
+### Changed
+
+- Updated the native PIR dependency to `0.0.1-rc2`. Request and response
+  bytes are unchanged.
+
 ## [0.0.1-rc1] - 2026-10-13
 
 ### Packaging

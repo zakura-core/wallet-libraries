@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc3] - 2026-10-16
+
+### Changed
+
+- Updated the status PIR dependency to `0.0.1-rc2`, which carries the native
+  PIR dependency `0.0.1-rc2`. Status routing and observation behavior are
+  unchanged.
+
 ## [0.0.1-rc2] - 2026-10-14
 
 ### Changed

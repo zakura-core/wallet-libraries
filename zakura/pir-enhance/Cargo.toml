@@ -1,6 +1,6 @@
 [package]
 name = "zakura-pir-enhance"
-version = "0.0.1-rc3"
+version = "0.0.1-rc4"
 description = "Private Ironwood compact-action enhancement client for Zakura wallets"
 edition.workspace = true
 rust-version.workspace = true
