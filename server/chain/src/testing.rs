@@ -332,6 +332,11 @@ pub struct Chain {
     pub fault: Option<BatchFault>,
     /// Heights whose `getblock` is held until released.
     pub hold: Option<u64>,
+    /// While set, a request asking for transactions after this many
+    /// `getrawtransaction` entries were answered is held until it is cleared.
+    pub hold_lookup: Option<usize>,
+    /// Requests held by `hold_lookup` so far.
+    pub held_lookups: usize,
     /// Method names in request order; a batch records each entry.
     pub calls: Vec<String>,
     /// Count of HTTP requests that were batches.
@@ -448,6 +453,20 @@ async fn handle(
         while chain.lock().unwrap().hold == Some(hold) {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+    }
+    let lookup = |request: &Value| request["method"].as_str() == Some("getrawtransaction");
+    let asks = match &request {
+        Value::Array(requests) => requests.iter().any(lookup),
+        request => lookup(request),
+    };
+    let held = {
+        let mut chain = chain.lock().unwrap();
+        let held = asks && chain.hold_lookup == Some(chain.count("getrawtransaction"));
+        chain.held_lookups += usize::from(held);
+        held
+    };
+    while held && chain.lock().unwrap().hold_lookup.is_some() {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     let mut chain = chain.lock().unwrap();
     let Value::Array(requests) = request else {
