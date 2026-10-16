@@ -43,10 +43,11 @@ def metadata(manifest, locked=True, no_deps=False):
 def main():
     manifest = tomllib.loads((ROOT / "manifests/sources.toml").read_text())
     server = manifest["server"]
+    workspace = ROOT / server["workspace"]
     owned, nodes = set(server["wallet_pir_packages"]), set(server["node_packages"])
-    graph = metadata(ROOT / "server/Cargo.toml")
+    graph = metadata(workspace / "Cargo.toml")
     errors = problems(graph, owned)
-    if Path(graph["workspace_root"]) != ROOT / "server":
+    if Path(graph["workspace_root"]) != workspace:
         errors.append("server packages must resolve in their separate workspace")
     root_members = metadata(ROOT / "Cargo.toml", no_deps=True)["workspace_members"]
     if set(root_members) & set(graph["workspace_members"]):
@@ -58,11 +59,11 @@ def main():
         for kind, dependency, source in (
             ("wallet", f'zakura-receiver-crypto = {{ path = "{ROOT / "zakura/receiver-crypto"}" }}',
              'fn main() { let _ = zakura_receiver_crypto::RECORD_BYTES; }\n'),
-            ("server-production", f'zakura-server-chain = {{ path = "{ROOT / "server/chain"}" }}',
+            ("server-production", f'zakura-server-chain = {{ path = "{workspace}" }}',
              'fn main() { let _ = zakura_server_chain::NodeClient::new("http://127.0.0.1:1".into(), None); }\n'),
             # The RocksDB reader's public surface: its errors carry only this
             # repository's own types, so a consumer needs no node package to match them.
-            ("server-rocksdb", f'zakura-server-chain = {{ path = "{ROOT / "server/chain"}", features = ["rocksdb"] }}',
+            ("server-rocksdb", f'zakura-server-chain = {{ path = "{workspace}", features = ["rocksdb"] }}',
              '''use std::path::PathBuf;
 use zakura_server_chain::{Network, transparent::{TransparentBlock, state::{StateError, StateReader}}};
 fn main() {
@@ -75,7 +76,7 @@ fn main() {
     }
 }
 '''),
-            ("server", f'zakura-server-chain = {{ path = "{ROOT / "server/chain"}", features = ["testing"] }}',
+            ("server", f'zakura-server-chain = {{ path = "{workspace}", features = ["testing"] }}',
              '''use zakura_server_chain::{Network, NodeClient, NodeError, receiver::ReceiverBlock, enhance::EnhanceBlock, status::StatusBlock};
 use zakura_server_chain::transparent::{CompactBlock, Fee, TransparentBlock};
 fn public_results(receiver: ReceiverBlock, enhance: EnhanceBlock, status: StatusBlock, transparent: TransparentBlock, compact: CompactBlock) {

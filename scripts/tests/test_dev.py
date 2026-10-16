@@ -122,7 +122,7 @@ class WorkflowTests(unittest.TestCase):
     def test_selecting_one_server_package_keeps_its_workspace(self):
         args = argparse.Namespace(package=["zakura-server-chain"], config="server")
         command = dev.cargo_args(args)
-        self.assertEqual(command[:4], ["--manifest-path", "server/Cargo.toml", "-p", "zakura-server-chain"])
+        self.assertEqual(command[:4], ["--manifest-path", "zakura/pir-chain/Cargo.toml", "-p", "zakura-server-chain"])
         self.assertEqual(command[command.index("--features") + 1], "testing,rocksdb")
 
     def test_server_doctor_checks_the_server_lockfile(self):
@@ -131,7 +131,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(dev.execute(args), 0)
         command = run.call_args.args[0]
         self.assertIn("--manifest-path", command)
-        self.assertEqual(command[command.index("--manifest-path") + 1], "server/Cargo.toml")
+        self.assertEqual(command[command.index("--manifest-path") + 1], "zakura/pir-chain/Cargo.toml")
 
     def test_facade_requires_explicit_verification(self):
         with self.assertRaisesRegex(ValueError, "exclusive backends"):
