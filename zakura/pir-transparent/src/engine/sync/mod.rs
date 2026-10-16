@@ -1149,7 +1149,7 @@ pub fn sync_into<S: WalletStore>(
                             refreshes,
                         });
                     }
-                    let (covered, _) = coverage_summary(store, &active, target_anchor.height)?;
+                    let (covered, _) = coverage_summary(store, target_anchor.height)?;
                     let (fresh, digest) = refresh_map(&active, covered, filters, &mut charges)?;
                     check_target_hash(&fresh, target_anchor)?;
                     if fresh
@@ -1221,8 +1221,7 @@ pub fn sync_into<S: WalletStore>(
         scripts_added += store.add_scripts(&added)?;
     }
 
-    let (covered_through, settled_through) =
-        coverage_summary(store, &active, target_anchor.height)?;
+    let (covered_through, settled_through) = coverage_summary(store, target_anchor.height)?;
     if completion == Completion::Complete {
         if covered_through < target_anchor.height {
             // A failed entry leaves its script uncovered over its shard.
@@ -1344,68 +1343,23 @@ fn previous_digest_of(map: &ShardMap, shard_id: u64) -> String {
 /// Heights through which every script is covered from its required height:
 /// provisional coverage included, then settled only. The minimum over
 /// scripts, so one script's gap holds the whole wallet's figure down.
-fn coverage_summary<S: WalletStore>(
-    store: &S,
-    map: &ShardMap,
-    through: u64,
-) -> Result<(u64, u64), SyncError> {
-    let floor = map.start_height.saturating_sub(1);
-    let mut covered = through;
-    let mut settled = through;
-    let entries = store.scripts()?;
-    if entries.is_empty() {
-        return Ok((floor, floor));
-    }
-    for entry in entries {
-        let from = entry.required_from.max(map.start_height);
-        let ranges = store.coverage(&entry.script)?;
-        let all = uncovered(&ranges, from, through);
-        let mine = all
-            .first()
-            .map_or(through, |(start, _)| start.saturating_sub(1));
-        covered = covered.min(mine);
-        let settled_ranges: Vec<CoverageRange> = ranges
-            .iter()
-            .filter(|range| range.kind == CoverageKind::Settled)
-            .cloned()
-            .collect();
-        let settled_gaps = uncovered(&settled_ranges, from, through);
-        let mine_settled = settled_gaps
-            .first()
-            .map_or(through, |(start, _)| start.saturating_sub(1));
-        settled = settled.min(mine_settled);
-    }
-    Ok((covered.max(floor), settled.max(floor)))
+fn coverage_summary<S: WalletStore>(store: &S, through: u64) -> Result<(u64, u64), SyncError> {
+    Ok(crate::engine::progress::coverage(store, Some(through))?)
 }
 
 fn provisional_of<S: WalletStore>(
     store: &S,
     map: &ShardMap,
 ) -> Result<Vec<ProvisionalCoverage>, SyncError> {
-    let mut seen: BTreeMap<(u64, String), u64> = BTreeMap::new();
-    for range in store.provisional()? {
-        let end = seen
-            .entry((range.shard_id, range.revision_digest.clone()))
-            .or_insert(range.end_height);
-        *end = (*end).max(range.end_height);
+    let mut provisional = crate::engine::progress::provisional(store)?;
+    for held in &mut provisional {
+        held.revision = map
+            .shards
+            .get(held.shard_id as usize)
+            .filter(|entry| entry.manifest_digest == held.manifest_digest)
+            .map_or(0, |entry| entry.revision);
     }
-    Ok(seen
-        .into_iter()
-        .map(
-            |((shard_id, manifest_digest), end_height)| ProvisionalCoverage {
-                shard_id,
-                // The digest identifies the revision; its number is the map's.
-                revision: map
-                    .shards
-                    .get(shard_id as usize)
-                    .filter(|entry| entry.manifest_digest == manifest_digest)
-                    .map(|entry| entry.revision)
-                    .unwrap_or(0),
-                manifest_digest,
-                end_height,
-            },
-        )
-        .collect())
+    Ok(provisional)
 }
 
 #[cfg(test)]

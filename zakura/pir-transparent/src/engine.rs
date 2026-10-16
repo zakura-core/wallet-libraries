@@ -23,6 +23,7 @@ pub mod http;
 pub mod init;
 pub mod ledger;
 pub mod memory_store;
+mod progress;
 pub mod store;
 pub mod sync;
 #[cfg(feature = "engine-conformance")]

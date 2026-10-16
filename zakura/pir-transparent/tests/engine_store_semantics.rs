@@ -213,3 +213,260 @@ fn a_walk_cursor_and_the_run_cache_survive_reopening() {
         vec![restored]
     );
 }
+
+mod durable_progress_reports {
+    use super::*;
+    use zakura_pir_transparent::engine::client::Table;
+    use zakura_pir_transparent::engine::transport::{BoxError, FilterSource, ShardTransport};
+    use zakura_pir_transparent::engine::{
+        Completion, IncompleteReason, ScriptEntry, ScriptOrigin, ServiceGeometry, SetIdentity,
+        StaticChain, StaticScripts, TransparentSync, WorkLimits, sync_into,
+    };
+
+    struct Never;
+    impl FilterSource for Never {
+        fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("progress must not fetch maps")
+        }
+        fn filter(&mut self, _: u64) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("progress must not fetch filters")
+        }
+    }
+    impl ShardTransport for Never {
+        fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("progress must not fetch init")
+        }
+        fn manifest(&mut self, _: u64, _: &str) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("progress must not fetch manifests")
+        }
+        fn setup(&mut self, _: u64, _: &str, _: Table, _: u32) -> Result<(Vec<u8>, u64), BoxError> {
+            panic!("progress must not fetch setup")
+        }
+        fn query(&mut self, _: u64, _: &str, _: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
+            panic!("progress must not send queries")
+        }
+    }
+    fn watched(tag: u8, from: u64) -> ScriptEntry {
+        ScriptEntry {
+            script: script(tag),
+            origin: ScriptOrigin::Imported,
+            required_from: from,
+        }
+    }
+    fn facade(path: &std::path::Path) -> TransparentSync {
+        TransparentSync::new(
+            Box::new(SqliteStore::open(path).unwrap()),
+            Box::new(Never),
+            Box::new(Never),
+        )
+    }
+    fn seed(path: &std::path::Path) -> transparent_filter::ShardMap {
+        let map: transparent_filter::ShardMap =
+            serde_json::from_slice(include_bytes!("fixtures/shard-map.json")).unwrap();
+        let mut store = SqliteStore::open(path).unwrap();
+        store
+            .bind_set(&SetIdentity::of_schema(&map, transparent_shard::SCHEMA))
+            .unwrap();
+        store.add_scripts(&[watched(1, map.start_height)]).unwrap();
+        for entry in &map.shards {
+            let mut event = receive(
+                entry.shard_id as u8 + 1,
+                0,
+                5000,
+                entry.start_height as u32 + 10,
+            );
+            event.script = script(1);
+            let mut saved = commit(
+                entry.shard_id,
+                &entry.manifest_digest,
+                entry.sealed,
+                (entry.start_height, entry.end_height),
+                vec![event],
+                vec![script(1)],
+            );
+            saved.terminal_block_hash = entry.terminal_block_hash.clone();
+            store.commit_shard(saved).unwrap();
+            if entry.sealed {
+                store
+                    .commit_anchor(
+                        &Anchor {
+                            height: entry.end_height,
+                            hash: entry.terminal_block_hash.clone(),
+                        },
+                        entry.end_height,
+                        entry.end_height,
+                    )
+                    .unwrap();
+            }
+        }
+        map
+    }
+
+    #[test]
+    fn reopened_progress_survives_unknown_targets_and_lagging_publications() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.sqlite");
+        let map = seed(&path);
+        let sealed = &map.shards[0];
+        let tail = map.shards.last().unwrap();
+        // The tail was committed after the last anchor checkpoint.
+        let status = facade(&path).status().unwrap();
+        assert_eq!(
+            (status.covered_through, status.settled_through),
+            (tail.end_height, sealed.end_height)
+        );
+        let mut store = SqliteStore::open(&path).unwrap();
+        let target = Anchor {
+            height: tail.end_height,
+            hash: tail.terminal_block_hash.clone(),
+        };
+        let geometry = ServiceGeometry {
+            schema: transparent_shard::SCHEMA.into(),
+            geometries: vec![],
+        };
+        let ordinary = sync_into(
+            &mut store,
+            &map,
+            0,
+            &geometry,
+            &StaticChain::from_map(&map),
+            &mut StaticScripts(vec![watched(1, map.start_height)]),
+            &mut Never,
+            &mut Never,
+            &WorkLimits::UNLIMITED,
+            &target,
+        )
+        .unwrap();
+        assert_eq!(ordinary.completion, Completion::Complete);
+        assert_eq!(
+            (ordinary.covered_through, ordinary.settled_through),
+            (tail.end_height, sealed.end_height)
+        );
+        let before = (
+            store.last_commit().unwrap(),
+            store.events().unwrap(),
+            store.coverage(&script(1)).unwrap(),
+            store.pending().unwrap(),
+        );
+        let unknown = sync_into(
+            &mut store,
+            &map,
+            0,
+            &geometry,
+            &StaticChain::default(),
+            &mut StaticScripts(vec![]),
+            &mut Never,
+            &mut Never,
+            &WorkLimits::UNLIMITED,
+            &target,
+        )
+        .unwrap();
+        assert!(matches!(
+            unknown.completion,
+            Completion::Incomplete {
+                reason: IncompleteReason::ChainUnknown { .. },
+                ..
+            }
+        ));
+        let mut behind = map.clone();
+        behind.shards.pop();
+        let lagging = sync_into(
+            &mut store,
+            &behind,
+            0,
+            &geometry,
+            &StaticChain::from_map(&map),
+            &mut StaticScripts(vec![]),
+            &mut Never,
+            &mut Never,
+            &WorkLimits::UNLIMITED,
+            &target,
+        )
+        .unwrap();
+        assert!(matches!(
+            lagging.completion,
+            Completion::Incomplete {
+                reason: IncompleteReason::PublicationBehind { .. },
+                ..
+            }
+        ));
+        for report in [unknown, lagging] {
+            assert_eq!(
+                (report.covered_through, report.settled_through),
+                (ordinary.covered_through, ordinary.settled_through)
+            );
+            assert_eq!(report.provisional, ordinary.provisional);
+        }
+        assert_eq!(
+            (
+                store.last_commit().unwrap(),
+                store.events().unwrap(),
+                store.coverage(&script(1)).unwrap(),
+                store.pending().unwrap()
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn status_recomputes_for_added_scripts_partial_progress_and_host_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollback.sqlite");
+        let map = seed(&path);
+        let sealed = &map.shards[0];
+        let tail = map.shards.last().unwrap();
+        let mut host = facade(&path);
+        assert_eq!(host.status().unwrap().covered_through, tail.end_height);
+        let mut store = SqliteStore::open(&path).unwrap();
+        // Even a stale successful checkpoint must not cover a newly added script.
+        store
+            .commit_anchor(
+                &Anchor {
+                    height: tail.end_height,
+                    hash: tail.terminal_block_hash.clone(),
+                },
+                sealed.end_height,
+                tail.end_height,
+            )
+            .unwrap();
+        store.add_scripts(&[watched(2, map.start_height)]).unwrap();
+        let status = host.status().unwrap();
+        assert_eq!(
+            (status.covered_through, status.settled_through),
+            (map.start_height - 1, map.start_height - 1)
+        );
+        let mut partial = commit(
+            0,
+            &sealed.manifest_digest,
+            true,
+            (sealed.start_height, sealed.end_height),
+            vec![],
+            vec![script(2)],
+        );
+        partial.terminal_block_hash = sealed.terminal_block_hash.clone();
+        store.commit_shard(partial).unwrap();
+        drop(store);
+        let status = host.status().unwrap();
+        assert_eq!(
+            (status.covered_through, status.settled_through),
+            (sealed.end_height, sealed.end_height)
+        );
+        let rollback = map.start_height + 100;
+        let status = host
+            .rollback_to(Anchor {
+                height: rollback,
+                hash: "11".repeat(32),
+            })
+            .unwrap();
+        assert_eq!(
+            (status.covered_through, status.settled_through),
+            (rollback, rollback)
+        );
+        drop(host);
+        let status = facade(&path).status().unwrap();
+        assert_eq!(
+            (status.covered_through, status.settled_through),
+            (rollback, rollback)
+        );
+    }
+}

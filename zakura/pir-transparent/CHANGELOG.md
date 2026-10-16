@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Report retained coverage after reopening, early sync stops, script additions and rollback by recomputing it from saved script ranges.
+
 ### Changed
 
 - Refuse unsupported shard-map versions before storing refreshed maps or advancing sync, including an already complete wallet.

@@ -221,10 +221,11 @@ impl TransparentSync {
     /// The store's state without syncing.
     pub fn status(&self) -> Result<SyncStatus, FacadeError> {
         let ledger = self.store.ledger()?;
+        let progress = crate::engine::progress::summary(self.store.as_ref())?;
         Ok(SyncStatus {
             anchor: self.store.anchor()?,
-            settled_through: 0,
-            covered_through: 0,
+            settled_through: progress.settled_through,
+            covered_through: progress.covered_through,
             pending: self.store.pending()?.len(),
             unresolved: ledger.unresolved().len(),
             confirmed_balance: ledger.confirmed_balance(),

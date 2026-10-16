@@ -181,7 +181,7 @@ pub(super) fn chain_unknown<S: WalletStore>(
     replaced_revisions: Vec<String>,
     first_commit: u64,
 ) -> Result<SyncReport, SyncError> {
-    let (covered, settled) = coverage_summary(store, map, target_anchor.height)?;
+    let (covered, settled) = coverage_summary(store, target_anchor.height)?;
     Ok(SyncReport {
         ledger: store.ledger()?,
         charges,
@@ -207,14 +207,15 @@ pub(super) fn incomplete_at<S: WalletStore>(
     store: &S,
     reason: IncompleteReason,
 ) -> Result<SyncReport, SyncError> {
+    let progress = crate::engine::progress::summary(store)?;
     Ok(SyncReport {
         ledger: store.ledger()?,
         charges: ByteCharges::default(),
         matched_shards: vec![],
         unproductive_matches: 0,
-        covered_through: 0,
-        settled_through: 0,
-        provisional: vec![],
+        covered_through: progress.covered_through,
+        settled_through: progress.settled_through,
+        provisional: progress.provisional,
         map_refreshes: 0,
         completion: Completion::Incomplete {
             reason,
