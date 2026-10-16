@@ -1917,6 +1917,218 @@ fn activity_recovered_from_a_replacement_revision_advances_the_gap_limit() {
     assert_eq!(report.completion, Completion::Complete);
 }
 
+/// Activity a budget-stopped sync saved reaches the gap-limit rule before a
+/// later sync completes. `first`'s history is committed by a call that then
+/// stops for its query budget; `other`, a separately watched script, is read
+/// by a later call. Only `first`'s activity derives `next`, whose received
+/// funds must be found before the wallet is told it is complete, across
+/// calls and a reopened SQLite store. An entry the service publishes
+/// malformed is never reported, though it matched.
+#[cfg(feature = "testing")]
+#[test]
+fn activity_saved_before_a_budget_stop_reaches_the_gap_limit_rule() {
+    use crate::engine::adapters::StaticChain;
+    use crate::engine_store::SqliteStore;
+    use crate::testing::service::{InProcess, SEAL, ShardSpec, publish, synthetic};
+    use crate::{HttpExchange, HttpFailure, HttpReply, HttpRequest, TransparentPirHttp};
+
+    struct Serving(InProcess);
+    impl HttpExchange for Serving {
+        fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
+            let answered = self.0.answer(
+                axum::http::Request::builder()
+                    .method(request.method.as_str())
+                    .uri(&request.path)
+                    .body(request.body.clone())
+                    .unwrap(),
+            );
+            let status = answered.status().as_u16();
+            let mut body = answered.into_body();
+            if !(200..300).contains(&status) {
+                body.truncate(request.error_limit);
+            }
+            Ok(HttpReply {
+                status,
+                retry_after: None,
+                map_sha256: None,
+                body,
+            })
+        }
+    }
+
+    /// Watches `first`, `other` and `broken`, and derives `next` once
+    /// `first` shows activity.
+    struct Extending {
+        watched: Vec<Vec<u8>>,
+        next: Vec<u8>,
+        derived: bool,
+        reported: Vec<Vec<u8>>,
+    }
+    impl Extending {
+        fn entry(script: &[u8]) -> ScriptEntry {
+            ScriptEntry {
+                script: script.to_vec(),
+                origin: ScriptOrigin::Derived,
+                required_from: START,
+            }
+        }
+    }
+    impl ScriptProvider for Extending {
+        fn scripts(&mut self) -> Vec<ScriptEntry> {
+            let derived = self.derived.then_some(&self.next);
+            self.watched
+                .iter()
+                .chain(derived)
+                .map(|s| Self::entry(s))
+                .collect()
+        }
+        fn on_activity(&mut self, active: &[Vec<u8>]) -> Vec<ScriptEntry> {
+            for script in active {
+                if !self.reported.contains(script) {
+                    self.reported.push(script.clone());
+                }
+            }
+            if self.derived || !active.contains(&self.watched[0]) {
+                return Vec::new();
+            }
+            self.derived = true;
+            vec![Self::entry(&self.next)]
+        }
+    }
+
+    const START: u64 = 3_428_143;
+    const END: u64 = START + 99;
+    let (first, other, broken, next) = (script(81), script(82), script(83), script(84));
+    let events = vec![
+        (
+            ScriptBytes::new(first.clone()),
+            receive(START as u32 + 10, 1),
+        ),
+        (
+            ScriptBytes::new(other.clone()),
+            receive(START as u32 + 30, 2),
+        ),
+        (
+            ScriptBytes::new(broken.clone()),
+            receive(START as u32 + 40, 3),
+        ),
+        (
+            ScriptBytes::new(next.clone()),
+            receive(START as u32 + 70, 4),
+        ),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let map = publish(
+        &dir.path().join("service"),
+        &[ShardSpec {
+            malformed_entries: vec![ScriptBytes::new(broken.clone())],
+            ..ShardSpec::first(START, END, true, events)
+        }],
+        SEAL,
+        synthetic,
+        vec![],
+    );
+    let exchange = Serving(InProcess::serve(&dir.path().join("service")));
+    let mut http = TransparentPirHttp::new(&exchange, 64 << 20);
+    let (mut filters, mut shards) = http.split();
+    let geometry = crate::engine::parse_init(&shards.init().unwrap().0).unwrap();
+    let target = Anchor {
+        height: END,
+        hash: map.shards[0].terminal_block_hash.clone(),
+    };
+    let chain = StaticChain::from_map(&map);
+    let mut sync =
+        |store: &mut Box<dyn WalletStore>, provider: &mut Extending, limits: &WorkLimits| {
+            sync_into(
+                store,
+                &map,
+                0,
+                &geometry,
+                &chain,
+                provider,
+                &mut filters,
+                &mut shards,
+                limits,
+                &target,
+            )
+            .unwrap()
+        };
+    let provider = || Extending {
+        watched: vec![first.clone(), other.clone(), broken.clone()],
+        next: next.clone(),
+        derived: false,
+        reported: Vec::new(),
+    };
+    let found = |store: &dyn WalletStore, script: &[u8]| {
+        store
+            .events()
+            .unwrap()
+            .into_iter()
+            .filter(|stored| stored.script == script)
+            .count()
+    };
+    let budget_stop = |completion: &Completion| {
+        matches!(
+            completion,
+            Completion::Incomplete {
+                reason: IncompleteReason::QueryBudget,
+                ..
+            }
+        )
+    };
+
+    // One unlimited sync reports `first` and finds `next` in its second pass.
+    let mut unlimited = provider();
+    let mut store: Box<dyn WalletStore> = Box::new(MemoryStore::new());
+    let report = sync(&mut store, &mut unlimited, &WorkLimits::UNLIMITED);
+    assert!(!budget_stop(&report.completion));
+    assert_eq!(
+        unlimited.reported,
+        vec![first.clone(), other.clone(), next.clone()]
+    );
+    assert_eq!(found(&*store, &next), 1);
+
+    // One private query per call; the SQLite store is reopened for each call.
+    let limits = WorkLimits {
+        max_queries: Some(1),
+        max_private_bytes: None,
+    };
+    let path = dir.path().join("store.sqlite");
+    for sqlite in [false, true] {
+        let mut provider = provider();
+        let mut memory: Box<dyn WalletStore> = Box::new(MemoryStore::new());
+        let mut stops = 0;
+        loop {
+            assert!(stops < 32, "the limited calls finish");
+            let mut reopened: Box<dyn WalletStore>;
+            let store = if sqlite {
+                reopened = Box::new(SqliteStore::open(&path).unwrap());
+                &mut reopened
+            } else {
+                &mut memory
+            };
+            let report = sync(store, &mut provider, &limits);
+            if budget_stop(&report.completion) {
+                stops += 1;
+                continue;
+            }
+            assert!(provider.derived, "the saved activity derived `next`");
+            assert_eq!(found(&**store, &first), 1);
+            assert_eq!(
+                found(&**store, &next),
+                1,
+                "`next` is found before the calls finish"
+            );
+            assert!(
+                !provider.reported.contains(&broken),
+                "a malformed entry is never reported"
+            );
+            break;
+        }
+        assert!(stops > 1, "the calls stopped for their budget");
+    }
+}
+
 // Shares only immutable shard construction and independent history helpers.
 #[path = "budget_tests.rs"]
 mod budget_tests;
