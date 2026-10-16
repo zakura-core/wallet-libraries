@@ -1,10 +1,13 @@
-use super::shard::entry_in;
+use super::shard::{entry_in, with_refusals};
 use super::walk::{check_head, check_run};
 use super::*;
+use crate::engine::client::classify_transport;
 use crate::engine::store::RunCursor;
+use crate::engine::transport::BoxError;
 use transparent_events::TransparentEvent;
 use transparent_events::{ReceiveEvent, SpendEvent, Txid};
 use transparent_filter::ShardMapEntry;
+use transparent_native::TableProfile;
 use transparent_shard::build::candidate_rows;
 use transparent_shard::build::{Block, Built, BuiltChild, BuiltDirectory, ShardStream};
 use transparent_shard::layout::DECOUPLED_2K_8K;
@@ -1589,6 +1592,188 @@ fn a_partial_round_finishes_a_later_run_without_requests() {
     for script in &scripts {
         assert_eq!(stored(&store, script), history(&blocks, directory, script));
     }
+}
+
+/// A shard transport that answers every setup and query, and every
+/// manifest request unless it holds `manifest`, with the error `refuse`
+/// makes, counting the requests it refused.
+struct Refusing {
+    manifest: Option<Vec<u8>>,
+    refuse: fn() -> BoxError,
+    refused: usize,
+}
+
+impl ShardTransport for Refusing {
+    fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+        Ok((Vec::new(), 0))
+    }
+
+    fn manifest(&mut self, _: u64, _: &str) -> Result<(Vec<u8>, u64), BoxError> {
+        match &self.manifest {
+            Some(manifest) => Ok((manifest.clone(), manifest.len() as u64)),
+            None => {
+                self.refused += 1;
+                Err((self.refuse)())
+            }
+        }
+    }
+
+    fn setup(&mut self, _: u64, _: &str, _: Table, _: u32) -> Result<(Vec<u8>, u64), BoxError> {
+        self.refused += 1;
+        Err((self.refuse)())
+    }
+
+    fn query(&mut self, _: u64, _: &str, _: Table, _: &[u8]) -> Result<Vec<u8>, BoxError> {
+        self.refused += 1;
+        Err((self.refuse)())
+    }
+}
+
+/// A budget stop is recognised inside an error that wraps it, as the
+/// service's refusals are, and is not mistaken for one of them.
+#[test]
+fn a_wrapped_budget_stop_is_classified_as_a_budget_stop() {
+    #[derive(Debug, thiserror::Error)]
+    #[error("wrapped")]
+    struct Wrapped(#[source] crate::engine::transport::BudgetStop);
+    let wrapped: BoxError = Box::new(Wrapped(crate::engine::transport::BudgetStop::Bytes));
+    assert!(matches!(
+        classify_transport(wrapped),
+        ClientError::BudgetStop(crate::engine::transport::BudgetStop::Bytes)
+    ));
+    let overloaded = crate::engine::transport::Overloaded { retry_after: None }.boxed();
+    assert!(matches!(
+        classify_transport(overloaded),
+        ClientError::Overloaded(_)
+    ));
+    assert_eq!(
+        crate::engine::transport::BudgetStop::Queries.reason(),
+        IncompleteReason::QueryBudget
+    );
+}
+
+/// A page setup the caller's transport declines for its budget ends the
+/// round with the replies before it, here none, and names the budget for
+/// the walk to stop on. A service refusal or failure in the same place is
+/// still an error: the capacity refusal goes to the overload retry, and
+/// nothing else is mistaken for a budget.
+#[test]
+fn a_budget_stop_at_a_page_setup_ends_the_round_without_an_error() {
+    let (_, directories) = fixture();
+    let manifest = manifest_of(&directories[0]);
+    let entry = entry_of(&manifest);
+    let profile = TableProfile::new(
+        transparent_shard::SCHEMA,
+        "recent-4k",
+        Table::Pages(0).kind(),
+        4_096,
+        4_096,
+    )
+    .unwrap();
+    let requests = [RowRequest { child: 0, row: 0 }];
+    let cases: [(fn() -> BoxError, &str); 3] = [
+        (
+            || crate::engine::transport::BudgetStop::Bytes.boxed(),
+            "budget",
+        ),
+        (
+            || crate::engine::transport::Overloaded { retry_after: None }.boxed(),
+            "overloaded",
+        ),
+        (|| "the service failed".into(), "failed"),
+    ];
+    for (refuse, case) in cases {
+        let mut client = TableClient::new(
+            Table::Pages(0),
+            "recent-4k",
+            4_096,
+            4_096,
+            &profile.scheme,
+            None,
+        )
+        .unwrap();
+        let mut transport = Refusing {
+            manifest: Some(Vec::new()),
+            refuse,
+            refused: 0,
+        };
+        let mut charges = ByteCharges::default();
+        let limits = WorkLimits::UNLIMITED;
+        let mut rows = PirRows {
+            entry: &entry,
+            manifest: &manifest,
+            client: &mut client,
+            transport: &mut transport,
+            charges: &mut charges,
+            limits: &limits,
+            stop: None,
+        };
+        let fetched = rows.fetch(&mut MemoryStore::new(), &requests);
+        match (case, fetched) {
+            ("budget", Ok(replies)) => {
+                assert!(replies.is_empty());
+                assert_eq!(rows.stopped(), Some(IncompleteReason::ByteBudget));
+            }
+            ("overloaded", Err(SyncError::Client(ClientError::Overloaded(_))))
+            | ("failed", Err(SyncError::Client(ClientError::Transport(_)))) => {
+                assert_eq!(rows.stopped(), None, "{case}");
+            }
+            (case, other) => panic!("{case}: {:?}", other.map(|replies| replies.len())),
+        }
+        assert_eq!(transport.refused, 1, "{case}: one setup asked for");
+    }
+}
+
+/// A budget stop ends the shard's work as an incomplete sync naming the
+/// budget, once: it is not retried or waited on as a capacity refusal is.
+#[test]
+fn a_budget_stop_is_reported_not_retried() {
+    let (_, directories) = fixture();
+    let manifest = manifest_of(&directories[0]);
+    let entry = entry_of(&manifest);
+    let map = ShardMap {
+        genesis_hash: transparent_filter::MAINNET_GENESIS_DISPLAY.into(),
+        network: "main".into(),
+        profile: transparent_filter::RANGE_PROFILE.into(),
+        range_envelope_version: 1,
+        start_height: manifest.start_height,
+        seal: BTreeMap::new(),
+        shards: vec![entry.clone()],
+        recuts: Vec::new(),
+    };
+    let mut transport = Refusing {
+        manifest: None,
+        refuse: || crate::engine::transport::BudgetStop::Queries.boxed(),
+        refused: 0,
+    };
+    let geometry = ServiceGeometry {
+        schema: transparent_shard::SCHEMA.into(),
+        geometries: Vec::new(),
+    };
+    let mut clients = Clients {
+        schema: geometry.schema.clone(),
+        prepared: HashMap::new(),
+    };
+    let outcome = with_refusals(
+        &mut MemoryStore::new(),
+        &map,
+        &entry,
+        "",
+        &geometry,
+        &mut clients,
+        &mut transport,
+        &mut ByteCharges::default(),
+        &WorkLimits::UNLIMITED,
+        |_, _, _, _, _| panic!("no work without a manifest"),
+    );
+    assert_eq!(
+        outcome.map_err(|error| error.to_string()),
+        Ok(Some(Completion::Incomplete {
+            reason: IncompleteReason::QueryBudget,
+            pending: 0,
+        }))
+    );
+    assert_eq!(transport.refused, 1, "asked once, not retried");
 }
 
 fn head(_child: u8, link: RunLink) -> PageEntry {

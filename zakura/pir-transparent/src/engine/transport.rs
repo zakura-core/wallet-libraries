@@ -173,6 +173,47 @@ impl Overloaded {
     }
 }
 
+/// The caller's transport declined a request before sending any of it,
+/// because the request would cross a budget the caller enforces for the sync.
+///
+/// For a transport that adds requests of its own, which the sync's
+/// [`WorkLimits`](crate::engine::WorkLimits) do not count. Return it only when nothing
+/// of the request was sent. The sync then stops as it does on its own budget:
+/// it keeps every reply it already received, including the earlier replies of
+/// a round of page queries, and reports an incomplete sync with
+/// [`IncompleteReason::QueryBudget`] or [`IncompleteReason::ByteBudget`]. It is
+/// not a refusal by the service: nothing is retried or waited for. In a
+/// [`ShardTransport::batch`], send nothing after a declined request: the sync
+/// reads no reply past it.
+///
+/// [`IncompleteReason::QueryBudget`]: crate::engine::IncompleteReason::QueryBudget
+/// [`IncompleteReason::ByteBudget`]: crate::engine::IncompleteReason::ByteBudget
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum BudgetStop {
+    #[error("the request would cross the caller's query budget")]
+    Queries,
+    #[error("the request would cross the caller's private byte budget")]
+    Bytes,
+}
+
+impl BudgetStop {
+    /// Why the sync stopped, as its report names it.
+    pub fn reason(self) -> crate::engine::IncompleteReason {
+        match self {
+            Self::Queries => crate::engine::IncompleteReason::QueryBudget,
+            Self::Bytes => crate::engine::IncompleteReason::ByteBudget,
+        }
+    }
+
+    pub fn found_in(error: &BoxError) -> Option<&Self> {
+        found_in(error)
+    }
+
+    pub fn boxed(self) -> BoxError {
+        Box::new(self)
+    }
+}
+
 /// Classifies a non-success reply into a refusal a wallet can act on.
 ///
 /// Takes the parts rather than a response type, so the wallet crate stays free
@@ -196,7 +237,7 @@ pub fn refusal(
     Overloaded::from_http(status, retry_after).map(Overloaded::boxed)
 }
 
-/// The shared `source`-chain walk behind both `found_in` methods.
+/// The shared `source`-chain walk behind every `found_in` method.
 fn found_in<E: std::error::Error + 'static>(error: &BoxError) -> Option<&E> {
     if let Some(found) = error.downcast_ref::<E>() {
         return Some(found);

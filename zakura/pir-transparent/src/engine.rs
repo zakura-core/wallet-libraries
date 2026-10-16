@@ -44,6 +44,6 @@ pub use sync::{
     ServiceGeometry, SyncError, SyncOutcome, SyncReport, WorkLimits, sync, sync_into,
 };
 pub use transport::{
-    ByteCharges, FilterSource, Overloaded, ShardReply, ShardRequest, ShardTransport, StaleRevision,
-    TableCharges, refusal,
+    BudgetStop, ByteCharges, FilterSource, Overloaded, ShardReply, ShardRequest, ShardTransport,
+    StaleRevision, TableCharges, refusal,
 };

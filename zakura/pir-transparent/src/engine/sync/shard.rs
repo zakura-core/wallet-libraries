@@ -346,6 +346,12 @@ where
                         refreshes: 0,
                     });
                 }
+                Err(SyncError::Client(ClientError::BudgetStop(stop))) => {
+                    return Ok(Some(Completion::Incomplete {
+                        reason: stop.reason(),
+                        pending: store.pending()?.len(),
+                    }));
+                }
                 Err(SyncError::Client(ClientError::Overloaded(overloaded))) => {
                     if attempt >= MAX_OVERLOAD_ATTEMPTS {
                         return Ok(Some(Completion::Incomplete {
@@ -371,6 +377,14 @@ where
                     stale,
                     refreshes: 0,
                 });
+            }
+            // The caller's budget, not the service: every commit so far
+            // stands, and the next sync resumes from the store.
+            Err(SyncError::Client(ClientError::BudgetStop(stop))) => {
+                return Ok(Some(Completion::Incomplete {
+                    reason: stop.reason(),
+                    pending: store.pending()?.len(),
+                }));
             }
             Err(SyncError::Client(ClientError::Overloaded(overloaded))) => {
                 if attempt >= MAX_OVERLOAD_ATTEMPTS {
@@ -835,6 +849,7 @@ pub(super) fn finish_pages<S: WalletStore, T: ShardTransport>(
         transport,
         charges,
         limits,
+        stop: None,
     };
     walk_chains(
         store,

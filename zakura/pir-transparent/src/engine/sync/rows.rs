@@ -1,5 +1,5 @@
 use super::{IncompleteReason, SyncError, WorkLimits, budget_stopped};
-use crate::engine::client::{Table, TableClient, classify_transport};
+use crate::engine::client::{ClientError, Table, TableClient, classify_transport};
 use crate::engine::store::{SetupBlob, SetupKey, WalletStore};
 use crate::engine::transport::ShardRequest;
 use crate::engine::transport::{ByteCharges, ShardTransport};
@@ -49,11 +49,29 @@ pub(super) struct PirRows<'a, T: ShardTransport> {
     pub(super) transport: &'a mut T,
     pub(super) charges: &'a mut ByteCharges,
     pub(super) limits: &'a WorkLimits,
+    /// The budget the caller's transport declined a request for, once it has.
+    pub(super) stop: Option<IncompleteReason>,
+}
+
+/// `result`, or `None` once the caller's transport declined the request for
+/// its budget, which `stop` records: the round keeps the replies before it.
+fn unless_budget<T>(
+    stop: &mut Option<IncompleteReason>,
+    result: Result<T, SyncError>,
+) -> Result<Option<T>, SyncError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(SyncError::Client(ClientError::BudgetStop(budget))) => {
+            *stop = Some(budget.reason());
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 impl<T: ShardTransport> RowSource for PirRows<'_, T> {
     fn stopped(&self) -> Option<IncompleteReason> {
-        budget_stopped(self.charges, self.limits)
+        budget_stopped(self.charges, self.limits).or_else(|| self.stop.clone())
     }
 
     /// Sends a round's queries together when the transport overlaps
@@ -88,7 +106,7 @@ impl<T: ShardTransport> RowSource for PirRows<'_, T> {
                     .ok_or_else(|| SyncError::Invalid("a walk left the page shards".into()))?;
                 let table = Table::Pages(request.child);
                 let segments = child.page_segments.len() as u32;
-                open_table(
+                let opened = open_table(
                     store,
                     &set_digest,
                     shard_id,
@@ -99,7 +117,10 @@ impl<T: ShardTransport> RowSource for PirRows<'_, T> {
                     self.transport,
                     self.charges,
                     None,
-                )?;
+                );
+                if unless_budget(&mut self.stop, opened)?.is_none() {
+                    break;
+                }
                 let (_, within) =
                     transparent_shard::layout::split_row(request.row, geometry.page_rows);
                 planned.push((
@@ -112,7 +133,7 @@ impl<T: ShardTransport> RowSource for PirRows<'_, T> {
             let mut answers = Vec::with_capacity(planned.len());
             if self.transport.concurrency() <= 1 || planned.len() <= 1 {
                 for (table, segments, query_rows, within) in planned {
-                    answers.push(self.client.fetch_row(
+                    let answer = self.client.fetch_row(
                         self.transport,
                         shard_id,
                         revision,
@@ -121,7 +142,11 @@ impl<T: ShardTransport> RowSource for PirRows<'_, T> {
                         query_rows,
                         within,
                         self.charges,
-                    )?);
+                    );
+                    match unless_budget(&mut self.stop, answer.map_err(SyncError::from))? {
+                        Some(answer) => answers.push(answer),
+                        None => break,
+                    }
                 }
                 return Ok(answers);
             }
@@ -162,17 +187,28 @@ impl<T: ShardTransport> RowSource for PirRows<'_, T> {
                                 .decode(revision, table, segments, query, &response)?,
                         );
                     }
-                    Some(Err(error)) => return Err(SyncError::Client(classify_transport(error))),
-                    None => answers.push(self.client.fetch_row(
-                        self.transport,
-                        shard_id,
-                        revision,
-                        table,
-                        segments,
-                        query_rows,
-                        within,
-                        self.charges,
-                    )?),
+                    Some(Err(error)) => {
+                        let failed: Result<(), _> =
+                            Err(SyncError::Client(classify_transport(error)));
+                        unless_budget(&mut self.stop, failed)?;
+                        break;
+                    }
+                    None => {
+                        let answer = self.client.fetch_row(
+                            self.transport,
+                            shard_id,
+                            revision,
+                            table,
+                            segments,
+                            query_rows,
+                            within,
+                            self.charges,
+                        );
+                        match unless_budget(&mut self.stop, answer.map_err(SyncError::from))? {
+                            Some(answer) => answers.push(answer),
+                            None => break,
+                        }
+                    }
                 }
             }
             return Ok(answers);
@@ -190,7 +226,7 @@ impl<T: ShardTransport> RowSource for PirRows<'_, T> {
                 .ok_or_else(|| SyncError::Invalid("a walk left the page shards".into()))?;
             let table = Table::Pages(request.child);
             let segments = child.page_segments.len() as u32;
-            if !open_table(
+            let opened = open_table(
                 store,
                 &set_digest,
                 shard_id,
@@ -201,14 +237,15 @@ impl<T: ShardTransport> RowSource for PirRows<'_, T> {
                 self.transport,
                 self.charges,
                 Some(self.limits),
-            )? {
+            );
+            if unless_budget(&mut self.stop, opened)? != Some(true) {
                 break;
             }
             if self.stopped().is_some() {
                 break;
             }
             let (_, within) = transparent_shard::layout::split_row(request.row, geometry.page_rows);
-            answers.push(self.client.fetch_row(
+            let answer = self.client.fetch_row(
                 self.transport,
                 shard_id,
                 revision,
@@ -217,7 +254,11 @@ impl<T: ShardTransport> RowSource for PirRows<'_, T> {
                 child.query_rows() as usize,
                 within as usize,
                 self.charges,
-            )?);
+            );
+            match unless_budget(&mut self.stop, answer.map_err(SyncError::from))? {
+                Some(answer) => answers.push(answer),
+                None => break,
+            }
         }
         Ok(answers)
     }

@@ -30,7 +30,9 @@
 //! when that scheme reproduces exactly, and otherwise the 49 bits, which are
 //! still checked whole.
 
-use crate::engine::transport::{BoxError, ByteCharges, Overloaded, ShardTransport, StaleRevision};
+use crate::engine::transport::{
+    BoxError, BudgetStop, ByteCharges, Overloaded, ShardTransport, StaleRevision,
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
@@ -58,6 +60,11 @@ pub enum ClientError {
     /// stands, without refreshing anything.
     #[error(transparent)]
     Overloaded(#[from] Overloaded),
+    /// The caller's transport declined to send this query or setup: it would
+    /// have crossed a budget the caller enforces. Not a service failure, and
+    /// nothing was sent.
+    #[error(transparent)]
+    BudgetStop(#[from] BudgetStop),
     /// A reply was made under other published parameters than the setup the
     /// wallet holds for that segment. The held setup is stale: the caller
     /// drops it, so the next attempt fetches the published one again.
@@ -503,6 +510,9 @@ pub(crate) fn classify_transport(error: crate::engine::transport::BoxError) -> C
     }
     if let Some(overloaded) = Overloaded::found_in(&error) {
         return ClientError::Overloaded(overloaded.clone());
+    }
+    if let Some(stop) = BudgetStop::found_in(&error) {
+        return ClientError::BudgetStop(*stop);
     }
     ClientError::Transport(crate::engine::transport::describe_error(error.as_ref()))
 }

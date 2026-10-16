@@ -514,6 +514,7 @@ fn a_failed_page_batch_charges_every_dispatched_query_before_returning() {
         transport: &mut transport,
         charges: &mut charges,
         limits: &WorkLimits::UNLIMITED,
+        stop: None,
     };
     assert!(matches!(
         rows.fetch(
