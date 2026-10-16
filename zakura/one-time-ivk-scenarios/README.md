@@ -35,8 +35,9 @@ wallet-libraries commit and the wallet-pir revision it ran against.
 ## What is real and what is simulated
 
 Real: the SQLite wallet store and its one-time IVK tables, compact scanning, the
-receiver restore client (`zakura-pir-receiver`), the receiver directory's routes
-and PIR (`receiver-pir-server`), Ironwood note encryption, and signed transactions
+receiver restore client (`zakura-pir-receiver`), the receiver directory's
+publications and PIR evaluation (`zakura-receiver-directory`, `zakura-receiver-pir`),
+answered in process on the service's routes, Ironwood note encryption, and signed transactions
 with proofs where a scenario needs them (swap funding, payouts that a reorg
 returns).
 
