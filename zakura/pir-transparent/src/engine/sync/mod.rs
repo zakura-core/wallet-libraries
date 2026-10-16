@@ -781,12 +781,22 @@ pub fn sync_into<S: WalletStore>(
     // unknown block does.
     let mut contradiction: Option<&CoverageRange> = None;
     let mut unplaced: Option<u64> = None;
+    let mut rederive_from: Option<u64> = None;
+    let mut rederived: Vec<String> = Vec::new();
     for range in rewritten
         .iter()
         .filter(|range| ancestor.is_none_or(|kept| range.end_height <= kept))
     {
         match judge_rewrite(map, range, target_anchor, chain) {
             Rewrite::Reorg => {}
+            Rewrite::Rederive => {
+                rederive_from = Some(
+                    rederive_from.map_or(range.start_height, |held| held.min(range.start_height)),
+                );
+                if !rederived.contains(&range.revision_digest) {
+                    rederived.push(range.revision_digest.clone());
+                }
+            }
             Rewrite::Contradiction => {
                 if contradiction.is_none_or(|held| held.start_height > range.start_height) {
                     contradiction = Some(range);
@@ -817,8 +827,15 @@ pub fn sync_into<S: WalletStore>(
     }
 
     // Provisional reconciliation. A tail revision the map has moved past is
-    // truncated and re-derived; one the map has sealed is promoted.
-    let mut truncate_from: Option<u64> = None;
+    // truncated and re-derived; one the map has sealed is promoted. A settled
+    // range whose publication the chain left above its coverage is re-derived
+    // the same way.
+    let mut truncate_from: Option<u64> = rederive_from;
+    for revision in rederived {
+        if !replaced_revisions.contains(&revision) {
+            replaced_revisions.push(revision);
+        }
+    }
     let mut promote: Vec<(u64, String)> = Vec::new();
     // A partially retrieved revision may have events and pending pages but no
     // completed coverage yet. Unfinished work under a revision the map no
@@ -906,6 +923,14 @@ pub fn sync_into<S: WalletStore>(
             ..Default::default()
         })?;
     }
+    // Filters and setups are cached by revision and read only under those the
+    // map publishes: a replaced revision's are never read again.
+    let queryable: Vec<&str> = map
+        .shards
+        .iter()
+        .map(|entry| entry.manifest_digest.as_str())
+        .collect();
+    store.prune_caches(&queryable)?;
 
     // Replies a lookahead sends early are held here until the walk asks for
     // them; see `ahead`. With nothing stashed both pass straight through.

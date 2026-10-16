@@ -388,6 +388,29 @@ fn setup_is_keyed_by_set_revision_table_and_segment<S: WalletStore>(make: &impl 
     );
     assert_eq!(store.filter("rev-a", "hash-b").unwrap(), None);
     assert_eq!(store.filter("rev-b", "hash-a").unwrap(), None);
+
+    // Pruning to the queryable revisions forgets the others' filters and
+    // setups, and keeps cached runs and failure counts.
+    let old = SetupKey {
+        revision_digest: "rev-old".into(),
+        ..key.clone()
+    };
+    store.put_setup(&old, &blob).unwrap();
+    store
+        .put_filter("rev-old", "hash-old", false, b"old")
+        .unwrap();
+    let run = cached_run("child", 9, &[10, 20]);
+    let mut kept = commit(4, "rev-old", false, (0, 0), vec![], vec![]);
+    kept.cached_runs.push(run.clone());
+    kept.failed_entries.push(script(9));
+    store.commit_shard(kept).unwrap();
+    store.prune_caches(&["rev-a"]).unwrap();
+    assert_eq!(store.setup(&key).unwrap(), Some(blob.clone()));
+    assert_eq!(store.setup(&old).unwrap(), None);
+    assert!(store.filter("rev-a", "hash-a").unwrap().is_some());
+    assert_eq!(store.filter("rev-old", "hash-old").unwrap(), None);
+    assert_eq!(store.cached_run("child", &script(9)).unwrap(), Some(run));
+    assert_eq!(store.entry_failures(4, "rev-old", &script(9)).unwrap(), 1);
 }
 
 fn a_commit_past_the_pending_bound_is_refused_whole<S: WalletStore>(make: &impl Fn() -> S) {

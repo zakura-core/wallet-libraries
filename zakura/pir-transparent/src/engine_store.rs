@@ -181,21 +181,7 @@ impl SqliteStore {
     fn prepare(&mut self) -> Result<(), StoreError> {
         let target_version = SCHEMA_VERSION.to_string();
         // Fence unknown readers before changing journal mode or creating indexes.
-        let has_meta: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wallet_meta')",
-            [], |row| row.get(0),
-        ).map_err(io)?;
-        if has_meta {
-            if let Some(found) = self.meta("schema_version")? {
-                // Schema 6 has the same history and walk representation. Older
-                // stores lack saved fragments or use another shard schema.
-                if found != "6" && found != target_version {
-                    return Err(StoreError::Corrupt(format!(
-                        "store schema {found}, this build reads {SCHEMA_VERSION}"
-                    )));
-                }
-            }
-        }
+        admit(&self.conn)?;
         // Durable on every commit: a commit that returned is on disk.
         self.conn
             .execute_batch(
@@ -206,30 +192,9 @@ impl SqliteStore {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(io)?;
-        // Read again under the write lock: another opener may have upgraded
-        // the file after the initial compatibility check.
-        let has_meta: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wallet_meta')",
-            [], |row| row.get(0),
-        ).map_err(io)?;
-        let version: Option<String> = if has_meta {
-            tx.query_row(
-                "SELECT value FROM wallet_meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(io)?
-        } else {
-            None
-        };
-        if let Some(found) = &version {
-            if found != "6" && found != &target_version {
-                return Err(StoreError::Corrupt(format!(
-                    "store schema {found}, this build reads {SCHEMA_VERSION}"
-                )));
-            }
-        }
+        // Admit again under the write lock: another opener may have created
+        // or upgraded the store after the initial compatibility check.
+        let version = admit(&tx)?;
         // Existing tables and their rows are untouched. For schema 6 this
         // creates only the empty failure-count table. Its creation and the
         // version update either both commit or both roll back.
@@ -379,6 +344,78 @@ impl SqliteStore {
         .map_err(io)?;
         Ok(())
     }
+}
+
+/// Deletes the filter and setup cache rows under any revision but those in
+/// `queryable`. The engine's sync and the catalog's pass both prune with it.
+pub(crate) fn prune_revision_caches(conn: &Connection, queryable: &[&str]) -> rusqlite::Result<()> {
+    let named = serde_json::to_string(queryable)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    for table in ["filter_cache", "setup_cache"] {
+        conn.execute(
+            &format!(
+                "DELETE FROM {table} WHERE revision_digest NOT IN (SELECT value FROM json_each(?1))"
+            ),
+            [&named],
+        )?;
+    }
+    Ok(())
+}
+
+/// The names of the tables and indexes [`SCHEMA`] creates.
+fn owned_names() -> impl Iterator<Item = &'static str> {
+    SCHEMA.lines().filter_map(|line| {
+        line.strip_prefix("CREATE TABLE IF NOT EXISTS ")
+            .or_else(|| line.strip_prefix("CREATE INDEX IF NOT EXISTS "))
+            .and_then(|rest| rest.split([' ', '(']).next())
+    })
+}
+
+/// Admits the file's store before anything in it changes, returning the
+/// schema version it records, or `None` for a file holding no store.
+///
+/// Only a file with none of the store's tables is fresh: other tables, such as
+/// a catalog sharing the file, are left alone. A metadata table without its
+/// version marker, store tables without a metadata table, or a version this
+/// build does not read is refused. Creating the missing tables beside those
+/// and stamping the current version would pass a layout of unknown origin off
+/// as this one.
+fn admit(conn: &Connection) -> Result<Option<String>, StoreError> {
+    let held: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'index') ORDER BY name")
+        .map_err(io)?
+        .query_map([], |row| row.get(0))
+        .map_err(io)?
+        .collect::<Result<_, _>>()
+        .map_err(io)?;
+    if !held.iter().any(|name| name == "wallet_meta") {
+        return match held
+            .iter()
+            .find(|name| owned_names().any(|owned| owned == name.as_str()))
+        {
+            Some(orphan) => Err(StoreError::Corrupt(format!(
+                "store table {orphan} without the store's metadata"
+            ))),
+            None => Ok(None),
+        };
+    }
+    let found: String = conn
+        .query_row(
+            "SELECT value FROM wallet_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(io)?
+        .ok_or_else(|| StoreError::Corrupt("store metadata without a schema version".into()))?;
+    // Schema 6 has the same history and walk representation. Older stores
+    // lack saved fragments or use another shard schema.
+    if found != "6" && found != SCHEMA_VERSION.to_string() {
+        return Err(StoreError::Corrupt(format!(
+            "store schema {found}, this build reads {SCHEMA_VERSION}"
+        )));
+    }
+    Ok(Some(found))
 }
 
 fn kind_str(kind: CoverageKind) -> &'static str {
@@ -1184,6 +1221,15 @@ impl WalletStore for SqliteStore {
             .map_err(io)
     }
 
+    fn prune_caches(&mut self, queryable: &[&str]) -> Result<(), StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(io)?;
+        prune_revision_caches(&tx, queryable).map_err(io)?;
+        tx.commit().map_err(io)
+    }
+
     fn last_commit(&self) -> Result<u64, StoreError> {
         self.conn
             .query_row("SELECT COALESCE(MAX(id), 0) FROM commits", [], |row| {
@@ -1230,6 +1276,26 @@ fn decode_anchor(raw: Option<String>) -> rusqlite::Result<Option<Anchor>> {
 #[cfg(test)]
 mod coverage_append_tests {
     use super::*;
+
+    /// Admission recognizes exactly the tables and indexes the schema creates.
+    #[test]
+    fn owned_names_are_every_object_the_schema_creates() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let created: Vec<String> = store
+            .conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'index') \
+                 AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let mut owned: Vec<&str> = owned_names().collect();
+        owned.sort_unstable();
+        assert_eq!(created, owned);
+    }
 
     #[test]
     fn appending_checkpoints_does_not_rewrite_prior_coverage() {

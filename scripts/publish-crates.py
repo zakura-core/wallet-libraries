@@ -12,6 +12,9 @@ import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
+# Share the graph check's repository predicate, also when loaded from another directory.
+sys.path.insert(0, str(ROOT / "scripts"))
+import server_graph  # noqa: E402
 # Include optional and development dependencies in the order, since Cargo
 # resolves them when it prepares the package for the registry.
 ORDER = (
@@ -62,7 +65,7 @@ def dependency_tables(manifest):
 def wallet_pir_owned(root, name, dep):
     """A wallet-libraries release never waits on wallet-pir: refuse its packages under any source."""
     owned = tomllib.loads((root / "manifests/sources.toml").read_text())["server"]["wallet_pir_packages"]
-    return name in owned or "wallet-pir" in dep.get("git", "").lower()
+    return name in owned or server_graph.wallet_pir_owned(dep.get("git"))
 
 
 def release_packages(root):

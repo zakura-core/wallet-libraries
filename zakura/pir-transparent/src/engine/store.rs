@@ -437,6 +437,11 @@ pub trait WalletStore {
         sealed: bool,
         bytes: &[u8],
     ) -> Result<(), StoreError>;
+    /// Forgets the filters and setups cached under any revision but those in
+    /// `queryable`, the revisions a validated map publishes. A sync reads them
+    /// only under those, so the rest are never read again. Cached runs and
+    /// content failure counts are not keyed by a map revision and are kept.
+    fn prune_caches(&mut self, queryable: &[&str]) -> Result<(), StoreError>;
 
     /// The id of the last commit, zero before any.
     fn last_commit(&self) -> Result<u64, StoreError>;
@@ -538,6 +543,9 @@ impl<T: WalletStore + ?Sized> WalletStore for Box<T> {
         bytes: &[u8],
     ) -> Result<(), StoreError> {
         (**self).put_filter(revision_digest, filter_hash, sealed, bytes)
+    }
+    fn prune_caches(&mut self, queryable: &[&str]) -> Result<(), StoreError> {
+        (**self).prune_caches(queryable)
     }
     fn last_commit(&self) -> Result<u64, StoreError> {
         (**self).last_commit()

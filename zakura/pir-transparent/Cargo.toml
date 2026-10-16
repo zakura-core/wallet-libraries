@@ -1,6 +1,6 @@
 [package]
 name = "zakura-pir-transparent"
-version = "0.0.1-rc1"
+version = "0.0.1-rc2"
 description = "Bounded reference transparent PIR recovery into candidate wallet evidence"
 edition.workspace = true
 rust-version.workspace = true

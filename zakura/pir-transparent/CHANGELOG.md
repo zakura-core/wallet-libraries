@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc2] - 2026-10-16
+
 ### Fixed
 
+- Refuse a SQLite engine store whose metadata lacks a schema version, or whose store tables lack the metadata table, before changing its journal mode, tables or rows; admission is repeated under the write lock. Unrelated tables sharing the file still open as a fresh store.
+- Hide a script's recovered activity only for a content failure under the same shard revision, so a replacement read in the same sync still reports it to gap-limit discovery; failures under the withdrawn revision stay reported.
+- Match settled coverage cut short of its shard by a target or rollback against the exact publication it was read from. A same-chain silent replacement is refused as a sealed rewrite, an exact re-cut declaration keeps it, a republication on a fork above the covered part re-derives it, and an endpoint the chain cannot check yet defers the sync.
 - Scope content failure holds to the exact shard revision so a re-cut can reuse numeric shard ids without inheriting another shard's failures. Pending-work housekeeping preserves those holds; legacy counters with no proven revision binding do not hold a current revision.
 - Complete empty-script recovery at its accepted target while retaining conservative progress when scripts are added or preflight stops early.
 - Charge failed and already dispatched private query attempts, including observed refusal bytes, before handling retries or decoding batch responses. Private HTTP setup and query calls make one physical attempt so wallet work limits govern retries; failed setup response bytes consume the private allowance.

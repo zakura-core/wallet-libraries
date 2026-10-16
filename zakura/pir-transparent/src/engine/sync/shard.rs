@@ -227,11 +227,14 @@ pub(super) fn read_shard_into<S: WalletStore>(
             let mut unproductive = 0u64;
             let events = store.events()?;
             for script in &matched_scripts {
-                if failures
-                    .entries
-                    .iter()
-                    .any(|held| held.shard_id == entry.shard_id && held.script == *script)
-                {
+                // Only a failure under this revision hides the script's
+                // activity: one recorded under a withdrawn revision stays
+                // reported, but does not suppress what its replacement found.
+                if failures.entries.iter().any(|held| {
+                    held.shard_id == entry.shard_id
+                        && held.revision_digest == entry.manifest_digest
+                        && held.script == *script
+                }) {
                     continue;
                 }
                 if holds_history(&events, script, entry, target_anchor.height) {
