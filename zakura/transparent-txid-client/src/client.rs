@@ -587,6 +587,7 @@ impl TxidDisplayClient {
         if map.to_bytes() != reply.body {
             return Err(TxidError::Protocol(ProtocolKind::MapCanonical));
         }
+        map.check_shape().map_err(protocol(ProtocolKind::Map))?;
         let chain = Chain {
             network: map.network.clone(),
             genesis_hash: map.genesis_hash.clone(),
@@ -1087,8 +1088,110 @@ mod tests {
     }
 
     #[test]
+    fn malformed_refresh_preserves_warm_state_and_all_caches() {
+        let mut valid = recent_map(100, 200, "txid-2k8");
+        valid.archives = 1;
+        valid.unsealed_start = 101;
+        valid.recent.as_mut().unwrap().shard_id = 1;
+        valid.chunks = vec![display::DisplayChunkRef {
+            start_height: 100,
+            sha256: "aa".repeat(32),
+        }];
+        valid.check_shape().unwrap();
+        let mut client = test_client();
+        let mut transport = Scripted::default();
+        transport.replies.push_back(served(&valid));
+        client.refresh_map(&mut transport, &never).unwrap();
+        let cached = client.map.clone().unwrap();
+        let chain = client.chain.clone();
+        let layout = client.layout.clone();
+        let init = Arc::new(Init {
+            supported: true,
+            geometries: HashMap::new(),
+        });
+        client.init = Some(init.clone());
+        let mut archive = valid.recent.clone().unwrap();
+        archive.shard_id = 0;
+        archive.end_height = 100;
+        archive.sealed = true;
+        archive.revision = 0;
+        let chunk = Arc::new(DisplayIndexChunk {
+            schema: display::DISPLAY_SCHEMA.into(),
+            base_shard_id: 0,
+            shards: vec![archive],
+        });
+        valid.check_chunk(0, &chunk).unwrap();
+        client
+            .chunks
+            .insert(valid.chunks[0].sha256.clone(), chunk.clone());
+        let revision = valid.recent.as_ref().unwrap().manifest_digest.clone();
+        let manifest = Arc::new(sample_manifest(false));
+        client.manifests.insert(revision.clone(), manifest.clone());
+        let key = (revision.clone(), DisplayTable::Directory(0), 0);
+        let setup = Arc::new(Setup {
+            public_params: Vec::new(),
+            epoch: [0; 8],
+        });
+        client.setups.insert(key.clone(), setup.clone());
+
+        let mut malformed = valid.clone();
+        malformed.seal.archive_target += 1;
+        malformed.chunks.clear();
+        assert!(malformed.check_shape().is_err());
+        transport.replies.push_back(served(&malformed));
+        assert_eq!(
+            client.refresh_map(&mut transport, &never),
+            Err(TxidError::Protocol(ProtocolKind::Map))
+        );
+        assert!(Arc::ptr_eq(client.map.as_ref().unwrap(), &cached));
+        assert!(client.chain == chain);
+        assert!(client.layout == layout);
+        assert!(Arc::ptr_eq(client.init.as_ref().unwrap(), &init));
+        assert_eq!(client.chunks.len(), 1);
+        assert!(Arc::ptr_eq(&client.chunks[&valid.chunks[0].sha256], &chunk));
+        assert_eq!(client.manifests.len(), 1);
+        assert!(Arc::ptr_eq(&client.manifests[&revision], &manifest));
+        assert_eq!(client.setups.len(), 1);
+        assert!(Arc::ptr_eq(&client.setups[&key], &setup));
+        // A valid retry replaces the rejected response, retaining its named caches.
+        valid.recent.as_mut().unwrap().end_height += 1;
+        transport.replies.push_back(served(&valid));
+        client.refresh_map(&mut transport, &never).unwrap();
+        assert_eq!(client.map_sha256(), Some(valid.sha256().as_str()));
+        assert!(!Arc::ptr_eq(client.map.as_ref().unwrap(), &cached));
+        assert!(Arc::ptr_eq(&client.manifests[&revision], &manifest));
+        assert!(Arc::ptr_eq(&client.setups[&key], &setup));
+        assert!(transport.replies.is_empty());
+    }
+
+    #[test]
+    fn malformed_first_map_does_not_pin_its_chain() {
+        let valid = recent_map(100, 200, "txid-2k8");
+        let mut malformed = valid.clone();
+        malformed.network = "another chain".into();
+        malformed.chunk_shards = 0;
+        let mut transport = Scripted::default();
+        transport
+            .replies
+            .extend([served(&malformed), served(&valid)]);
+        let mut client = test_client();
+        assert_eq!(
+            client.refresh_map(&mut transport, &never),
+            Err(TxidError::Protocol(ProtocolKind::Map))
+        );
+        assert!(client.map.is_none());
+        assert!(client.chain.is_none());
+        assert!(client.layout.is_none());
+        client.refresh_map(&mut transport, &never).unwrap();
+        assert_eq!(client.map_sha256(), Some(valid.sha256().as_str()));
+    }
+
+    #[test]
     fn refresh_map_validates_and_replaces_only_on_success() {
-        let (a, b) = (map(10), map(20));
+        let (a, b) = (
+            recent_map(10, 19, "txid-2k8"),
+            recent_map(20, 29, "txid-2k8"),
+        );
         let digest = |m: &DisplayRecentMap| -> [u8; 32] { Sha256::digest(m.to_bytes()).into() };
         let mut transport = Scripted::default();
         transport
@@ -1855,8 +1958,9 @@ mod tests {
         let named = |chunks: &[u8]| {
             chunks
                 .iter()
-                .map(|&n| display::DisplayChunkRef {
-                    start_height: 100,
+                .enumerate()
+                .map(|(index, &n)| display::DisplayChunkRef {
+                    start_height: 100 + index as u64 * display::INDEX_CHUNK_SHARDS,
                     sha256: digest(n),
                 })
                 .collect::<Vec<_>>()
@@ -1866,6 +1970,10 @@ mod tests {
         // A seal replaced chunk 0xa1 and a block the recent revision: the
         // archives of chunk 0xa0 stay, the rest goes.
         next.chunks = named(&[0xa0, 0xb1]);
+        next.archives = 33;
+        next.unsealed_start = 133;
+        next.recent.as_mut().unwrap().shard_id = 33;
+        next.check_shape().unwrap();
         transport.replies.push_back(served(&next));
         client.refresh_map(&mut transport, &never).unwrap();
         assert_eq!(client.cached_revisions(), [digest(1), digest(2)]);
@@ -1887,6 +1995,11 @@ mod tests {
         // nothing of the old one stays, whatever ids it had.
         let mut fresh = recent_map(50, 300, "txid-2k8");
         fresh.chunks = named(&[0xc0]);
+        fresh.chunks[0].start_height = fresh.start_height;
+        fresh.archives = 1;
+        fresh.unsealed_start = fresh.start_height + 1;
+        fresh.recent.as_mut().unwrap().shard_id = 1;
+        fresh.check_shape().unwrap();
         transport.replies.push_back(served(&fresh));
         client.refresh_map(&mut transport, &never).unwrap();
         assert!(client.cached_revisions().is_empty());
