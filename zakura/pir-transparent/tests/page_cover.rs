@@ -1231,6 +1231,81 @@ mod page_cover {
         }
     }
 
+    /// Evidence for the payload-corruption leak (PR #211 review thread
+    /// r4290377076): a service keeps every segment header of one table's page
+    /// reply in the first sweep and garbles the payload behind it. The same
+    /// wallet, seed and chain of three runs (pages-2, then pages-1, then
+    /// pages-0) is run twice, once with the real slot corrupted and once with a
+    /// dummy slot corrupted. The service must not be able to tell the two apart
+    /// from what it receives.
+    #[test]
+    #[ignore = "known leak: fails until the page schedule stops depending on the walk (PR #211, r4290377076)"]
+    fn payload_corruption_in_the_real_or_a_dummy_slot_sends_the_same_requests() {
+        let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+        /// Garbles everything after the 16-byte header of the first page reply
+        /// to `pages-<table>`, and records every exchange.
+        struct Garbling {
+            inner: Recording,
+            table: u32,
+            done: std::cell::Cell<bool>,
+        }
+        impl HttpExchange for Garbling {
+            fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
+                let mut reply = self.inner.send(request)?;
+                let target = format!("/query/pages-{}", self.table);
+                if !self.done.get()
+                    && request.method == HttpMethod::Post
+                    && request.path.ends_with(&target)
+                {
+                    self.done.set(true);
+                    for byte in reply.body.iter_mut().skip(16) {
+                        *byte ^= 0x5a;
+                    }
+                }
+                Ok(reply)
+            }
+        }
+        let end = H0 + 29;
+        let events = chain([H0 + 1, H0 + 11, H0 + 21]);
+        let (_server, url, _dir) = serve(&[shard(H0, end, 10, events)]);
+        let mut seen = Vec::new();
+        for table in [2, 0] {
+            let mut wallet = Wallet::open(1, end, 7, config(1, QUERIES, PRIVATE_BYTES));
+            let exchange = Garbling {
+                inner: Recording {
+                    inner: Loopback::new(&url),
+                    sent: RefCell::default(),
+                },
+                table,
+                done: std::cell::Cell::new(false),
+            };
+            let watch = wallet.watch();
+            let chain = Chain { tip: end };
+            let result = wallet.recovery.as_mut().unwrap().pass(
+                &watch,
+                &chain,
+                &exchange,
+                RESPONSE_LIMIT,
+                &|| false,
+            );
+            let outcome = result.map(|report| report.progress.outcome);
+            let sent = exchange.inner.sent.into_inner();
+            eprintln!(
+                "garbled pages-{table}: outcome {outcome:?}, page queries {:?}",
+                page_queries(&sent, 0)
+            );
+            seen.push(
+                sent.iter()
+                    .map(|sent| (sent.method, sent.path.clone(), sent.upload))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(
+            seen[0], seen[1],
+            "the service sees the same requests whether the garbled slot was real or a dummy"
+        );
+    }
+
     /// A directory setup reply padded past the size its scheme allows, here with
     /// a field the setup's reader would ignore, fails the pass before any
     /// directory query instead of being kept, as a page setup's would.
