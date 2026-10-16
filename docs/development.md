@@ -212,11 +212,10 @@ A successful run means all selected packages passed; a failed run must be
 investigated before publishing. This checks package contents and builds, not
 crates.io ownership or all wallet behavior. Required repository CI still applies.
 
-Transparent PIR requires the registry versions declared for its eight `wallet-pir`
-dependencies, including optional test support. Publish those upstream packages
-first. To release the other nine crates separately, add `--without-transparent`
-to any of the commands above. This script does not publish `wallet-pir` or change
-credentials, changelog dates, tags, or source files. After publication, confirm the
+The release never waits on `wallet-pir`: the script refuses any selected crate
+that declares a `wallet-pir` package, of any dependency kind or source, so no
+`wallet-pir` tag or registry release is ever a prerequisite. This script does not
+change credentials, changelog dates, tags, or source files. After publication, confirm the
 registry versions and confirm the corresponding changelog dates.
 
 `--output PATH` writes a JSON receipt and partial progress outside the checkout.

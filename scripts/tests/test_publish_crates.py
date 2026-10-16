@@ -55,7 +55,7 @@ class PublishingTests(unittest.TestCase):
              patch.object(release, "release_packages", return_value=([package("first")], [("upstream", "1.0.0")])), \
              patch.object(release, "registry_version", return_value="absent"), \
              patch.object(release.subprocess, "run") as cargo:
-            with self.assertRaisesRegex(release.ReleaseError, "required wallet-pir"):
+            with self.assertRaisesRegex(release.ReleaseError, "required upstream"):
                 release.run_release(Path("."), publish=True)
             cargo.assert_not_called()
 
@@ -101,7 +101,7 @@ class PublishingTests(unittest.TestCase):
         with patch.object(release.sys, "argv", ["publish-crates.py", "--dry-run"]), \
              patch.object(release, "run_release") as run:
             self.assertEqual(release.main(), 0)
-            run.assert_called_once_with(release.ROOT, False, False, False,
+            run.assert_called_once_with(release.ROOT, False, False,
                                         output=None, publish_verified=None)
 
     def test_dry_run_cannot_be_combined_with_publish(self):
@@ -119,14 +119,32 @@ class PublishingTests(unittest.TestCase):
                      for directory in workspace["members"]]
         members = {package["name"] for package in manifests if package.get("publish") is not False}
         self.assertEqual({p["name"] for p in packages}, members)
-        # wallet-pir's crates come from crates.io, so no git prerequisite remains.
-        self.assertEqual(upstream, [])
-        selected, upstream = release.release_packages(release.ROOT, without_transparent=True)
-        self.assertEqual(len(selected), len(packages) - 1)
+        # Nothing the release selects waits on a git prerequisite.
         self.assertEqual(upstream, [])
 
+    def test_wallet_pir_packages_are_refused_under_any_source(self):
+        declarations = (
+            'receiver-pir = { version = "=0.1.0" }',
+            'alias = { package = "transparent-shard", version = "=0.1.0" }',
+            'renamed = { git = "https://github.com/valargroup/wallet-pir", version = "=0.1.0" }',
+        )
+        for declaration in declarations:
+            for table in ("dependencies", "dev-dependencies", "build-dependencies", 'target."cfg(unix)".dependencies'):
+                with self.subTest(declaration=declaration, table=table), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    (root / "manifests").mkdir()
+                    (root / "manifests/sources.toml").write_text(
+                        '[server]\nwallet_pir_packages = ["receiver-pir", "transparent-shard"]\n')
+                    (root / "first").mkdir()
+                    (root / "first/Cargo.toml").write_text(
+                        f'[package]\nname = "first"\nversion = "1.0.0"\n[{table}]\n{declaration}\n')
+                    (root / "Cargo.toml").write_text('[workspace]\nmembers = ["first"]\n[workspace.dependencies]\n')
+                    with patch.object(release, "ORDER", ("first",)), \
+                            self.assertRaisesRegex(release.ReleaseError, "depends on the wallet-pir package"):
+                        release.release_packages(root)
+
     def receipt(self, directory, selection, **changes):
-        data = {"schema_version": 1, "commit": "commit", "without_transparent": False,
+        data = {"schema_version": 2, "commit": "commit",
                 "verification_passed": True,
                 "packages": [{"name": p["name"], "version": p["version"],
                               "registry_status": "absent", "result": "remaining"}
@@ -156,8 +174,8 @@ class PublishingTests(unittest.TestCase):
     def test_bad_receipts_stop_before_registry_queries_or_uploads(self):
         packages = [package("first"), package("second")]
         invalid = ({"commit": "other"}, {"verification_passed": False},
-                   {"verification_passed": 1}, {"schema_version": 2},
-                   {"without_transparent": True}, {"packages": []},
+                   {"verification_passed": 1}, {"schema_version": 1},
+                   {"packages": []},
                    {"packages": [{"name": "second", "version": "1.0.0"},
                                  {"name": "first", "version": "1.0.0"}]},
                    {"packages": [{"name": "first", "version": "2.0.0"}]})
@@ -211,7 +229,7 @@ class PublishingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "progress.json"
             self.run_with([package("first")], {"first": "absent"}, output=output)
-            release.validate_receipt(output, "commit", [package("first")], False)
+            release.validate_receipt(output, "commit", [package("first")])
 
     def test_receipts_cannot_be_written_inside_checkout(self):
         with tempfile.TemporaryDirectory() as directory:

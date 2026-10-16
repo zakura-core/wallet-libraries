@@ -59,15 +59,19 @@ def dependency_tables(manifest):
             yield section.get(key, {})
 
 
-def release_packages(root, without_transparent=False):
+def wallet_pir_owned(root, name, dep):
+    """A wallet-libraries release never waits on wallet-pir: refuse its packages under any source."""
+    owned = tomllib.loads((root / "manifests/sources.toml").read_text())["server"]["wallet_pir_packages"]
+    return name in owned or "wallet-pir" in dep.get("git", "").lower()
+
+
+def release_packages(root):
     workspace = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]
     packages = []
     for directory in ORDER:
         path = root / directory / "Cargo.toml"
         manifest = tomllib.loads(path.read_text())
         package = manifest["package"]
-        if without_transparent and package["name"] == "zakura-pir-transparent":
-            continue
         if package.get("publish") is False:
             raise ReleaseError(f"{package['name']} disables publication.")
         packages.append({"name": package["name"], "version": package["version"],
@@ -85,6 +89,8 @@ def release_packages(root, without_transparent=False):
                 if not isinstance(dep, dict):
                     continue
                 name = dep.get("package", alias)
+                if wallet_pir_owned(root, name, dep):
+                    raise ReleaseError(f"{package['name']} depends on the wallet-pir package {name}.")
                 if name in names:
                     version = names[name]["version"]
                     if dep.get("version", "").removeprefix("=") != version:
@@ -146,14 +152,13 @@ def save_receipt(path, receipt):
         temporary.replace(path)
 
 
-def validate_receipt(path, head, packages, without_transparent):
+def validate_receipt(path, head, packages):
     try:
         receipt = json.loads(Path(path).read_text())
         expected = [(p["name"], p["version"]) for p in packages]
         actual = [(p["name"], p["version"]) for p in receipt["packages"]]
-        valid = (receipt["schema_version"] == 1
+        valid = (receipt["schema_version"] == 2
                  and receipt["commit"] == head
-                 and receipt["without_transparent"] is without_transparent
                  and receipt["verification_passed"] is True
                  and actual == expected
                  and all(p["registry_status"] in ("available", "absent")
@@ -180,17 +185,16 @@ def observe_package(record, receipt, output):
     return status
 
 
-def run_release(root, publish=False, plan=False, without_transparent=False,
+def run_release(root, publish=False, plan=False,
                 output=None, publish_verified=None):
     head = git(root, "rev-parse", "HEAD")
     check_checkout(root, head)
-    packages, upstream = release_packages(root, without_transparent)
+    packages, upstream = release_packages(root)
     output = output_path(root, output)
     if publish_verified is not None:
-        validate_receipt(publish_verified, head, packages, without_transparent)
+        validate_receipt(publish_verified, head, packages)
     publishing = publish or publish_verified is not None
-    receipt = {"schema_version": 1, "commit": head,
-               "without_transparent": without_transparent,
+    receipt = {"schema_version": 2, "commit": head,
                "verification_passed": publish_verified is not None,
                "packages": [{"name": p["name"], "version": p["version"],
                              "registry_status": "unknown", "result": "remaining"}
@@ -209,8 +213,7 @@ def run_release(root, publish=False, plan=False, without_transparent=False,
         status = observe_package(record, receipt, output)
         print(f"Release: {name} {version}: {status}", flush=True)
     if missing:
-        raise ReleaseError("Publish the required wallet-pir versions first: " + ", ".join(missing)
-                           + ". Use --without-transparent to release the other crates separately.")
+        raise ReleaseError("Publish the required upstream versions first: " + ", ".join(missing) + ".")
     if plan:
         return
     # A fresh target directory belongs exclusively to this invocation. No shared
@@ -275,10 +278,9 @@ def main():
     mode.add_argument("--publish", action="store_true", help="Verify then upload each unpublished version to crates.io")
     mode.add_argument("--publish-verified", metavar="RECEIPT", help="Upload without recompiling after validating a successful receipt for this checkout")
     parser.add_argument("--output", type=Path, help="Write the release receipt and progress outside the checkout")
-    parser.add_argument("--without-transparent", action="store_true", help="Exclude transparent PIR and its wallet-pir prerequisites")
     args = parser.parse_args()
     try:
-        run_release(ROOT, args.publish, args.plan, args.without_transparent,
+        run_release(ROOT, args.publish, args.plan,
                     output=args.output, publish_verified=args.publish_verified)
     except (ReleaseError, subprocess.CalledProcessError, OSError) as error:
         print(f"Release stopped: {error}", file=sys.stderr)
