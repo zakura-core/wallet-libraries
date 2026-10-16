@@ -1,6 +1,6 @@
 [package]
 name = "zakura-transaction-status"
-version = "0.0.1-rc2"
+version = "0.0.1-rc3"
 description = "Policy-bound transaction status observation for Zakura wallets"
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,7 @@ categories.workspace = true
 keywords = ["zcash", "wallet", "privacy"]
 
 [dependencies]
-zakura-pir-status = { version = "=0.0.1-rc1", path = "../pir-status" }
+zakura-pir-status = { version = "=0.0.1-rc2", path = "../pir-status" }
 zcash_client_backend = { workspace = true, features = ["lightwalletd-tonic", "lightwalletd-tonic-transport"] }
 zcash_primitives.workspace = true
 zcash_protocol.workspace = true

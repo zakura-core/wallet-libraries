@@ -441,14 +441,24 @@ impl DisplayMap {
 /// Checks one listed shard on its own: range, geometry, tables, digest, and
 /// for a sealed shard the bucket target and content purity.
 pub(crate) fn check_entry(seal: &DisplaySealParams, shard: &DisplayMapEntry) -> Result<(), String> {
+    check_entry_structure(seal, shard)?;
+    if display_by_name(&shard.geometry).is_none() {
+        return Err(format!("display shard {} geometry", shard.shard_id));
+    }
+    Ok(())
+}
+
+/// Validates the wire fields shared by known and future geometries. A caller
+/// must separately recognize the geometry before interpreting or querying it.
+pub(crate) fn check_entry_structure(
+    seal: &DisplaySealParams,
+    shard: &DisplayMapEntry,
+) -> Result<(), String> {
     if shard.end_height < shard.start_height {
         return Err(format!(
             "display shard {} ends before it starts",
             shard.shard_id
         ));
-    }
-    if display_by_name(&shard.geometry).is_none() {
-        return Err(format!("display shard {} geometry", shard.shard_id));
     }
     let expected_buckets = if shard.sealed {
         seal.n_archive
@@ -467,7 +477,7 @@ pub(crate) fn check_entry(seal: &DisplaySealParams, shard: &DisplayMapEntry) -> 
     {
         return Err(format!("display shard {} tables", shard.shard_id));
     }
-    if shard.manifest_digest.len() != 64 {
+    if !is_digest(&shard.manifest_digest) {
         return Err(format!("display shard {} digest", shard.shard_id));
     }
     if shard.sealed && (shard.revision != 0 || shard.min_bucket_records < seal.archive_target) {
@@ -477,6 +487,13 @@ pub(crate) fn check_entry(seal: &DisplaySealParams, shard: &DisplayMapEntry) -> 
         ));
     }
     Ok(())
+}
+
+pub(crate) fn is_digest(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Checks the recent shard's range against the archives': it starts no lower
