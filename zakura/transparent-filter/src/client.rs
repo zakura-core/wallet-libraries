@@ -12,7 +12,6 @@ use crate::envelope::{
 use crate::error::FilterError;
 use crate::hash::{BlockHash, ShardKey};
 use crate::matching::{map_wallet_scripts, map_wallet_scripts_keyed, match_mapped};
-use crate::profile::PROFILE;
 use crate::script::ScriptBytes;
 use crate::transport::{
     ByteCharges, FilterTransport, RangeRequest, ShardFilterTransport, ShardRangeRequest,
@@ -74,28 +73,10 @@ impl AcceptedChain for ChainMap {
     }
 }
 
-/// A record whose filter has been fully validated and located on the accepted
-/// chain.
-#[derive(Clone, Debug)]
-pub struct CheckedRecord {
-    pub height: u64,
-    pub block_hash: BlockHash,
-    pub filter: ValidatedFilter,
-}
-
-/// Admits a per-block range request, returning the accepted stop height.
-///
-/// Per-block filters are decoded with the fixed [`PROFILE`] parameters, so any
-/// other profile name, even one a service echoes back consistently, is refused
-/// rather than decoded under the wrong `P` and `M`. The stop block must be on
-/// the wallet's accepted chain at or above the start, so an empty or reversed
-/// range can never be reported as coverage. [`sync_range`] and [`check_batch`]
-/// both admit through here before any transport call or decoding.
-fn admit_range_request(
-    request: &RangeRequest,
-    chain: &impl AcceptedChain,
-) -> Result<u64, FilterError> {
-    if request.profile != PROFILE {
+/// Admits the fixed per-block format and inclusive accepted range before any
+/// coverage is initialized, transport is called, or filter is decoded.
+fn admit_range(request: &RangeRequest, chain: &impl AcceptedChain) -> Result<u64, FilterError> {
+    if request.profile != crate::profile::PROFILE {
         return Err(FilterError::Response(format!(
             "unsupported per-block filter profile {:?}",
             request.profile
@@ -112,6 +93,15 @@ fn admit_range_request(
     Ok(stop_height)
 }
 
+/// A record whose filter has been fully validated and located on the accepted
+/// chain.
+#[derive(Clone, Debug)]
+pub struct CheckedRecord {
+    pub height: u64,
+    pub block_hash: BlockHash,
+    pub filter: ValidatedFilter,
+}
+
 /// Checks a batch against the request and the wallet's accepted chain.
 ///
 /// Rejects a batch that is on the wrong chain or profile, out of order, short,
@@ -124,7 +114,7 @@ pub fn check_batch(
     chain: &impl AcceptedChain,
     limits: FilterLimits,
 ) -> Result<Vec<CheckedRecord>, FilterError> {
-    let stop_height = admit_range_request(request, chain)?;
+    let stop_height = admit_range(request, chain)?;
     if batch.genesis != request.genesis {
         return Err(FilterError::Response(
             "batch is for a different chain".into(),
@@ -505,7 +495,7 @@ pub fn sync_range(
     wallet_scripts: &[ScriptBytes],
     limits: FilterLimits,
 ) -> Result<SyncOutcome, FilterError> {
-    let stop_height = admit_range_request(request, chain)?;
+    let stop_height = admit_range(request, chain)?;
     let mut charges = ByteCharges::default();
     let mut matches = Vec::new();
     let mut filters_checked = 0u64;
@@ -640,6 +630,111 @@ mod tests {
             profile: PROFILE.to_string(),
             start_height: 10,
             stop_block_hash: hash_at(14),
+        }
+    }
+
+    #[test]
+    fn per_block_request_admission_precedes_transport_and_coverage() {
+        struct NeverFetch;
+        impl FilterTransport for NeverFetch {
+            fn fetch_range(
+                &mut self,
+                _: &RangeRequest,
+            ) -> Result<(FilterBatch, ByteCharges), FilterError> {
+                panic!("invalid requests must not reach the transport")
+            }
+        }
+        let fixture = fixture();
+        for scripts in [vec![], vec![script(7)]] {
+            let mut reversed = request();
+            reversed.start_height = 15;
+            let error = sync_range(
+                &mut NeverFetch,
+                &reversed,
+                &fixture.chain,
+                &scripts,
+                FilterLimits::default(),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("below the requested start"));
+            for profile in ["", "unknown-per-block-profile", RANGE_PROFILE] {
+                let mut unsupported = request();
+                unsupported.profile = profile.into();
+                let error = sync_range(
+                    &mut NeverFetch,
+                    &unsupported,
+                    &fixture.chain,
+                    &scripts,
+                    FilterLimits::default(),
+                )
+                .unwrap_err();
+                assert!(error
+                    .to_string()
+                    .contains("unsupported per-block filter profile"));
+            }
+        }
+        // A range containing just its accepted endpoint still fetches and checks it.
+        let mut single = request();
+        single.start_height = 14;
+        let mut batch = FilterBatch::decode(&fixture.batches[&10]).unwrap();
+        batch.start_height = 14;
+        batch.records = batch.records[4..].to_vec();
+        let mut transport = MapTransport {
+            batches: std::collections::BTreeMap::from([(14, batch.encode())]),
+            charges: ByteCharges::default(),
+        };
+        let outcome = sync_range(
+            &mut transport,
+            &single,
+            &fixture.chain,
+            &[],
+            FilterLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(outcome.filters_checked, 1);
+        assert_eq!(outcome.covered_through, 14);
+        assert_eq!(outcome.covered_block_hash, hash_at(14));
+        assert_eq!(transport.charges.requests, 1);
+    }
+
+    #[test]
+    fn echoed_unknown_profile_cannot_select_the_fixed_per_block_decoder() {
+        // Independently encoded: CompactSize(1), zero quotient, then the
+        // remainder and zero padding. P19 reads 1; P20 reads 2 from these bytes.
+        let bytes = [0x01, 0x00, 0x00, 0x10];
+        assert_eq!(
+            validate_filter(&bytes, FilterLimits::default())
+                .unwrap()
+                .values(),
+            &[1]
+        );
+        assert_eq!(
+            crate::validate::validate_parameters(
+                &bytes,
+                FilterLimits::default(),
+                crate::profile::M,
+                20,
+            )
+            .unwrap()
+            .values(),
+            &[2]
+        );
+        let fixture = fixture();
+        let mut batch = FilterBatch::decode(&fixture.batches[&10]).unwrap();
+        for record in &mut batch.records {
+            record.filter = bytes.to_vec();
+        }
+        // These are canonical V1 bytes too: name equality alone is insufficient.
+        assert!(check_batch(&batch, &request(), &fixture.chain, FilterLimits::default()).is_ok());
+        for profile in ["", "unknown-per-block-profile", RANGE_PROFILE] {
+            let mut request = request();
+            request.profile = profile.into();
+            batch.profile = profile.into();
+            let error =
+                check_batch(&batch, &request, &fixture.chain, FilterLimits::default()).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("unsupported per-block filter profile"));
         }
     }
 
@@ -783,100 +878,6 @@ mod tests {
         let error =
             check_batch(&batch, &request(), &fixture.chain, FilterLimits::default()).unwrap_err();
         assert!(!matches!(error, FilterError::Response(_)));
-    }
-
-    /// A transport that must never be reached.
-    struct RefusingTransport {
-        calls: u64,
-    }
-
-    impl FilterTransport for RefusingTransport {
-        fn fetch_range(
-            &mut self,
-            _: &RangeRequest,
-        ) -> Result<(FilterBatch, ByteCharges), FilterError> {
-            self.calls += 1;
-            Err(FilterError::Response("the transport was reached".into()))
-        }
-    }
-
-    #[test]
-    fn a_reversed_range_is_refused_before_any_request_or_coverage() {
-        let fixture = fixture();
-        let mut transport = RefusingTransport { calls: 0 };
-        // Unfixed, this returned coverage through 19 paired with block 14's hash.
-        let mut reversed = request();
-        reversed.start_height = 20;
-        let error = sync_range(
-            &mut transport,
-            &reversed,
-            &fixture.chain,
-            &[script(7)],
-            FilterLimits::default(),
-        )
-        .unwrap_err();
-        assert!(format!("{error}").contains("below the requested start"));
-        assert_eq!(transport.calls, 0);
-    }
-
-    /// One element, `01 00 00 10`: after the count, a zero quotient bit then
-    /// the remainder `000...0001` read as 19 bits (value 1) or as 20 bits
-    /// (value 2). Valid under both, so only the profile name can tell which.
-    const ONE_ELEMENT_GR: [u8; 4] = [0x01, 0x00, 0x00, 0x10];
-
-    #[test]
-    fn the_fixed_vector_decodes_differently_under_another_golomb_rice_parameter() {
-        let limits = FilterLimits::default();
-        assert_eq!(
-            validate_filter(&ONE_ELEMENT_GR, limits).unwrap().values(),
-            [1]
-        );
-        assert_eq!(
-            crate::validate::validate_parameters(&ONE_ELEMENT_GR, limits, crate::profile::M, 20)
-                .unwrap()
-                .values(),
-            [2]
-        );
-    }
-
-    #[test]
-    fn an_unsupported_per_block_profile_is_refused_before_fetching_or_decoding() {
-        let fixture = fixture();
-        let mut newer = request();
-        newer.profile = "zcash-transparent-basic-v2".to_string();
-
-        let mut transport = RefusingTransport { calls: 0 };
-        let error = sync_range(
-            &mut transport,
-            &newer,
-            &fixture.chain,
-            &[script(7)],
-            FilterLimits::default(),
-        )
-        .unwrap_err();
-        assert!(format!("{error}").contains("unsupported per-block filter profile"));
-        assert_eq!(transport.calls, 0);
-
-        // A service echoing the newer name with bytes that decode under the
-        // fixed parameters is still refused.
-        let mut batch = FilterBatch::decode(&fixture.batches[&10]).unwrap();
-        batch.profile = newer.profile.clone();
-        for record in &mut batch.records {
-            record.filter = ONE_ELEMENT_GR.to_vec();
-        }
-        let error =
-            check_batch(&batch, &newer, &fixture.chain, FilterLimits::default()).unwrap_err();
-        assert!(format!("{error}").contains("unsupported per-block filter profile"));
-    }
-
-    #[test]
-    fn a_batch_profile_differing_from_the_supported_request_is_refused() {
-        let fixture = fixture();
-        let mut batch = FilterBatch::decode(&fixture.batches[&10]).unwrap();
-        batch.profile = "zcash-transparent-basic-v2".to_string();
-        let error =
-            check_batch(&batch, &request(), &fixture.chain, FilterLimits::default()).unwrap_err();
-        assert!(format!("{error}").contains("is not the requested"));
     }
 
     // --- Shard sync -------------------------------------------------------

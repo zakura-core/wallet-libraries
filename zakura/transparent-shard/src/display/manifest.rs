@@ -438,36 +438,19 @@ impl DisplayMap {
     }
 }
 
-/// Whether `text` is a canonical digest: exactly 64 lowercase hexadecimal
-/// digits. Digests name request paths and cache keys, so nothing else is
-/// admitted.
-pub(crate) fn is_digest(text: &str) -> bool {
-    text.len() == 64
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
 /// Checks one listed shard on its own: range, geometry, tables, digest, and
 /// for a sealed shard the bucket target and content purity.
 pub(crate) fn check_entry(seal: &DisplaySealParams, shard: &DisplayMapEntry) -> Result<(), String> {
-    check_listed_entry(seal, shard)?;
-    check_geometry(shard)
-}
-
-/// Checks the listed shard names a geometry this build reads.
-pub(crate) fn check_geometry(shard: &DisplayMapEntry) -> Result<(), String> {
+    check_entry_structure(seal, shard)?;
     if display_by_name(&shard.geometry).is_none() {
         return Err(format!("display shard {} geometry", shard.shard_id));
     }
     Ok(())
 }
 
-/// [`check_entry`] without the geometry: every rule a listed shard must meet
-/// whatever geometry it names. A client admits entries through this, then
-/// classifies the geometry itself, so a geometry newer than this build is
-/// unsupported rather than malformed.
-pub(crate) fn check_listed_entry(
+/// Validates the wire fields shared by known and future geometries. A caller
+/// must separately recognize the geometry before interpreting or querying it.
+pub(crate) fn check_entry_structure(
     seal: &DisplaySealParams,
     shard: &DisplayMapEntry,
 ) -> Result<(), String> {
@@ -504,6 +487,13 @@ pub(crate) fn check_listed_entry(
         ));
     }
     Ok(())
+}
+
+pub(crate) fn is_digest(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Checks the recent shard's range against the archives': it starts no lower

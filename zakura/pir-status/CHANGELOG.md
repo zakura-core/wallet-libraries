@@ -6,8 +6,7 @@
 
 ### Changed
 
-- Updated the native PIR dependency to `0.0.1-rc2`. Request and response
-  bytes are unchanged.
+- Require native PIR `0.0.1-rc2`, including the canonical protocol primitives moved into this repository.
 
 ## [0.0.1-rc1] - 2026-10-13
 

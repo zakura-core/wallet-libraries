@@ -6,9 +6,7 @@
 
 ### Changed
 
-- Updated the status PIR dependency to `0.0.1-rc2`, which carries the native
-  PIR dependency `0.0.1-rc2`. Status routing and observation behavior are
-  unchanged.
+- Require private Status PIR `0.0.1-rc2`, which carries the updated native PIR dependency.
 
 ## [0.0.1-rc2] - 2026-10-14
 
