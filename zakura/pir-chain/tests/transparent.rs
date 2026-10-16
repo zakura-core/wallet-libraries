@@ -355,7 +355,8 @@ fn compact_blocks_advance_every_tree_from_the_given_sizes() {
     };
     let sapling = sum(|t| t.sapling_outputs.len());
     let orchard = sum(|t| t.orchard_actions.len());
-    assert!(sapling > 0 && orchard > 0);
+    // The fixture block pays five Sapling outputs and has no Orchard actions.
+    assert_eq!((sapling, orchard), (5, 0));
     assert_eq!(sum(|t| t.ironwood_actions.len()), 0);
     assert_eq!(counts, [100 + sapling, 200 + orchard, 300]);
     assert_eq!(

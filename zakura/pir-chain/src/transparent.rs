@@ -1031,11 +1031,11 @@ mod tests {
             tokio::pin!(read);
             tokio::select! {
                 _ = &mut read => panic!("the held lookup cannot complete"),
-                _ = async {
+                waited = tokio::time::timeout(std::time::Duration::from_secs(30), async {
                     while chain.lock().unwrap().held_lookups == 0 {
                         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                     }
-                } => {}
+                }) => waited.expect("the extraction reaches the held lookup"),
             }
         }
         chain.lock().unwrap().hold_lookup = None;
