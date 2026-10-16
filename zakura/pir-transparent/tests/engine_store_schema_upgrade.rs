@@ -3,7 +3,7 @@
 use rusqlite::{Connection, params, types::Value};
 use std::{collections::BTreeMap, path::Path};
 use zakura_pir_transparent::engine::{
-    store::{Anchor, WalletStore},
+    store::{Anchor, StoreError, WalletStore},
     testing::{commit, identity, receive, script, spend},
 };
 use zakura_pir_transparent::engine_store::SqliteStore;
@@ -215,4 +215,165 @@ fn unsupported_versions_are_refused_without_modification() {
             .unwrap()
         );
     }
+}
+
+/// Everything a refused open must leave as it was: the persistent journal mode,
+/// every schema object's SQL and every row, the version marker included.
+type FileState = (
+    String,
+    Vec<(String, String, Option<String>)>,
+    BTreeMap<String, Vec<Vec<Value>>>,
+);
+
+fn file_state(path: &Path) -> FileState {
+    let db = Connection::open(path).unwrap();
+    let journal = db
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap();
+    let schema = db
+        .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let tables: Vec<String> = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let rows = tables
+        .into_iter()
+        .map(|table| {
+            let mut stmt = db
+                .prepare(&format!("SELECT * FROM \"{table}\" ORDER BY rowid"))
+                .unwrap();
+            let columns = stmt.column_count();
+            let rows = stmt
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|column| row.get(column))
+                        .collect::<Result<Vec<Value>, _>>()
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            (table, rows)
+        })
+        .collect();
+    (journal, schema, rows)
+}
+
+/// Opening the file at `path` is refused as incompatible and changes nothing.
+fn assert_refused_unchanged(path: &Path) {
+    let before = file_state(path);
+    assert_eq!(
+        before.0, "delete",
+        "the fixture starts in rollback journal mode"
+    );
+    match SqliteStore::open(path) {
+        Err(StoreError::Corrupt(_)) => {}
+        Err(other) => panic!("refused for another reason: {other}"),
+        Ok(_) => panic!("an incompatible file was opened"),
+    }
+    assert_eq!(file_state(path), before);
+}
+
+#[test]
+fn a_metadata_table_without_its_version_is_refused_without_modification() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.sqlite");
+    let db = populated_cache6(&path);
+    db.execute("DELETE FROM wallet_meta WHERE key = 'schema_version'", [])
+        .unwrap();
+    // An incompatible layout the store would otherwise keep and stamp.
+    db.execute_batch("DROP TABLE filter_cache; CREATE TABLE filter_cache (other TEXT);")
+        .unwrap();
+    drop(db);
+    assert_refused_unchanged(&path);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.sqlite");
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE wallet_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         INSERT INTO wallet_meta VALUES ('anchor', 'kept');",
+    )
+    .unwrap();
+    drop(db);
+    assert_refused_unchanged(&path);
+}
+
+#[test]
+fn unknown_versions_are_refused_without_changing_schema_or_journal_mode() {
+    for incompatible in ["5", "8", "invalid", ""] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        let db = populated_cache6(&path);
+        db.execute(
+            "UPDATE wallet_meta SET value = ?1 WHERE key = 'schema_version'",
+            [incompatible],
+        )
+        .unwrap();
+        drop(db);
+        assert_refused_unchanged(&path);
+    }
+}
+
+#[test]
+fn orphaned_store_tables_without_metadata_are_refused_without_modification() {
+    // A cache whose metadata table is gone keeps its other tables and rows.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.sqlite");
+    let db = populated_cache6(&path);
+    db.execute_batch("DROP TABLE wallet_meta").unwrap();
+    drop(db);
+    assert_refused_unchanged(&path);
+
+    // One table under a store name, in a layout this build does not write.
+    for table in ["coverage", "run_cache", "filter_cache", "commits"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(&format!(
+            "CREATE TABLE {table} (other TEXT); INSERT INTO {table} VALUES ('kept');"
+        ))
+        .unwrap();
+        drop(db);
+        assert_refused_unchanged(&path);
+    }
+}
+
+#[test]
+fn unrelated_tables_in_the_file_still_open_as_a_fresh_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.sqlite");
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE pir_bridge_catalog (source BLOB PRIMARY KEY, lineage INTEGER);
+         INSERT INTO pir_bridge_catalog VALUES (X'0102', 4);
+         CREATE TABLE application_settings (name TEXT PRIMARY KEY, value TEXT);
+         INSERT INTO application_settings VALUES ('theme', 'dark');
+         CREATE TABLE counters (id INTEGER PRIMARY KEY AUTOINCREMENT, n INTEGER);
+         INSERT INTO counters (n) VALUES (1);",
+    )
+    .unwrap();
+    drop(db);
+    let (_, _, foreign) = file_state(&path);
+
+    let store = SqliteStore::open(&path).unwrap();
+    assert_eq!(store.set_identity().unwrap(), None);
+    assert_eq!(store.last_commit().unwrap(), 0);
+    drop(store);
+    assert_eq!(version(&Connection::open(&path).unwrap()), "7");
+    let (journal, _, rows) = file_state(&path);
+    assert_eq!(journal, "wal");
+    for (table, held) in &foreign {
+        assert_eq!(rows.get(table), Some(held), "{table} changed");
+    }
+    // The version 7 store, unrelated tables and all, reopens.
+    let store = SqliteStore::open(&path).unwrap();
+    assert_eq!(store.last_commit().unwrap(), 0);
 }
