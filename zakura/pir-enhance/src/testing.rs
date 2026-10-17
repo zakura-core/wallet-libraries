@@ -162,8 +162,7 @@ impl IronwoodOutputFixture {
         let cv = fixture_value_commitment();
         let cmx = ExtractedNoteCommitment::from(note.commitment());
         let encryptor = IronwoodNoteEncryption::new(Some(keys.ovk), note, FIXTURE_MEMO);
-        let out_ciphertext =
-            encryptor.encrypt_outgoing_plaintext(&cv, &cmx, &mut rand::thread_rng());
+        let out_ciphertext = encryptor.encrypt_outgoing_plaintext(&cv, &cmx, &mut rand_10::rng());
         Self {
             output: OutputBytes {
                 nullifier: NULLIFIER,

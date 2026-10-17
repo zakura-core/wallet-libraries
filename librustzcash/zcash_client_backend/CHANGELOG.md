@@ -20,6 +20,8 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- Common dependencies use the protocol-port revision of the version 4 family,
+  with the Halo 2 backend selected explicitly for transaction proving.
 - ZIP 318 anchor retention, canonical crossing fees, and rolling expiry now follow
   the network's NU7 block spacing. `AnchorRetention::new` and `union`, and
   `PoolMigrationParams::new`, require a `BlockSpacing` argument; the implicit

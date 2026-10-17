@@ -19,7 +19,6 @@ use {
         note_encryption::{CompactAction, IronwoodDomain, OrchardDomain, OrchardNoteEncryption},
         value::{NoteValue, ValueCommitTrapdoor, ValueCommitment},
     },
-    ff::PrimeField,
     zcash_note_encryption::{
         COMPACT_NOTE_SIZE, Domain, ENC_CIPHERTEXT_SIZE, EphemeralKeyBytes, ShieldedOutput,
         try_output_recovery_with_pkd_esk,
@@ -2302,7 +2301,7 @@ impl Bundle {
                                     .expect("path is length 32"),
                             )
                         }),
-                        alpha: spend.alpha().map(|alpha| alpha.to_repr()),
+                        alpha: spend.alpha().map(|alpha| alpha.to_bytes()),
                         zip32_derivation: spend.zip32_derivation().as_ref().map(|z| {
                             Zip32Derivation {
                                 seed_fingerprint: *z.seed_fingerprint(),

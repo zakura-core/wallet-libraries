@@ -43,7 +43,7 @@ sapling = { workspace = true, optional = true }
 
 # - Orchard
 nonempty = { workspace = true, optional = true }
-orchard = { workspace = true, optional = true }
+orchard = { workspace = true, features = ["backend-halo2"], optional = true }
 pasta_curves = { workspace = true, optional = true }
 
 # Dependencies used internally:
