@@ -1520,6 +1520,7 @@ mod tests {
 #[cfg(test)]
 mod nu7_expiry_tests {
     use super::*;
+    use zcash_client_backend::data_api::Account;
 
     #[test]
     fn nu7_unknown_expiry_uses_original_target_or_observation() {

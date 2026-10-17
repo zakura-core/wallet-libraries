@@ -642,6 +642,10 @@ impl ConfirmationsPolicy {
     /// Returns the number of confirmations until a transaction output is considered spendable,
     /// given information about the output and the inputs to the transaction that produced it.
     ///
+    /// A result of zero only satisfies the confirmation policy. Shielded outputs must also be
+    /// included in the selected anchor and have a usable witness, and locked outputs remain
+    /// unavailable for selection.
+    ///
     /// # Parameters
     /// - `target_height`: The minimum height at which the output will be potentially spent.
     /// - `pool_type`: The Zcash pool that the output was received into.
