@@ -223,7 +223,7 @@ impl ShieldedPoolTester for OrchardPoolTester {
         summary.received_orchard_note_count()
     }
 
-    #[cfg(feature = "pczt")]
+    #[cfg(feature = "proving-tests")]
     fn add_proof_generation_keys(
         pczt: pczt::Pczt,
         _: &UnifiedSpendingKey,
@@ -232,7 +232,7 @@ impl ShieldedPoolTester for OrchardPoolTester {
         Ok(pczt)
     }
 
-    #[cfg(feature = "pczt")]
+    #[cfg(feature = "proving-tests")]
     fn apply_signatures_to_pczt(
         signer: &mut pczt::roles::signer::Signer,
         usk: &UnifiedSpendingKey,

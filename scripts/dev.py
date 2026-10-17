@@ -19,6 +19,7 @@ CONFIGS = {
     "orchard": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "test-dependencies"]),
     "transparent": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "test-dependencies", "unstable"]),
     "transparent-import": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "transparent-key-import", "test-dependencies", "unstable"]),
+    "proving": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "transparent-key-import", "test-dependencies", "pczt-tests", "proving-tests", "unstable"]),
     "pczt": (["-p", "zakura-pczt"], ["internal-tests"]),
     "sqlite": (["-p", "zakura-client-sqlite"], ["test-dependencies"]),
     "enhance-wallet": (["-p", "zakura-pir-enhance"], ["wallet"]),
@@ -42,7 +43,7 @@ CONFIGS = {
     # RocksDB reader is tested here; fresh consumers check the feature off.
     "server": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing", "rocksdb"]),
 }
-VERIFY = ("server-graph", "zakura-graph", "wallet-lib-modes", "vendor-ancestry")
+VERIFY = ("server-graph", "zakura-graph", "wallet-lib-modes", "vendor-ancestry", "dependency-graph")
 
 
 def capture(argv: list[str], **kwargs) -> str:

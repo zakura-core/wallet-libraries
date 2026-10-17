@@ -1,10 +1,10 @@
 //! Opt-in research profile. Parent negatives trust the same indexer as child
 //! negatives; digests establish consistency, not chain completeness. Selective
 //! child requests disclose coarse activity intervals to the filter origin.
+use crate::gcs::GcsFilterWriter;
 use crate::{
     FilterError, FilterKeys, FilterLimits, ScriptBytes, ShardMap, ShardMapEntry, ValidatedFilter,
 };
-use bitcoin::bip158::GcsFilterWriter;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;

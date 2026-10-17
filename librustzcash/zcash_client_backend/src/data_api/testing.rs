@@ -8,7 +8,7 @@ use std::{
     num::{NonZeroU8, NonZeroU32, NonZeroU64},
 };
 
-#[cfg(feature = "pczt")]
+#[cfg(feature = "proving-tests")]
 use super::wallet::{create_pczt_from_proposal, extract_and_store_transaction_from_pczt};
 use assert_matches::assert_matches;
 use group::ff::Field;
@@ -53,7 +53,7 @@ use zcash_primitives::{
     block::BlockHash,
     transaction::{Transaction, TxId, components::sapling::zip212_enforcement, fees::FeeRule},
 };
-#[cfg(feature = "pczt")]
+#[cfg(feature = "proving-tests")]
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::{
     ShieldedPool,
@@ -240,7 +240,7 @@ where
     )
 }
 
-#[cfg(feature = "pczt")]
+#[cfg(feature = "proving-tests")]
 fn real_test_prover() -> &'static LocalTxProver {
     use std::sync::OnceLock;
 
@@ -1666,7 +1666,7 @@ where
     /// Invokes [`create_pczt_from_proposal`] with the given arguments.
     ///
     /// [`create_pczt_from_proposal`]: super::wallet::create_pczt_from_proposal
-    #[cfg(feature = "pczt")]
+    #[cfg(feature = "proving-tests")]
     #[allow(clippy::type_complexity)]
     pub fn create_pczt_from_proposal<InputsErrT, FeeRuleT, ChangeErrT>(
         &mut self,
@@ -1698,7 +1698,7 @@ where
     /// Invokes [`extract_and_store_transaction_from_pczt`] with the given arguments.
     ///
     /// [`extract_and_store_transaction_from_pczt`]: super::wallet::extract_and_store_transaction_from_pczt
-    #[cfg(feature = "pczt")]
+    #[cfg(feature = "proving-tests")]
     #[allow(clippy::type_complexity)]
     pub fn extract_and_store_transaction_from_pczt(
         &mut self,

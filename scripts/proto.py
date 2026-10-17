@@ -20,8 +20,10 @@ def main():
         parser.error(f"use libprotoc {version}; select the executable with PROTOC")
     root = Path(os.environ.get("WALLET_LIB_BUILD_ROOT", str(Path.home() / ".cache/wallet-libraries/targets"))).expanduser().resolve()
     with dev.Lease(root, dev.build_identity("protobuf", "dev")) as lease:
-        env = dict(os.environ, PROTOC=protoc, ZAKURA_PROTO_MODE=args.mode, CARGO_TARGET_DIR=str(lease.path))
-        code = subprocess.call(["cargo", "check", "--locked", "-p", "zakura-client-backend"], cwd=dev.ROOT, env=env, pass_fds=(lease.lock.fileno(),))
+        generated = lease.path / "generated"
+        generated.mkdir(exist_ok=True)
+        env = dict(os.environ, PROTOC=protoc, OUT_DIR=str(generated), CARGO_TARGET_DIR=str(lease.path))
+        code = subprocess.call(["cargo", "run", "--locked", "--manifest-path", str(dev.ROOT / "tools/proto/Cargo.toml"), "--", str(dev.ROOT), args.mode], cwd=dev.ROOT, env=env, pass_fds=(lease.lock.fileno(),))
         return code
 
 

@@ -92,6 +92,7 @@ regex = { workspace = true }
 document-features.workspace = true
 maybe-rayon.workspace = true
 pczt.workspace = true
+zcash_proofs = { workspace = true, optional = true }
 rand_core.workspace = true
 rand_distr.workspace = true
 rand.workspace = true
@@ -118,7 +119,7 @@ secp256k1 = { workspace = true, features = ["rand"] }
 tempfile = "3.5.0"
 zcash_keys = { workspace = true, features = ["test-dependencies"] }
 zcash_note_encryption.workspace = true
-zcash_proofs = { workspace = true, features = ["bundled-prover"] }
+zcash_proofs.workspace = true
 zcash_primitives = { workspace = true, features = ["test-dependencies", "non-standard-fees"] }
 zcash_protocol = { workspace = true, features = ["local-consensus"] }
 zcash_client_backend = { workspace = true, features = ["test-dependencies", "unstable-serialization", "unstable-spanning-tree"] }
@@ -215,6 +216,9 @@ serde = ["dep:serde", "uuid/serde"]
 ## Exposes unstable APIs. Their behaviour may change at any time.
 unstable = ["zcash_client_backend/unstable"]
 
+## Enables the real proving fixtures used by migration and PCZT tests.
+proving-tests = ["test-dependencies", "zcash_proofs/bundled-prover", "zcash_client_backend/proving-tests"]
+
 ## A feature used to isolate tests that are expensive to run. Test-only.
 expensive-tests = []
 
@@ -232,6 +236,7 @@ pczt-tests = [
     "orchard",
     "transparent-inputs",
     "zcash_client_backend/pczt",
+    "proving-tests",
 ]
 
 [lib]

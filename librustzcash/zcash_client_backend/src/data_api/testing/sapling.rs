@@ -191,7 +191,7 @@ impl ShieldedPoolTester for SaplingPoolTester {
         summary.received_sapling_note_count()
     }
 
-    #[cfg(feature = "pczt")]
+    #[cfg(feature = "proving-tests")]
     fn add_proof_generation_keys(
         pczt: pczt::Pczt,
         usk: &UnifiedSpendingKey,
@@ -223,7 +223,7 @@ impl ShieldedPoolTester for SaplingPoolTester {
             .finish())
     }
 
-    #[cfg(feature = "pczt")]
+    #[cfg(feature = "proving-tests")]
     fn apply_signatures_to_pczt(
         signer: &mut pczt::roles::signer::Signer,
         usk: &UnifiedSpendingKey,

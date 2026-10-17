@@ -146,7 +146,7 @@ use {
     },
 };
 
-#[cfg(feature = "pczt")]
+#[cfg(feature = "proving-tests")]
 use {
     crate::data_api::wallet::{SignerView, redact_pczt_for_batch_signer, redact_pczt_for_signer},
     pczt::roles::{combiner::Combiner, prover::Prover, signer::Signer},
@@ -158,11 +158,11 @@ use {
     zcash_script::opcode::PushValue,
 };
 
-#[cfg(feature = "pczt")]
+#[cfg(feature = "proving-tests")]
 #[allow(non_upper_case_globals)]
 const OsRng: UnwrapErr<SysRng> = UnwrapErr(SysRng);
 
-#[cfg(all(feature = "pczt", feature = "transparent-inputs"))]
+#[cfg(all(feature = "proving-tests", feature = "transparent-inputs"))]
 use {
     crate::data_api::wallet::input_selection::LockedInputPolicy,
     zcash_protocol::consensus::COINBASE_MATURITY_BLOCKS,
@@ -277,13 +277,13 @@ pub trait ShieldedPoolTester {
 
     fn received_note_count(summary: &ScanSummary) -> usize;
 
-    #[cfg(feature = "pczt")]
+    #[cfg(feature = "proving-tests")]
     fn add_proof_generation_keys(
         pczt: pczt::Pczt,
         usk: &UnifiedSpendingKey,
     ) -> Result<pczt::Pczt, pczt::roles::updater::SaplingError>;
 
-    #[cfg(feature = "pczt")]
+    #[cfg(feature = "proving-tests")]
     fn apply_signatures_to_pczt(
         signer: &mut Signer,
         usk: &UnifiedSpendingKey,
@@ -7014,7 +7014,7 @@ pub fn metadata_queries_exclude_unwanted_notes<T: ShieldedPoolTester, Dsf, TC>(
     );
 }
 
-#[cfg(feature = "pczt")]
+#[cfg(feature = "proving-tests")]
 pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,
@@ -7738,7 +7738,7 @@ pub fn consolidation_does_not_add_orchard_inputs_to_fill_ironwood_actions(
     assert_eq!(selected, [Zatoshis::const_from_u64(2_000_000)],);
 }
 
-#[cfg(feature = "pczt")]
+#[cfg(feature = "proving-tests")]
 fn build_transparent_coinbase_tx(
     network: &LocalNetwork,
     target_height: TargetHeight,
@@ -7770,7 +7770,7 @@ fn build_transparent_coinbase_tx(
         .unwrap()
 }
 
-#[cfg(all(feature = "pczt", feature = "transparent-inputs"))]
+#[cfg(all(feature = "proving-tests", feature = "transparent-inputs"))]
 /// Tests that immature coinbase outputs are excluded from note selection.
 pub fn immature_coinbase_outputs_are_excluded_from_note_selection<T: ShieldedPoolTester>(
     dsf: impl DataStoreFactory,
@@ -7862,7 +7862,7 @@ pub fn immature_coinbase_outputs_are_excluded_from_note_selection<T: ShieldedPoo
         .unwrap();
 }
 
-#[cfg(all(feature = "pczt", feature = "transparent-inputs"))]
+#[cfg(all(feature = "proving-tests", feature = "transparent-inputs"))]
 /// Tests that `CoinbaseFilter::CoinbaseOnly` excludes non-coinbase outputs and
 /// `CoinbaseFilter::NonCoinbaseOnly` excludes coinbase outputs from UTXO selection and
 /// shielding proposals, and that `CoinbaseOnly` still allows proposing shielding when only
@@ -8057,7 +8057,7 @@ where
 /// Verifies that `propose_shielding_coinbase` with a shielded destination produces
 /// a proposal containing a single ZIP-321 payment to the supplied address for the
 /// full available value (input total minus fee), with no change.
-#[cfg(all(feature = "pczt", feature = "transparent-inputs"))]
+#[cfg(all(feature = "proving-tests", feature = "transparent-inputs"))]
 pub fn propose_shielding_coinbase_succeeds<T: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,
@@ -8136,7 +8136,7 @@ pub fn propose_shielding_coinbase_succeeds<T: ShieldedPoolTester, Dsf>(
 /// because it still carries that real anchor, builds. Separately, a shielding step produces a
 /// shielded bundle, so a proposal that encodes such a step with the zero anchor sentinel is
 /// rejected at the parse boundary.
-#[cfg(all(feature = "pczt", feature = "transparent-inputs"))]
+#[cfg(all(feature = "proving-tests", feature = "transparent-inputs"))]
 pub fn proposal_without_confirmations_policy_builds<T: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,
@@ -8231,7 +8231,7 @@ pub fn proposal_without_confirmations_policy_builds<T: ShieldedPoolTester, Dsf>(
 
 /// Verifies that `propose_shielding_coinbase` rejects a transparent destination
 /// with [`ProposalError::ShieldingRequiresShieldedRecipient`].
-#[cfg(all(feature = "pczt", feature = "transparent-inputs"))]
+#[cfg(all(feature = "proving-tests", feature = "transparent-inputs"))]
 pub fn propose_shielding_coinbase_transparent_recipient_rejected<T: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,
@@ -8279,7 +8279,7 @@ pub fn propose_shielding_coinbase_transparent_recipient_rejected<T: ShieldedPool
 
 /// Verifies that `propose_shielding_coinbase` propagates the supplied `memo`
 /// into the resulting payment's memo field.
-#[cfg(all(feature = "pczt", feature = "transparent-inputs"))]
+#[cfg(all(feature = "proving-tests", feature = "transparent-inputs"))]
 pub fn propose_shielding_coinbase_with_memo_succeeds<T: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,
@@ -8329,7 +8329,7 @@ pub fn propose_shielding_coinbase_with_memo_succeeds<T: ShieldedPoolTester, Dsf>
 
 /// Verifies that `propose_shielding_coinbase` with `limit = Some(n)` selects at
 /// most `n` UTXOs, preferring the highest-value coinbase outputs.
-#[cfg(all(feature = "pczt", feature = "transparent-inputs"))]
+#[cfg(all(feature = "proving-tests", feature = "transparent-inputs"))]
 pub fn propose_shielding_coinbase_with_limit_truncates_inputs<T: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,
@@ -8405,7 +8405,7 @@ pub fn propose_shielding_coinbase_with_limit_truncates_inputs<T: ShieldedPoolTes
 /// inputs, returning [`InputSelectorError::InsufficientFunds`].
 ///
 /// [`InputSelectorError::InsufficientFunds`]: crate::data_api::wallet::input_selection::InputSelectorError::InsufficientFunds
-#[cfg(all(feature = "pczt", feature = "transparent-inputs"))]
+#[cfg(all(feature = "proving-tests", feature = "transparent-inputs"))]
 pub fn propose_shielding_coinbase_with_zero_limit_insufficient_funds<T: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,
@@ -8463,7 +8463,7 @@ pub fn propose_shielding_coinbase_with_zero_limit_insufficient_funds<T: Shielded
 ///
 /// This test verifies the propose-and-build round trip succeeds for both
 /// Sapling and Orchard destinations (parameterized by `T`).
-#[cfg(all(feature = "pczt", feature = "transparent-inputs"))]
+#[cfg(all(feature = "proving-tests", feature = "transparent-inputs"))]
 pub fn propose_and_build_shielding_coinbase_succeeds<T: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,
@@ -8526,7 +8526,11 @@ pub fn propose_and_build_shielding_coinbase_succeeds<T: ShieldedPoolTester, Dsf>
 /// Verifies that once Ironwood is active, `propose_shielding_coinbase` resolves a destination
 /// with an Orchard receiver to the Ironwood pool — the payment is delivered to the Orchard
 /// receiver via the Ironwood bundle — and that the proposed transaction builds.
-#[cfg(all(feature = "orchard", feature = "pczt", feature = "transparent-inputs"))]
+#[cfg(all(
+    feature = "orchard",
+    feature = "proving-tests",
+    feature = "transparent-inputs"
+))]
 pub fn shielding_coinbase_to_orchard_receiver_delivers_via_ironwood<Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,
@@ -8746,7 +8750,7 @@ pub fn propose_v5_payment_to_orchard_receiver_is_rejected<Dsf>(
 /// After NU6.3 a payment to an Orchard receiver is delivered through the Ironwood pool, so
 /// `create_pczt_from_proposal` realizes such a proposal as a version 6 PCZT that carries a
 /// populated Ironwood bundle.
-#[cfg(all(feature = "orchard", feature = "pczt"))]
+#[cfg(all(feature = "orchard", feature = "proving-tests"))]
 pub fn create_pczt_supports_ironwood_output<Dsf>(ds_factory: Dsf, cache: impl TestCache)
 where
     Dsf: DataStoreFactory,

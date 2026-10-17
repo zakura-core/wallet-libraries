@@ -17,6 +17,7 @@ pub mod digest;
 pub mod envelope;
 pub mod error;
 pub mod experimental_parent;
+mod gcs;
 pub mod hash;
 #[cfg(feature = "client")]
 pub mod http;

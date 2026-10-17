@@ -1403,7 +1403,7 @@ where
 }
 
 /// Tests spending from a standalone P2PKH address by shielding its balance.
-#[cfg(feature = "transparent-key-import")]
+#[cfg(all(feature = "transparent-key-import", feature = "proving-tests"))]
 pub fn spend_from_standalone_pubkey<DSF>(dsf: DSF, cache: impl TestCache)
 where
     DSF: DataStoreFactory,
@@ -1734,7 +1734,7 @@ where
 }
 
 /// Tests spending from a standalone P2SH (multisig) address by shielding its balance.
-#[cfg(feature = "transparent-key-import")]
+#[cfg(all(feature = "transparent-key-import", feature = "proving-tests"))]
 pub fn spend_from_standalone_p2sh<DSF>(dsf: DSF, cache: impl TestCache)
 where
     DSF: DataStoreFactory,

@@ -1,0 +1,11 @@
+[package]
+name = "wallet-proto"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[workspace]
+
+[dependencies]
+tonic-prost-build = { version = "=0.14.6", default-features = false }

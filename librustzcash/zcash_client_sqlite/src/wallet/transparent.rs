@@ -4585,7 +4585,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "transparent-key-import")]
+    #[cfg(all(feature = "transparent-key-import", feature = "proving-tests"))]
     fn test_spend_from_standalone_pubkey() {
         zcash_client_backend::data_api::testing::transparent::spend_from_standalone_pubkey(
             TestDbFactory::default(),
@@ -4626,7 +4626,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "transparent-key-import")]
+    #[cfg(all(feature = "transparent-key-import", feature = "proving-tests"))]
     fn test_spend_from_standalone_p2sh() {
         zcash_client_backend::data_api::testing::transparent::spend_from_standalone_p2sh(
             TestDbFactory::default(),

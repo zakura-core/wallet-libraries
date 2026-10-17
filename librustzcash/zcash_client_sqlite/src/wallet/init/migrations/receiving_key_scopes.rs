@@ -273,7 +273,7 @@ impl<P: consensus::Parameters> RusqliteMigration for Migration<P> {
 }
 
 #[cfg(feature = "transparent-inputs")]
-#[cfg(test)]
+#[cfg(all(test, feature = "proving-tests"))]
 mod tests {
     use std::convert::Infallible;
 

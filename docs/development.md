@@ -23,6 +23,7 @@ python3 scripts/dev.py verify
 | `transparent` | Backend + SQLite; `orchard,transparent-inputs,test-dependencies,unstable` |
 | `transparent-import` | Backend + SQLite; transparent features plus `transparent-key-import` |
 | `pczt` | PCZT; `internal-tests`, including signing and end-to-end proof construction |
+| `proving` | Backend + SQLite; real Sapling proving fixtures, migration tests, standalone-key shielding and PCZT integration tests |
 | `sqlite` | SQLite; `test-dependencies`, without Orchard |
 | `enhance-wallet` | Enhance PIR; `wallet` |
 | `enhance` | Enhance PIR; default features |
@@ -100,6 +101,21 @@ with all three checked-in bindings. `python3 scripts/proto.py write` explicitly
 updates them. Both require `libprotoc 34.1`; set `PROTOC` to that executable.
 The locked Rust generator dependencies determine the remaining output.
 Source packages without `.proto` files keep using checked-in bindings.
+The generator lives in the standalone `tools/proto` workspace, with its own
+lockfile. Ordinary wallet builds do not compile the protobuf compiler. Run
+`cargo fmt --manifest-path tools/proto/Cargo.toml --all -- --check` when editing it.
+
+Ordinary `test-dependencies` expose mock provers without embedding Sapling
+parameters. Enable `proving-tests` for real proving fixtures; the `proving` and
+`pczt` configurations retain that coverage. This feature is only for tests.
+`python3 scripts/dev.py verify --only dependency-graph` checks fresh external
+consumers, including fixture availability and the engine's transport-free graph.
+
+The PIR clients temporarily pin the IPIR family to the exact head of
+[IPIR PR 38](https://github.com/valargroup/ipir-sp/pull/38), which removes CLI-only
+dependencies from the library. Keep IPIR, InspiRING and ReinspiRING on the same
+source when repinning, since their exposed types must share one identity.
+Repin to the published family after that change is released.
 
 ## CI and completion
 

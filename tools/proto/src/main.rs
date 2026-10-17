@@ -1,62 +1,33 @@
-#[cfg(not(windows))]
-use std::env;
-#[cfg(not(windows))]
-use std::fs;
-use std::io;
-#[cfg(not(windows))]
-use std::path::{Path, PathBuf};
+//! Explicit generator for the checked-in wallet protobuf bindings.
+use std::{
+    env, fs, io,
+    path::{Path, PathBuf},
+};
 
-// The proto machinery below is only ever exercised on non-Windows targets (see the note in
-// `main`), so gate it on `not(windows)` to avoid dead-code and unused-import warnings on Windows.
-#[cfg(not(windows))]
 const COMPACT_FORMATS_PROTO: &str = "proto/compact_formats.proto";
-
-#[cfg(not(windows))]
 const PROPOSAL_PROTO: &str = "proto/proposal.proto";
-
-#[cfg(not(windows))]
 const SERVICE_PROTO: &str = "proto/service.proto";
 
 fn main() -> io::Result<()> {
-    // Ordinary builds always consume the checked-in bindings. Generation is
-    // explicit, including on machines where protoc happens to be installed.
-    println!("cargo:rerun-if-env-changed=ZAKURA_PROTO_MODE");
-    println!("cargo:rerun-if-env-changed=PROTOC");
-    #[cfg(not(windows))]
-    for path in [COMPACT_FORMATS_PROTO, PROPOSAL_PROTO, SERVICE_PROTO] {
-        println!("cargo:rerun-if-changed={path}");
+    let mut args = env::args_os().skip(1);
+    let root = args
+        .next()
+        .ok_or_else(|| io::Error::other("missing repository path"))?;
+    let mode = args
+        .next()
+        .ok_or_else(|| io::Error::other("missing check/write mode"))?;
+    let mode = mode
+        .to_str()
+        .ok_or_else(|| io::Error::other("invalid protobuf mode"))?;
+    if !matches!(mode, "check" | "write") || args.next().is_some() {
+        return Err(io::Error::other(
+            "expected repository path and check/write mode",
+        ));
     }
-    for path in [
-        "src/proto/compact_formats.rs",
-        "src/proto/proposal.rs",
-        "src/proto/service.rs",
-    ] {
-        println!("cargo:rerun-if-changed={path}");
-    }
-    if let Some(mode) = std::env::var_os("ZAKURA_PROTO_MODE") {
-        #[cfg(windows)]
-        return Err(io::Error::other("regenerate protobufs on macOS or Linux"));
-        #[cfg(not(windows))]
-        {
-            let mode = mode
-                .to_str()
-                .ok_or_else(|| io::Error::other("invalid protobuf mode"))?;
-            if !matches!(mode, "check" | "write") {
-                return Err(io::Error::other("ZAKURA_PROTO_MODE must be check or write"));
-            }
-            if !Path::new(COMPACT_FORMATS_PROTO).exists() {
-                return Err(io::Error::other(
-                    "protobuf sources are absent; use the repository checkout",
-                ));
-            }
-            build(mode)?;
-        }
-    }
-
-    Ok(())
+    env::set_current_dir(Path::new(&root).join("librustzcash/zcash_client_backend"))?;
+    build(mode)
 }
 
-#[cfg(not(windows))]
 fn build(mode: &str) -> io::Result<()> {
     let out: PathBuf = env::var_os("OUT_DIR")
         .expect("Cannot find OUT_DIR environment variable")
@@ -139,7 +110,6 @@ fn build(mode: &str) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(windows))]
 fn install_binding(generated: &Path, checked_in: &str, mode: &str) -> io::Result<()> {
     if mode == "write" {
         fs::copy(generated, checked_in)?;

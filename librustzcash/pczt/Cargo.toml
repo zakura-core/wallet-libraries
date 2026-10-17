@@ -15,6 +15,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
+zcash_proofs = { workspace = true, optional = true }
 zcash_note_encryption = { workspace = true, optional = true }
 zcash_primitives = { workspace = true, optional = true }
 zcash_protocol = { workspace = true, default-features = false }
@@ -69,7 +70,7 @@ zcash_primitives = { workspace = true, features = [
     "test-dependencies",
     "transparent-inputs",
 ] }
-zcash_proofs = { workspace = true, features = ["bundled-prover"] }
+zcash_proofs.workspace = true
 zcash_protocol = { workspace = true, features = ["local-consensus"] }
 zip32.workspace = true
 
@@ -158,8 +159,12 @@ tx-extractor = [
     "transparent",
 ]
 
+## Enables tests that construct real Sapling proofs.
+proving-tests = ["zcash_proofs/bundled-prover"]
+
 # Undocumented internal feature flag for enabling features needed for tests.
 internal-tests = [
+    "proving-tests",
     "io-finalizer",
     "orchard",
     "prover",

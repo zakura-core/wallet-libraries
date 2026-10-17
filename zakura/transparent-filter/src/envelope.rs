@@ -200,7 +200,7 @@ pub struct FilterBatch {
     pub records: Vec<FilterRecord>,
 }
 
-fn write_compact_size(out: &mut Vec<u8>, value: u64) {
+pub(crate) fn write_compact_size(out: &mut Vec<u8>, value: u64) {
     match value {
         0..=0xfc => out.push(value as u8),
         0xfd..=0xffff => {

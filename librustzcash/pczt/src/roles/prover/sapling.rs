@@ -54,7 +54,7 @@ pub enum SaplingError {
     Prover(sapling::pczt::ProverError),
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "proving-tests"))]
 mod tests {
     use alloc::collections::BTreeMap;
 

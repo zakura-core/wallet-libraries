@@ -24,6 +24,6 @@ serde_json.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
-ipir-sp = { version = "=0.1.0-rc.7", features = ["native-reinspiring"] }
+ipir-sp = { version = "=0.1.0-rc.7", git = "https://github.com/valargroup/ipir-sp", rev = "a719f820c59e60c5f08997a57b875b9090b7e53e", features = ["native-reinspiring"] }
 rand = "0.8"
 rand_chacha.workspace = true

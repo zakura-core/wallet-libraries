@@ -144,10 +144,6 @@ webpki-roots = { workspace = true, optional = true }
 # - Boilerplate
 getset.workspace = true
 
-[build-dependencies]
-tonic-prost-build.workspace = true
-which.workspace = true
-
 [dev-dependencies]
 ambassador.workspace = true
 assert_matches.workspace = true
@@ -164,7 +160,7 @@ transparent = { workspace = true, features = ["test-dependencies"] }
 zcash_address = { workspace = true, features = ["test-dependencies"] }
 zcash_keys = { workspace = true, features = ["test-dependencies"] }
 zcash_primitives = { workspace = true, features = ["test-dependencies"] }
-zcash_proofs = { workspace = true, features = ["bundled-prover"] }
+zcash_proofs.workspace = true
 zcash_protocol = { workspace = true, features = ["local-consensus", "test-dependencies"] }
 
 [features]
@@ -289,10 +285,12 @@ test-dependencies = [
     "orchard/test-dependencies",
     "zcash_keys/test-dependencies",
     "zcash_primitives/test-dependencies",
-    "zcash_proofs/bundled-prover",
     "zcash_protocol/local-consensus",
     "incrementalmerkletree/test-dependencies",
 ]
+
+## Enables test helpers that construct real Sapling proofs.
+proving-tests = ["test-dependencies", "pczt", "zcash_proofs/bundled-prover"]
 
 ## Exposes APIs that allow calculation of non-standard fees.
 non-standard-fees = ["zcash_primitives/non-standard-fees"]

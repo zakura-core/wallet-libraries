@@ -1,10 +1,10 @@
 //! Deterministic filter construction, for a single block and for a shard.
 
 use crate::error::FilterError;
+use crate::gcs::GcsFilterWriter;
 use crate::hash::{BlockHash, FilterKeys, ShardKey};
 use crate::profile::{M, P};
 use crate::script::ScriptBytes;
-use bitcoin::bip158::GcsFilterWriter;
 use std::collections::BTreeSet;
 
 /// Serialized BIP 158 filter bytes for one block or for one shard.

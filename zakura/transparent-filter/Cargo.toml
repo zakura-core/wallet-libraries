@@ -29,10 +29,9 @@ client = ["dep:reqwest", "dep:serde_json"]
 cli = ["client", "dep:clap"]
 
 [dependencies]
-# Pinned exactly: the filter bytes this crate produces are consensus-visible to
-# every wallet that caches them, so the encoder may not move without a
-# deliberate revalidation against the committed vectors.
-bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
+# The codec in src/gcs.rs was extracted from bitcoin 0.32.102.
+bitcoin_hashes = { version = "=0.14.101", default-features = false, features = ["std"] }
+bitcoin-io = { version = "=0.1.101", default-features = false, features = ["std"] }
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
@@ -43,4 +42,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
+# Independent byte/matching oracle; never enters the wallet library graph.
+bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
 serde_json = "1"

@@ -8,7 +8,7 @@ use crate::error::FilterError;
 use crate::hash::{BlockHash, FilterKeys, ShardKey};
 use crate::script::ScriptBytes;
 use crate::validate::ValidatedFilter;
-use bitcoin::hashes::siphash24;
+use bitcoin_hashes::siphash24;
 
 /// Maps a SipHash output into `[0, nm)` by taking the high 64 bits of the
 /// 128-bit product, as BIP 158 specifies.
