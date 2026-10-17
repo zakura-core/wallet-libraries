@@ -42,7 +42,7 @@ use zcash_keys::{
     },
 };
 #[cfg(not(feature = "spend-index"))]
-use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
+use zcash_primitives::transaction::builder::default_tx_expiry_delta;
 use zcash_primitives::transaction::fees::{
     FeeRule,
     transparent::{InputSize, InputView},
@@ -74,7 +74,7 @@ use crate::{
     error::{RefusalReason, SqliteClientError},
     util::Clock,
     wallet::{
-        common::tx_unexpired_condition,
+        common::tx_unexpired_condition_at,
         get_account,
         locking::{
             is_locked_at, output_eligible_condition, overridable_owners_rarray, push_lock_params,
@@ -1195,7 +1195,9 @@ fn to_unspent_transparent_output(
 /// # Usage requirements
 /// - The parent must provide `:target_height` as a named argument.
 /// - The parent is responsible for enclosing this condition in parentheses as appropriate.
-pub(crate) fn spent_utxos_clause() -> String {
+pub(crate) fn spent_utxos_clause(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
+) -> String {
     format!(
         r#"
         SELECT txo_spends.transparent_received_output_id
@@ -1203,7 +1205,7 @@ pub(crate) fn spent_utxos_clause() -> String {
         JOIN transactions stx ON stx.id_tx = txo_spends.transaction_id
         WHERE {}
         "#,
-        super::common::tx_unexpired_condition("stx")
+        super::common::tx_unexpired_condition_at(nu7_activation_height, "stx")
     )
 }
 
@@ -1366,7 +1368,9 @@ macro_rules! rewound_ledger_only_receive {
 /// condition decides, which waits for the account's recovery to place the receive again. An
 /// output public discovery or local construction also evidences keeps the expiry rule: under
 /// public authority nothing else would keep a dead output out.
-fn input_conditions() -> [(RefusalReason, String); 5] {
+fn input_conditions(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
+) -> [(RefusalReason, String); 5] {
     [
         // the transaction that created the output is mined, is definitely unexpired, or is a
         // recovered receive awaiting placement that nothing else evidences
@@ -1374,7 +1378,7 @@ fn input_conditions() -> [(RefusalReason, String); 5] {
             RefusalReason::Expired,
             format!(
                 "({}) OR ({})",
-                tx_unexpired_condition("t"),
+                tx_unexpired_condition_at(nu7_activation_height, "t"),
                 rewound_ledger_only_receive!()
             ),
         ),
@@ -1388,7 +1392,7 @@ fn input_conditions() -> [(RefusalReason, String); 5] {
                      JOIN transactions stx ON stx.id_tx = txo_spends.transaction_id
                      WHERE ({}) AND (:retry_txid IS NULL OR stx.txid != :retry_txid)
                  )",
-                tx_unexpired_condition("stx")
+                tx_unexpired_condition_at(nu7_activation_height, "stx")
             ),
         ),
         // exclude likely-spent wallet-internal ephemeral outputs
@@ -1420,6 +1424,7 @@ fn input_conditions() -> [(RefusalReason, String); 5] {
 ///   returned output. If this is `None`, no spendability checks are performed.
 /// - `authority`: which outputs the transparent authority admits; others are not returned.
 pub(crate) fn get_wallet_transparent_output(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     conn: &rusqlite::Connection,
     outpoint: &OutPoint,
     target_height: Option<TargetHeight>,
@@ -1430,7 +1435,7 @@ pub(crate) fn get_wallet_transparent_output(
     // rewind or spent in a transaction that has not been observed by this wallet. There isn't a
     // way to detect the circumstance related to anchor invalidation at present, but it should be
     // vanishingly rare as the vast majority of rewinds are of a single block.
-    let spendable = input_conditions()
+    let spendable = input_conditions(nu7_activation_height)
         .map(|(_, condition)| format!("({condition})"))
         .join(" AND ");
     let mut stmt_select_utxo = conn.prepare_cached(&format!(
@@ -1477,6 +1482,7 @@ pub(crate) fn get_wallet_transparent_output(
 
 /// Checks both linked wallet spends and spends recorded before a receive was discovered.
 pub(crate) fn has_competing_transparent_spend(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     conn: &rusqlite::Connection,
     outpoint: &OutPoint,
     target: TargetHeight,
@@ -1496,7 +1502,7 @@ pub(crate) fn has_competing_transparent_spend(
                     WHERE prevout_txid = :prevout_txid AND prevout_output_index = :output_index
                 ) AND ({}) AND (:retry_txid IS NULL OR stx.txid != :retry_txid)
             )",
-            tx_unexpired_condition("stx")
+            tx_unexpired_condition_at(nu7_activation_height, "stx")
         ),
         named_params![":prevout_txid": outpoint.txid().as_ref(), ":output_index": outpoint.n(),
             ":target_height": u32::from(target), ":retry_txid": retry_bytes],
@@ -1538,12 +1544,13 @@ pub(crate) enum InputStanding {
 /// `retry_txid` transaction does not count. Authority is left to the caller: an `Eligible`
 /// output is one [`InputAuthority::admits_output`] decides.
 pub(crate) fn transparent_input_standing(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     conn: &rusqlite::Connection,
     outpoint: &OutPoint,
     target: TargetHeight,
     retry_txid: Option<TxId>,
 ) -> Result<InputStanding, SqliteClientError> {
-    let conditions = input_conditions();
+    let conditions = input_conditions(nu7_activation_height);
     let columns = conditions
         .iter()
         .map(|(_, condition)| format!("({condition})"))
@@ -1608,6 +1615,7 @@ pub(crate) fn transparent_input_standing(
 /// (per-address determinism) or by value descending (value-bounded selection), optionally prefixed
 /// with a lock-tier preference key.
 fn spendable_transparent_outputs_query(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     address_predicate_sql: &str,
     lock_eligible_sql: &str,
     order_by_sql: &str,
@@ -1641,7 +1649,7 @@ fn spendable_transparent_outputs_query(
          AND ({INPUT_AUTHORITY_CONDITION}) -- the transparent authority admits the output
          ORDER BY {order_by_sql}",
         tx_unexpired_condition_minconf_0("t"),
-        spent_utxos_clause(),
+        spent_utxos_clause(nu7_activation_height,),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         excluding_immature_coinbase_outputs("t"),
         super::transparent_ledger::output_observation_condition("u"),
@@ -1734,6 +1742,10 @@ pub(crate) fn get_spendable_transparent_outputs_for_addresses<P: consensus::Para
     // This returns all matching outputs (no value target), so only the eligibility filter
     // (Part A) applies; no lock-tier ordering is imposed.
     let mut stmt_utxos = conn.prepare_cached(&spendable_transparent_outputs_query(
+        zcash_protocol::consensus::Parameters::activation_height(
+            params,
+            zcash_protocol::consensus::NetworkUpgrade::Nu7,
+        ),
         "addresses.cached_transparent_receiver_address IN rarray(:addresses)",
         &output_eligible_condition(lock_filter, "u"),
         "addresses.cached_transparent_receiver_address, u.output_index",
@@ -1854,6 +1866,10 @@ pub(crate) fn select_spendable_transparent_outputs<P: consensus::Parameters>(
     // `:coinbase_filter`, so that there is a single query text regardless of whether an
     // allow list is present.
     let mut stmt_utxos = conn.prepare_cached(&spendable_transparent_outputs_query(
+        zcash_protocol::consensus::Parameters::activation_height(
+            params,
+            zcash_protocol::consensus::NetworkUpgrade::Nu7,
+        ),
         "accounts.uuid = :account_uuid
          AND (
              :has_address_allow_list = 0
@@ -1988,7 +2004,7 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
          AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
          AND ({}) -- exclude withdrawn ledger-only receives",
         tx_unexpired_condition_minconf_0("t"),
-        spent_utxos_clause(),
+        spent_utxos_clause(zcash_protocol::consensus::Parameters::activation_height(params, zcash_protocol::consensus::NetworkUpgrade::Nu7), ),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         super::transparent_ledger::output_observation_condition("u"),
     ))?;
@@ -2050,7 +2066,10 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
              AND u.id NOT IN ({}) -- and the output is unspent
              AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
              AND ({}) -- exclude withdrawn ledger-only receives",
-            spent_utxos_clause(),
+            spent_utxos_clause(zcash_protocol::consensus::Parameters::activation_height(
+                params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7
+            ),),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
             super::transparent_ledger::output_observation_condition("u"),
         ))?;
@@ -2141,6 +2160,7 @@ const LEDGER_ORIGIN_CONDITION: &str = concat!("NOT :ledger_only OR ", placed_led
 /// counts for `account`. An output with no recorded origin is reported as corrupted data rather
 /// than guessed.
 pub(crate) fn transparent_balance_provenance(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     conn: &rusqlite::Connection,
     account: AccountUuid,
     target_height: TargetHeight,
@@ -2178,7 +2198,7 @@ pub(crate) fn transparent_balance_provenance(
                  )",
             tx_unexpired_condition_minconf_0("t"),
             tx_unconfirmed_condition("t"),
-            spent_utxos_clause(),
+            spent_utxos_clause(nu7_activation_height, ),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
             super::transparent_ledger::output_observation_condition("u"),
         ),
@@ -2208,6 +2228,7 @@ pub(crate) fn transparent_balance_provenance(
 /// input selection.
 #[tracing::instrument(skip(conn, account_balances))]
 pub(crate) fn add_transparent_account_balances(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     conn: &rusqlite::Connection,
     target_height: TargetHeight,
     confirmations_policy: ConfirmationsPolicy,
@@ -2234,7 +2255,7 @@ pub(crate) fn add_transparent_account_balances(
          AND (:account IS NULL OR accounts.uuid = :account)
          GROUP BY accounts.uuid, lock_expiry_height, is_coinbase, is_mature",
         tx_unexpired_condition_minconf_0("t"),
-        spent_utxos_clause(),
+        spent_utxos_clause(nu7_activation_height,),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         LEDGER_ORIGIN_CONDITION,
         super::transparent_ledger::output_observation_condition("u"),
@@ -2310,7 +2331,7 @@ pub(crate) fn add_transparent_account_balances(
              AND (:account IS NULL OR accounts.uuid = :account)
          GROUP BY accounts.uuid, lock_expiry_height, is_coinbase",
             tx_unconfirmed_condition("t"),
-            spent_utxos_clause(),
+            spent_utxos_clause(nu7_activation_height,),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
             LEDGER_ORIGIN_CONDITION,
             super::transparent_ledger::output_observation_condition("u"),
@@ -2462,7 +2483,11 @@ pub(crate) fn update_observed_unspent_heights<P: consensus::Parameters>(
              :chain_tip_height
          ) BETWEEN :range_start AND :checked_at
          AND NOT ({resolved_spend})",
-        resolved_spend = resolved_spend_condition(),
+        resolved_spend =
+            resolved_spend_condition(zcash_protocol::consensus::Parameters::activation_height(
+                params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7
+            ),),
     ))?;
 
     stmt_update_observed_unspent.execute(named_params![
@@ -2484,6 +2509,7 @@ pub(crate) fn update_observed_unspent_heights<P: consensus::Parameters>(
 /// [`TransactionDataRequest::GetSpendingTx`]: zcash_client_backend::data_api::TransactionDataRequest::GetSpendingTx
 #[cfg(feature = "spend-index")]
 pub(crate) fn update_observed_unspent_height_for_outpoint(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     conn: &rusqlite::Transaction,
     outpoint: &OutPoint,
     checked_at: BlockHeight,
@@ -2503,7 +2529,7 @@ pub(crate) fn update_observed_unspent_height_for_outpoint(
          AND t.txid = :txid
          AND tro.output_index = :output_index
          AND NOT ({resolved_spend})",
-        resolved_spend = resolved_spend_condition(),
+        resolved_spend = resolved_spend_condition(nu7_activation_height,),
     ))?;
 
     stmt.execute(named_params![
@@ -2737,7 +2763,9 @@ pub(crate) fn mark_transparent_addresses_exposed<P: consensus::Parameters>(
 /// A SQL condition that `tro`'s spend is resolved: a transaction that is mined, or not yet expired,
 /// spends it. A retained unmined spender that expired does not resolve the output's spend;
 /// discovery must continue. The parent must provide `:target_height`.
-fn resolved_spend_condition() -> String {
+fn resolved_spend_condition(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
+) -> String {
     format!(
         "EXISTS (
              SELECT 1 FROM transparent_received_output_spends spend
@@ -2745,7 +2773,7 @@ fn resolved_spend_condition() -> String {
              WHERE spend.transparent_received_output_id = tro.id
              AND ({})
          )",
-        super::common::tx_unexpired_condition("stx")
+        super::common::tx_unexpired_condition_at(nu7_activation_height, "stx")
     )
 }
 
@@ -2791,7 +2819,11 @@ pub(crate) fn transaction_data_requests<P: consensus::Parameters>(
                  tro.max_observed_unspent_height IS NULL
                  OR tro.max_observed_unspent_height < :chain_tip_height
              )",
-            resolved_spend = resolved_spend_condition(),
+            resolved_spend =
+                resolved_spend_condition(zcash_protocol::consensus::Parameters::activation_height(
+                    params,
+                    zcash_protocol::consensus::NetworkUpgrade::Nu7
+                ),),
         ))?;
 
         spend_requests_stmt
@@ -2831,7 +2863,11 @@ pub(crate) fn transaction_data_requests<P: consensus::Parameters>(
                  block_range_start IS NOT NULL
                  OR t.expiry_height > :chain_tip_height
              )",
-            resolved_spend = resolved_spend_condition(),
+            resolved_spend =
+                resolved_spend_condition(zcash_protocol::consensus::Parameters::activation_height(
+                    params,
+                    zcash_protocol::consensus::NetworkUpgrade::Nu7
+                ),),
         ))?;
 
         spend_requests_stmt
@@ -2849,7 +2885,9 @@ pub(crate) fn transaction_data_requests<P: consensus::Parameters>(
                         .get::<_, Option<u32>>(1)?
                         .map(BlockHeight::from)
                         .unwrap_or(chain_tip_height);
-                    let max_end_height = block_range_start + DEFAULT_TX_EXPIRY_DELTA + 1;
+                    let max_end_height = block_range_start
+                        + default_tx_expiry_delta(params, block_range_start + 1)
+                        + 1;
                     Ok::<TransactionDataRequest, SqliteClientError>(
                         TransactionDataRequest::transactions_involving_address(
                             address,
@@ -4301,6 +4339,7 @@ mod tests {
         // `update_observed_unspent_height_for_outpoint` (the outpoint matches no rows).
         let tx = st.wallet().db().conn.unchecked_transaction().unwrap();
         super::update_observed_unspent_height_for_outpoint(
+            None,
             &tx,
             &OutPoint::new([1u8; 32], 0),
             chain_tip,
@@ -5016,10 +5055,12 @@ mod tests {
 
         /// The funding account the wallet reports for the scenario's transparent output.
         fn reported_funding_account(
+            nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
             conn: &rusqlite::Connection,
             outpoint: &OutPoint,
         ) -> Option<AccountUuid> {
             get_wallet_transparent_output(
+                nu7_activation_height,
                 conn,
                 outpoint,
                 None,
@@ -5056,7 +5097,7 @@ mod tests {
             );
 
             assert_eq!(
-                reported_funding_account(&st.wallet().db().conn, &scenario.outpoint),
+                reported_funding_account(None, &st.wallet().db().conn, &scenario.outpoint),
                 Some(scenario.account_a_uuid),
                 "the bug: an output funded entirely from Ironwood reports no funding account, \
                  because the funding-account query counts no Ironwood value",
@@ -5094,7 +5135,8 @@ mod tests {
                 MIXED_POOL_SAPLING_INPUT_ZATS,
             );
 
-            let reported = reported_funding_account(&st.wallet().db().conn, &scenario.outpoint);
+            let reported =
+                reported_funding_account(None, &st.wallet().db().conn, &scenario.outpoint);
             assert_ne!(
                 reported,
                 Some(scenario.account_b_uuid),

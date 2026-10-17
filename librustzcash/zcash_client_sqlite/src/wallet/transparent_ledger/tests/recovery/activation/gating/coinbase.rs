@@ -115,6 +115,7 @@ fn maturity_boundary_governs_every_selector_and_final_storage() {
 
     assert!(
         crate::wallet::transparent::get_wallet_transparent_output(
+            None,
             conn(&st),
             &coinbase.outpoint,
             None,

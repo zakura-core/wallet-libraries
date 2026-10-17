@@ -213,11 +213,13 @@ pub(crate) fn select_spendable_sapling_notes_for_consolidation<P: consensus::Par
 }
 
 pub(crate) fn select_unspent_note_meta(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     conn: &Connection,
     wallet_birthday: BlockHeight,
     anchor_height: BlockHeight,
 ) -> Result<Vec<UnspentNoteMeta>, SqliteClientError> {
     super::common::select_unspent_note_meta(
+        nu7_activation_height,
         conn,
         ShieldedPool::Sapling,
         wallet_birthday,

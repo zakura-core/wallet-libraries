@@ -1691,6 +1691,7 @@ mod handles {
         )));
 
         let status = crate::wallet::transaction_status_work(
+            None,
             &snapshot,
             TransactionStatusMode::Public,
             Some(Public),
@@ -1721,6 +1722,7 @@ mod handles {
             "{enhancement:?}"
         );
         let status = crate::wallet::transaction_status_work(
+            None,
             &reader.conn,
             TransactionStatusMode::Public,
             Some(Public),

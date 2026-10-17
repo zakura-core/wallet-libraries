@@ -987,10 +987,20 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// rescanned in order to correct missing witness data.
     ///
     /// This method is intended for repairing wallets that broke due to bugs in `shardtree`.
-    pub fn check_witnesses(&mut self) -> Result<Vec<Range<BlockHeight>>, SqliteClientError> {
+    pub fn check_witnesses(&mut self) -> Result<Vec<Range<BlockHeight>>, SqliteClientError>
+    where
+        P: consensus::Parameters,
+    {
         self.transactionally(|wdb| {
             if let Some(anchor_height) = chain_tip_height(wdb.conn.0)? {
-                wallet::commitment_tree::check_witnesses(wdb.conn.0, anchor_height)
+                wallet::commitment_tree::check_witnesses(
+                    zcash_protocol::consensus::Parameters::activation_height(
+                        &wdb.params,
+                        zcash_protocol::consensus::NetworkUpgrade::Nu7,
+                    ),
+                    wdb.conn.0,
+                    anchor_height,
+                )
             } else {
                 Ok(vec![])
             }
@@ -1473,6 +1483,10 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
         lock_filter: LockFilter<'_>,
     ) -> Result<AccountMeta, Self::Error> {
         let sapling_pool_meta = unspent_notes_meta(
+            zcash_protocol::consensus::Parameters::activation_height(
+                &self.params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7,
+            ),
             self.conn.borrow(),
             ShieldedPool::Sapling,
             target_height,
@@ -1484,6 +1498,10 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
 
         #[cfg(feature = "orchard")]
         let orchard_pool_meta = unspent_notes_meta(
+            zcash_protocol::consensus::Parameters::activation_height(
+                &self.params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7,
+            ),
             self.conn.borrow(),
             ShieldedPool::Orchard,
             target_height,
@@ -1497,6 +1515,10 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
 
         #[cfg(feature = "orchard")]
         let ironwood_pool_meta = unspent_notes_meta(
+            zcash_protocol::consensus::Parameters::activation_height(
+                &self.params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7,
+            ),
             self.conn.borrow(),
             ShieldedPool::Ironwood,
             target_height,
@@ -1952,7 +1974,13 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transacti
         if wallet::chain_tip_height(self.conn.borrow())?.is_none() {
             return Ok(vec![]);
         }
-        wallet::transaction_status_work(self.conn.borrow(), mode, self.transparent_ledger_mode)
+        wallet::transaction_status_work(
+            self.params
+                .activation_height(consensus::NetworkUpgrade::Nu7),
+            self.conn.borrow(),
+            mode,
+            self.transparent_ledger_mode,
+        )
     }
     fn transaction_status_work_for(
         &self,
@@ -2068,7 +2096,14 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<
         {
             let prevout = input.prevout();
             if wallet::transparent::has_competing_transparent_spend(
-                conn, prevout, target, retry_txid,
+                zcash_protocol::consensus::Parameters::activation_height(
+                    &self.params,
+                    zcash_protocol::consensus::NetworkUpgrade::Nu7,
+                ),
+                conn,
+                prevout,
+                target,
+                retry_txid,
             )? {
                 return Err(wallet::transparent_ledger::refused(
                     RefusalReason::CompetingSpend,
@@ -2114,7 +2149,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<
         pending: &mut Vec<AccountUuid>,
     ) -> Result<(), SqliteClientError> {
         use wallet::transparent::InputStanding;
-        match wallet::transparent::transparent_input_standing(conn, prevout, target, retry_txid)? {
+        match wallet::transparent::transparent_input_standing(
+            zcash_protocol::consensus::Parameters::activation_height(
+                &self.params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7,
+            ),
+            conn,
+            prevout,
+            target,
+            retry_txid,
+        )? {
             InputStanding::Unknown => Err(wallet::transparent_ledger::refused(
                 RefusalReason::UnknownOutput,
             )),
@@ -2197,7 +2241,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<
     ) -> Result<Option<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
         use wallet::transparent::InputStanding;
         let mut pending = vec![];
-        match wallet::transparent::transparent_input_standing(conn, outpoint, target, None)? {
+        match wallet::transparent::transparent_input_standing(
+            zcash_protocol::consensus::Parameters::activation_height(
+                &self.params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7,
+            ),
+            conn,
+            outpoint,
+            target,
+            None,
+        )? {
             InputStanding::Eligible {
                 account,
                 account_ref,
@@ -2233,7 +2286,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<
             _ => {}
         }
         wallet::transparent_ledger::pending_result(pending)?;
-        wallet::transparent::get_wallet_transparent_output(conn, outpoint, Some(target), authority)
+        wallet::transparent::get_wallet_transparent_output(
+            zcash_protocol::consensus::Parameters::activation_height(
+                &self.params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7,
+            ),
+            conn,
+            outpoint,
+            Some(target),
+            authority,
+        )
     }
 }
 
@@ -2995,6 +3057,10 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletTes
         <Self as InputSource>::Error,
     > {
         wallet::transparent::get_wallet_transparent_output(
+            zcash_protocol::consensus::Parameters::activation_height(
+                &self.params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7,
+            ),
             self.conn.borrow(),
             outpoint,
             target_height,
@@ -4027,6 +4093,10 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         as_of_height: BlockHeight,
     ) -> Result<(), <Self as WalletRead>::Error> {
         wallet::transparent::update_observed_unspent_height_for_outpoint(
+            zcash_protocol::consensus::Parameters::activation_height(
+                &self.params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7,
+            ),
             self.conn.0,
             &outpoint,
             as_of_height,
@@ -4130,6 +4200,10 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         target_height: Option<TargetHeight>,
     ) -> Result<Option<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
         wallet::transparent::get_wallet_transparent_output(
+            zcash_protocol::consensus::Parameters::activation_height(
+                &self.params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7,
+            ),
             self.conn.borrow(),
             outpoint,
             target_height,
