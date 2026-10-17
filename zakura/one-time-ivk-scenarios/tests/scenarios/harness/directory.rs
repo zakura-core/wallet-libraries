@@ -4,7 +4,7 @@
 use std::{
     cell::OnceCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use receiver_directory::{
@@ -48,22 +48,43 @@ pub struct Options {
     pub depth: u32,
     /// Note positions the indexer left out.
     pub omit: BTreeSet<u64>,
+    /// A manifest whose last block does not match the chain.
+    pub bad: Option<Bad>,
+    /// A publication the indexer made earlier, served instead of a fresh one, as an
+    /// indexer that stalled (or has not seen a reorg yet) would.
+    pub frozen: Option<Arc<Frozen>>,
 }
 
-/// A directory serving one publication, with injectable failures.
-pub struct Directory {
-    routes: Routes,
-    requests: Mutex<Vec<String>>,
-    faults: Mutex<VecDeque<u16>>,
-    targeted: Mutex<Vec<Fault>>,
-    /// Request and response body bytes, as (sent, received).
-    bytes: Mutex<(u64, u64)>,
+/// How a bad publication's manifest misstates its last block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bad {
+    /// One more note commitment than the chain holds there.
+    TreeSize,
+    /// Another block hash.
+    Hash,
 }
 
-impl Directory {
-    /// Publishes every zero-OVK payment through `depth` blocks below the tip, with
-    /// NEAR's sets as of `now`.
-    pub fn publish(chain: &Chain, near: &Near, now: i64, options: &Options) -> Self {
+/// What a publication is built from: the chain's indexed payments, commitments and last
+/// block through its end, and NEAR's sets as of when it was made.
+pub struct Frozen {
+    records: Vec<Record>,
+    commitments: Vec<[u8; 32]>,
+    end_height: u32,
+    end_hash: [u8; 32],
+    end_position: u64,
+    sets: Vec<receiver_directory::snapshot::ProviderSet>,
+}
+
+impl std::fmt::Debug for Frozen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Frozen(end {})", self.end_height)
+    }
+}
+
+impl Frozen {
+    /// The publication of every zero-OVK payment through `depth` blocks below the tip,
+    /// with NEAR's sets as of `now`.
+    pub fn capture(chain: &Chain, near: &Near, now: i64, options: &Options) -> Self {
         let depth = options.depth.max(2);
         let end = chain.tip() - depth;
         let end_height = u32::from(end);
@@ -92,14 +113,57 @@ impl Directory {
             })
             .collect();
         let end_position = chain.tree_size_at(end);
+        let commitments =
+            chain.commitments()[..usize::try_from(end_position).expect("fits")].to_vec();
+        Self {
+            records,
+            commitments,
+            end_height,
+            end_hash: chain.hash_at(end).0,
+            end_position,
+            sets: near.sets(now),
+        }
+    }
+}
+
+/// A directory serving one publication, with injectable failures.
+pub struct Directory {
+    routes: Routes,
+    requests: Mutex<Vec<String>>,
+    faults: Mutex<VecDeque<u16>>,
+    targeted: Mutex<Vec<Fault>>,
+    /// Request and response body bytes, as (sent, received).
+    bytes: Mutex<(u64, u64)>,
+}
+
+impl Directory {
+    /// Publishes every zero-OVK payment through `depth` blocks below the tip, with
+    /// NEAR's sets as of `now`, or serves the frozen publication `options` names.
+    pub fn publish(chain: &Chain, near: &Near, now: i64, options: &Options) -> Self {
+        match &options.frozen {
+            Some(frozen) => Self::build(frozen, options.bad),
+            None => Self::build(&Frozen::capture(chain, near, now, options), options.bad),
+        }
+    }
+
+    /// Serves `frozen`, with its last block misstated as `bad` says.
+    fn build(frozen: &Frozen, bad: Option<Bad>) -> Self {
+        let records = &frozen.records;
+        let mut end_hash = frozen.end_hash;
+        let mut end_position = frozen.end_position;
+        match bad {
+            Some(Bad::Hash) => end_hash[0] ^= 0xff,
+            Some(Bad::TreeSize) => end_position += 1,
+            None => {}
+        }
         let manifest = Manifest {
             profile: PROFILE.into(),
             genesis: GENESIS,
             start_height: ACTIVATION,
             start_parent: [0; 32],
             start_position: 0,
-            end_height,
-            end_hash: chain.hash_at(end).0,
+            end_height: frozen.end_height,
+            end_hash,
             end_position,
             rows: MIN_ROWS,
             salt: [5; 32],
@@ -118,27 +182,39 @@ impl Directory {
                     .expect("a record")
             })
             .collect();
-        let snapshot =
-            Snapshot::build(manifest, &raw, &near.sets(now)).expect("a valid publication");
-        let commitments = &chain.commitments()[..usize::try_from(end_position).expect("fits")];
+        let snapshot = Snapshot::build(manifest, &raw, &frozen.sets).expect("a valid publication");
+        let mut commitments = frozen.commitments.clone();
+        if bad == Some(Bad::TreeSize) {
+            // A witness file must hold the tree its manifest claims.
+            commitments.push(commitments.last().copied().unwrap_or([0; 32]));
+        }
         let positions = records
             .iter()
             .map(|r| u32::try_from(r.payment.position).expect("small positions"))
             .collect();
         // A chain without Ironwood outputs has no witnesses to serve.
+        // A bad manifest's witnesses may not build; it then serves none.
         let witnesses = (!commitments.is_empty()).then(|| {
-            WitnessSnapshot::build(&publication(&snapshot.manifest), commitments, &positions)
-                .expect("witnesses build")
-                .encode()
+            let built =
+                WitnessSnapshot::build(&publication(&snapshot.manifest), &commitments, &positions);
+            match bad {
+                None => Some(built.expect("witnesses build").encode()),
+                Some(_) => built.ok().map(|w| w.encode()),
+            }
         });
         let server = Server::new(snapshot).expect("the PIR server prepares");
         Self {
-            routes: Routes::new(server, witnesses),
+            routes: Routes::new(server, witnesses.flatten()),
             requests: Mutex::new(Vec::new()),
             faults: Mutex::new(VecDeque::new()),
             targeted: Mutex::new(Vec::new()),
             bytes: Mutex::new((0, 0)),
         }
+    }
+
+    /// Every request served so far, as method and path.
+    pub fn requests(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
     }
 
     /// Request and response body bytes so far, as (sent, received).

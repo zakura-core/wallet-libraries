@@ -61,6 +61,8 @@ pub struct Ctx {
     near_wallet: Option<Dev>,
     /// Wallet pairs whose balances must match once settled.
     same_balances: Vec<(Dev, Dev)>,
+    /// Payment results a scenario judged itself, added to the report as they are.
+    judged: Vec<PaymentResult>,
 }
 
 impl Ctx {
@@ -77,6 +79,7 @@ impl Ctx {
             final_balances: Vec::new(),
             same_balances: Vec::new(),
             near_wallet: None,
+            judged: Vec::new(),
         }
     }
 
@@ -108,6 +111,28 @@ impl Ctx {
         let text = format!("wallet created, birthday {}", u32::from(birthday));
         self.log(name, text);
         Dev(self.devices.len() - 1)
+    }
+
+    /// Adds the seed's next account to `dev`'s wallet, with its birthday at `birthday`,
+    /// and returns its handle (see [`Device::add_account`]).
+    pub fn add_account(
+        &mut self,
+        dev: Dev,
+        name: &str,
+        seed: [u8; 32],
+        birthday: BlockHeight,
+    ) -> Dev {
+        let handle = self.devices[dev.0].add_account(name, &self.chain, seed, birthday);
+        self.devices.push(handle);
+        let text = format!("adds a second account, birthday {}", u32::from(birthday));
+        let owner = self.name(dev);
+        self.log(&owner, text);
+        Dev(self.devices.len() - 1)
+    }
+
+    /// Adds a payment result the scenario judged itself.
+    pub fn judged(&mut self, result: PaymentResult) {
+        self.judged.push(result);
     }
 
     /// The wallet `dev`.
@@ -852,7 +877,7 @@ impl Ctx {
     /// Payment observations, checks, metrics and the timeline.
     pub fn finish(mut self) -> (Vec<Event>, Vec<PaymentResult>, Vec<Check>, Vec<Metric>) {
         self.judge_balances();
-        let mut payments = Vec::new();
+        let mut payments = std::mem::take(&mut self.judged);
         for e in &self.expectations {
             let device = &self.devices[e.wallet.0];
             let actual = device

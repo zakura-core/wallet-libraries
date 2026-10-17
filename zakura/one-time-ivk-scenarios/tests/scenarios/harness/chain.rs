@@ -196,6 +196,8 @@ pub struct Mined {
     pub receiver: [u8; 43],
     /// The record a zero-OVK payment gives the directory.
     pub indexed: Option<Record>,
+    /// The nullifier that spends the received note, derived with the receiving key.
+    pub nullifier: [u8; 32],
 }
 
 impl Mined {
@@ -203,6 +205,22 @@ impl Mined {
     pub fn id(&self) -> ([u8; 32], u32) {
         (*self.txid.as_ref(), self.action_index)
     }
+}
+
+/// The nullifier of the note `compact` pays `fvk`'s default external address, which
+/// spends it. Panics if the action does not decrypt with `fvk`.
+fn received_nullifier(
+    fvk: &FullViewingKey,
+    compact: &zcash_client_backend::proto::compact_formats::CompactOrchardAction,
+) -> [u8; 32] {
+    use orchard::note_encryption::{CompactAction, IronwoodDomain};
+    use zcash_note_encryption::try_compact_note_decryption;
+    let action = CompactAction::try_from(compact).expect("a valid compact action");
+    let domain = IronwoodDomain::for_compact_action(&action);
+    let (note, _) =
+        try_compact_note_decryption(&domain, &fvk.to_ivk(Scope::External).prepare(), &action)
+            .expect("the output pays the key");
+    note.nullifier(fvk).to_bytes()
 }
 
 /// `bytes` in lowercase hex, for diagnostics.
@@ -604,6 +622,7 @@ impl Chain {
                 payer,
                 receiver,
                 indexed,
+                nullifier: received_nullifier(fvk, compact),
             };
             self.mined.push(entry.clone());
             mined.push(entry);
@@ -720,6 +739,7 @@ impl Chain {
                     payer,
                     receiver,
                     indexed,
+                    nullifier: received_nullifier(fvk, compact),
                 };
                 self.mined.push(mined.clone());
                 return mined;
@@ -840,6 +860,33 @@ impl Chain {
             .flat_map(|block| &block.vtx)
             .flat_map(|tx| &tx.ironwood_actions)
             .map(|action| action.nullifier.as_slice().try_into().expect("32 bytes"))
+            .collect()
+    }
+
+    /// Every Ironwood nullifier the chain's blocks reveal, with the height revealing it.
+    pub fn nullifier_heights(&self) -> BTreeMap<[u8; 32], u32> {
+        let blocks = self.st.cache().0.read().unwrap();
+        blocks
+            .iter()
+            .flat_map(|(height, block)| {
+                block
+                    .vtx
+                    .iter()
+                    .flat_map(|tx| &tx.ironwood_actions)
+                    .map(move |action| {
+                        let nf: [u8; 32] =
+                            action.nullifier.as_slice().try_into().expect("32 bytes");
+                        (nf, *height)
+                    })
+            })
+            .collect()
+    }
+
+    /// Every wallet-built transaction mined on this branch, with its height.
+    pub fn mined_txs(&self) -> Vec<(Transaction, BlockHeight)> {
+        self.txs
+            .keys()
+            .filter_map(|txid| self.transaction(&TxId::from_bytes(*txid)))
             .collect()
     }
 

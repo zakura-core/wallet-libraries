@@ -173,6 +173,8 @@ pub struct SyncReport {
     pub pending: bool,
     /// Why discovery failed keys or stopped, as the library reported it.
     pub problems: Vec<String>,
+    /// Every directory request the sync made, as method and path, in order.
+    pub requests: Vec<String>,
 }
 
 /// What a device can reach when it syncs.
@@ -204,8 +206,17 @@ pub struct Device {
     pub name: String,
     db: Wallet,
     path: PathBuf,
-    _file: NamedTempFile,
+    /// The wallet file, owned by the device's first account; another account's handle
+    /// shares it (see [`Self::add_account`]).
+    _file: Option<NamedTempFile>,
     pub account: AccountUuid,
+    /// The wallet's other accounts, whose discovery each sync runs too.
+    pub extra_accounts: Vec<AccountUuid>,
+    /// Whether the directory's NEAR feed and seen sets are dated by the chain's clock,
+    /// as a real directory's are, rather than by this device's.
+    pub feed_clock: bool,
+    /// Directory requests the current sync made so far.
+    requests: Vec<String>,
     pub fvk: FullViewingKey,
     usk: UnifiedSpendingKey,
     skew: i64,
@@ -269,8 +280,11 @@ impl Device {
             name: name.into(),
             db,
             path,
-            _file: file,
+            _file: Some(file),
             account,
+            extra_accounts: Vec::new(),
+            feed_clock: false,
+            requests: Vec::new(),
             fvk: FullViewingKey::from(usk.orchard()),
             usk,
             skew,
@@ -287,6 +301,84 @@ impl Device {
             bytes_sent: 0,
             bytes_received: 0,
             reach: Reach::default(),
+        }
+    }
+
+    /// Adds the seed's next account to this wallet, with its birthday at `birthday`, and
+    /// returns a handle to it named `name`. The handle shares this wallet's database; this
+    /// device's syncs run its discovery, so the handle need not sync.
+    pub fn add_account(
+        &mut self,
+        name: &str,
+        chain: &Chain,
+        seed: [u8; 32],
+        birthday: BlockHeight,
+    ) -> Self {
+        let clock = self.clock.clone();
+        let mut db = open(&self.path, &clock, 1_000 + self.extra_accounts.len() as u64);
+        let birthday = AccountBirthday::from_parts(chain.state_below(birthday), None);
+        let (account, usk) = db
+            .create_account(name, &SecretVec::new(seed.to_vec()), &birthday, None)
+            .expect("the account is created");
+        self.extra_accounts.push(account);
+        Self {
+            name: name.into(),
+            db,
+            path: self.path.clone(),
+            _file: None,
+            account,
+            extra_accounts: Vec::new(),
+            feed_clock: self.feed_clock,
+            requests: Vec::new(),
+            fvk: FullViewingKey::from(usk.orchard()),
+            usk,
+            skew: self.skew,
+            clock,
+            restarts: 1_000,
+            derived: RefCell::new(BTreeSet::new()),
+            found: BTreeMap::new(),
+            phase: Phase::Scan,
+            candidates: BTreeSet::new(),
+            syncs: 0,
+            lookups: 0,
+            scanned_blocks: 0,
+            rewinds: Vec::new(),
+            bytes_sent: 0,
+            bytes_received: 0,
+            reach: Reach::default(),
+        }
+    }
+
+    /// Declares this account's seed fresh, as an app does for a seed it just generated
+    /// (see `mark_one_time_account_fresh`).
+    pub fn mark_fresh(&mut self) {
+        self.db
+            .mark_one_time_account_fresh(self.account)
+            .expect("the account is marked fresh");
+    }
+
+    /// A read-only connection to the wallet file, for oracles.
+    pub fn conn(&self) -> Connection {
+        read_only(&self.path)
+    }
+
+    /// The account's discovery status at the device's time.
+    pub fn discovery(
+        &self,
+        chain: &Chain,
+        account: AccountUuid,
+    ) -> Option<zcash_client_backend::data_api::one_time_ivk::restore::DiscoveryStatus> {
+        self.db
+            .one_time_discovery(account, self.now(chain))
+            .expect("the discovery status")
+    }
+
+    /// The time the directory's feed is read at (see [`Self::feed_clock`]).
+    fn feed_now(&self, chain: &Chain) -> i64 {
+        if self.feed_clock {
+            chain.now()
+        } else {
+            self.now(chain)
         }
     }
 
@@ -326,6 +418,7 @@ impl Device {
     pub fn sync(&mut self, chain: &Chain, near: &Near) -> SyncReport {
         self.syncs += 1;
         let mut report = SyncReport::default();
+        self.requests.clear();
         self.db
             .update_chain_tip(chain.tip())
             .expect("the tip updates");
@@ -340,6 +433,7 @@ impl Device {
         report.found_by_discovery = discovered;
         report.open_keys = self.keys().iter().filter(|k| k.open()).count();
         report.pending = self.history_pending();
+        report.requests = std::mem::take(&mut self.requests);
         report
     }
 
@@ -483,13 +577,37 @@ impl Device {
     /// injected fault that stops the app ends discovery there, and the app restarts (see
     /// [`Self::reopen`]).
     pub fn discover(&mut self, chain: &Chain, near: &Near) -> (usize, Vec<String>) {
+        let accounts: Vec<AccountUuid> = std::iter::once(self.account)
+            .chain(self.extra_accounts.iter().copied())
+            .collect();
+        let (mut lookups, mut problems) = (0, Vec::new());
+        for account in accounts {
+            let (n, more, stopped) = self.discover_account(chain, near, account);
+            lookups += n;
+            problems.extend(more);
+            if stopped {
+                break;
+            }
+        }
+        (lookups, problems)
+    }
+
+    /// Runs discovery once for `account` (see [`Self::discover`]), returning the lookups
+    /// made, problems, and whether the app stopped.
+    fn discover_account(
+        &mut self,
+        chain: &Chain,
+        near: &Near,
+        account: AccountUuid,
+    ) -> (usize, Vec<String>, bool) {
         let now = self.now(chain);
+        let feed_now = self.feed_now(chain);
         let reach = self.reach.clone();
         // Injected failures hit one discovery run only.
         self.reach.directory_faults.clear();
         self.reach.endpoint_faults.clear();
         let directory = Served::new(reach.directory, move || {
-            let directory = Directory::publish(chain, near, now, &reach.publication);
+            let directory = Directory::publish(chain, near, feed_now, &reach.publication);
             directory.fail_next(&reach.directory_faults);
             directory.fail_at(&reach.endpoint_faults);
             directory
@@ -504,7 +622,7 @@ impl Device {
             runtime.block_on(discover(
                 &mut self.db,
                 &network(),
-                self.account,
+                account,
                 GENESIS,
                 ORIGIN,
                 &directory,
@@ -534,13 +652,14 @@ impl Device {
             let (sent, received) = published.bytes();
             self.bytes_sent += sent;
             self.bytes_received += received;
+            self.requests.extend(published.requests());
         }
         drop(directory);
         self.candidates.extend(candidates(&self.path));
         if stopped {
             self.reopen();
         }
-        (lookups, problems)
+        (lookups, problems, stopped)
     }
 
     /// "Check swap history": ends the account's discovery pass, so the next starts a new
@@ -553,6 +672,14 @@ impl Device {
         let report = self.sync(chain, near);
         self.phase = Phase::Scan;
         report
+    }
+
+    /// Starts "Check swap history" without syncing: ends the account's discovery pass, so
+    /// the next sync starts a new one.
+    pub fn begin_recheck(&mut self) {
+        self.db
+            .recheck_one_time_key_history(self.account)
+            .expect("the recheck ends the pass");
     }
 
     /// Continues a "Check swap history" begun by [`Self::check_swap_history`]: one more
@@ -604,11 +731,12 @@ impl Device {
         near: &Near,
     ) -> Result<u64, ReservationPolicy> {
         let now = self.now(chain);
+        let feed_now = self.feed_now(chain);
         let contains =
-            |receivers: &[[u8; 43]]| receivers.iter().map(|r| near.seen(r, now)).collect();
+            |receivers: &[[u8; 43]]| receivers.iter().map(|r| near.seen(r, feed_now)).collect();
         let seen = ProviderSeen {
             since: near.feed_started,
-            until: near.read_until(now),
+            until: near.read_until(feed_now),
             contains: &contains,
         };
         self.db
@@ -776,13 +904,18 @@ impl Device {
         deadline_in: i64,
     ) -> Result<RefundSwap, ReservationPolicy> {
         let now = self.now(chain);
+        let feed_now = self.feed_now(chain);
         let key = {
             let seen_near = &*near;
-            let contains =
-                |receivers: &[[u8; 43]]| receivers.iter().map(|r| seen_near.seen(r, now)).collect();
+            let contains = |receivers: &[[u8; 43]]| {
+                receivers
+                    .iter()
+                    .map(|r| seen_near.seen(r, feed_now))
+                    .collect()
+            };
             let seen = ProviderSeen {
                 since: near.feed_started,
-                until: near.read_until(now),
+                until: near.read_until(feed_now),
                 contains: &contains,
             };
             self.db
@@ -796,7 +929,7 @@ impl Device {
             .record_refund_operation(self.account, index, &deposit, deadline, now)
             .expect("the refund operation records");
         let fvk = self.key(Purpose::Refund, index);
-        near.give(receiver_of(&fvk), now, Role::Refund);
+        near.give(receiver_of(&fvk), self.feed_now(chain), Role::Refund);
         Ok(RefundSwap {
             index,
             fvk,
@@ -1041,6 +1174,58 @@ impl Device {
             ConfirmationsPolicy::MIN,
             &policy,
             None,
+            None,
+        )
+        .map_err(|e| format!("no proposal: {e}"))?;
+        let txids = create_proposed_transactions::<
+            _,
+            _,
+            std::convert::Infallible,
+            _,
+            std::convert::Infallible,
+            _,
+        >(
+            &mut self.db,
+            &network(),
+            &MockSpendProver,
+            &MockOutputProver,
+            &SpendingKeys::from_unified_spending_key(self.usk.clone()),
+            OvkPolicy::Sender,
+            &proposal,
+            None,
+        )
+        .map_err(|e| format!("the transaction does not build: {e}"))?;
+        Ok(self
+            .db
+            .get_transaction(*txids.first())
+            .expect("the stored transaction")
+            .expect("the wallet stored its transaction"))
+    }
+
+    /// Sends everything the wallet can spend now to `to`, less the fee, so the change
+    /// output carries no value, and returns the transaction, or why it could not.
+    pub fn send_max(&mut self, to: orchard::Address) -> Result<Transaction, String> {
+        let to = Address::Unified(
+            zcash_keys::address::UnifiedAddress::from_receivers(Some(to), None, None)
+                .expect("a unified address"),
+        )
+        .to_zcash_address(&network());
+        let proposal = zcash_client_backend::data_api::wallet::propose_send_max_transfer::<
+            _,
+            _,
+            _,
+            <Wallet as WalletCommitmentTrees>::Error,
+        >(
+            &mut self.db,
+            &network(),
+            self.account,
+            &[ShieldedPool::Ironwood],
+            &StandardFeeRule::Zip317,
+            to,
+            None,
+            zcash_client_backend::data_api::MaxSpendMode::MaxSpendable,
+            ConfirmationsPolicy::MIN,
+            &zcash_client_backend::data_api::wallet::input_selection::LockedInputPolicy::Exclude,
             None,
         )
         .map_err(|e| format!("no proposal: {e}"))?;
