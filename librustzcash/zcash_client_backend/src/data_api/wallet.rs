@@ -617,13 +617,16 @@ impl ConfirmationsPolicy {
     }
 
     /// Returns the shielded anchor height to use for a transaction targeting `target_height` under
-    /// this policy: `target_height` less the number of required trusted confirmations.
+    /// this policy: chain tip (`target_height - 1`) less the trusted anchor depth.
+    /// Spend confirmation thresholds still count from the target height independently.
     ///
     /// This is the anchor used to interpret a proposal step that carries no explicit anchor height —
     /// a purely transparent step, whose anchor is unused (see
     /// [`crate::proposal::Step::anchor_height`]).
     pub fn anchor_height(&self, target_height: TargetHeight) -> BlockHeight {
-        target_height.saturating_sub(u32::from(self.trusted()))
+        target_height
+            .saturating_sub(1)
+            .saturating_sub(u32::from(self.trusted()))
     }
 
     /// Returns whether or not transparent inputs may be spent with zero confirmations in shielding
@@ -3875,4 +3878,36 @@ where
         &proposal,
         None,
     )
+}
+
+#[cfg(test)]
+mod nu7_policy_tests {
+    use super::*;
+    use zcash_protocol::consensus::{NetworkUpgrade, Parameters, TEST_NETWORK};
+
+    #[test]
+    fn nu7_anchor_depth_is_from_tip_and_confirmations_stay_from_target() {
+        let policy = ConfirmationsPolicy::default();
+        let target = TargetHeight::from(BlockHeight::from_u32(4_465_026));
+        assert_eq!(policy.trusted().get(), 3);
+        assert_eq!(
+            policy.anchor_height(target),
+            BlockHeight::from_u32(4_465_022)
+        );
+        // A trusted output mined target-3 has its three confirmations even though
+        // an anchor three behind the tip is one block older.
+        assert_eq!(
+            policy.confirmations_until_spendable(
+                target,
+                PoolType::SAPLING,
+                None,
+                Some(BlockHeight::from_u32(4_465_023)),
+                true,
+                None,
+                false
+            ),
+            0
+        );
+    }
+
 }

@@ -953,7 +953,7 @@ pub(crate) fn get_max_checkpointed_height(
     min_confirmations: NonZeroU32,
 ) -> Result<Option<BlockHeight>, SqliteClientError> {
     let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(protocol)?;
-    let max_checkpoint_height = target_height - u32::from(min_confirmations); confirmation predicates
+    // ZIP 218 measures anchor depth behind the chain tip; confirmation predicates
     // independently count from the target height.
     let max_checkpoint_height = target_height
         .saturating_sub(1)
@@ -2221,5 +2221,41 @@ mod tests {
 
         assert_eq!(witnesses.len(), 1);
         assert_eq!(witnesses[0].root(note_leaf), expected_root);
+    }
+}
+
+#[cfg(test)]
+mod nu7_anchor_tests {
+    #[test]
+    fn nu7_checkpoint_anchor_is_three_blocks_behind_tip() {
+        use std::num::NonZeroU32;
+        use zcash_protocol::{ShieldedPool, consensus::BlockHeight};
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sapling_tree_checkpoints(checkpoint_id INTEGER PRIMARY KEY);
+            INSERT INTO sapling_tree_checkpoints VALUES (96), (97), (98), (99), (100);",
+        )
+        .unwrap();
+        let target = BlockHeight::from_u32(101).into();
+        assert_eq!(
+            super::get_max_checkpointed_height(
+                &conn,
+                ShieldedPool::Sapling,
+                target,
+                NonZeroU32::new(3).unwrap()
+            )
+            .unwrap(),
+            Some(BlockHeight::from_u32(97))
+        );
+        assert_eq!(
+            super::get_max_checkpointed_height(
+                &conn,
+                ShieldedPool::Sapling,
+                target,
+                NonZeroU32::MIN
+            )
+            .unwrap(),
+            Some(BlockHeight::from_u32(99))
+        );
     }
 }
