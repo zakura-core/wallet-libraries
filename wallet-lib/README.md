@@ -4,8 +4,10 @@ Selects the complete Zakura wallet stack by default and re-exports the selected
 family under stable names. Crates that must build both for Gemini and for Vizor
 depend on this instead of naming either family directly.
 
-`zakura` and `lrz` select a backend. Each includes Orchard and the complete
-feature set required by `zcash_voting`. Applications that use Enhance PIR
+`zakura` and `lrz` select a backend. Each includes Orchard. The Zakura backend
+uses the Common 4 protocol-port revision pinned in its manifest; its Orchard
+proof implementation uses the explicit Halo 2 backend. Common 4 no longer
+exposes the `unstable-voting-circuits` feature that the upstream backend enables. Applications that use Enhance PIR
 depend directly on `zakura-client-backend`/`zakura-client-sqlite` with Orchard
 storage enabled and on the `zakura-pir-enhance` client; this facade does not
 expose the client.
