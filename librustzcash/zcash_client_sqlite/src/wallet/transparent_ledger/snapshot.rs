@@ -54,7 +54,7 @@ fn transparent_balance(
 
 #[cfg(not(feature = "transparent-inputs"))]
 fn transparent_balance(
-    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
+    _nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     _: &rusqlite::Connection,
     _: AccountUuid,
     _: TargetHeight,
@@ -366,7 +366,7 @@ fn last_known_source(
 /// Without transparent support no balance is read, so no last-known amount is classified.
 #[cfg(not(feature = "transparent-inputs"))]
 fn last_known_source(
-    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
+    _nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     _: &rusqlite::Connection,
     _: AccountUuid,
     _: TargetHeight,

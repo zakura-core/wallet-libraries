@@ -3469,6 +3469,72 @@ mod tests {
     };
 
     #[test]
+    #[cfg(not(feature = "spend-index"))]
+    fn nu7_spend_search_uses_the_candidate_next_height() {
+        use zcash_client_backend::data_api::TransactionDataRequest;
+        use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
+        let network = zcash_protocol::local_consensus::LocalNetwork {
+            nu7: Some(BlockHeight::from_u32(100_200)),
+            ..TestBuilder::DEFAULT_NETWORK
+        };
+        let activation = network.activation_height(NetworkUpgrade::Nu7).unwrap();
+        for (start, delta) in [(activation - 2, 40), (activation - 1, 120)] {
+            let mut st = TestBuilder::new()
+                .with_network(network)
+                .with_data_store_factory(TestDbFactory::default())
+                .with_account_from_sapling_activation(BlockHash([0; 32]))
+                .build();
+            let account = st.test_account().unwrap().id();
+            let address = *st
+                .wallet()
+                .get_last_generated_address_matching(
+                    account,
+                    UnifiedAddressRequest::AllAvailableKeys,
+                )
+                .unwrap()
+                .unwrap()
+                .transparent()
+                .unwrap();
+            let tip = activation + 200;
+            st.wallet_mut().update_chain_tip(tip).unwrap();
+            let outpoint = OutPoint::fake();
+            let output = WalletTransparentOutput::from_parts(
+                outpoint.clone(),
+                TxOut::new(Zatoshis::const_from_u64(100_000), address.script().into()),
+                Some(start),
+                Some(account),
+                Some(TransparentKeyScope::EXTERNAL),
+                None,
+            )
+            .unwrap();
+            st.wallet_mut()
+                .put_received_transparent_utxo(&output)
+                .unwrap();
+            let conn = &st.wallet().db().conn;
+            let id = conn
+                .query_row(
+                    "SELECT id_tx FROM transactions WHERE txid = ?1",
+                    [outpoint.hash().to_vec()],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            super::queue_transparent_spend_detection(
+                &tx,
+                &network,
+                address,
+                crate::TxRef(id),
+                outpoint.n(),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            let requests = super::transaction_data_requests(conn, &network, tip).unwrap();
+            assert!(requests.iter().any(|r| matches!(r, TransactionDataRequest::TransactionsInvolvingAddress(r)
+                if r.address() == address && r.block_range_start() == start && r.block_range_end() == Some(start + delta + 1))));
+        }
+    }
+
+    #[test]
     fn put_received_transparent_utxo() {
         zcash_client_backend::data_api::testing::transparent::put_received_transparent_utxo(
             TestDbFactory::default(),
