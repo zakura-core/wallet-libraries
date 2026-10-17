@@ -7201,6 +7201,9 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     let note_value = Zatoshis::const_from_u64(350000);
     st.generate_next_block(&p0_fvk, AddressType::DefaultExternal, note_value);
     st.scan_cached_blocks(account.birthday().height(), 1);
+    // Include the funding note in the anchor before exercising signing and extraction.
+    let (anchor_ready_height, _) = st.generate_empty_block();
+    st.scan_cached_blocks(anchor_ready_height, 1);
 
     assert_eq!(st.get_total_balance(account.id()), note_value);
     assert_eq!(
