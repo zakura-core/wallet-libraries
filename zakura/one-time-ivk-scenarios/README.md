@@ -21,6 +21,24 @@ ONE_TIME_IVK_SLOW=1 python3 scripts/dev.py test --config one-time-ivk-scenarios
 python3 scripts/dev.py test --config one-time-ivk-scenarios E2-restore
 ```
 
+Randomized worlds (`Z-fuzz-<seed>`) generate a history of swaps, devices, outages,
+reorgs, restores and spends from a seed, run it with the same harness, and check it
+with an oracle after every sync: no spent note shown unspent, no note the chain lacks or
+holds once, a balance within what the chain holds, no reissued address, every payment a
+completed discovery pass lists, bounded directory requests, and, once the world is
+stable, discovery that completes and goes quiet and every payment the contract promises.
+The default set runs three seeds. `ONE_TIME_IVK_FUZZ_SEEDS` names a seed or a
+`start..end` range, `ONE_TIME_IVK_FUZZ_PROFILE=late` or `reorg` biases the worlds
+toward the late path or reorgs, and `ONE_TIME_IVK_FUZZ_SKIP` drops plan steps by number
+to minimize a failing seed. A failure prints its seed, how to replay it, and its last
+steps. Regression scenarios for what the worlds found run only with
+`ONE_TIME_IVK_FUZZ_FINDINGS=1`, since they fail until fixed:
+
+```sh
+ONE_TIME_IVK_FUZZ_SEEDS=0..200 python3 scripts/dev.py test --config one-time-ivk-scenarios Z-fuzz
+ONE_TIME_IVK_FUZZ_FINDINGS=1 python3 scripts/dev.py test --config one-time-ivk-scenarios Z-finding
+```
+
 A run writes `report.json` and `report.md` (short enough to paste into a PR) to
 `ONE_TIME_IVK_REPORT_DIR`, or under Cargo's test temp directory by default. It exits
 nonzero if any scenario fails or a filter selects none.

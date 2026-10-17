@@ -2406,7 +2406,7 @@ impl<'p> Exec<'p> {
                         } else {
                             Class::MissedDocumented
                         },
-                        "not judged: no oracle rule promises it".into(),
+                        format!("not judged: {}", self.unpromised(ctx, w, i)),
                     ),
                 };
                 let ok = match expected {
@@ -2439,6 +2439,50 @@ impl<'p> Exec<'p> {
                 }
             }
         }
+    }
+
+    /// Why no rule of [`Self::promise`] covers wallet `w`'s payment `i`, for the report.
+    fn unpromised(&self, ctx: &Ctx, w: W, i: usize) -> String {
+        let p = &self.pays[i];
+        let h = u32::from(p.mined.height);
+        if h < self.births[&w] {
+            return format!("before {}'s birthday {}", w.name(), self.births[&w]);
+        }
+        let passes = self.passes.get(&w).map(Vec::as_slice).unwrap_or(&[]);
+        let judged: Vec<&Pass> = passes.iter().filter(|p| p.first || p.recheck).collect();
+        if self.plan.swaps[p.swap].wallet == w {
+            return "its own key, after a status that lets the key close or past the limit".into();
+        }
+        if judged.is_empty() {
+            return format!(
+                "{} has no first or recheck pass (a fresh account)",
+                w.name()
+            );
+        }
+        if judged.iter().all(|pass| pass.end < h) {
+            return format!(
+                "after every first or recheck pass of {} (last through {})",
+                w.name(),
+                judged.iter().map(|p| p.end).max().unwrap_or(0)
+            );
+        }
+        let reach = judged
+            .iter()
+            .map(|pass| {
+                self.reach(
+                    w.acct,
+                    p.key.refund,
+                    pass.end,
+                    pass.feed_until,
+                    ctx.near.feed_started,
+                )
+            })
+            .max()
+            .unwrap_or(0);
+        if p.key.index >= reach {
+            return format!("beyond the search's reach {reach}");
+        }
+        "no rule".into()
     }
 
     /// What the documented contract promises wallet `w` of payment `i`, and why, if
