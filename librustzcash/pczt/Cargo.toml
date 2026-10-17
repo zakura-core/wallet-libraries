@@ -104,7 +104,7 @@ transparent = [
 ]
 
 ## Enables building a PCZT from the output of `zcash_primitives`'s `Builder::build_for_pczt`.
-zcp-builder = ["dep:zcash_primitives", "orchard", "sapling", "transparent"]
+zcp-builder = ["dep:zcash_primitives", "zcash_primitives/pczt", "orchard", "sapling", "transparent"]
 
 #! ### PCZT roles behind feature flags
 #!
