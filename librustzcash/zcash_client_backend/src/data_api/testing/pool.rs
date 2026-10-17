@@ -64,6 +64,16 @@ use super::{
     random_frontier_with_prior_subtree_roots,
 };
 
+fn anchor_grid<P: consensus::Parameters>(
+    params: &P,
+    interval: AnchorRetentionInterval,
+) -> zcash_protocol::zip318::AnchorGrid {
+    zcash_protocol::zip318::AnchorGrid::new(
+        interval,
+        zcash_protocol::zip318::BlockSpacing::for_network(params),
+    )
+}
+
 fn random_sapling_frontier<const DEPTH: u8>(
     rng: &mut TestRng,
     tree_size: u64,
@@ -4366,7 +4376,9 @@ pub fn anchor_checkpoints_retained_across_deep_scan<
 
     // The first interval-aligned anchor height at or above the retention floor and strictly above
     // the received note, so the note's position precedes the anchor's checkpoint.
-    let mut anchor = u32::from(interval.boundary_at_or_above(BlockHeight::from(floor)));
+    let mut anchor = u32::from(
+        anchor_grid(st.network(), interval).boundary_at_or_above(BlockHeight::from(floor)),
+    );
     while anchor <= received {
         anchor += interval_blocks;
     }
@@ -4431,7 +4443,7 @@ pub fn anchor_checkpoints_retained_across_deep_scan<
     // Exactly the interval-aligned checkpoints at or above the retention floor are retained.
     let expected_anchors: BTreeSet<BlockHeight> = (floor..=tip)
         .map(BlockHeight::from)
-        .filter(|h| interval.is_boundary(*h))
+        .filter(|h| anchor_grid(st.network(), interval).is_boundary(*h))
         .collect();
     assert_eq!(
         retained, expected_anchors,
@@ -4503,7 +4515,8 @@ pub fn ordinary_canonical_crossing_is_unpadded_with_rolling_expiry<Dsf: DataStor
     let account = st.test_account().cloned().unwrap();
     let fvk = OrchardPoolTester::test_account_fvk(&st);
     let recipient = OrchardPoolTester::fvk_default_address(&fvk).to_zcash_address(st.network());
-    let zip318_params = PoolMigrationParams::new(interval);
+    let zip318_params =
+        PoolMigrationParams::new(zip318::BlockSpacing::for_network(st.network()), interval);
 
     // One Orchard note, comfortably larger than a canonical denomination plus fees.
     let (received_height, _, _) =
@@ -4512,7 +4525,7 @@ pub fn ordinary_canonical_crossing_is_unpadded_with_rolling_expiry<Dsf: DataStor
     // Fillers pay a non-wallet key, so each block adds a checkpoint without changing the
     // wallet's spendable set.
     let not_our_fvk = OrchardPoolTester::sk_to_fvk(&OrchardPoolTester::sk(&[0xf5; 32]));
-    let boundary = interval.boundary_at_or_above(received_height + 2);
+    let boundary = anchor_grid(st.network(), interval).boundary_at_or_above(received_height + 2);
     let mut next_height = received_height + 1;
     let mut mine_to = |st: &mut TestState<_, _, _>, tip: BlockHeight| {
         let from = next_height;
@@ -4561,7 +4574,7 @@ pub fn ordinary_canonical_crossing_is_unpadded_with_rolling_expiry<Dsf: DataStor
     )
     .expect("the canonical shape is a valid input to the ZIP 317 rule");
     let step = off_grid.steps().first();
-    assert!(!interval.is_boundary(step.anchor_height().unwrap()));
+    assert!(!anchor_grid(st.network(), interval).is_boundary(step.anchor_height().unwrap()));
     assert!(!step.is_canonical_crossing(&zip318_params, canonical_fee));
     assert_eq!(ironwood_actions(step), Ok(2));
 
@@ -4618,9 +4631,10 @@ pub fn ordinary_canonical_crossing_is_unpadded_with_rolling_expiry<Dsf: DataStor
     let tx = st.get_tx_from_history(txids[0]).unwrap().unwrap();
     assert_eq!(
         tx.expiry_height(),
-        Some(zip318::expiry_height(BlockHeight::from(
-            canonical.min_target_height()
-        )))
+        Some(zip318::expiry_height(
+            &zip318::BlockSpacing::for_network(st.network()),
+            BlockHeight::from(canonical.min_target_height())
+        ))
     );
     let built = st
         .wallet()
@@ -4687,7 +4701,7 @@ pub fn empty_boundary_blocks_are_checkpointed_and_retained<
     // The first two boundaries strictly above the received note, plus slack so neither boundary
     // is the final block of the batch.
     let first_boundary = {
-        let mut b = u32::from(interval.boundary_at_or_above(activation));
+        let mut b = u32::from(anchor_grid(st.network(), interval).boundary_at_or_above(activation));
         while b <= received {
             b += interval_blocks;
         }
@@ -4701,16 +4715,17 @@ pub fn empty_boundary_blocks_are_checkpointed_and_retained<
     // of its own.
     let not_our_fvk = T::sk_to_fvk(&T::sk(&[0xf5; 32]));
     for height in (received + 1)..=tip {
-        let generated = if interval.is_boundary(BlockHeight::from_u32(height)) {
-            st.generate_empty_block().0
-        } else {
-            st.generate_next_block(
-                &not_our_fvk,
-                AddressType::DefaultExternal,
-                Zatoshis::const_from_u64(10_000),
-            )
-            .0
-        };
+        let generated =
+            if anchor_grid(st.network(), interval).is_boundary(BlockHeight::from_u32(height)) {
+                st.generate_empty_block().0
+            } else {
+                st.generate_next_block(
+                    &not_our_fvk,
+                    AddressType::DefaultExternal,
+                    Zatoshis::const_from_u64(10_000),
+                )
+                .0
+            };
         assert_eq!(u32::from(generated), height, "cache height must track");
     }
     // One batch, covering both boundaries.

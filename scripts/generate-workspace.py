@@ -146,6 +146,8 @@ def main(argv: list[str]) -> int:
             for target_field in ("version", "package", "git", "rev"):
                 if target_field in target:
                     fields[target_field] = f'"{target[target_field]}"'
+            if "features" in target:
+                fields["features"] = "[" + ", ".join(f'"{feature}"' for feature in target["features"]) + "]"
         elif "path" in fields:
             if package in vendored:
                 crate = vendored[package]

@@ -551,8 +551,11 @@ mod tests {
         },
         pallas,
     };
-    use rand::{Rng as _, rand_core::UnwrapErr, rngs::SysRng};
-    use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng as _};
+    use rand::{
+        Rng as _, SeedableRng as _,
+        rand_core::UnwrapErr,
+        rngs::{StdRng, SysRng},
+    };
     use zcash_keys::keys::UnifiedSpendingKey;
     use zcash_note_encryption::Domain;
     use zcash_primitives::transaction::TxId;
@@ -670,7 +673,7 @@ mod tests {
             IronwoodNoteEncryption::new(Some(fvk.to_ovk(Scope::External)), note, [4; 512]);
         let cmx = ExtractedNoteCommitment::from(note.commitment());
         let cv_net = ValueCommitment::from_bytes(&pallas::Point::generator().to_bytes()).unwrap();
-        let mut outgoing_rng = ChaCha20Rng::from_seed([7; 32]);
+        let mut outgoing_rng = StdRng::from_seed([7; 32]);
         let record = EnhanceRecord::from_parts(EnhanceRecordParts {
             enc_ciphertext_suffix: (encryptor.encrypt_note_plaintext())[52..]
                 .try_into()

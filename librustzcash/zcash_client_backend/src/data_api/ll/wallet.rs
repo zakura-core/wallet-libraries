@@ -1995,7 +1995,11 @@ mod tests {
         ] {
             let blocks = interval.block_count().get();
             let floor = BlockHeight::from(4 * blocks);
-            let policy = AnchorRetention::new(floor, interval);
+            let policy = AnchorRetention::new(
+                floor,
+                zcash_protocol::zip318::BlockSpacing::UNIFORM,
+                interval,
+            );
             let retention = Some(&policy);
 
             // With retention disabled, nothing is retained, even on the interval.
@@ -2106,6 +2110,7 @@ mod tests {
         // ordinary case on a sparse chain: most blocks carry no shielded output at all.
         let retention = AnchorRetention::new(
             h(1_000),
+            zcash_protocol::zip318::BlockSpacing::UNIFORM,
             AnchorRetentionInterval::custom(NonZeroU32::new(12).unwrap()),
         );
 

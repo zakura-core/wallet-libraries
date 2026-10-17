@@ -3535,6 +3535,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             .map(|from_height| {
                 Ok::<_, SqliteClientError>(AnchorRetention::union(
                     from_height,
+                    zcash_protocol::zip318::BlockSpacing::for_network(&self.params),
                     core::iter::once(self.anchor_retention_interval),
                 ))
             })
