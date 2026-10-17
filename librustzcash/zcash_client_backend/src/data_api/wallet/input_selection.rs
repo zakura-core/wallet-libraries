@@ -1572,6 +1572,10 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                             },
                         ),
                     )
+                    .and_then(|proposal| {
+                        proposal.validate_shielded_budget(params)?;
+                        Ok(proposal)
+                    })
                     .map_err(InputSelectorError::Proposal);
                 }
                 Err(ChangeError::DustInputs {
@@ -2274,6 +2278,10 @@ where
                 tr1_payment_pools: BTreeMap::from_iter([(0, PoolType::Transparent)]),
             }),
     )
+    .and_then(|proposal| {
+        proposal.validate_shielded_budget(params)?;
+        Ok(proposal)
+    })
     .map_err(InputSelectorError::Proposal)
 }
 
@@ -2462,6 +2470,10 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
                 #[cfg(feature = "orchard")]
                 ironwood_active_at(params, target_height),
             )
+            .and_then(|proposal| {
+                proposal.validate_shielded_budget(params)?;
+                Ok(proposal)
+            })
             .map_err(InputSelectorError::Proposal)
         } else {
             Err(InputSelectorError::InsufficientFunds {
@@ -2640,6 +2652,10 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
             #[cfg(feature = "orchard")]
             ironwood_active_at(params, target_height),
         )
+        .and_then(|proposal| {
+            proposal.validate_shielded_budget(params)?;
+            Ok(proposal)
+        })
         .map_err(InputSelectorError::Proposal)
     }
 }

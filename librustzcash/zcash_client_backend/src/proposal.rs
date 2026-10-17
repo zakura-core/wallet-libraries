@@ -29,6 +29,9 @@ use crate::{
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ProposalError {
+    /// The padded transaction cannot fit in any block at the proposed target height.
+    ShieldedBudget(&'static str),
+
     /// The total output value of the transaction request is not a valid Zcash amount.
     RequestTotalInvalid,
     /// The total of transaction inputs overflows the valid range of Zcash values.
@@ -127,6 +130,10 @@ pub enum ProposalError {
 impl Display for ProposalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ProposalError::ShieldedBudget(reason) => write!(
+                f,
+                "Oversized shielded transaction: {reason}; reduce the payment or split the inputs"
+            ),
             ProposalError::RequestTotalInvalid => write!(
                 f,
                 "The total requested output value is not a valid Zcash amount."
@@ -414,6 +421,57 @@ impl<FeeRuleT, NoteRef> Proposal<FeeRuleT, NoteRef> {
                 ironwood_active,
             )?),
         })
+    }
+
+    /// Rejects a proposal containing a padded shielded transaction that cannot fit
+    /// in a NU7 block. Wallet proposal entry points call this before locking inputs;
+    /// imported proposals are checked again at construction.
+    pub fn validate_shielded_budget(
+        &self,
+        params: &impl zcash_protocol::consensus::Parameters,
+    ) -> Result<(), ProposalError> {
+        use zcash_protocol::consensus::NetworkUpgrade;
+        let target = self.min_target_height.into();
+        if !params.is_nu_active(NetworkUpgrade::Nu7, target) {
+            return Ok(());
+        }
+        for step in &self.steps {
+            let spends = step.input_count_in_pool(PoolType::SAPLING);
+            let outputs = step.output_count_in_pool(PoolType::SAPLING)
+                + step.change_count_in_pool(PoolType::SAPLING);
+            let kind = sapling::builder::BundleType::DEFAULT;
+            let sapling_spends = kind
+                .num_spends(spends)
+                .map_err(ProposalError::ShieldedBudget)?;
+            let sapling_outputs = kind
+                .num_outputs(spends, outputs)
+                .map_err(ProposalError::ShieldedBudget)?;
+            #[cfg(feature = "orchard")]
+            let (orchard, ironwood) = (
+                step.orchard_action_count(
+                    BundlePadding::DEFAULT,
+                    ::orchard::bundle::BundleVersion::orchard_v3(),
+                )
+                .map_err(ProposalError::ShieldedBudget)?,
+                step.ironwood_action_count(
+                    step.ironwood_bundle_padding(),
+                    ::orchard::bundle::BundleVersion::ironwood_v3(),
+                )
+                .map_err(ProposalError::ShieldedBudget)?,
+            );
+            #[cfg(not(feature = "orchard"))]
+            let (orchard, ironwood) = (0, 0);
+            zcash_primitives::transaction::builder::check_shielded_budget(
+                params,
+                target,
+                sapling_spends,
+                sapling_outputs,
+                orchard,
+                ironwood,
+            )
+            .map_err(ProposalError::ShieldedBudget)?;
+        }
+        Ok(())
     }
 
     /// Returns the fee rule to be used by the transaction builder.
@@ -1907,6 +1965,51 @@ mod tests {
     //
     // The counts themselves cannot overflow `usize`: each is the length of an in-memory collection,
     // so reaching `usize::MAX` would require more notes than could be addressed.
+    #[test]
+    fn nu7_proposal_rejects_per_pool_and_combined_padded_budgets() {
+        let network = zcash_protocol::consensus::TEST_NETWORK;
+        let activation = network.activation_height(NetworkUpgrade::Nu7).unwrap();
+        for (orchard, ironwood, expected) in [
+            (330, 0, true),
+            (331, 0, false),
+            (0, 330, true),
+            (0, 331, false),
+            (165, 165, true),
+            (200, 200, false),
+        ] {
+            let step = step_with_notes(orchard_and_ironwood_notes((orchard, 0), (ironwood, 0)));
+            let mut proposal = super::Proposal {
+                fee_rule: (),
+                min_target_height: activation.into(),
+                confirmations_policy: ConfirmationsPolicy::default(),
+                steps: NonEmpty::singleton(step),
+                proposed_version: None,
+            };
+            assert_eq!(
+                proposal.validate_shielded_budget(&network).is_ok(),
+                expected
+            );
+            proposal.min_target_height = (activation - 1).into();
+            assert!(proposal.validate_shielded_budget(&network).is_ok());
+        }
+        // One Ironwood change output pads to two actions beside 329 Orchard spends.
+        let step = step_with_notes_and_change(
+            orchard_and_ironwood_notes((329, 0), (0, 0)),
+            vec![shielded_change(ShieldedPool::Ironwood, 0)],
+        );
+        let proposal = super::Proposal {
+            fee_rule: (),
+            min_target_height: activation.into(),
+            confirmations_policy: ConfirmationsPolicy::default(),
+            steps: NonEmpty::singleton(step),
+            proposed_version: None,
+        };
+        assert!(matches!(
+            proposal.validate_shielded_budget(&network),
+            Err(ProposalError::ShieldedBudget(_))
+        ));
+    }
+
     #[test]
     fn counts_beyond_the_block_limit_are_counted_exactly() {
         let spends = 4 * MAX_ACTIONS_PER_BUNDLE;
