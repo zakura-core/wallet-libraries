@@ -3496,12 +3496,13 @@ mod tests {
                 .transparent()
                 .unwrap();
             let tip = activation + 200;
-            st.wallet_mut().update_chain_tip(tip).unwrap();
+            // Record the UTXO as unspent through the block before the search start.
+            st.wallet_mut().update_chain_tip(start - 1).unwrap();
             let outpoint = OutPoint::fake();
             let output = WalletTransparentOutput::from_parts(
                 outpoint.clone(),
                 TxOut::new(Zatoshis::const_from_u64(100_000), address.script().into()),
-                Some(start),
+                Some(start - 1),
                 Some(account),
                 Some(TransparentKeyScope::EXTERNAL),
                 None,
@@ -3510,6 +3511,7 @@ mod tests {
             st.wallet_mut()
                 .put_received_transparent_utxo(&output)
                 .unwrap();
+            st.wallet_mut().update_chain_tip(tip).unwrap();
             let conn = &st.wallet().db().conn;
             let id = conn
                 .query_row(
