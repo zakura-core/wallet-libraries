@@ -107,7 +107,99 @@ fn findings() -> Vec<Scenario> {
     if std::env::var_os("ONE_TIME_IVK_FUZZ_FINDINGS").is_none() {
         return Vec::new();
     }
-    Vec::new()
+    vec![memo_after_pass(false), memo_after_pass(true)]
+}
+
+/// Seed 300: A funds a ZEC-to-X swap after A2, a second install of the seed, finished its
+/// discovery pass. A2 scans the funding memo, which registers the refund key for a lookup
+/// (`recover_refund_memos`), but the lookup's cutoff is A2's old pass publication, below
+/// the memo, so it cannot find the refund, and the key closes as looked up. `early`: A2
+/// scans the memo before NEAR refunds.
+fn memo_after_pass(early: bool) -> Scenario {
+    let when = if early { "before" } else { "after" };
+    Scenario {
+        id: format!("Z-finding-memo-after-pass-scanned-{when}-refund"),
+        group: FUZZ,
+        title: format!(
+            "A second install scans a funding memo after its discovery pass, {when} the refund"
+        ),
+        summary: "A refund key recovered from a funding memo is looked up only through the \
+            account's current pass publication, which predates the memo, so the refund is never \
+            found without Check swap history."
+            .into(),
+        params: vec![("A2 scans the memo".into(), format!("{when} the refund"))],
+        slow: false,
+        run: Box::new(move |ctx| {
+            ctx.mine(20);
+            let birthday = ctx.chain.tip() + 1;
+            ctx.mine(5);
+            let a = ctx.device("A", SEED, birthday);
+            let a2 = ctx.device("A2", SEED, birthday);
+            let fvk = ctx.get(a).fvk.clone();
+            ctx.pay("A's funds", "A's address", &fvk, FUNDS, Payer::Wallet);
+            ctx.mine(10);
+            for dev in [a, a, a2, a2] {
+                ctx.sync(dev);
+            }
+            ctx.wait(HOUR);
+            ctx.sync(a);
+            let swap = ctx.quote_refund(a, HOUR).expect("a refund key");
+            let (funded, _) = ctx.fund_refund(a, &swap, ZEC / 2);
+            ctx.mine(5);
+            ctx.sync(a);
+            if early {
+                ctx.sync(a2);
+                ctx.mine(1);
+                ctx.sync(a2);
+            }
+            ctx.wait(30 * MINUTE);
+            let value = ZEC / 2 - 10_000;
+            let refund = ctx.pay("refund", &swap.label(), &swap.fvk, value, Payer::Near);
+            ctx.mine(1);
+            ctx.observe_refund(a, &swap, "REFUNDED", Some(value));
+            ctx.sync(a);
+            ctx.wait(HOUR);
+            for _ in 0..3 {
+                ctx.sync(a2);
+                ctx.mine(1);
+            }
+            let lookup = ctx
+                .get(a2)
+                .lookup_state(zakura_one_time_ivk::Purpose::Refund, swap.index);
+            let keys: Vec<String> = ctx
+                .get(a2)
+                .keys()
+                .iter()
+                .map(|k| format!("{} {:?}/{:?}", k.label(), k.active_from, k.closed_at))
+                .collect();
+            ctx.check(
+                format!(
+                    "A2's lookup of {} reads past the funding at {}",
+                    swap.label(),
+                    u32::from(funded)
+                ),
+                lookup.is_some_and(|l| l.done_height.is_none_or(|h| h >= u32::from(funded))),
+                format!("lookup {lookup:?}; A2's keys {keys:?}"),
+            );
+            ctx.expect(
+                a,
+                "refund",
+                &swap.label(),
+                &refund,
+                Class::FoundLive,
+                "A funded R0 and scans it.",
+            );
+            ctx.expect(
+                a2,
+                "refund",
+                &swap.label(),
+                &refund,
+                Class::FoundAutomatically,
+                "A2 recovers R0 from A's funding memo, and discovery looks up a key registered after it finished in its next run.",
+            );
+            ctx.check_same_balance(a, a2);
+        }),
+    }
 }
 
 /// The seeds `ONE_TIME_IVK_FUZZ_SEEDS` names, as `start..end` or one seed.
