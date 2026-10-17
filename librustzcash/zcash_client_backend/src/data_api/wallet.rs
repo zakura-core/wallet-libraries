@@ -1284,7 +1284,12 @@ where
 {
     // The transaction version is carried on the proposal, chosen when the proposal was
     // constructed; `None` builds at the version implied by the target height.
-    proposal.validate_shielded_budget(params)?;
+    let current_target = wallet_db
+        .chain_height()
+        .map_err(Error::DataSource)?
+        .ok_or(Error::ScanRequired)?
+        + 1;
+    proposal.validate_for_current_target(params, current_target)?;
     let proposed_version = proposal.proposed_version();
 
     if let Some(expiry_height) = expiry_height {
@@ -2788,7 +2793,12 @@ where
     // Build at the version the proposal requested, falling back to the version implied by the
     // target height (version 6 from NU6.3 onward). Both the version 6 format and its Ironwood
     // bundle are fully representable as a PCZT.
-    proposal.validate_shielded_budget(params)?;
+    let current_target = wallet_db
+        .chain_height()
+        .map_err(Error::DataSource)?
+        .ok_or(Error::ScanRequired)?
+        + 1;
+    proposal.validate_for_current_target(params, current_target)?;
     let proposed_version = proposal.proposed_version();
 
     let build_state = build_proposed_transaction::<_, _, _, FeeRuleT, _, _>(
@@ -3369,6 +3379,13 @@ pub fn redact_pczt_for_batch_signer(pczt: &pczt::Pczt) -> pczt::Pczt {
 ///
 /// Returns the transaction ID for the resulting transaction.
 ///
+/// `params` must identify this wallet's network. Synchronize the wallet's chain tip
+/// before calling: acceptance is checked at tip + 1 before cryptographic work.
+/// Obsolete branch authorization, expired transactions, and oversized NU7 bundles
+/// are rejected. Rebuild and re-sign stale transactions. For archival imports use
+/// [`extract_and_store_transaction_from_pczt_for_history`]. Applications own broadcast
+/// and must recheck against a fresh tip immediately before submission.
+///
 /// - `sapling_vk` is optional to allow the caller to check whether a PCZT has Sapling
 ///   with [`pczt::roles::prover::Prover::requires_sapling_proofs`], and avoid downloading
 ///   the Sapling parameters if they are not needed. If `sapling_vk` is `None`, and the
@@ -3378,6 +3395,79 @@ pub fn redact_pczt_for_batch_signer(pczt: &pczt::Pczt) -> pczt::Pczt {
 ///   bundle, an Orchard verifying key will be generated on the fly.
 #[cfg(feature = "pczt")]
 pub fn extract_and_store_transaction_from_pczt<DbT, N>(
+    wallet_db: &mut DbT,
+    params: &impl consensus::Parameters,
+    pczt: pczt::Pczt,
+    sapling_vk: Option<(
+        &sapling::circuit::SpendVerifyingKey,
+        &sapling::circuit::OutputVerifyingKey,
+    )>,
+    #[cfg(feature = "orchard")] orchard_vk: Option<&orchard::circuit::VerifyingKey>,
+) -> Result<TxId, ExtractErrT<DbT, N>>
+where
+    DbT: WalletWrite + WalletCommitmentTrees,
+    <DbT as WalletRead>::AccountId: serde::de::DeserializeOwned,
+{
+    let target = wallet_db
+        .chain_height()
+        .map_err(Error::DataSource)?
+        .ok_or(Error::ScanRequired)?
+        + 1;
+    validate_pczt_for_target(params, target, &pczt)?;
+    extract_and_store_transaction_from_pczt_for_history(
+        wallet_db,
+        pczt,
+        sapling_vk,
+        #[cfg(feature = "orchard")]
+        orchard_vk,
+    )
+}
+
+/// Checks branch authorization, expiry, version, and padded budgets before accepting a PCZT
+/// for sending. The caller must supply the candidate next height of a freshly synchronized
+/// chain; a stale local tip cannot detect a network upgrade it has not learned about.
+#[cfg(feature = "pczt")]
+pub fn validate_pczt_for_target(
+    params: &impl consensus::Parameters,
+    target: BlockHeight,
+    pczt: &pczt::Pczt,
+) -> Result<(), PcztError> {
+    let expected = u32::from(consensus::BranchId::for_height(params, target));
+    if *pczt.global().consensus_branch_id() != expected {
+        return Err(PcztError::Invalid(
+            "Saved transaction authorization belongs to an obsolete consensus branch; rebuild and re-sign".into(),
+        ));
+    }
+    if params.is_nu_active(consensus::NetworkUpgrade::Nu7, target)
+        && !matches!(*pczt.global().tx_version(), 5 | 6)
+    {
+        return Err(PcztError::Invalid(
+            "Transaction version is invalid at NU7; rebuild in a supported format".into(),
+        ));
+    }
+    let expiry = *pczt.global().expiry_height();
+    if expiry != 0 && expiry < u32::from(target) {
+        return Err(PcztError::Invalid(
+            "Saved transaction has expired; rebuild and re-sign".into(),
+        ));
+    }
+    zcash_primitives::transaction::builder::check_shielded_budget(
+        params,
+        target,
+        pczt.sapling().spends().len(),
+        pczt.sapling().outputs().len(),
+        pczt.orchard().actions().len(),
+        pczt.ironwood().actions().len(),
+    )
+    .map_err(|e| PcztError::Invalid(e.into()))
+}
+
+/// Extracts and stores a historical or intentionally offline PCZT, without current-height
+/// acceptance checks. This is an archival operation and does not authorize broadcasting.
+/// Use [`extract_and_store_transaction_from_pczt`] when finalizing for sending, and recheck
+/// against a fresh chain tip immediately before application-owned broadcast.
+#[cfg(feature = "pczt")]
+pub fn extract_and_store_transaction_from_pczt_for_history<DbT, N>(
     wallet_db: &mut DbT,
     pczt: pczt::Pczt,
     sapling_vk: Option<(
@@ -3957,7 +4047,8 @@ where
 #[cfg(test)]
 mod nu7_policy_tests {
     use super::*;
-    use zcash_protocol::consensus::{NetworkUpgrade, Parameters, TEST_NETWORK};
+    #[cfg(feature = "pczt")]
+    use zcash_protocol::consensus::{BranchId, NetworkUpgrade, Parameters, TEST_NETWORK};
 
     #[test]
     fn nu7_anchor_depth_is_from_tip_and_confirmations_stay_from_target() {
@@ -3984,4 +4075,36 @@ mod nu7_policy_tests {
         );
     }
 
+    #[test]
+    #[cfg(feature = "pczt")]
+    fn nu7_saved_authorization_requires_current_branch_and_unexpired_target() {
+        use pczt::roles::creator::Creator;
+        let activation = TEST_NETWORK.activation_height(NetworkUpgrade::Nu7).unwrap();
+        let saved = Creator::new(
+            BranchId::Nu6_3.into(),
+            u32::from(activation + 120),
+            1,
+            None,
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        assert!(validate_pczt_for_target(&TEST_NETWORK, activation - 1, &saved).is_ok());
+        assert!(validate_pczt_for_target(&TEST_NETWORK, activation, &saved).is_err());
+        assert!(validate_pczt_for_target(&TEST_NETWORK, activation + 1, &saved).is_err());
+        let rebuilt = Creator::new(
+            BranchId::Nu7.into(),
+            u32::from(activation + 120),
+            1,
+            None,
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        assert!(validate_pczt_for_target(&TEST_NETWORK, activation, &rebuilt).is_ok());
+        assert!(validate_pczt_for_target(&TEST_NETWORK, activation + 120, &rebuilt).is_ok());
+        assert!(validate_pczt_for_target(&TEST_NETWORK, activation + 121, &rebuilt).is_err());
+    }
 }

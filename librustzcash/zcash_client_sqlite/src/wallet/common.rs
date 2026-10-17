@@ -1557,6 +1557,44 @@ mod nu7_expiry_tests {
     }
 
     #[test]
+    #[cfg(feature = "pczt-tests")]
+    fn nu7_public_finalization_rejects_obsolete_branch_before_crypto_or_storage() {
+        use crate::testing::db::TestDbFactory;
+        use zcash_client_backend::data_api::{WalletWrite, testing::TestBuilder};
+        use zcash_protocol::consensus::{BranchId, NetworkUpgrade, Parameters};
+        let mut st = TestBuilder::new()
+            .with_network(zcash_protocol::local_consensus::LocalNetwork {
+                nu7: Some(BlockHeight::from_u32(100_010)),
+                ..TestBuilder::DEFAULT_NETWORK
+            })
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(zcash_primitives::block::BlockHash([0; 32]))
+            .build();
+        let params = st.network().clone();
+        let activation = params.activation_height(NetworkUpgrade::Nu7).unwrap();
+        st.wallet_mut().update_chain_tip(activation - 1).unwrap();
+        let saved = pczt::roles::creator::Creator::new(
+            BranchId::Nu6_3.into(),
+            u32::from(activation + 120),
+            1,
+            None,
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let result =
+            zcash_client_backend::data_api::wallet::extract_and_store_transaction_from_pczt::<
+                _,
+                crate::ReceivedNoteId,
+            >(st.wallet_mut(), &params, saved, None, None);
+        assert!(
+            matches!(result, Err(zcash_client_backend::data_api::error::Error::Pczt(
+            zcash_client_backend::data_api::error::PcztError::Invalid(reason))) if reason.contains("obsolete consensus branch"))
+        );
+    }
+
+    #[test]
     fn nu7_status_expiry_horizon_is_per_transaction_and_network() {
         let conn = Connection::open_in_memory().unwrap();
         let activation = BlockHeight::from_u32(4_465_026);

@@ -31,7 +31,11 @@ use crate::{
 pub enum ProposalError {
     /// The padded transaction cannot fit in any block at the proposed target height.
     ShieldedBudget(&'static str),
-
+    /// A saved proposal targets another branch and must be rebuilt before authorization.
+    ObsoleteConsensusBranch {
+        proposed: BranchId,
+        current: BranchId,
+    },
     /// The total output value of the transaction request is not a valid Zcash amount.
     RequestTotalInvalid,
     /// The total of transaction inputs overflows the valid range of Zcash values.
@@ -130,6 +134,10 @@ pub enum ProposalError {
 impl Display for ProposalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ProposalError::ObsoleteConsensusBranch { proposed, current } => write!(
+                f,
+                "Saved proposal targets {proposed:?}, current branch is {current:?}; rebuild and re-sign"
+            ),
             ProposalError::ShieldedBudget(reason) => write!(
                 f,
                 "Oversized shielded transaction: {reason}; reduce the payment or split the inputs"
@@ -421,6 +429,21 @@ impl<FeeRuleT, NoteRef> Proposal<FeeRuleT, NoteRef> {
                 ironwood_active,
             )?),
         })
+    }
+
+    /// Checks that a saved proposal can still be authorized for the current branch.
+    /// The caller must derive `current_target` from a freshly synchronized chain tip.
+    pub fn validate_for_current_target(
+        &self,
+        params: &impl zcash_protocol::consensus::Parameters,
+        current_target: BlockHeight,
+    ) -> Result<(), ProposalError> {
+        let proposed = BranchId::for_height(params, self.min_target_height.into());
+        let current = BranchId::for_height(params, current_target);
+        if proposed != current {
+            return Err(ProposalError::ObsoleteConsensusBranch { proposed, current });
+        }
+        self.validate_shielded_budget(params)
     }
 
     /// Rejects a proposal containing a padded shielded transaction that cannot fit
@@ -1991,6 +2014,15 @@ mod tests {
             );
             proposal.min_target_height = (activation - 1).into();
             assert!(proposal.validate_shielded_budget(&network).is_ok());
+            assert!(
+                proposal
+                    .validate_for_current_target(&network, activation - 1)
+                    .is_ok()
+            );
+            assert!(matches!(
+                proposal.validate_for_current_target(&network, activation),
+                Err(ProposalError::ObsoleteConsensusBranch { .. })
+            ));
         }
         // One Ironwood change output pads to two actions beside 329 Orchard spends.
         let step = step_with_notes_and_change(

@@ -18,6 +18,7 @@ CONFIGS = {
     "default": (["--workspace", "--exclude", "zakura-wallet-lib", "--exclude", "zakura-pir-enhance", "--exclude", "zakura-pir-transparent", "--exclude", "zakura-pir-receiver", "--exclude", "zakura-one-time-ivk-scenarios"], []),
     "orchard": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "test-dependencies"]),
     "transparent": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "test-dependencies", "unstable"]),
+    "pczt-wallet": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "test-dependencies", "unstable", "zakura-client-sqlite/pczt-tests"]),
     "transparent-import": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "transparent-key-import", "test-dependencies", "unstable"]),
     "proving": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "transparent-key-import", "test-dependencies", "pczt-tests", "proving-tests", "unstable"]),
     "pczt": (["-p", "zakura-pczt"], ["internal-tests"]),
