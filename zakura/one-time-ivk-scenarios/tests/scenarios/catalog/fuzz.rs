@@ -107,7 +107,87 @@ fn findings() -> Vec<Scenario> {
     if std::env::var_os("ONE_TIME_IVK_FUZZ_FINDINGS").is_none() {
         return Vec::new();
     }
-    vec![memo_after_pass(false), memo_after_pass(true)]
+    vec![
+        memo_after_pass(false),
+        memo_after_pass(true),
+        seen_after_pass(),
+    ]
+}
+
+/// The incoming side of [`memo_after_pass`]: A quotes and NEAR pays after A2 finished its
+/// pass. A2's next quote finds A's address in NEAR's seen set and registers it for a lookup
+/// (`prepare_receive_reservation`), again with the old pass publication as the cutoff, so
+/// the lookup cannot list the payout.
+fn seen_after_pass() -> Scenario {
+    Scenario {
+        id: "Z-finding-seen-key-after-pass".into(),
+        group: FUZZ,
+        title: "A second install registers the other install's seen address after its pass".into(),
+        summary: "An incoming key issuance registers from the seen set is looked up only through \
+            the account's current pass publication, which predates the payout."
+            .into(),
+        params: vec![],
+        slow: false,
+        run: Box::new(|ctx| {
+            ctx.mine(20);
+            let birthday = ctx.chain.tip() + 1;
+            ctx.mine(5);
+            let a = ctx.device("A", SEED, birthday);
+            let a2 = ctx.device("A2", SEED, birthday);
+            ctx.mine(10);
+            for dev in [a, a, a2, a2] {
+                ctx.sync(dev);
+            }
+            ctx.wait(HOUR);
+            ctx.sync(a);
+            let swap = ctx.quote_incoming(a, HOUR).expect("an incoming quote");
+            ctx.wait(20 * MINUTE);
+            let payout = ctx.pay("payout", &swap.label(), &swap.fvk, ZEC, Payer::Near);
+            ctx.mine(1);
+            ctx.observe_incoming(a, &swap, "SUCCESS", Some(ZEC));
+            ctx.sync(a);
+            ctx.wait(HOUR);
+            ctx.sync(a2);
+            let other = ctx.quote_incoming(a2, HOUR).expect("A2's quote");
+            ctx.check(
+                "A2 skips A's address",
+                other.index != swap.index,
+                format!("A2 issued {}", other.label()),
+            );
+            for _ in 0..3 {
+                ctx.mine(1);
+                ctx.sync(a2);
+            }
+            let lookup = ctx
+                .get(a2)
+                .lookup_state(zakura_one_time_ivk::Purpose::Receive, swap.index);
+            ctx.check(
+                format!(
+                    "A2's lookup of {} reads past the payout at {}",
+                    swap.label(),
+                    u32::from(payout.height)
+                ),
+                lookup.is_some_and(|l| l.done_height.is_none_or(|h| h >= u32::from(payout.height))),
+                format!("lookup {lookup:?}"),
+            );
+            ctx.expect(
+                a,
+                "payout",
+                &swap.label(),
+                &payout,
+                Class::FoundLive,
+                "A quoted I0 and scans it.",
+            );
+            ctx.expect(
+                a2,
+                "payout",
+                &swap.label(),
+                &payout,
+                Class::FoundAutomatically,
+                "Issuance registers the seen address for a lookup, and discovery looks up a key registered after it finished in its next run.",
+            );
+        }),
+    }
 }
 
 /// Seed 300: A funds a ZEC-to-X swap after A2, a second install of the seed, finished its
