@@ -139,7 +139,8 @@ pub struct DiscoveryStatus {
     /// search stops, so a payment after a key closed is found even past a gap of unused
     /// keys.
     pub closed: Vec<DiscoveryWork>,
-    /// Paid keys whose history is due for a lookup.
+    /// Paid keys whose history is due for a lookup. A key registered after the scan passed
+    /// `publication` has a later cutoff, so its lookup waits for a revision that reaches it.
     pub lookups: Vec<LookupWork>,
     /// Late candidates whose inclusion path is due.
     pub witnesses: Vec<WitnessRequest>,

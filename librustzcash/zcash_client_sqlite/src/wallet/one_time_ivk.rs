@@ -379,15 +379,20 @@ fn register<P: Parameters>(
             activate(conn, id, scan_from)?;
         }
         // Only a key scanned from its earliest possible payment needs no directory history.
-        // The lookup is due in the account's current discovery pass, or the next one.
+        // The lookup reads through the account's current pass and every block the scan
+        // stored without the key, so it may wait for a newer publication. With neither, it
+        // waits for the next pass.
         Discovery::Lookup if active_from.is_none_or(|start| start > stored_from) => {
             conn.execute(
                 "INSERT INTO ironwood_one_time_lookups (one_time_key_id, cutoff_height)
-                 SELECT ?1, d.publication_height FROM accounts a
-                 LEFT JOIN ironwood_one_time_discovery d ON d.account_id = a.id
-                 WHERE a.id = ?2
+                 SELECT ?1, MAX(height) FROM (
+                     SELECT publication_height AS height FROM ironwood_one_time_discovery
+                     WHERE account_id = ?2
+                     UNION ALL SELECT MAX(height) FROM blocks)
+                 WHERE true
                  ON CONFLICT (one_time_key_id) DO UPDATE SET
-                     cutoff_height = COALESCE(cutoff_height, excluded.cutoff_height)",
+                     cutoff_height = COALESCE(MAX(cutoff_height, excluded.cutoff_height),
+                         cutoff_height, excluded.cutoff_height)",
                 rusqlite::params![id, account_ref.0],
             )?;
         }

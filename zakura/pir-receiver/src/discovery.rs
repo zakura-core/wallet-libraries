@@ -83,7 +83,8 @@ pub struct Discovered<E> {
     /// `DiscoveryStatus::complete`). Until it is, the app runs discovery again.
     pub complete: bool,
     /// Lookups ready to run again now, for example after a page budget. A lookup backed off
-    /// after a failure counts only once its retry is due.
+    /// after a failure counts only once its retry is due, and one waiting for a newer
+    /// publication not at all.
     pub lookups: usize,
     /// Late payments still waiting for an inclusion path.
     pub witnesses: usize,
@@ -102,10 +103,10 @@ pub struct Discovered<E> {
 /// mainnet) and cover history from Ironwood activation on `params`' network. It is
 /// provisional: the wallet judges it once its scan stores the publication's last block. A
 /// run with nothing due makes no request, and keys registered after discovery finished,
-/// such as a refund key recovered from a funding memo, are looked up by the next run. A run
-/// starts a new pass when the account has none, its pass's publication was rejected, or its
-/// pass's search is unfinished and the directory has published since (see
-/// [`KEYS_PER_RUN`]). Once discovery is complete, only `recheck_one_time_key_history` in
+/// such as a refund key recovered from a funding memo, are looked up by the first run whose
+/// publication reaches the blocks the wallet scanned without them. A run starts a new pass
+/// when the account has none, its pass's publication was rejected, or its pass's search is
+/// unfinished and the directory has published since (see [`KEYS_PER_RUN`]). Once discovery is complete, only `recheck_one_time_key_history` in
 /// the SQLite store starts another pass, so a payment to a closed key is found on request.
 /// Each purpose's keys are checked against the filters from index zero: always the first
 /// [`FIRST_WINDOW`], then on until [`GAP`] consecutive keys are in no seen set and not in
@@ -199,18 +200,10 @@ where
     else {
         return Ok(nothing_due(failed));
     };
-    if !status.lookups.is_empty() {
+    let lookups = readable(status.lookups, publication);
+    if !lookups.is_empty() {
         directory.open_session().await?;
-        look_up_due(
-            wallet,
-            &directory,
-            account,
-            status.lookups,
-            lock,
-            now,
-            &mut failed,
-        )
-        .await?;
+        look_up_due(wallet, &directory, account, lookups, lock, now, &mut failed).await?;
     }
 
     let Some(status) = wallet
@@ -255,10 +248,19 @@ where
     };
     Ok(Discovered {
         complete: status.complete,
-        lookups: status.lookups.len(),
+        lookups: readable(status.lookups, publication).len(),
         witnesses: status.witnesses.len(),
         failed,
     })
+}
+
+/// The lookups `publication` can serve. One whose cutoff it has not reached, such as a key
+/// registered after the scan passed the account's pass, waits for a newer publication.
+fn readable(lookups: Vec<LookupWork>, publication: PublicationEnd) -> Vec<LookupWork> {
+    lookups
+        .into_iter()
+        .filter(|lookup| lookup.cutoff <= publication.height)
+        .collect()
 }
 
 /// What a run reports once the account has no discovery to run, as a fresh account has

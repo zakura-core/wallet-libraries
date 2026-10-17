@@ -32,12 +32,10 @@ contract promises. The default set runs the first five seeds, less any slow one.
 `ONE_TIME_IVK_FUZZ_PROFILE=late` or `reorg` biases the worlds toward the late path or
 reorgs, and `ONE_TIME_IVK_FUZZ_SKIP` drops plan steps by number to minimize a failing
 seed. A failure prints its seed, how to replay it, and its last steps. Regression
-scenarios for what the worlds found run only with `ONE_TIME_IVK_FUZZ_FINDINGS=1`,
-since they fail until fixed:
+scenarios for what the worlds found run alongside the seeds. To run more seeds:
 
 ```sh
 ONE_TIME_IVK_FUZZ_SEEDS=0..200 python3 scripts/dev.py test --config one-time-ivk-scenarios Z-fuzz
-ONE_TIME_IVK_FUZZ_FINDINGS=1 python3 scripts/dev.py test --config one-time-ivk-scenarios Z-finding
 ```
 
 A run writes `report.json` and `report.md` (short enough to paste into a PR) to

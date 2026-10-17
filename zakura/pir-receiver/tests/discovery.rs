@@ -795,3 +795,45 @@ async fn issuance_skips_a_refund_address_in_the_fetched_seen_sets() {
         KeyId::new(Purpose::Refund, 1)
     );
 }
+
+/// A key issuance registers for a lookup after the pass finished, from a provider's seen
+/// set, waits without a lookup request for a publication that reaches the blocks the
+/// wallet scanned without it. That publication's lookup finds its payment without starting
+/// a new pass.
+#[tokio::test]
+async fn a_key_registered_after_the_pass_waits_for_a_newer_publication() {
+    let mut r = restored(&[]);
+    let first = serve(&[], r.through);
+    assert!(run_clean(&mut r.st, &first).await.complete);
+    let record = pay_restored_key(&mut r.st, 0, 0);
+    r.st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    let through = tip(&r.st);
+    let sets = provider(&[receiver(&r.st, 0)]);
+    let seen = Directory::new(publish(&[], &[], through, &sets));
+    let seen = fetch_seen(ORIGIN, &seen, GENESIS).await.unwrap();
+    let contains = |receivers: &[[u8; 43]]| seen.contains(receivers);
+    let seen = ProviderSeen {
+        since: seen.since(),
+        until: seen.until(),
+        contains: &contains,
+    };
+    let db = r.st.wallet_mut().db_mut();
+    let issued = db.prepare_receive_reservation(r.account, NOW, through.height, Some(&seen));
+    assert_eq!(issued.unwrap().unwrap().key_id().index(), 1);
+
+    let requests = first.requests().len();
+    let found = run_clean(&mut r.st, &first).await;
+    assert!(!found.complete);
+    assert_eq!(found.lookups, 0);
+    assert_eq!(first.requests().len(), requests + 1, "only the manifest");
+
+    let newer = serve(&[record], through);
+    let found = run_clean(&mut r.st, &newer).await;
+    assert!(found.complete);
+    assert_eq!(balance(&r.st), VALUE);
+    let requests = newer.requests();
+    assert!(
+        !requests.iter().any(|r| r.contains("/filters/")),
+        "{requests:?}"
+    );
+}

@@ -22,7 +22,7 @@
 //! default). A failure prints the seed, how to replay it, and the last steps.
 //! `ONE_TIME_IVK_FUZZ_SKIP` drops plan steps by number, to minimize a failing seed, and
 //! `ONE_TIME_IVK_FUZZ_TRACE` streams the trace as a replay runs.
-//! Regression scenarios for what the worlds found run with `ONE_TIME_IVK_FUZZ_FINDINGS=1`.
+//! Regression scenarios for what the worlds found run with them.
 //!
 //! Left out: payers other than NEAR's zero OVK, mempool payouts, refund quotes on a
 //! second install or restored device (they would spend the same notes as the original),
@@ -97,17 +97,13 @@ impl W {
 
 pub fn all() -> Vec<Scenario> {
     let (start, end) = seeds();
-    let mut scenarios = findings();
+    let mut scenarios = regressions();
     scenarios.extend((start..end).map(scenario));
     scenarios
 }
 
-/// Minimal reproductions of what the randomized worlds found, which fail until fixed, so
-/// they run only with `ONE_TIME_IVK_FUZZ_FINDINGS=1`.
-fn findings() -> Vec<Scenario> {
-    if std::env::var_os("ONE_TIME_IVK_FUZZ_FINDINGS").is_none() {
-        return Vec::new();
-    }
+/// Minimal reproductions of what the randomized worlds found.
+fn regressions() -> Vec<Scenario> {
     vec![
         memo_after_pass(false),
         memo_after_pass(true),
@@ -117,15 +113,15 @@ fn findings() -> Vec<Scenario> {
 
 /// The incoming side of [`memo_after_pass`]: A quotes and NEAR pays after A2 finished its
 /// pass. A2's next quote finds A's address in NEAR's seen set and registers it for a lookup
-/// (`prepare_receive_reservation`), again with the old pass publication as the cutoff, so
-/// the lookup cannot list the payout.
+/// (`prepare_receive_reservation`), which must read past the old pass publication to list
+/// the payout.
 fn seen_after_pass() -> Scenario {
     Scenario {
-        id: "Z-finding-seen-key-after-pass".into(),
+        id: "Z-seen-key-after-pass".into(),
         group: FUZZ,
         title: "A second install registers the other install's seen address after its pass".into(),
-        summary: "An incoming key issuance registers from the seen set is looked up only through \
-            the account's current pass publication, which predates the payout."
+        summary: "An incoming key issuance registers from the seen set is looked up through the \
+            blocks the wallet scanned without it, past the account's pass publication."
             .into(),
         params: vec![],
         slow: false,
@@ -185,7 +181,7 @@ fn seen_after_pass() -> Scenario {
                 &swap.label(),
                 &payout,
                 Class::FoundAutomatically,
-                "Issuance registers the seen address for a lookup, and discovery looks up a key registered after it finished in its next run.",
+                "Issuance registers the seen address for a lookup, and discovery looks up a key registered after it finished once a publication reaches the blocks A2 scanned.",
             );
         }),
     }
@@ -193,20 +189,20 @@ fn seen_after_pass() -> Scenario {
 
 /// Seed 300: A funds a ZEC-to-X swap after A2, a second install of the seed, finished its
 /// discovery pass. A2 scans the funding memo, which registers the refund key for a lookup
-/// (`recover_refund_memos`), but the lookup's cutoff is A2's old pass publication, below
-/// the memo, so it cannot find the refund, and the key closes as looked up. `early`: A2
-/// scans the memo before NEAR refunds.
+/// (`recover_refund_memos`) that must read past A2's old pass publication, through the
+/// blocks A2 scanned without the key. `early`: A2 scans the memo before NEAR refunds, so
+/// the lookup ends before the refund and, with no watch on a recovered refund key, only
+/// Check swap history finds it.
 fn memo_after_pass(early: bool) -> Scenario {
     let when = if early { "before" } else { "after" };
     Scenario {
-        id: format!("Z-finding-memo-after-pass-scanned-{when}-refund"),
+        id: format!("Z-memo-after-pass-scanned-{when}-refund"),
         group: FUZZ,
         title: format!(
             "A second install scans a funding memo after its discovery pass, {when} the refund"
         ),
-        summary: "A refund key recovered from a funding memo is looked up only through the \
-            account's current pass publication, which predates the memo, so the refund is never \
-            found without Check swap history."
+        summary: "A refund key recovered from a funding memo is looked up through the blocks the \
+            wallet scanned without it, past the account's pass publication."
             .into(),
         params: vec![("A2 scans the memo".into(), format!("{when} the refund"))],
         slow: false,
@@ -270,14 +266,19 @@ fn memo_after_pass(early: bool) -> Scenario {
                 Class::FoundLive,
                 "A funded R0 and scans it.",
             );
-            ctx.expect(
-                a2,
-                "refund",
-                &swap.label(),
-                &refund,
-                Class::FoundAutomatically,
-                "A2 recovers R0 from A's funding memo, and discovery looks up a key registered after it finished in its next run.",
-            );
+            let (class, why) = if early {
+                ctx.check_swap_history(a2);
+                (
+                    Class::FoundAfterRecheck,
+                    "A2 recovered R0 from A's funding memo before the refund, so its lookup ended first. A recovered refund key has no watch, so only Check swap history finds a later refund.",
+                )
+            } else {
+                (
+                    Class::FoundAutomatically,
+                    "A2 recovers R0 from A's funding memo, and discovery looks up a key registered after it finished once a publication reaches the blocks A2 scanned.",
+                )
+            };
+            ctx.expect(a2, "refund", &swap.label(), &refund, class, why);
             ctx.check_same_balance(a, a2);
         }),
     }

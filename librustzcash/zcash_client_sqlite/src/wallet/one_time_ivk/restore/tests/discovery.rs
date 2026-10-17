@@ -772,6 +772,27 @@ fn a_new_pass_raises_a_due_lookups_cutoff() {
     assert_eq!(status(db, account).witnesses.len(), 1);
 }
 
+/// A key registered for a lookup after its account's pass, as a refund key recovered from
+/// a funding memo is, is looked up through every block the scan stored without it, not
+/// only through the pass's publication.
+#[test]
+fn a_key_registered_after_the_pass_is_looked_up_through_the_scanned_blocks() {
+    let mut st = restored_wallet();
+    let account = st.test_account().unwrap().id();
+    let pass = discover(&mut st, account, &[]);
+    let candidate = pay_candidate(&mut st, key8());
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    let scanned = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
+    recover(db, account, key8(), candidate.height);
+    let due = status(db, account).lookups;
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].cutoff, scanned.height);
+    assert!(!look_up(db, account, key8(), pass, &[]));
+    assert!(look_up(db, account, key8(), scanned, &[candidate]));
+    assert_eq!(status(db, account).witnesses.len(), 1);
+}
+
 /// Pays `key` in a new scanned block, before the wallet scans with it, and returns the
 /// output as a directory candidate.
 fn pay_candidate(st: &mut State, key: KeyId) -> PendingPayment {
