@@ -132,7 +132,7 @@ use zcash_keys::{
 use zcash_primitives::{
     block::BlockHash,
     merkle_tree::read_commitment_tree,
-    transaction::{Transaction, TransactionData, builder::DEFAULT_TX_EXPIRY_DELTA, fees::zip317},
+    transaction::{Transaction, TransactionData, fees::zip317},
 };
 use zcash_protocol::{
     PoolType, ShieldedPool, TxId,
@@ -2698,6 +2698,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         .collect::<Result<HashMap<AccountUuid, AccountBalance>, _>>()?;
 
     fn with_pool_balances<F>(
+        nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
         tx: &rusqlite::Connection,
         target_height: TargetHeight,
         anchor_height: Option<BlockHeight>,
@@ -2773,8 +2774,8 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
              WHERE ({}) -- the transaction is unexpired
              AND rn.id NOT IN ({}) -- and the received note is unspent
              GROUP BY rn.id",
-            common::tx_unexpired_condition("t"),
-            common::spent_notes_clause(table_prefix),
+            common::tx_unexpired_condition_at(nu7_activation_height, "t"),
+            common::spent_notes_clause(nu7_activation_height, table_prefix),
         ))?;
 
         let mut rows = stmt_select_notes.query(named_params![
@@ -2841,6 +2842,9 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             // confirmations to be spent.
             let is_spendable = witness_stabilized
                 || (any_spendable
+                    && received_height
+                        .zip(anchor_height)
+                        .is_some_and(|(received, anchor)| received <= anchor)
                     && max_priority <= ScanPriority::Scanned
                     && confirmations_policy.confirmations_until_spendable(
                         target_height,
@@ -2898,6 +2902,10 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
     {
         let orchard_trace = tracing::info_span!("orchard_balances").entered();
         with_pool_balances(
+            zcash_protocol::consensus::Parameters::activation_height(
+                params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7,
+            ),
             tx,
             target_height,
             anchor_height,
@@ -2927,6 +2935,10 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
     {
         let ironwood_trace = tracing::info_span!("ironwood_balances").entered();
         with_pool_balances(
+            zcash_protocol::consensus::Parameters::activation_height(
+                params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7,
+            ),
             tx,
             target_height,
             anchor_height,
@@ -2954,6 +2966,10 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
 
     let sapling_trace = tracing::info_span!("sapling_balances").entered();
     with_pool_balances(
+        zcash_protocol::consensus::Parameters::activation_height(
+            params,
+            zcash_protocol::consensus::NetworkUpgrade::Nu7,
+        ),
         tx,
         target_height,
         anchor_height,
@@ -2981,6 +2997,10 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
     #[cfg(feature = "transparent-inputs")]
     if include_transparent {
         transparent::add_transparent_account_balances(
+            zcash_protocol::consensus::Parameters::activation_height(
+                params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7,
+            ),
             tx,
             target_height,
             confirmations_policy,
@@ -3877,7 +3897,7 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
             )?;
 
             conn.execute(
-                "DELETE FROM tx_retrieval_queue
+                &format!("DELETE FROM tx_retrieval_queue
                  WHERE txid = :txid
                  AND query_type = :status_type
                  AND NOT EXISTS (
@@ -3894,14 +3914,14 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
                         OR (
                             t.expiry_height IS NULL
                             AND t.confirmed_unmined_at_height
-                                < COALESCE(t.target_height, t.min_observed_height) + :certainty_depth
+                                < COALESCE(t.target_height, t.min_observed_height) + :certainty_depth + {expiry_delta}
                         )
                     )
-                 )",
+                 )", expiry_delta = common::expiry_delta_sql(_params.activation_height(NetworkUpgrade::Nu7), "COALESCE(t.target_height, t.min_observed_height)")),
                 named_params![
                     ":txid": txid.as_ref(),
                     ":status_type": TxQueryType::Status.code(),
-                    ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA,
+                    ":certainty_depth": PRUNING_DEPTH,
                 ],
             )?;
         }
@@ -5575,6 +5595,7 @@ pub(crate) fn queue_status_for_unobservable_transactions(
 /// Payload retrieval is returned only by [`public_enhancement_work`] or, with Orchard support,
 /// `enhance_pir::transaction_enhancement_work`.
 pub(crate) fn transaction_status_work(
+    nu7_activation_height: Option<BlockHeight>,
     conn: &rusqlite::Connection,
     mode: TransactionStatusMode,
     configured: Option<zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode>,
@@ -5595,7 +5616,7 @@ pub(crate) fn transaction_status_work(
         // scanning so an advertised tip or an isolated scanned range cannot suppress work.
         let scanned_height = fully_scanned_height(conn)?.map(u32::from);
         let mut tx_retrieval_stmt = conn.prepare_cached(
-            "SELECT q.txid,
+            &format!("SELECT q.txid,
                 CASE WHEN t.target_height IS NOT NULL THEN MIN(t.target_height, t.min_observed_height) END,
                 q.policy_generation
          FROM tx_retrieval_queue q
@@ -5623,16 +5644,16 @@ pub(crate) fn transaction_status_work(
             OR (
                 t.expiry_height IS NULL
                 AND t.confirmed_unmined_at_height
-                    < COALESCE(t.target_height, t.min_observed_height) + :certainty_depth
+                    < COALESCE(t.target_height, t.min_observed_height) + :certainty_depth + {expiry_delta}
             )
-         )",
+         )", expiry_delta = common::expiry_delta_sql(nu7_activation_height, "COALESCE(t.target_height, t.min_observed_height)")),
         )?;
 
         let rows = tx_retrieval_stmt
             .query_and_then(
                 named_params![
                     ":status_type": TxQueryType::Status.code(),
-                    ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA,
+                    ":certainty_depth": PRUNING_DEPTH,
                     ":scanned_height": scanned_height,
                     ":reorg_depth": PRUNING_DEPTH
                 ],

@@ -70,6 +70,7 @@ fn receipts(conn: &Connection) -> i64 {
 }
 fn work(conn: &Connection) -> Vec<TransactionStatusWork> {
     super::super::transaction_status_work(
+        None,
         conn,
         TransactionStatusMode::Public,
         Some(TransparentLedgerMode::Public),
@@ -168,6 +169,7 @@ fn changed_block_exposes_private_fallback_without_manufacturing_inclusion_bounds
     )
     .unwrap();
     let pending = super::super::transaction_status_work(
+        None,
         &db.conn,
         TransactionStatusMode::Public,
         Some(TransparentLedgerMode::PrivateRequired),
@@ -190,6 +192,7 @@ fn changed_block_exposes_private_fallback_without_manufacturing_inclusion_bounds
     );
     assert!(
         super::super::transaction_status_work(
+            None,
             &db.conn,
             TransactionStatusMode::Public,
             Some(TransparentLedgerMode::PrivateRequired)
@@ -425,4 +428,48 @@ fn six_wallet_shielded_associations_are_excluded_from_capture_and_queue() {
             "{table}"
         );
     }
+}
+
+#[test]
+fn nu7_status_work_and_completion_keep_the_original_expiry_horizon() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let mut db = database(file.path());
+    let activation = BlockHeight::from_u32(4_465_026);
+    let a = u32::from(activation);
+    let ids = [TxId::from_bytes([41; 32]), TxId::from_bytes([42; 32])];
+    for (txid, original) in ids.iter().zip([a - 1, a]) {
+        db.conn.execute(
+            "INSERT INTO transactions(txid, target_height, min_observed_height) VALUES (?1, ?2, ?2)",
+            rusqlite::params![txid.as_ref(), original],
+        ).unwrap();
+        let tx = db.conn.transaction().unwrap();
+        super::super::queue_tx_status(&tx, *txid).unwrap();
+        tx.commit().unwrap();
+    }
+    db.conn.execute("INSERT INTO scan_queue(block_range_start, block_range_end, priority) VALUES (1, ?1, 10)", [a + 141]).unwrap();
+    for txid in ids {
+        observed(&mut db.conn, txid, TransactionStatus::TxidNotRecognized);
+    }
+    let work = super::super::transaction_status_work(
+        Some(activation),
+        &db.conn,
+        TransactionStatusMode::Public,
+        Some(TransparentLedgerMode::Public),
+    )
+    .unwrap();
+    assert!(matches!(work.as_slice(), [TransactionStatusWork::Public(r)] if r.txid() == ids[1]));
+    db.conn
+        .execute("UPDATE scan_queue SET block_range_end = ?1", [a + 221])
+        .unwrap();
+    observed(&mut db.conn, ids[1], TransactionStatus::TxidNotRecognized);
+    assert!(
+        super::super::transaction_status_work(
+            Some(activation),
+            &db.conn,
+            TransactionStatusMode::Public,
+            Some(TransparentLedgerMode::Public),
+        )
+        .unwrap()
+        .is_empty()
+    );
 }

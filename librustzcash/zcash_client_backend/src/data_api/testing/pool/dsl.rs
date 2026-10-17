@@ -249,8 +249,8 @@ where
     /// ```
     ///
     /// This also verifies that the test account contains the expected funds as
-    /// part of the _total_, and that the funds are spendable with the minimum number
-    /// of confirmations.
+    /// part of the _total_. Spending also requires aging the note into the selected
+    /// anchor; call `add_empty_blocks` explicitly when the scenario needs this.
     pub fn add_a_single_note_checking_balance(
         &mut self,
         note: impl Into<TestNoteConfig<T>>,
@@ -393,10 +393,6 @@ where
                 .unwrap()
                 .block_height(),
             current_height
-        );
-        assert_eq!(
-            self.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
-            expected_total
         );
 
         summary

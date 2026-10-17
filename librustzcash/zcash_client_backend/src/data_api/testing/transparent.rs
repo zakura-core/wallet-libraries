@@ -1121,6 +1121,8 @@ where
         Zatoshis::const_from_u64(1000000),
     );
     st.scan_cached_blocks(h0, 1);
+    let (anchor_ready_height, _) = st.generate_empty_block();
+    st.scan_cached_blocks(anchor_ready_height, 1);
 
     // The previous operation was shielded-only, but unified address usage within the
     // valid transparent child index range still count towards the gap limit, so this

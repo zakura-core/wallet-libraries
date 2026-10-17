@@ -836,6 +836,7 @@ fn pay_address_from_sapling(st: &mut State, to: zcash_keys::address::Address, va
         Zatoshis::const_from_u64(200_000),
     );
     st.scan_cached_blocks(height, 1);
+    scan_new_blocks(st, 1);
     let request = zip321::TransactionRequest::new(vec![zip321::Payment::without_memo(
         to.to_zcash_address(st.network()),
         Zatoshis::const_from_u64(value),
@@ -1981,6 +1982,7 @@ mod gating {
             Zatoshis::const_from_u64(200_000),
         );
         st.scan_cached_blocks(height, 1);
+        scan_new_blocks(&mut st, 1);
         // The ledger now lags the tip, so transparent authority is unavailable.
         assert_eq!(
             snapshot(&st, account).authority,

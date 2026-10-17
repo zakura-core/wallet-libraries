@@ -2268,6 +2268,10 @@ pub trait WalletRead {
     /// transaction), given the range of block heights that the backend
     /// knows about.
     ///
+    /// The anchor is at or below `target_height - 1 - min_confirmations`, so the
+    /// default depth of three means three blocks behind the chain tip. This is
+    /// independent of spend confirmations, which count back from the target height.
+    ///
     /// This will return `Ok(None)` if no block data is present in the database.
     fn get_target_and_anchor_heights(
         &self,

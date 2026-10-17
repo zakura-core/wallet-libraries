@@ -953,7 +953,11 @@ pub(crate) fn get_max_checkpointed_height(
     min_confirmations: NonZeroU32,
 ) -> Result<Option<BlockHeight>, SqliteClientError> {
     let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(protocol)?;
-    let max_checkpoint_height = target_height - u32::from(min_confirmations);
+    // ZIP 218 measures anchor depth behind the chain tip; confirmation predicates
+    // independently count from the target height.
+    let max_checkpoint_height = target_height
+        .saturating_sub(1)
+        .saturating_sub(u32::from(min_confirmations));
 
     // We exclude from consideration all checkpoints having heights greater than the maximum
     // checkpoint height. The checkpoint depth is the number of excluded checkpoints + 1.
@@ -1329,12 +1333,17 @@ pub(crate) fn put_shard_roots<
 }
 
 pub(crate) fn check_witnesses(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     conn: &rusqlite::Transaction<'_>,
     anchor_height: BlockHeight,
 ) -> Result<Vec<Range<BlockHeight>>, SqliteClientError> {
     let wallet_birthday = super::wallet_birthday(conn)?.ok_or(SqliteClientError::AccountUnknown)?;
-    let unspent_sapling_note_meta =
-        super::sapling::select_unspent_note_meta(conn, wallet_birthday, anchor_height)?;
+    let unspent_sapling_note_meta = super::sapling::select_unspent_note_meta(
+        nu7_activation_height,
+        conn,
+        wallet_birthday,
+        anchor_height,
+    )?;
 
     let mut scan_ranges = vec![];
     let mut sapling_incomplete = vec![];
@@ -1358,8 +1367,12 @@ pub(crate) fn check_witnesses(
 
     #[cfg(feature = "orchard")]
     {
-        let unspent_orchard_note_meta =
-            super::orchard::select_unspent_note_meta(conn, wallet_birthday, anchor_height)?;
+        let unspent_orchard_note_meta = super::orchard::select_unspent_note_meta(
+            nu7_activation_height,
+            conn,
+            wallet_birthday,
+            anchor_height,
+        )?;
         let mut orchard_incomplete = vec![];
         let orchard_tree = orchard_tree(conn)?;
         for m in unspent_orchard_note_meta.iter() {
@@ -1380,6 +1393,7 @@ pub(crate) fn check_witnesses(
         }
 
         let unspent_ironwood_note_meta = super::common::select_unspent_note_meta(
+            nu7_activation_height,
             conn,
             ShieldedPool::Ironwood,
             wallet_birthday,
@@ -2207,5 +2221,41 @@ mod tests {
 
         assert_eq!(witnesses.len(), 1);
         assert_eq!(witnesses[0].root(note_leaf), expected_root);
+    }
+}
+
+#[cfg(test)]
+mod nu7_anchor_tests {
+    #[test]
+    fn nu7_checkpoint_anchor_is_three_blocks_behind_tip() {
+        use std::num::NonZeroU32;
+        use zcash_protocol::{ShieldedPool, consensus::BlockHeight};
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sapling_tree_checkpoints(checkpoint_id INTEGER PRIMARY KEY);
+            INSERT INTO sapling_tree_checkpoints VALUES (96), (97), (98), (99), (100);",
+        )
+        .unwrap();
+        let target = BlockHeight::from_u32(101).into();
+        assert_eq!(
+            super::get_max_checkpointed_height(
+                &conn,
+                ShieldedPool::Sapling,
+                target,
+                NonZeroU32::new(3).unwrap()
+            )
+            .unwrap(),
+            Some(BlockHeight::from_u32(97))
+        );
+        assert_eq!(
+            super::get_max_checkpointed_height(
+                &conn,
+                ShieldedPool::Sapling,
+                target,
+                NonZeroU32::MIN
+            )
+            .unwrap(),
+            Some(BlockHeight::from_u32(99))
+        );
     }
 }

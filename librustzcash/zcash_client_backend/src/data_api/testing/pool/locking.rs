@@ -54,6 +54,8 @@ pub fn spend_fails_on_locked_notes<T: ShieldedPoolTester>(
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(50000);
     let (h1, _, _) = st.add_a_single_note_checking_balance(value);
+    // The selected anchor must include the funding note before it can be spent.
+    st.add_empty_blocks(1);
 
     // Send some of the funds to another address, but don't mine the tx.
     let extsk2 = T::sk(&[0xf5; 32]);
@@ -116,6 +118,8 @@ pub fn explicit_note_locking<T: ShieldedPoolTester>(
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(50000);
     let (_, _, _) = st.add_a_single_note_checking_balance(value);
+    // The selected anchor must include the funding note before it can be spent.
+    st.add_empty_blocks(1);
 
     let account_id = st.test_account().unwrap().id();
 
@@ -201,6 +205,8 @@ pub fn note_locking_height_boundary<T: ShieldedPoolTester>(
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(50000);
     let (_, _, _) = st.add_a_single_note_checking_balance(value);
+    // Include the funding notes in the anchor before testing lock eligibility.
+    st.add_empty_blocks(1);
 
     let account = st.test_account().cloned().unwrap();
     let account_id = account.id();
@@ -267,6 +273,8 @@ pub fn clear_locked_outputs<T: ShieldedPoolTester>(
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(50000);
     let (_, _, _) = st.add_a_single_note_checking_balance(value);
+    // Include the funding notes in the anchor before testing lock eligibility.
+    st.add_empty_blocks(1);
 
     let account = st.test_account().cloned().unwrap();
     let account_id = account.id();
@@ -318,6 +326,8 @@ pub fn proposal_level_note_locking<T: ShieldedPoolTester>(
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(50000);
     let (_, _, _) = st.add_a_single_note_checking_balance(value);
+    // The selected anchor must include the funding note before it can be spent.
+    st.add_empty_blocks(1);
 
     let account = st.test_account().cloned().unwrap();
     let account_id = account.id();
@@ -420,6 +430,8 @@ pub fn locked_proposal_proto_roundtrip<T: ShieldedPoolTester>(
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(50000);
     let (_, _, _) = st.add_a_single_note_checking_balance(value);
+    // The selected anchor must include the funding note before it can be spent.
+    st.add_empty_blocks(1);
 
     let account_id = st.test_account().unwrap().id();
     let extsk2 = T::sk(&[0xf5; 32]);
@@ -464,6 +476,8 @@ pub fn lock_expiry_restores_spendability<T: ShieldedPoolTester>(
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(50000);
     let (_, _, _) = st.add_a_single_note_checking_balance(value);
+    // Include the funding notes in the anchor before testing lock eligibility.
+    st.add_empty_blocks(1);
 
     let account_id = st.test_account().unwrap().id();
     let tip = st.latest_cached_block().unwrap().height();
@@ -558,6 +572,8 @@ pub fn lock_conflict_and_batch_atomicity<T: ShieldedPoolTester>(
     let value1 = Zatoshis::const_from_u64(60000);
     let value2 = Zatoshis::const_from_u64(40000);
     st.add_notes_checking_balance([[value1, value2]]);
+    // Include the funding notes in the anchor before testing lock eligibility.
+    st.add_empty_blocks(1);
 
     let account_id = st.test_account().unwrap().id();
     let far_expiry = BlockHeight::from(u32::MAX);
@@ -685,6 +701,8 @@ pub fn unlock_proposal_inputs_releases_locks<T: ShieldedPoolTester>(
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(50000);
     let (_, _, _) = st.add_a_single_note_checking_balance(value);
+    // The selected anchor must include the funding note before it can be spent.
+    st.add_empty_blocks(1);
 
     let account_id = st.test_account().unwrap().id();
     let extsk2 = T::sk(&[0xf5; 32]);
@@ -773,6 +791,8 @@ pub fn spend_policy_locked_input_policy_reaches_selection<T: ShieldedPoolTester>
     let locked_a_value = Zatoshis::const_from_u64(60_000);
     let locked_b_value = Zatoshis::const_from_u64(70_000);
     st.add_notes_checking_balance([[unlocked_value, locked_a_value, locked_b_value]]);
+    // The selected anchor must include the funding note before it can be spent.
+    st.add_empty_blocks(1);
 
     let account = st.test_account().cloned().unwrap();
     let account_id = account.id();
@@ -952,6 +972,8 @@ pub fn check_note_locking_model<T: ShieldedPoolTester>(
         Zatoshis::const_from_u64(80000),
     ];
     st.add_notes_checking_balance([values]);
+    // Include the funding notes in the anchor before testing lock eligibility.
+    st.add_empty_blocks(1);
     let total = values
         .iter()
         .try_fold(Zatoshis::ZERO, |acc, v| acc + *v)
@@ -1274,6 +1296,8 @@ pub fn consolidation_selection_honors_lock_tier_preference<T: ShieldedPoolTester
         [unlocked_medium],
         [unlocked_small],
     ]);
+    // The selected anchor must include the funding note before it can be spent.
+    st.add_empty_blocks(1);
 
     let account_id = st.test_account().unwrap().id();
     let owner = LockOwner::new([0xA1; 32]);

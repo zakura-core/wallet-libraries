@@ -677,6 +677,8 @@ mod handles {
             Zatoshis::const_from_u64(200_000),
         );
         st.scan_cached_blocks(height, 1);
+        let (anchor_ready_height, _) = st.generate_empty_block();
+        st.scan_cached_blocks(anchor_ready_height, 1);
         let (_, taddr) = account_taddr(&st);
         let unshield = TransactionRequest::new(vec![Payment::without_memo(
             Address::Transparent(taddr).to_zcash_address(st.network()),
@@ -1691,6 +1693,7 @@ mod handles {
         )));
 
         let status = crate::wallet::transaction_status_work(
+            None,
             &snapshot,
             TransactionStatusMode::Public,
             Some(Public),
@@ -1721,6 +1724,7 @@ mod handles {
             "{enhancement:?}"
         );
         let status = crate::wallet::transaction_status_work(
+            None,
             &reader.conn,
             TransactionStatusMode::Public,
             Some(Public),

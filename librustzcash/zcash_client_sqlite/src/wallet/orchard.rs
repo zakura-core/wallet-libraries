@@ -469,11 +469,13 @@ pub(crate) fn ensure_address<
 }
 
 pub(crate) fn select_unspent_note_meta(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     conn: &Connection,
     wallet_birthday: BlockHeight,
     anchor_height: BlockHeight,
 ) -> Result<Vec<UnspentNoteMeta>, SqliteClientError> {
     super::common::select_unspent_note_meta(
+        nu7_activation_height,
         conn,
         ShieldedPool::Orchard,
         wallet_birthday,
@@ -2623,9 +2625,9 @@ pub(crate) mod tests {
             }
 
             // The anchor is the Ironwood tree state as of the height at which the note was
-            // received, and the spend targets the next block.
+            // received. The transaction targets the next block after the current tip.
             let anchor_height = received_height;
-            let target_height = TargetHeight::from(anchor_height + 1);
+            let target_height = TargetHeight::from(st.latest_cached_block().unwrap().height() + 1);
 
             // Retrieve the received note (and its commitment tree position) from the wallet.
             let received = select_spendable_ironwood_notes(
