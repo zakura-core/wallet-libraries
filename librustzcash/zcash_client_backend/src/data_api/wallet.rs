@@ -804,6 +804,7 @@ where
         spend_policy,
         proposed_version,
     )?;
+    proposal.validate_shielded_budget(params)?;
     if let Some(request) = lock_inputs {
         let lock_expiry_height = target_height + request.for_blocks();
         lock_proposal_inputs(wallet_db, &proposal, request.owner(), lock_expiry_height)?;
@@ -1026,6 +1027,7 @@ where
         locked_input_policy,
     )?;
 
+    proposal.validate_shielded_budget(params)?;
     if let Some(request) = lock_inputs {
         let lock_expiry_height = target_height + request.for_blocks();
         lock_proposal_inputs(wallet_db, &proposal, request.owner(), lock_expiry_height)?;
@@ -1088,6 +1090,7 @@ where
         )
         .map_err(Error::from)?;
 
+    proposal.validate_shielded_budget(params)?;
     if let Some(request) = lock_inputs {
         let lock_expiry_height = target_height + request.for_blocks();
         lock_proposal_inputs(wallet_db, &proposal, request.owner(), lock_expiry_height)?;
@@ -1185,6 +1188,7 @@ where
         )
         .map_err(Error::from)?;
 
+    proposal.validate_shielded_budget(params)?;
     if let Some(request) = lock_inputs {
         let lock_expiry_height = target_height + request.for_blocks();
         lock_proposal_inputs(wallet_db, &proposal, request.owner(), lock_expiry_height)?;
@@ -1277,6 +1281,7 @@ where
 {
     // The transaction version is carried on the proposal, chosen when the proposal was
     // constructed; `None` builds at the version implied by the target height.
+    proposal.validate_shielded_budget(params)?;
     let proposed_version = proposal.proposed_version();
 
     if let Some(expiry_height) = expiry_height {
@@ -2735,6 +2740,7 @@ where
     // Build at the version the proposal requested, falling back to the version implied by the
     // target height (version 6 from NU6.3 onward). Both the version 6 format and its Ironwood
     // bundle are fully representable as a PCZT.
+    proposal.validate_shielded_budget(params)?;
     let proposed_version = proposal.proposed_version();
 
     let build_state = build_proposed_transaction::<_, _, _, FeeRuleT, _, _>(
