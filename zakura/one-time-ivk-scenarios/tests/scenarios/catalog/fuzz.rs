@@ -365,6 +365,8 @@ enum Step {
         /// NEAR pays the removed payouts again in new transactions this long after,
         /// instead of the same transactions being mined again at once.
         late: Option<i64>,
+        /// Every device syncs just before, so each has scanned the blocks replaced.
+        synced: bool,
     },
     Recheck(W),
     Restart(usize),
@@ -676,7 +678,16 @@ impl Plan {
             let late = r
                 .chance(30)
                 .then(|| r.pick(&[30 * MINUTE, 6 * HOUR, 2 * DAY]));
-            s.at(at, Step::Reorg { depth, tail, late });
+            let synced = r.chance(70);
+            s.at(
+                at,
+                Step::Reorg {
+                    depth,
+                    tail,
+                    late,
+                    synced,
+                },
+            );
             notes.push(format!(
                 "{depth}-block reorg at +{}{}",
                 span_of(at),
@@ -1429,7 +1440,21 @@ impl<'p> Exec<'p> {
                 }
             }
             Step::Publication(kind) => self.publication(ctx, kind),
-            Step::Reorg { depth, tail, late } => self.reorg(ctx, depth, tail, late),
+            Step::Reorg {
+                depth,
+                tail,
+                late,
+                synced,
+            } => {
+                if synced {
+                    for slot in 0..4 {
+                        if self.slots[slot].is_some() {
+                            self.sync(ctx, slot);
+                        }
+                    }
+                }
+                self.reorg(ctx, depth, tail, late)
+            }
             Step::Recheck(w) => {
                 if self.wallets.contains_key(&w) {
                     self.recheck(ctx, w, false);
