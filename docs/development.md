@@ -22,6 +22,7 @@ python3 scripts/dev.py verify
 | `orchard` | Backend + SQLite; `orchard,test-dependencies` |
 | `transparent` | Backend + SQLite; `orchard,transparent-inputs,test-dependencies,unstable` |
 | `transparent-import` | Backend + SQLite; transparent features plus `transparent-key-import` |
+| `pczt-wallet` | Backend + SQLite; transparent configuration plus `pczt-tests`, including current-branch finalization checks |
 | `pczt` | PCZT; `internal-tests`, including signing and end-to-end proof construction |
 | `sqlite` | SQLite; `test-dependencies`, without Orchard |
 | `enhance-wallet` | Enhance PIR; `wallet` |

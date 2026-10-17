@@ -1710,8 +1710,10 @@ where
         let prover = real_test_prover();
         let (spend_vk, output_vk) = prover.verifying_keys();
 
+        let params = self.network().clone();
         extract_and_store_transaction_from_pczt(
             self.wallet_mut(),
+            &params,
             pczt,
             Some((&spend_vk, &output_vk)),
             None,
