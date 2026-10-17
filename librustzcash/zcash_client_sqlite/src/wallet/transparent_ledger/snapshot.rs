@@ -28,6 +28,7 @@ use {
 /// another build may have written, so it reports none rather than a zero balance.
 #[cfg(feature = "transparent-inputs")]
 fn transparent_balance(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     conn: &rusqlite::Connection,
     account: AccountUuid,
     target_height: TargetHeight,
@@ -36,6 +37,7 @@ fn transparent_balance(
 ) -> Result<Option<TransparentLedgerBalance>, SqliteClientError> {
     let mut balances = std::collections::HashMap::<AccountUuid, AccountBalance>::new();
     crate::wallet::transparent::add_transparent_account_balances(
+        nu7_activation_height,
         conn,
         target_height,
         confirmations_policy,
@@ -52,6 +54,7 @@ fn transparent_balance(
 
 #[cfg(not(feature = "transparent-inputs"))]
 fn transparent_balance(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     _: &rusqlite::Connection,
     _: AccountUuid,
     _: TargetHeight,
@@ -74,6 +77,7 @@ struct PrivateLedgerView {
 /// `tip`.
 #[cfg(feature = "transparent-inputs")]
 fn private_ledger_view<P: consensus::Parameters>(
+    _nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     conn: &rusqlite::Connection,
     params: &P,
     gap_limits: &GapLimits,
@@ -91,7 +95,17 @@ fn private_ledger_view<P: consensus::Parameters>(
     };
     let (authority, last_known, blockers) = if ledger.authorizes_after(tip) {
         (
-            transparent_balance(conn, account, target, confirmations_policy, true)?,
+            transparent_balance(
+                zcash_protocol::consensus::Parameters::activation_height(
+                    params,
+                    zcash_protocol::consensus::NetworkUpgrade::Nu7,
+                ),
+                conn,
+                account,
+                target,
+                confirmations_policy,
+                true,
+            )?,
             None,
             vec![],
         )
@@ -102,17 +116,33 @@ fn private_ledger_view<P: consensus::Parameters>(
             // tip; while coverage lags, placed events above it may already count.
             AccountLifecycle::Active => {
                 let at = covered_through.filter(|point| point.height == tip);
-                transparent_balance(conn, account, target, confirmations_policy, true)?.map(
-                    |balance| LastKnownBalance {
-                        balance,
-                        source: LastKnownSource::PrivateLedger,
-                        at,
-                    },
-                )
+                transparent_balance(
+                    zcash_protocol::consensus::Parameters::activation_height(
+                        params,
+                        zcash_protocol::consensus::NetworkUpgrade::Nu7,
+                    ),
+                    conn,
+                    account,
+                    target,
+                    confirmations_policy,
+                    true,
+                )?
+                .map(|balance| LastKnownBalance {
+                    balance,
+                    source: LastKnownSource::PrivateLedger,
+                    at,
+                })
             }
-            AccountLifecycle::Candidate => {
-                legacy_last_known(conn, account, target, confirmations_policy)?
-            }
+            AccountLifecycle::Candidate => legacy_last_known(
+                zcash_protocol::consensus::Parameters::activation_height(
+                    params,
+                    zcash_protocol::consensus::NetworkUpgrade::Nu7,
+                ),
+                conn,
+                account,
+                target,
+                confirmations_policy,
+            )?,
         };
         (
             None,
@@ -132,6 +162,7 @@ fn private_ledger_view<P: consensus::Parameters>(
 /// Without transparent support there is no private ledger to read.
 #[cfg(not(feature = "transparent-inputs"))]
 fn private_ledger_view(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     conn: &rusqlite::Connection,
     account: AccountUuid,
     tip: BlockHeight,
@@ -140,6 +171,7 @@ fn private_ledger_view(
     Ok(PrivateLedgerView {
         authority: None,
         last_known: legacy_last_known(
+            nu7_activation_height,
             conn,
             account,
             TargetHeight::from(tip + 1),
@@ -156,20 +188,34 @@ fn private_ledger_view(
 
 /// The account's whole transparent balance as last-known evidence, classified by provenance.
 fn legacy_last_known(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     conn: &rusqlite::Connection,
     account: AccountUuid,
     target: TargetHeight,
     confirmations_policy: ConfirmationsPolicy,
 ) -> Result<Option<LastKnownBalance>, SqliteClientError> {
-    transparent_balance(conn, account, target, confirmations_policy, false)?
-        .map(|balance| {
-            Ok(LastKnownBalance {
-                balance,
-                source: last_known_source(conn, account, target, confirmations_policy)?,
-                at: None,
-            })
+    transparent_balance(
+        nu7_activation_height,
+        conn,
+        account,
+        target,
+        confirmations_policy,
+        false,
+    )?
+    .map(|balance| {
+        Ok(LastKnownBalance {
+            balance,
+            source: last_known_source(
+                nu7_activation_height,
+                conn,
+                account,
+                target,
+                confirmations_policy,
+            )?,
+            at: None,
         })
-        .transpose()
+    })
+    .transpose()
 }
 
 /// Builds the snapshot for `account` from the connection's current state. The caller provides
@@ -210,8 +256,17 @@ pub(crate) fn ledger_snapshot<P: consensus::Parameters>(
 
     if mode.retains_public_authority() {
         // A build that cannot read transparent state never reports public authority.
-        let Some(balance) =
-            transparent_balance(conn, account, target, confirmations_policy, false)?
+        let Some(balance) = transparent_balance(
+            zcash_protocol::consensus::Parameters::activation_height(
+                params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7,
+            ),
+            conn,
+            account,
+            target,
+            confirmations_policy,
+            false,
+        )?
         else {
             return Ok(blocked_snapshot(vec![
                 RecoveryBlocker::TransparentSupportUnavailable,
@@ -231,10 +286,29 @@ pub(crate) fn ledger_snapshot<P: consensus::Parameters>(
     }
 
     #[cfg(feature = "transparent-inputs")]
-    let private_ledger =
-        private_ledger_view(conn, params, gap_limits, account, tip, confirmations_policy)?;
+    let private_ledger = private_ledger_view(
+        zcash_protocol::consensus::Parameters::activation_height(
+            params,
+            zcash_protocol::consensus::NetworkUpgrade::Nu7,
+        ),
+        conn,
+        params,
+        gap_limits,
+        account,
+        tip,
+        confirmations_policy,
+    )?;
     #[cfg(not(feature = "transparent-inputs"))]
-    let private_ledger = private_ledger_view(conn, account, tip, confirmations_policy)?;
+    let private_ledger = private_ledger_view(
+        zcash_protocol::consensus::Parameters::activation_height(
+            params,
+            zcash_protocol::consensus::NetworkUpgrade::Nu7,
+        ),
+        conn,
+        account,
+        tip,
+        confirmations_policy,
+    )?;
     let (covered_through, recovered_unverified) = (
         private_ledger.covered_through,
         private_ledger.recovered_unverified,
@@ -268,6 +342,7 @@ pub(crate) fn ledger_snapshot<P: consensus::Parameters>(
 /// Classifies the provenance of the outputs counted in the account's transparent balance.
 #[cfg(feature = "transparent-inputs")]
 fn last_known_source(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     conn: &rusqlite::Connection,
     account: AccountUuid,
     target_height: TargetHeight,
@@ -275,7 +350,13 @@ fn last_known_source(
 ) -> Result<LastKnownSource, SqliteClientError> {
     use crate::wallet::transparent::{BalanceProvenance, transparent_balance_provenance};
     Ok(
-        match transparent_balance_provenance(conn, account, target_height, confirmations_policy)? {
+        match transparent_balance_provenance(
+            nu7_activation_height,
+            conn,
+            account,
+            target_height,
+            confirmations_policy,
+        )? {
             BalanceProvenance::LegacyPublic => LastKnownSource::LegacyPublic,
             BalanceProvenance::IncludesLocalOnly => LastKnownSource::LegacyPublicAndLocal,
         },
@@ -285,6 +366,7 @@ fn last_known_source(
 /// Without transparent support no balance is read, so no last-known amount is classified.
 #[cfg(not(feature = "transparent-inputs"))]
 fn last_known_source(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     _: &rusqlite::Connection,
     _: AccountUuid,
     _: TargetHeight,

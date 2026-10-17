@@ -70,6 +70,7 @@ fn receipts(conn: &Connection) -> i64 {
 }
 fn work(conn: &Connection) -> Vec<TransactionStatusWork> {
     super::super::transaction_status_work(
+        None,
         conn,
         TransactionStatusMode::Public,
         Some(TransparentLedgerMode::Public),
@@ -168,6 +169,7 @@ fn changed_block_exposes_private_fallback_without_manufacturing_inclusion_bounds
     )
     .unwrap();
     let pending = super::super::transaction_status_work(
+        None,
         &db.conn,
         TransactionStatusMode::Public,
         Some(TransparentLedgerMode::PrivateRequired),
@@ -190,6 +192,7 @@ fn changed_block_exposes_private_fallback_without_manufacturing_inclusion_bounds
     );
     assert!(
         super::super::transaction_status_work(
+            None,
             &db.conn,
             TransactionStatusMode::Public,
             Some(TransparentLedgerMode::PrivateRequired)

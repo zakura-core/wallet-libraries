@@ -220,6 +220,7 @@ fn withdrawn_receive_is_not_public_value_and_does_not_block_reactivation() {
     // Retained metadata remains available without a spend target.
     assert!(
         crate::wallet::transparent::get_wallet_transparent_output(
+            None,
             conn(&st),
             &received.outpoint,
             None,

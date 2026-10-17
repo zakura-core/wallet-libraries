@@ -12,7 +12,7 @@ use super::{
 };
 use crate::wallet::one_time_ivk::{RESTORED, account_key, invalid};
 use crate::{
-    AccountUuid, error::SqliteClientError, wallet, wallet::common::tx_unexpired_condition,
+    AccountUuid, error::SqliteClientError, wallet, wallet::common::tx_unexpired_condition_at,
 };
 
 /// See `WalletDb::close_finished_one_time_keys`.
@@ -65,7 +65,13 @@ pub(in crate::wallet::one_time_ivk) fn close_finished<P: Parameters>(
             {STARTED}
          FROM ironwood_one_time_keys k
          WHERE k.account_id = :account AND k.active_from IS NOT NULL AND k.closed_at IS NULL",
-        unexpired = tx_unexpired_condition("t"),
+        unexpired = tx_unexpired_condition_at(
+            zcash_protocol::consensus::Parameters::activation_height(
+                params,
+                zcash_protocol::consensus::NetworkUpgrade::Nu7
+            ),
+            "t"
+        ),
     ))?;
     let bounds = named_params![
         ":account": owner.0,

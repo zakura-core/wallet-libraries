@@ -953,7 +953,11 @@ pub(crate) fn get_max_checkpointed_height(
     min_confirmations: NonZeroU32,
 ) -> Result<Option<BlockHeight>, SqliteClientError> {
     let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(protocol)?;
-    let max_checkpoint_height = target_height - u32::from(min_confirmations);
+    let max_checkpoint_height = target_height - u32::from(min_confirmations); confirmation predicates
+    // independently count from the target height.
+    let max_checkpoint_height = target_height
+        .saturating_sub(1)
+        .saturating_sub(u32::from(min_confirmations));
 
     // We exclude from consideration all checkpoints having heights greater than the maximum
     // checkpoint height. The checkpoint depth is the number of excluded checkpoints + 1.
@@ -1329,12 +1333,17 @@ pub(crate) fn put_shard_roots<
 }
 
 pub(crate) fn check_witnesses(
+    nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     conn: &rusqlite::Transaction<'_>,
     anchor_height: BlockHeight,
 ) -> Result<Vec<Range<BlockHeight>>, SqliteClientError> {
     let wallet_birthday = super::wallet_birthday(conn)?.ok_or(SqliteClientError::AccountUnknown)?;
-    let unspent_sapling_note_meta =
-        super::sapling::select_unspent_note_meta(conn, wallet_birthday, anchor_height)?;
+    let unspent_sapling_note_meta = super::sapling::select_unspent_note_meta(
+        nu7_activation_height,
+        conn,
+        wallet_birthday,
+        anchor_height,
+    )?;
 
     let mut scan_ranges = vec![];
     let mut sapling_incomplete = vec![];
@@ -1358,8 +1367,12 @@ pub(crate) fn check_witnesses(
 
     #[cfg(feature = "orchard")]
     {
-        let unspent_orchard_note_meta =
-            super::orchard::select_unspent_note_meta(conn, wallet_birthday, anchor_height)?;
+        let unspent_orchard_note_meta = super::orchard::select_unspent_note_meta(
+            nu7_activation_height,
+            conn,
+            wallet_birthday,
+            anchor_height,
+        )?;
         let mut orchard_incomplete = vec![];
         let orchard_tree = orchard_tree(conn)?;
         for m in unspent_orchard_note_meta.iter() {
@@ -1380,6 +1393,7 @@ pub(crate) fn check_witnesses(
         }
 
         let unspent_ironwood_note_meta = super::common::select_unspent_note_meta(
+            nu7_activation_height,
             conn,
             ShieldedPool::Ironwood,
             wallet_birthday,
@@ -1713,7 +1727,7 @@ mod tests {
 
         #[test]
         fn witnesses() {
-            super::check_witnesses(new_tree::<OrchardPoolTester>);
+            super::check_witnesses(None, new_tree::<OrchardPoolTester>);
         }
 
         #[test]
@@ -1859,7 +1873,7 @@ mod tests {
 
     #[test]
     fn sapling_witnesses() {
-        check_witnesses(new_tree::<SaplingPoolTester>);
+        check_witnesses(None, new_tree::<SaplingPoolTester>);
     }
 
     #[test]
