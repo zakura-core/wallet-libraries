@@ -8954,6 +8954,8 @@ where
 
     // Fund the wallet with a single spendable Orchard note.
     st.add_a_single_note_checking_balance(Zatoshis::const_from_u64(60_000));
+    // Include the funding note in the spending anchor before constructing the PCZT.
+    st.add_empty_blocks(1);
 
     // The destination has an Orchard receiver controlled by a separate spending key; post-NU6.3 the
     // payment is routed through the Ironwood pool.
