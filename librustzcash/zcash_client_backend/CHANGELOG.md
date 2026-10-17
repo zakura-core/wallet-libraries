@@ -33,6 +33,10 @@ and this library adheres to Rust's notion of
   `create_pczt_from_proposal` and `extract_and_store_transaction_from_pczt` reject a
   transaction without it. A PCZT created before this change can't be extracted, because its
   proposal metadata lacks the new flag.
+- ZIP 318 anchor retention, canonical crossing fees, and rolling expiry now follow
+  the network's NU7 block spacing. `AnchorRetention::new` and `union`, and
+  `PoolMigrationParams::new`, require a `BlockSpacing` argument; the implicit
+  conversion from `AnchorRetentionInterval` is removed.
 
 ### Removed
 

@@ -893,7 +893,10 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
     {
         // Whether a payment is a canonical ZIP 318 crossing depends on the grid the wallet
         // retains its anchors on.
-        let zip318 = PoolMigrationParams::new(wallet_db.anchor_retention_interval());
+        let zip318 = PoolMigrationParams::new(
+            zcash_protocol::zip318::BlockSpacing::for_network(params),
+            wallet_db.anchor_retention_interval(),
+        );
         let zip318 = &zip318;
         let (sapling_supported, orchard_supported) =
             proposed_version.map_or(Ok((true, true)), |v| {
@@ -2415,7 +2418,10 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
         ParamsT: consensus::Parameters,
         ChangeT: ChangeStrategy<MetaSource = Self::InputSource>,
     {
-        let zip318 = PoolMigrationParams::new(wallet_db.anchor_retention_interval());
+        let zip318 = PoolMigrationParams::new(
+            zcash_protocol::zip318::BlockSpacing::for_network(params),
+            wallet_db.anchor_retention_interval(),
+        );
         let zip318 = &zip318;
         let mut transparent_inputs = gather_shielding_inputs::<DbT, ChangeT::Error>(
             wallet_db,

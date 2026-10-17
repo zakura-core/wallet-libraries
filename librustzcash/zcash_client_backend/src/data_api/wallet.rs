@@ -1773,6 +1773,7 @@ where
                     return Err(Error::ExpiryHeightConflictsWithCanonicalCrossing { requested });
                 }
                 None => Some(zcash_protocol::zip318::expiry_height(
+                    &zcash_protocol::zip318::BlockSpacing::for_network(params),
                     min_target_height.into(),
                 )),
             }
