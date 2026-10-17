@@ -7365,10 +7365,8 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
         original_sighash,
     );
 
-    // The full signer view is for receivers that predate the compact view:
-    // it commits to the same transaction effects, retains proofs and anchors,
-    // clears witnesses and dummy signing keys, and (for v5 transactions)
-    // remains representable in the v1 PCZT encoding.
+    // The full signer view commits to the same effects and retains proofs and anchors,
+    // while clearing witnesses and dummy signing keys. V6 requires the modern PCZT encoding.
     let full_view = redact_pczt_for_signer(&pczt_proven, SignerView::Full);
     assert_eq!(
         Signer::new(full_view.clone()).unwrap().shielded_sighash(),
@@ -7420,12 +7418,13 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
             .proprietary()
             .contains_key("zcash_client_backend:output_info")
     }));
-    let full_view_bytes = full_view.serialize().unwrap();
+    let full_view_bytes = full_view.clone().serialize().unwrap();
     assert_eq!(
         u32::from_le_bytes(full_view_bytes[4..8].try_into().unwrap()),
         2,
         "a v6 transaction requires the v2 PCZT encoding",
     );
+    assert!(pczt::v1::Pczt::try_from(full_view.clone()).is_err());
 
     // Apply signatures to the transported signer view, then combine the
     // contribution with the proof-bearing authoritative copy.
