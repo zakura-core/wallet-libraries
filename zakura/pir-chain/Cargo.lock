@@ -3061,6 +3061,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zakura-bls12-381"
+version = "4.0.0"
+source = "git+https://github.com/zakura-core/common.git?rev=98f6caf315ba1b5828f205c0384e5fbaaf2d1fc1#98f6caf315ba1b5828f205c0384e5fbaaf2d1fc1"
+dependencies = [
+ "ff",
+ "rand_core 0.10.1",
+ "subtle",
+]
+
+[[package]]
 name = "zakura-chain"
 version = "10.0.0-rc0"
 source = "git+https://github.com/zakura-core/zakura.git?rev=83738c07468bee30a7db8a8d678cb27bf60094f4#83738c07468bee30a7db8a8d678cb27bf60094f4"
@@ -3101,16 +3111,16 @@ dependencies = [
  "zakura-address 3.0.0",
  "zakura-equihash",
  "zakura-halo2-proofs",
- "zakura-jubjub",
+ "zakura-jubjub 3.0.0",
  "zakura-mmr-tree",
  "zakura-note-encryption 3.0.0",
  "zakura-orchard 3.0.0",
  "zakura-primitives",
  "zakura-protocol 3.0.0",
- "zakura-reddsa",
+ "zakura-reddsa 3.0.0",
  "zakura-redjubjub",
  "zakura-sapling-crypto",
- "zakura-sinsemilla",
+ "zakura-sinsemilla 3.0.0",
  "zakura-transparent",
  "zcash_script",
 ]
@@ -3134,10 +3144,10 @@ dependencies = [
  "arrayvec",
  "ff",
  "group",
- "zakura-halo2-poseidon",
+ "zakura-halo2-poseidon 3.0.0",
  "zakura-halo2-proofs",
- "zakura-pasta-curves",
- "zakura-sinsemilla",
+ "zakura-pasta-curves 3.0.0",
+ "zakura-sinsemilla 3.0.0",
 ]
 
 [[package]]
@@ -3155,7 +3165,18 @@ dependencies = [
  "bitvec",
  "ff",
  "group",
- "zakura-pasta-curves",
+ "zakura-pasta-curves 3.0.0",
+]
+
+[[package]]
+name = "zakura-halo2-poseidon"
+version = "4.0.0"
+source = "git+https://github.com/zakura-core/common.git?rev=98f6caf315ba1b5828f205c0384e5fbaaf2d1fc1#98f6caf315ba1b5828f205c0384e5fbaaf2d1fc1"
+dependencies = [
+ "bitvec",
+ "ff",
+ "group",
+ "zakura-pasta-curves 4.0.0",
 ]
 
 [[package]]
@@ -3172,7 +3193,7 @@ dependencies = [
  "rand_core 0.10.1",
  "tracing",
  "zakura-halo2-legacy-pdqsort",
- "zakura-pasta-curves",
+ "zakura-pasta-curves 3.0.0",
 ]
 
 [[package]]
@@ -3198,7 +3219,20 @@ dependencies = [
  "group",
  "rand_core 0.10.1",
  "subtle",
- "zakura-bls12-381",
+ "zakura-bls12-381 3.0.0",
+]
+
+[[package]]
+name = "zakura-jubjub"
+version = "4.0.0"
+source = "git+https://github.com/zakura-core/common.git?rev=98f6caf315ba1b5828f205c0384e5fbaaf2d1fc1#98f6caf315ba1b5828f205c0384e5fbaaf2d1fc1"
+dependencies = [
+ "bitvec",
+ "ff",
+ "group",
+ "rand_core 0.10.1",
+ "subtle",
+ "zakura-bls12-381 4.0.0",
 ]
 
 [[package]]
@@ -3271,12 +3305,12 @@ dependencies = [
  "subtle",
  "tracing",
  "zakura-halo2-gadgets",
- "zakura-halo2-poseidon",
+ "zakura-halo2-poseidon 3.0.0",
  "zakura-halo2-proofs",
  "zakura-note-encryption 3.0.0",
- "zakura-pasta-curves",
- "zakura-reddsa",
- "zakura-sinsemilla",
+ "zakura-pasta-curves 3.0.0",
+ "zakura-reddsa 3.0.0",
+ "zakura-sinsemilla 3.0.0",
  "zcash_spec",
  "zip32",
 ]
@@ -3300,8 +3334,22 @@ dependencies = [
  "subtle",
  "tracing",
  "zakura-note-encryption 4.0.0",
+ "zakura-orchard-legacy",
  "zcash_spec",
  "zip32",
+]
+
+[[package]]
+name = "zakura-orchard-legacy"
+version = "4.0.0"
+source = "git+https://github.com/zakura-core/common.git?rev=98f6caf315ba1b5828f205c0384e5fbaaf2d1fc1#98f6caf315ba1b5828f205c0384e5fbaaf2d1fc1"
+dependencies = [
+ "ff",
+ "group",
+ "zakura-halo2-poseidon 4.0.0",
+ "zakura-pasta-curves 4.0.0",
+ "zakura-reddsa 4.0.0",
+ "zakura-sinsemilla 4.0.0",
 ]
 
 [[package]]
@@ -3331,6 +3379,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zakura-pasta-curves"
+version = "4.0.0"
+source = "git+https://github.com/zakura-core/common.git?rev=98f6caf315ba1b5828f205c0384e5fbaaf2d1fc1#98f6caf315ba1b5828f205c0384e5fbaaf2d1fc1"
+dependencies = [
+ "blake2b_simd",
+ "ff",
+ "group",
+ "once_cell",
+ "rand 0.10.3",
+ "static_assertions",
+ "subtle",
+]
+
+[[package]]
 name = "zakura-primitives"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3347,7 +3409,7 @@ dependencies = [
  "secp256k1",
  "sha2 0.10.9",
  "zakura-equihash",
- "zakura-jubjub",
+ "zakura-jubjub 3.0.0",
  "zakura-note-encryption 3.0.0",
  "zakura-orchard 3.0.0",
  "zakura-protocol 3.0.0",
@@ -3403,8 +3465,20 @@ dependencies = [
  "hex",
  "rand_core 0.10.1",
  "serde",
- "zakura-jubjub",
- "zakura-pasta-curves",
+ "zakura-jubjub 3.0.0",
+ "zakura-pasta-curves 3.0.0",
+]
+
+[[package]]
+name = "zakura-reddsa"
+version = "4.0.0"
+source = "git+https://github.com/zakura-core/common.git?rev=98f6caf315ba1b5828f205c0384e5fbaaf2d1fc1#98f6caf315ba1b5828f205c0384e5fbaaf2d1fc1"
+dependencies = [
+ "blake2b_simd",
+ "group",
+ "rand_core 0.10.1",
+ "zakura-jubjub 4.0.0",
+ "zakura-pasta-curves 4.0.0",
 ]
 
 [[package]]
@@ -3416,7 +3490,7 @@ dependencies = [
  "rand_core 0.10.1",
  "serde",
  "thiserror",
- "zakura-reddsa",
+ "zakura-reddsa 3.0.0",
 ]
 
 [[package]]
@@ -3442,8 +3516,8 @@ dependencies = [
  "subtle",
  "tracing",
  "zakura-bellman",
- "zakura-bls12-381",
- "zakura-jubjub",
+ "zakura-bls12-381 3.0.0",
+ "zakura-jubjub 3.0.0",
  "zakura-note-encryption 3.0.0",
  "zakura-redjubjub",
  "zcash_spec",
@@ -3479,7 +3553,18 @@ dependencies = [
  "group",
  "once_cell",
  "subtle",
- "zakura-pasta-curves",
+ "zakura-pasta-curves 3.0.0",
+]
+
+[[package]]
+name = "zakura-sinsemilla"
+version = "4.0.0"
+source = "git+https://github.com/zakura-core/common.git?rev=98f6caf315ba1b5828f205c0384e5fbaaf2d1fc1#98f6caf315ba1b5828f205c0384e5fbaaf2d1fc1"
+dependencies = [
+ "group",
+ "once_cell",
+ "subtle",
+ "zakura-pasta-curves 4.0.0",
 ]
 
 [[package]]
