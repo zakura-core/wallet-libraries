@@ -27,7 +27,7 @@ rand_core = { workspace = true, optional = true }
 # Encoding
 postcard.workspace = true
 serde.workspace = true
-serde_with = { version = "3", default-features = false, features = ["alloc", "macros"] }
+serde_with = { version = "3", default-features = false, features = ["alloc"] }
 
 # Payment protocols
 # - Transparent
