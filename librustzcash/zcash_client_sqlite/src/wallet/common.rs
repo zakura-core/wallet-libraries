@@ -1595,6 +1595,33 @@ mod nu7_expiry_tests {
     }
 
     #[test]
+    fn nu7_balance_requires_the_note_to_be_in_the_anchor() {
+        use crate::testing::{BlockCache, db::TestDbFactory};
+        use zcash_client_backend::data_api::testing::{
+            pool::{ShieldedPoolTester, dsl::TestDsl},
+            sapling::SaplingPoolTester,
+        };
+        let mut st =
+            TestDsl::with_sapling_birthday_account(TestDbFactory::default(), BlockCache::new())
+                .build::<SaplingPoolTester>();
+        let value = Zatoshis::const_from_u64(60_000);
+        st.add_a_single_note_checking_balance(value);
+        let account = st.get_account().id();
+        assert_eq!(st.get_total_balance(account), value);
+        assert_eq!(
+            st.get_spendable_balance(account, ConfirmationsPolicy::MIN),
+            Zatoshis::ZERO
+        );
+        st.add_empty_blocks(1);
+        assert_eq!(
+            st.get_spendable_balance(account, ConfirmationsPolicy::MIN),
+            value
+        );
+        let to = SaplingPoolTester::sk_default_address(&SaplingPoolTester::sk(&[7; 32]));
+        st.propose_transfer_to(&to, Zatoshis::const_from_u64(10_000));
+    }
+
+    #[test]
     fn nu7_status_expiry_horizon_is_per_transaction_and_network() {
         let conn = Connection::open_in_memory().unwrap();
         let activation = BlockHeight::from_u32(4_465_026);
