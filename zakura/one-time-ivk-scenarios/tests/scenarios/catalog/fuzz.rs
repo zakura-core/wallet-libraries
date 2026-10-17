@@ -18,7 +18,7 @@
 //! of syncs that keep downloading filters, witnesses or lookups while nothing changes
 //! fails.
 //!
-//! Seeds come from `ONE_TIME_IVK_FUZZ_SEEDS` (`start..end` or one seed; three by
+//! Seeds come from `ONE_TIME_IVK_FUZZ_SEEDS` (`start..end` or one seed; five by
 //! default). A failure prints the seed, how to replay it, and the last steps.
 //! `ONE_TIME_IVK_FUZZ_SKIP` drops plan steps by number, to minimize a failing seed, and
 //! `ONE_TIME_IVK_FUZZ_TRACE` streams the trace as a replay runs.
@@ -54,7 +54,7 @@ use crate::harness::{
 /// The seed every world's wallets share.
 const SEED: [u8; 32] = [0x7a; 32];
 /// Seeds a run without `ONE_TIME_IVK_FUZZ_SEEDS` generates.
-const DEFAULT_SEEDS: u64 = 3;
+const DEFAULT_SEEDS: u64 = 5;
 /// Ironwood funds each funded account starts with.
 const FUNDS: u64 = 5 * ZEC;
 /// Fee margin the app keeps when funding a deposit.
