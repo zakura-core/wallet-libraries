@@ -1180,6 +1180,7 @@ fn check_unlinked_unmined_spend(pool: zcash_protocol::ShieldedPool) {
         _ => unreachable!("the tests request only supported pools"),
     };
     st.scan_cached_blocks(height, 1);
+    scan_new_blocks(&mut st, 1);
     let to = zcash_keys::address::Address::Transparent(TransparentAddress::PublicKeyHash([7; 20]));
     let request = zip321::TransactionRequest::new(vec![zip321::Payment::without_memo(
         to.to_zcash_address(st.network()),
@@ -1215,7 +1216,7 @@ fn check_unlinked_unmined_spend(pool: zcash_protocol::ShieldedPool) {
         )
         .unwrap();
     let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
-    let funding_height = st.wallet().chain_height().unwrap().unwrap();
+    let funding_height = height;
     let params = *st.network();
 
     // Restore the pre-funding scan state, retaining the cached block for the later scan. Remove

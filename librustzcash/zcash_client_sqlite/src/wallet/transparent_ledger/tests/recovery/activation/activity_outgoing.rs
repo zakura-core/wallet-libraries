@@ -72,6 +72,7 @@ fn funded(prepare: impl FnOnce(&mut State)) -> State {
     let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
     let (height, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, zat(SPENT));
     st.scan_cached_blocks(height, 1);
+    scan_new_blocks(&mut st, 1);
     st
 }
 
