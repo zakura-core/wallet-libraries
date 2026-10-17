@@ -1159,6 +1159,7 @@ pub fn send_max_spendable_to_transparent<T: ShieldedPoolTester>(
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(60000);
     st.add_a_single_note_checking_balance(value);
+    st.add_empty_blocks(1);
 
     let account = st.test_account().cloned().unwrap();
     let to: Address = Address::Transparent(TransparentAddress::PublicKeyHash([0x7f; 20]));
@@ -1231,6 +1232,7 @@ pub fn send_max_fee_overflow_is_an_error<T: ShieldedPoolTester>(
 
     // Add funds to the wallet in a single note
     st.add_a_single_note_checking_balance(Zatoshis::const_from_u64(60000));
+    st.add_empty_blocks(1);
 
     let account = st.test_account().cloned().unwrap();
 
@@ -1279,6 +1281,8 @@ pub fn send_max_spends_inputs_across_pools<P0: ShieldedPoolTester, P1: ShieldedP
     st.generate_next_block(&p0_fvk, AddressType::DefaultExternal, note_value);
     st.generate_next_block(&p1_fvk, AddressType::DefaultExternal, note_value);
     st.scan_cached_blocks(account.birthday().height(), 2);
+    // Include both pools' funding notes in the spending anchor.
+    st.add_empty_blocks(1);
 
     let total = (note_value * 2u64).unwrap();
     assert_eq!(
@@ -1765,6 +1769,7 @@ pub fn spend_everything_multi_step_single_note_proposed_transfer<T: ShieldedPool
 
     // Add funds to the wallet.
     st.add_a_single_note_checking_balance(value);
+    st.add_empty_blocks(1);
     let initial_balance = value;
     assert_eq!(
         st.get_spendable_balance(account_id, ConfirmationsPolicy::MIN),
@@ -1919,6 +1924,8 @@ pub fn spend_everything_multi_step_many_notes_proposed_transfer<T: ShieldedPoolT
     for _ in 0..number_of_notes {
         st.add_a_single_note_checking_balance(note_value);
     }
+
+    st.add_empty_blocks(1);
 
     let initial_balance = value;
     let account = st.test_account().cloned().unwrap();
@@ -2397,6 +2404,8 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
                 .block_height(),
             h
         );
+        let (anchor_ready_height, _) = st.generate_empty_block();
+        st.scan_cached_blocks(anchor_ready_height, 1);
         h
     };
 
@@ -2913,6 +2922,8 @@ pub fn spend_all_funds_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
     // Add funds to the wallet.
     let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
     st.scan_cached_blocks(h, 1);
+    let (anchor_ready_height, _) = st.generate_empty_block();
+    st.scan_cached_blocks(anchor_ready_height, 1);
 
     let initial_balance = value;
     assert_eq!(
@@ -3051,6 +3062,8 @@ pub fn proposal_fails_if_not_all_ephemeral_outputs_consumed<T: ShieldedPoolTeste
                 .block_height(),
             h
         );
+        let (anchor_ready_height, _) = st.generate_empty_block();
+        st.scan_cached_blocks(anchor_ready_height, 1);
         assert_eq!(
             st.get_spendable_balance(account_id, ConfirmationsPolicy::MIN),
             value
@@ -4602,7 +4615,7 @@ pub fn ordinary_canonical_crossing_is_unpadded_with_rolling_expiry<Dsf: DataStor
         let request =
             TransactionRequest::new(vec![Payment::without_memo(recipient.clone(), amount)])
                 .unwrap();
-        // `ConfirmationsPolicy::MIN` anchors at the chain tip.
+        // `ConfirmationsPolicy::MIN` anchors one block behind the chain tip.
         st.propose_transfer(
             account.id(),
             &input_selector,
@@ -4619,8 +4632,8 @@ pub fn ordinary_canonical_crossing_is_unpadded_with_rolling_expiry<Dsf: DataStor
         )
     };
 
-    // (1) One block below the boundary, the ordinary anchor is off the grid: padded.
-    mine_to(&mut st, boundary - 1);
+    // (1) With the tip on the boundary, the anchor is one block below it: padded.
+    mine_to(&mut st, boundary);
     let off_grid = propose(&mut st, MAX_RESIDUAL_VALUE);
     let canonical_fee = canonical_crossing_fee(
         st.network(),
@@ -4632,8 +4645,8 @@ pub fn ordinary_canonical_crossing_is_unpadded_with_rolling_expiry<Dsf: DataStor
     assert!(!step.is_canonical_crossing(&zip318_params, canonical_fee));
     assert_eq!(ironwood_actions(step), Ok(2));
 
-    // (2) With the tip on the boundary, the same payment is a canonical crossing.
-    mine_to(&mut st, boundary);
+    // (2) One block later, the anchor is on the boundary: a canonical crossing.
+    mine_to(&mut st, boundary + 1);
     let canonical = propose(&mut st, MAX_RESIDUAL_VALUE);
     assert_eq!(canonical.steps().len(), 1);
     let step = canonical.steps().first();
@@ -4873,6 +4886,8 @@ pub fn pool_crossing_required<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
     let note_value = Zatoshis::const_from_u64(350000);
     st.generate_next_block(&p0_fvk, AddressType::DefaultExternal, note_value);
     st.scan_cached_blocks(account.birthday().height(), 2);
+    // Include both pools' funding notes in the spending anchor.
+    st.add_empty_blocks(1);
 
     let initial_balance = note_value;
     assert_eq!(st.get_total_balance(account.id()), initial_balance);
@@ -4928,6 +4943,8 @@ pub fn pool_crossing_required<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
 
     let (h, _) = st.generate_next_block_including(txids[0]);
     st.scan_cached_blocks(h, 1);
+    // Include the newly mined payment and change in the next spending anchor.
+    st.add_empty_blocks(1);
 
     assert_eq!(
         st.get_total_balance(account.id()),
@@ -4958,6 +4975,8 @@ pub fn fully_funded_fully_private<P0: ShieldedPoolTester, P1: ShieldedPoolTester
     st.generate_next_block(&p0_fvk, AddressType::DefaultExternal, note_value);
     st.generate_next_block(&p1_fvk, AddressType::DefaultExternal, note_value);
     st.scan_cached_blocks(account.birthday().height(), 2);
+    // Include both pools' funding notes in the spending anchor.
+    st.add_empty_blocks(1);
 
     let initial_balance = (note_value * 2u64).unwrap();
     assert_eq!(st.get_total_balance(account.id()), initial_balance);
@@ -5013,6 +5032,8 @@ pub fn fully_funded_fully_private<P0: ShieldedPoolTester, P1: ShieldedPoolTester
 
     let (h, _) = st.generate_next_block_including(txids[0]);
     st.scan_cached_blocks(h, 1);
+    // Include the newly mined payment and change in the next spending anchor.
+    st.add_empty_blocks(1);
 
     assert_eq!(
         st.get_total_balance(account.id()),
@@ -5042,6 +5063,8 @@ pub fn fully_funded_send_to_t<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
     st.generate_next_block(&p0_fvk, AddressType::DefaultExternal, note_value);
     st.generate_next_block(&p1_fvk, AddressType::DefaultExternal, note_value);
     st.scan_cached_blocks(account.birthday().height(), 2);
+    // Include both pools' funding notes in the spending anchor.
+    st.add_empty_blocks(1);
 
     let initial_balance = (note_value * 2u64).unwrap();
     assert_eq!(st.get_total_balance(account.id()), initial_balance);
@@ -5094,6 +5117,8 @@ pub fn fully_funded_send_to_t<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
 
     let (h, _) = st.generate_next_block_including(txids[0]);
     st.scan_cached_blocks(h, 1);
+    // Include the newly mined payment and change in the next spending anchor.
+    st.add_empty_blocks(1);
 
     // Since the recipient address is in the same account, the total balance includes the transfer
     // amount.
@@ -5136,9 +5161,14 @@ pub fn multi_pool_checkpoint<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
 
     let initial_balance = (note_value * 3u64).unwrap();
     assert_eq!(st.get_total_balance(acct_id), initial_balance);
+    // The latest funding note is still newer than the selected anchor.
     assert_eq!(
         st.get_spendable_balance(acct_id, ConfirmationsPolicy::MIN),
-        initial_balance
+        (note_value * 2u64).unwrap()
+    );
+    assert_eq!(
+        st.get_pending_shielded_balance(acct_id, ConfirmationsPolicy::MIN),
+        note_value
     );
 
     // Generate several empty blocks
@@ -7659,6 +7689,7 @@ pub fn prefer_consolidation_allows_more_than_five_funding_notes<T: ShieldedPoolT
     let values =
         [300_000, 250_000, 200_000, 150_000, 100_000, 90_000, 10_000].map(Zatoshis::const_from_u64);
     st.add_notes_checking_balance(values.map(|value| [value]));
+    st.add_empty_blocks(1);
 
     let mut selected = selected_notes_for_transfer(
         &mut st,
@@ -9374,6 +9405,8 @@ pub fn orchard_to_ironwood_payment_reports_net_value_delta<Dsf>(
     // Fund the wallet with a single spendable Orchard note.
     let note_value = Zatoshis::const_from_u64(60_000);
     st.add_a_single_note_checking_balance(note_value);
+    // Include the funding note in the selected anchor.
+    st.add_empty_blocks(1);
 
     // The destination has an Orchard receiver controlled by a separate spending key; post-NU6.3 the
     // payment is routed through the Ironwood pool.
@@ -9518,6 +9551,8 @@ pub fn orchard_to_ironwood_self_migration_reports_fee_only_delta<Dsf>(
     // Fund the wallet with a single spendable Orchard note.
     let note_value = Zatoshis::const_from_u64(60_000);
     st.add_a_single_note_checking_balance(note_value);
+    // Include the funding note in the selected anchor.
+    st.add_empty_blocks(1);
 
     // The payment destination is the wallet's own external Orchard receiver; post-NU6.3 the
     // payment is routed through the Ironwood pool.
@@ -9652,6 +9687,8 @@ where
 
     // Fund the wallet with a single spendable Orchard note.
     st.add_a_single_note_checking_balance(Zatoshis::const_from_u64(60_000));
+    // Include the funding note in the selected anchor.
+    st.add_empty_blocks(1);
 
     let to_extsk = OrchardPoolTester::sk(&[0xf5; 32]);
     let to = OrchardPoolTester::sk_default_address(&to_extsk);
