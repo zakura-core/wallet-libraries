@@ -1573,6 +1573,9 @@ impl<'p> Exec<'p> {
                     FUNDS,
                     Payer::Wallet,
                 ));
+                // The funds are a fake output, which a reorg could not mine again, so no
+                // reorg reaches below them.
+                self.floor = u32::from(ctx.chain.tip());
                 self.note(
                     ctx,
                     "A",
