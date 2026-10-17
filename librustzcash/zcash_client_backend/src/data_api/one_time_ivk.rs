@@ -33,15 +33,11 @@ pub trait OneTimeIvkRead: WalletRead {
 
     /// Returns the one-time keys to trial-decrypt in a scan batch covering `range`: the
     /// open keys active by its end, and keys with a scan hint inside it (see
-    /// [`restore::OneTimeIvkRestoreWrite::record_one_time_lookup`]). Stores without
-    /// discovery return [`Self::get_one_time_scanning_keys`].
+    /// [`restore::OneTimeIvkRestoreWrite::record_one_time_lookup`]).
     fn get_one_time_scanning_keys_for_range(
         &self,
         range: std::ops::Range<BlockHeight>,
-    ) -> Result<Vec<OneTimeScanningKey<Self::AccountId>>, Self::Error> {
-        let _ = range;
-        self.get_one_time_scanning_keys()
-    }
+    ) -> Result<Vec<OneTimeScanningKey<Self::AccountId>>, Self::Error>;
 
     /// Selects keys for full transaction decryption, retaining known-note ownership
     /// even after a key stops scanning. `receivers` come from ordinary authenticated

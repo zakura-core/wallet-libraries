@@ -15,8 +15,7 @@ and this library adheres to Rust's notion of
   `record_one_time_filter_checks`, `record_one_time_lookup`, `defer_one_time_lookup` and
   `record_one_time_witness` record it. Payments ahead of the scan become scan hints.
   `OneTimeIvkRead::get_one_time_scanning_keys_for_range` gives one batch's keys, hints
-  included, and `chain::scan_cached_blocks_with_one_time_ivks` uses it. Its default is
-  `get_one_time_scanning_keys`.
+  included, and `chain::scan_cached_blocks_with_one_time_ivks` uses it.
 - `WalletTx::ironwood_nullifiers` (with `orchard`) gives every Ironwood nullifier a
   transaction a block scan recognized reveals, matched to a wallet note or not.
   `ScannedBlock::scanned_accounts` names the accounts whose ordinary internal keys scanned

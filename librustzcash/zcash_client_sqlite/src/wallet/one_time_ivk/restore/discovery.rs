@@ -988,8 +988,8 @@ fn scanned_tip(conn: &Connection) -> Result<Option<ChainPoint>, SqliteClientErro
 }
 
 /// Queues for a rescan each stretch from `from` through `through` that the scan finished
-/// without covering for account `owner`, as blocks scanned before the journal existed or by
-/// the full-block scanner are, so a late payment there is not left waiting for good.
+/// without covering for account `owner`, as blocks scanned before the journal existed are,
+/// so a late payment there is not left waiting for good.
 fn rescan_uncovered(
     conn: &rusqlite::Transaction<'_>,
     owner: i64,

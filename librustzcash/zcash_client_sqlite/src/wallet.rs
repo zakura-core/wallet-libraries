@@ -872,7 +872,7 @@ pub(crate) fn one_time_key_open(conn: &Connection) -> Result<bool, SqliteClientE
 pub(crate) fn one_time_scan_required(conn: &Connection) -> Result<bool, SqliteClientError> {
     Ok(one_time_key_open(conn)?
         || conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_publications p WHERE p.state = 0 AND (
+            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_publications p WHERE p.state = ?1 AND (
                  EXISTS(SELECT 1 FROM ironwood_one_time_discovery d
                      JOIN accounts a ON a.id = d.account_id
                      WHERE d.publication_height = p.height AND d.publication_hash = p.hash
@@ -880,7 +880,7 @@ pub(crate) fn one_time_scan_required(conn: &Connection) -> Result<bool, SqliteCl
                  OR EXISTS(SELECT 1 FROM ironwood_one_time_lookup_reads r
                      WHERE r.publication_height = p.height AND r.publication_hash = p.hash)))
              OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery)",
-            [],
+            [one_time_rewind::PROVISIONAL],
             |row| row.get(0),
         )?)
 }
