@@ -7183,6 +7183,9 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     let note_value = Zatoshis::const_from_u64(350000);
     st.generate_next_block(&p0_fvk, AddressType::DefaultExternal, note_value);
     st.scan_cached_blocks(account.birthday().height(), 1);
+    // Include the funding note in the anchor before exercising signing and extraction.
+    let (anchor_ready_height, _) = st.generate_empty_block();
+    st.scan_cached_blocks(anchor_ready_height, 1);
 
     assert_eq!(st.get_total_balance(account.id()), note_value);
     assert_eq!(
@@ -8782,12 +8785,23 @@ pub fn shielding_coinbase_to_orchard_receiver_delivers_via_ironwood<Dsf>(
         None,
     );
     assert!(
+        !st.wallet()
+            .transaction_status_work()
+            .unwrap()
+            .iter()
+            .any(|work| work.txid() == sent_txid),
+        "status work waits for an accepted replacement scan after rewind",
+    );
+    let (replacement_height, _) = st.generate_empty_block();
+    assert_eq!(replacement_height, mined_height);
+    st.scan_cached_blocks(replacement_height, 1);
+    assert!(
         st.wallet()
             .transaction_status_work()
             .unwrap()
             .iter()
             .any(|work| work.txid() == sent_txid),
-        "rewinding the mined block reactivates the durable status intent",
+        "a replacement block reactivates the durable status intent",
     );
 }
 
