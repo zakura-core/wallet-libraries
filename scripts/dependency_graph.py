@@ -25,7 +25,7 @@ def consumer_graph(directory, dependency, features):
         f'features = {json.dumps(features)} }}\n'
     )
     result = subprocess.check_output(
-        ["cargo", "tree", "--offline", "--manifest-path", str(directory / "Cargo.toml"),
+        ["cargo", "tree", "--manifest-path", str(directory / "Cargo.toml"),
          "-e", "normal,build", "--prefix", "none", "--format", "{p}"],
         text=True,
     )
@@ -33,9 +33,6 @@ def consumer_graph(directory, dependency, features):
 
 
 def main():
-    # CI lanes have independent caches. Materialize the pinned sources before
-    # resolving the external consumers offline.
-    subprocess.run(["cargo", "fetch", "--locked", "--manifest-path", str(ROOT / "Cargo.toml")], check=True)
     # Check both feature-off libraries and real consumer capabilities. The
     # proving consumer also ensures the real fixture remains available.
     cases = [

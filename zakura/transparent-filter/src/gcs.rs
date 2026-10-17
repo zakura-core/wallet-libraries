@@ -9,65 +9,6 @@ use bitcoin_hashes::siphash24;
 use bitcoin_io::{self as io, Write};
 use std::{cmp, collections::BTreeSet};
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{validate::validate_parameters, FilterLimits};
-
-    #[test]
-    fn extracted_writer_matches_upstream_across_counts_keys_and_precisions() {
-        for count in [0, 1, 2, 252, 253, 254, 1000] {
-            let mut elements: Vec<_> = (0..count as u32)
-                .map(|i| i.to_le_bytes().to_vec())
-                .collect();
-            // Both writers ignore empty elements and deduplicate before hashing.
-            elements.push(Vec::new());
-            elements.extend(elements.clone());
-            for (k0, k1, m, p) in [
-                (0, 0, 784931, 19),
-                (u64::MAX, 1, 100, 6),
-                (17, 89, 10000, 13),
-            ] {
-                let mut actual = Vec::new();
-                let mut expected = Vec::new();
-                let mut writer = GcsFilterWriter::new(&mut actual, k0, k1, m, p);
-                let mut upstream =
-                    bitcoin::bip158::GcsFilterWriter::new(&mut expected, k0, k1, m, p);
-                for element in &elements {
-                    writer.add_element(element);
-                    upstream.add_element(element);
-                }
-                assert_eq!(writer.finish().unwrap(), upstream.finish().unwrap());
-                assert_eq!(actual, expected, "count={count}, m={m}, p={p}");
-                let query = elements.iter().filter(|e| !e.is_empty()).map(Vec::as_slice);
-                assert!(bitcoin::bip158::GcsFilterReader::new(k0, k1, m, p)
-                    .match_all(&mut actual.as_slice(), query)
-                    .unwrap());
-            }
-        }
-    }
-
-    #[test]
-    fn strict_decoder_still_rejects_truncation_trailing_bytes_and_bad_counts() {
-        let mut bytes = Vec::new();
-        let mut writer = GcsFilterWriter::new(&mut bytes, 3, 5, 100, 6);
-        for value in 0u32..64 {
-            writer.add_element(&value.to_le_bytes());
-        }
-        writer.finish().unwrap();
-        let limits = FilterLimits::default();
-        assert!(validate_parameters(&bytes, limits, 100, 6).is_ok());
-        for end in 0..bytes.len() {
-            assert!(validate_parameters(&bytes[..end], limits, 100, 6).is_err());
-        }
-        bytes.push(0);
-        assert!(validate_parameters(&bytes, limits, 100, 6).is_err());
-        for bad in [&[0xfd, 1, 0][..], &[0xff; 9][..]] {
-            assert!(validate_parameters(bad, limits, 100, 6).is_err());
-        }
-    }
-}
-
 /// Fast reduction of hash to [0, nm) range.
 fn map_to_range(hash: u64, nm: u64) -> u64 {
     ((hash as u128 * nm as u128) >> 64) as u64
@@ -216,6 +157,65 @@ impl<'a, W: Write> BitStreamWriter<'a, W> {
             Ok(1)
         } else {
             Ok(0)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{validate::validate_parameters, FilterLimits};
+
+    #[test]
+    fn extracted_writer_matches_upstream_across_counts_keys_and_precisions() {
+        for count in [0, 1, 2, 252, 253, 254, 1000] {
+            let mut elements: Vec<_> = (0..count as u32)
+                .map(|i| i.to_le_bytes().to_vec())
+                .collect();
+            // Both writers ignore empty elements and deduplicate before hashing.
+            elements.push(Vec::new());
+            elements.extend(elements.clone());
+            for (k0, k1, m, p) in [
+                (0, 0, 784931, 19),
+                (u64::MAX, 1, 100, 6),
+                (17, 89, 10000, 13),
+            ] {
+                let mut actual = Vec::new();
+                let mut expected = Vec::new();
+                let mut writer = GcsFilterWriter::new(&mut actual, k0, k1, m, p);
+                let mut upstream =
+                    bitcoin::bip158::GcsFilterWriter::new(&mut expected, k0, k1, m, p);
+                for element in &elements {
+                    writer.add_element(element);
+                    upstream.add_element(element);
+                }
+                assert_eq!(writer.finish().unwrap(), upstream.finish().unwrap());
+                assert_eq!(actual, expected, "count={count}, m={m}, p={p}");
+                let query = elements.iter().filter(|e| !e.is_empty()).map(Vec::as_slice);
+                assert!(bitcoin::bip158::GcsFilterReader::new(k0, k1, m, p)
+                    .match_all(&mut actual.as_slice(), query)
+                    .unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn strict_decoder_still_rejects_truncation_trailing_bytes_and_bad_counts() {
+        let mut bytes = Vec::new();
+        let mut writer = GcsFilterWriter::new(&mut bytes, 3, 5, 100, 6);
+        for value in 0u32..64 {
+            writer.add_element(&value.to_le_bytes());
+        }
+        writer.finish().unwrap();
+        let limits = FilterLimits::default();
+        assert!(validate_parameters(&bytes, limits, 100, 6).is_ok());
+        for end in 0..bytes.len() {
+            assert!(validate_parameters(&bytes[..end], limits, 100, 6).is_err());
+        }
+        bytes.push(0);
+        assert!(validate_parameters(&bytes, limits, 100, 6).is_err());
+        for bad in [&[0xfd, 1, 0][..], &[0xff; 9][..]] {
+            assert!(validate_parameters(bad, limits, 100, 6).is_err());
         }
     }
 }
