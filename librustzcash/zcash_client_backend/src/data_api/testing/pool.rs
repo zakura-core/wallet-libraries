@@ -7150,7 +7150,7 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
                 network.activation_height(NetworkUpgrade::Canopy).unwrap() + ZIP212_GRACE_PERIOD,
             );
 
-            // Ironwood is not active at these test heights, so its tree is empty.
+            // The synthetic birthday starts with an empty Ironwood tree.
             #[cfg(feature = "orchard")]
             let ironwood_initial_tree = Frontier::empty();
 
@@ -7308,29 +7308,25 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     let pczt_proven = Prover::new(pczt_updated)
         .create_orchard_proof(orchard_pk)
         .unwrap()
+        .create_ironwood_proof(orchard_pk)
+        .unwrap()
         .create_sapling_proofs(&sapling_prover, &sapling_prover)
         .unwrap()
         .finish();
 
-    // The signer view of a v5 PCZT commits to the same transaction effects. V5
-    // anchors are retained, while Orchard effecting fields are compacted using
-    // the v2 PCZT encoding. Passing the proof-bearing authoritative copy also
-    // exercises redaction of data that the external Signer does not need.
+    // The signer view of a V6 PCZT commits to the same transaction effects while
+    // omitting anchors and compacting effecting fields. Passing the proof-bearing
+    // authoritative copy also exercises redaction of data the external signer does not need.
     let original_sighash = Signer::new(pczt_proven.clone()).unwrap().shielded_sighash();
     let original_len = pczt_proven.clone().serialize().unwrap().len();
     let signer_view = redact_pczt_for_signer(&pczt_proven, SignerView::Compact);
     assert_eq!(
         *signer_view.global().tx_version(),
-        zcash_protocol::constants::V5_TX_VERSION,
+        zcash_protocol::constants::V6_TX_VERSION,
     );
-    assert_eq!(
-        signer_view.sapling().anchor(),
-        pczt_proven.sapling().anchor()
-    );
-    assert_eq!(
-        signer_view.orchard().anchor(),
-        pczt_proven.orchard().anchor()
-    );
+    assert_eq!(signer_view.sapling().anchor(), &None);
+    assert_eq!(signer_view.orchard().anchor(), &None);
+    assert_eq!(signer_view.ironwood().anchor(), &None);
     if !signer_view.orchard().actions().is_empty() {
         assert!(pczt::v1::Pczt::try_from(signer_view.clone()).is_err());
         assert!(
@@ -7350,10 +7346,8 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
         original_sighash,
     );
 
-    // The full signer view is for receivers that predate the compact view:
-    // it commits to the same transaction effects, retains proofs and anchors,
-    // clears witnesses and dummy signing keys, and (for v5 transactions)
-    // remains representable in the v1 PCZT encoding.
+    // The full signer view commits to the same effects and retains proofs and anchors,
+    // while clearing witnesses and dummy signing keys. V6 requires the modern PCZT encoding.
     let full_view = redact_pczt_for_signer(&pczt_proven, SignerView::Full);
     assert_eq!(
         Signer::new(full_view.clone()).unwrap().shielded_sighash(),
@@ -7361,6 +7355,10 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     );
     assert_eq!(full_view.orchard().anchor(), pczt_proven.orchard().anchor());
     assert_eq!(full_view.sapling().anchor(), pczt_proven.sapling().anchor());
+    assert_eq!(
+        full_view.ironwood().anchor(),
+        pczt_proven.ironwood().anchor()
+    );
     assert_eq!(
         full_view.orchard().zkproof().is_some(),
         pczt_proven.orchard().zkproof().is_some(),
@@ -7401,15 +7399,7 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
             .proprietary()
             .contains_key("zcash_client_backend:output_info")
     }));
-    if *full_view.global().tx_version() == zcash_protocol::constants::V5_TX_VERSION {
-        let full_view_bytes = full_view.clone().serialize().unwrap();
-        assert!(pczt::v1::Pczt::try_from(full_view).is_ok());
-        assert_eq!(
-            u32::from_le_bytes(full_view_bytes[4..8].try_into().unwrap()),
-            1,
-            "the full signer view of a v5 PCZT serializes in the v1 encoding",
-        );
-    }
+    assert!(pczt::v1::Pczt::try_from(full_view).is_err());
 
     // Apply signatures to the transported signer view, then combine the
     // contribution with the proof-bearing authoritative copy.
