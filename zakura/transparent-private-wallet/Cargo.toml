@@ -1,0 +1,133 @@
+[package]
+name = "zakura-transparent-private-wallet"
+version = "0.0.1-rc0"
+description = "Transparent private-mode wallet: bounded PIR recovery into candidate wallet evidence, txid display lookups and filter matching"
+edition.workspace = true
+rust-version.workspace = true
+# The filter matching and txid display client moved from wallet-pir were MIT;
+# the recovery adapter was MIT or Apache-2.0.
+license = "MIT"
+repository.workspace = true
+readme = "README.md"
+categories.workspace = true
+keywords = ["zcash", "privacy", "pir"]
+
+[features]
+default = []
+# The recovery engine: birthday-to-balance sync over caller transports, its ledger
+# and the in-memory store. No wallet or node dependency.
+engine = []
+# The engine's SQLite store of recovery progress and history.
+engine-store = ["engine", "dep:rusqlite"]
+# The store conformance suite, for a wallet that brings its own engine storage.
+engine-conformance = ["engine"]
+# Reference blocking HTTP adapters for the shard service and filter origin, and
+# the blocking filter service transport.
+reqwest = ["engine", "dep:reqwest"]
+# Applying a batch to a SQLite wallet and acknowledging it in one call.
+sqlite = ["wallet", "dep:zcash_client_sqlite"]
+wallet = ["engine-store", "dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol", "dep:transparent", "dep:same-file", "dep:rustix"]
+# Test support for applications: batches no companion issued, their settlement,
+# a fake txid display publication, and the txid client's test hooks (a lower
+# recent-shard floor and placement refresh age). Never enable it in a production
+# build: it is the only feature that brings in the server crate, whose display
+# map split the fake publication serves. A real shard service to recover from is
+# the server crate's own `testing`.
+testing = ["wallet", "engine-conformance", "dep:zakura-transparent-private-server"]
+
+[dependencies]
+zakura-transparent-private-shared = { version = "=0.0.1-rc0", path = "../transparent-private-shared" }
+# The client half of the native profile: preparing queries and decoding answers.
+zakura-pir-native = { version = "=0.0.1-rc2", path = "../pir-native", features = ["client"] }
+# Test support only, through `testing`; never part of a production wallet.
+zakura-transparent-private-server = { version = "=0.0.1-rc0", path = "../transparent-private-server", optional = true }
+zcash_client_backend = { workspace = true, optional = true, features = ["transparent-inputs"] }
+zcash_client_sqlite = { version = "0.1.0-rc9", path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", optional = true, features = ["transparent-inputs"] }
+zcash_primitives = { workspace = true, optional = true }
+zcash_protocol = { workspace = true, optional = true }
+transparent = { workspace = true, optional = true }
+base64.workspace = true
+# Pinned exactly, as in the server crate: filter matching hashes scripts with
+# its SipHash, which must agree with the filters the publisher encoded.
+bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
+hex = { workspace = true, features = ["std"] }
+rusqlite = { workspace = true, optional = true }
+sha2.workspace = true
+serde = { workspace = true, features = ["std"] }
+serde_json.workspace = true
+same-file = { version = "1.0.6", optional = true }
+thiserror = "2"
+url = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+
+# Companion locks: `flock` directly, which `std` supports on Android only from Rust 1.98.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", optional = true, default-features = false, features = ["std", "fs"] }
+
+[dev-dependencies]
+tempfile = "3"
+serde_json.workspace = true
+zcash_client_sqlite = { version = "0.1.0-rc9", path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "transparent-inputs", "test-dependencies", "unstable"] }
+zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
+zcash_keys = { workspace = true, features = ["transparent-inputs"] }
+# The example's and the end-to-end tests' `HttpExchange`: one blocking request at a
+# time, the client the reference HTTP adapters above already build.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+# The end-to-end tests publish shards and serve them in process with the real
+# publisher and native evaluation; the native round trips answer queries with
+# the server's operations. Tests only: the wallet never depends on the server.
+zakura-transparent-private-server = { version = "=0.0.1-rc0", path = "../transparent-private-server", features = ["testing"] }
+zakura-pir-native = { version = "=0.0.1-rc2", path = "../pir-native", features = ["client", "server"] }
+axum = "0.7"
+tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
+regex = { workspace = true, features = ["std"] }
+# The txid display end-to-end test drives its in-process fixture's router directly.
+tower = { version = "0.5", features = ["util"] }
+rand = "0.8"
+rand_chacha.workspace = true
+flate2 = "1"
+# Only for the `txid-quality-canary` example's blocking HTTPS transport.
+clap = { version = "4", features = ["derive"] }
+
+[[example]]
+name = "engine-store-reopen"
+required-features = ["engine-store"]
+
+[[example]]
+name = "recover-activity"
+required-features = ["sqlite"]
+
+[[example]]
+name = "txid-quality-canary"
+
+[[test]]
+name = "private_recovery"
+required-features = ["sqlite", "testing", "reqwest"]
+
+[[test]]
+name = "private_discovery"
+required-features = ["testing", "reqwest"]
+
+[[test]]
+name = "engine_cache_pruning"
+required-features = ["testing", "reqwest"]
+
+[[test]]
+name = "detail_run"
+required-features = ["testing"]
+
+[[test]]
+name = "engine_birthday_to_balance"
+required-features = ["engine"]
+
+[[test]]
+name = "engine_store_semantics"
+required-features = ["engine-store", "engine-conformance"]
+
+[[test]]
+name = "engine_store_schema_upgrade"
+required-features = ["engine-store", "engine-conformance"]
+
+[[test]]
+name = "map_bytes"
+required-features = ["testing"]

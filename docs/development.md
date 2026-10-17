@@ -18,7 +18,7 @@ python3 scripts/dev.py verify
 
 | Configuration | Packages and features |
 | --- | --- |
-| `default` | Workspace except the facade, Enhance PIR, the transparent PIR adapter, receiver PIR and the one-time IVK scenarios; default features |
+| `default` | Workspace except the facade, Enhance PIR, the Transparent wallet, receiver PIR and the one-time IVK scenarios; default features |
 | `orchard` | Backend + SQLite; `orchard,test-dependencies` |
 | `transparent` | Backend + SQLite; `orchard,transparent-inputs,test-dependencies,unstable` |
 | `transparent-import` | Backend + SQLite; transparent features plus `transparent-key-import` |
@@ -27,10 +27,16 @@ python3 scripts/dev.py verify
 | `enhance-wallet` | Enhance PIR; `wallet` |
 | `enhance` | Enhance PIR; default features |
 | `enhance-testing` | Enhance PIR; `testing` (the synthetic Ironwood output fixture service tests authenticate PIR-returned records with) |
-| `transparent-filter-client` | Transparent filter with its wallet HTTP `client` (profile validation and bounded streaming responses) |
-| `transparent-pir` | Transparent PIR adapter; `wallet` |
-| `transparent-pir-sqlite` | Transparent PIR adapter; `sqlite` (`wallet` plus the SQLite apply-and-acknowledge integration and the in-process end-to-end tests) |
-| `transparent-pir-testing` | Transparent PIR adapter; `sqlite`, `testing` and `reqwest` (the test support applications build their recovery and txid display tests on; the private recovery and discovery tests go through the HTTP transport) |
+| `pir-native` | Native PIR profile with its `client`, `server` and `test-server` operations, which the golden vectors need |
+| `transparent-shared` | Transparent protocol crate shared by the wallet and the publisher; it has no features |
+| `transparent-server` | Transparent publisher; `testing` (its in-process shard service) |
+| `transparent-engine` | Transparent wallet; `engine` (the recovery engine alone) |
+| `transparent-engine-store` | Transparent wallet; `engine-store`, `engine-conformance` and `reqwest` (the SQLite store, its conformance suite, the reference HTTP adapters and the filter service transport) |
+| `transparent-wallet` | Transparent wallet; `wallet` |
+| `transparent-wallet-sqlite` | Transparent wallet; `sqlite` (`wallet` plus the SQLite apply-and-acknowledge integration and the in-process end-to-end tests) |
+| `transparent-wallet-testing` | Transparent wallet; `sqlite`, `testing` and `reqwest` (the test support applications build their recovery and txid display tests on; the private recovery and discovery tests go through the HTTP transport) |
+| `transparent-compat` | Separate `zakura/transparent-private-compat` workspace: the current Transparent crates against the frozen baseline files under its `baseline/` |
+| `transparent-compat-live` | The same workspace with `live-baseline`: the current crates against the replaced release itself, built from its pinned commit, in both directions |
 | `pir-receiver` | Receiver PIR; `wallet` (which enables the backend's `orchard`; its tests use SQLite with `orchard`) |
 | `receiver-wire` | Library-owned receiver codec with default features disabled |
 | `receiver-pir-server` | Receiver PIR client with the `server` evaluator, which the golden client/evaluator vectors need |
@@ -40,6 +46,15 @@ python3 scripts/dev.py verify
 `default` builds the backend and SQLite crates without Orchard or transparent
 inputs, which `orchard` and `transparent` test, so items used only under those
 features warn as dead code in `default`.
+
+The Transparent wallet and server crates share only `zakura-transparent-private-shared`.
+`verify --only transparent-roles` checks that from fresh external consumers of
+each crate, every one with its own lockfile and Cargo invocation so no test
+feature unifies into it: the protocol crate resolves neither role, no backend,
+SQLite or HTTP stack; a production wallet resolves no server crate and builds
+`zakura-pir-native` without `server`; a server resolves no wallet crate and
+builds it without `client`. Operations of the other role, the wallet's test
+hooks and the server's test service must fail to compile there.
 
 The Python configuration table is authoritative. `-p` replaces the package
 selection; features still come from the selected configuration. Test-name
@@ -121,7 +136,7 @@ proving-key caches and the cargo test runner.
 ### GitHub Actions
 
 Use **Publish crates** from `main` in `zakura-core/wallet-libraries`. The workflow
-uses the exact commit selected by the dispatch, and reads versions from all twenty
+uses the exact commit selected by the dispatch, and reads versions from all seventeen
 crate manifests. It does not create tags, change versions, or publish wallet-pir.
 Successful **Verify wallet libraries** CI for that exact main commit is required;
 wait for it to finish before dispatching the release workflow.
@@ -135,7 +150,7 @@ that each crate has the right publisher configuration.
 
 Before the first run, a repository administrator must create the `crates-io`
 GitHub Environment, allow only the `main` branch, and require approval by `ebfull`
-(self-approval is allowed, matching Zakura). An owner of **each of the twenty crates**
+(self-approval is allowed, matching Zakura). An owner of **each of the seventeen crates**
 must configure this Trusted Publisher on crates.io:
 
 | Setting | Value |
@@ -145,10 +160,10 @@ must configure this Trusted Publisher on crates.io:
 | Workflow filename | `publish-crates.yml` |
 | Environment | `crates-io` |
 
-Use `python3 scripts/publish-crates.py --plan` to list the twenty names and versions.
+Use `python3 scripts/publish-crates.py --plan` to list the seventeen names and versions.
 Check every crate's publisher settings, including names already reserved by a
 placeholder release. Trusted Publishing needs existing crate names.
-Check that the five `zakura-transparent-{native,events,filter,shard,txid-client}`
+Check that the three `zakura-transparent-private-{shared,wallet,server}`
 names and the three receiver names, `zakura-receiver-crypto`,
 `zakura-receiver-directory`, and `zakura-receiver-pir`, are reserved. Reserve any
 missing names and configure each crate's Trusted Publisher before the first run

@@ -15,7 +15,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = {
-    "default": (["--workspace", "--exclude", "zakura-wallet-lib", "--exclude", "zakura-pir-enhance", "--exclude", "zakura-pir-transparent", "--exclude", "zakura-pir-receiver", "--exclude", "zakura-one-time-ivk-scenarios"], []),
+    "default": (["--workspace", "--exclude", "zakura-wallet-lib", "--exclude", "zakura-pir-enhance", "--exclude", "zakura-transparent-private-wallet", "--exclude", "zakura-pir-receiver", "--exclude", "zakura-one-time-ivk-scenarios"], []),
     "orchard": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "test-dependencies"]),
     "transparent": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "test-dependencies", "unstable"]),
     "transparent-import": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "transparent-key-import", "test-dependencies", "unstable"]),
@@ -24,15 +24,25 @@ CONFIGS = {
     "enhance-wallet": (["-p", "zakura-pir-enhance"], ["wallet"]),
     "enhance": (["-p", "zakura-pir-enhance"], []),
     "enhance-testing": (["-p", "zakura-pir-enhance"], ["testing"]),
+    # The native profile with both roles, which its golden vectors exercise.
+    "pir-native": (["-p", "zakura-pir-native"], ["client", "server", "test-server"]),
+    # The Transparent protocol both roles read: it has no features.
+    "transparent-shared": (["-p", "zakura-transparent-private-shared"], []),
+    # The Transparent publisher, with its in-process shard service.
+    "transparent-server": (["-p", "zakura-transparent-private-server"], ["testing"]),
     # The recovery engine alone, and with its SQLite store, the store suite and
-    # the reference HTTP adapters, without the wallet.
-    "transparent-engine": (["-p", "zakura-pir-transparent"], ["engine"]),
-    "transparent-engine-store": (["-p", "zakura-pir-transparent"], ["engine-store", "engine-conformance", "reqwest"]),
-    # The Transparent filter's wallet HTTP client, which no other lane enables.
-    "transparent-filter-client": (["-p", "zakura-transparent-filter"], ["client"]),
-    "transparent-pir": (["-p", "zakura-pir-transparent"], ["wallet"]),
-    "transparent-pir-sqlite": (["-p", "zakura-pir-transparent"], ["sqlite"]),
-    "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing", "reqwest"]),
+    # the reference HTTP adapters (the filter service transport included),
+    # without the wallet.
+    "transparent-engine": (["-p", "zakura-transparent-private-wallet"], ["engine"]),
+    "transparent-engine-store": (["-p", "zakura-transparent-private-wallet"], ["engine-store", "engine-conformance", "reqwest"]),
+    "transparent-wallet": (["-p", "zakura-transparent-private-wallet"], ["wallet"]),
+    "transparent-wallet-sqlite": (["-p", "zakura-transparent-private-wallet"], ["sqlite"]),
+    "transparent-wallet-testing": (["-p", "zakura-transparent-private-wallet"], ["sqlite", "testing", "reqwest"]),
+    # The separate cross-version workspace: the current crates against the frozen
+    # baseline files, and, with `live-baseline`, against the baseline release
+    # itself built from its pinned commit.
+    "transparent-compat": (["--manifest-path", "zakura/transparent-private-compat/Cargo.toml", "--workspace"], []),
+    "transparent-compat-live": (["--manifest-path", "zakura/transparent-private-compat/Cargo.toml", "--workspace"], ["live-baseline"]),
     "pir-receiver": (["-p", "zakura-pir-receiver"], ["wallet"]),
     "receiver-wire": (["-p", "zakura-receiver-crypto", "--no-default-features"], []),
     # The receiver PIR evaluator with its client: runs the golden vectors.
@@ -42,7 +52,7 @@ CONFIGS = {
     # RocksDB reader is tested here; fresh consumers check the feature off.
     "server": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing", "rocksdb"]),
 }
-VERIFY = ("server-graph", "zakura-graph", "wallet-lib-modes", "vendor-ancestry")
+VERIFY = ("server-graph", "zakura-graph", "transparent-roles", "wallet-lib-modes", "vendor-ancestry")
 
 
 def capture(argv: list[str], **kwargs) -> str:

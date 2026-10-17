@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Each role's operations are behind a feature, and the crate has no role by
+  default: `client` gates `prepare_with`, `prepare_dithered`,
+  `prepare_dithered_with`, `decode_cols`, their `Profile` methods and the
+  `NativeSecret` re-export; `server` gates `publish`, `parse_*`, `pack`,
+  `response`, `hint`, `preprocess`, `Entry`, their `Profile` methods and the
+  `NativeKeys` and `NativePreprocessed` re-exports. `test-server` now enables
+  `server`. Parameters, masks, setups, lengths and accepted shapes need neither.
+  Bytes, randomness consumption and validation are unchanged.
+
 ## [0.0.1-rc2] - 2026-10-16
 
 ### Added

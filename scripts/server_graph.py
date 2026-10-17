@@ -94,7 +94,11 @@ def main():
     # wallet-pir release.
     root = metadata(ROOT / "Cargo.toml", no_deps=True)
     errors.extend(problems(root, owned))
-    for lockfile in (ROOT / "Cargo.lock", workspace / "Cargo.lock"):
+    # The Transparent cross-version workspace builds the baseline release from
+    # its pinned wallet-libraries commit, never anything wallet-pir owns.
+    compat = ROOT / "zakura/transparent-private-compat"
+    errors.extend(problems(metadata(compat / "Cargo.toml"), owned))
+    for lockfile in (ROOT / "Cargo.lock", workspace / "Cargo.lock", compat / "Cargo.lock"):
         errors.extend(lock_problems(lockfile, owned))
     if set(root["workspace_members"]) & set(graph["workspace_members"]):
         errors.append("server and ordinary wallet workspace members overlap")

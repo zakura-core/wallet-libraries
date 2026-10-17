@@ -20,11 +20,8 @@ import server_graph  # noqa: E402
 ORDER = (
     "zakura/pir-enhance-types",
     "zakura/pir-native",
-    "zakura/transparent-native",
-    "zakura/transparent-events",
-    "zakura/transparent-filter",
-    "zakura/transparent-shard",
-    "zakura/transparent-txid-client",
+    "zakura/transparent-private-shared",
+    "zakura/transparent-private-server",
     "zakura/receiver-crypto",
     "zakura/receiver-directory",
     "zakura/receiver-pir",
@@ -37,7 +34,7 @@ ORDER = (
     "zakura/pir-enhance",
     "zakura/transaction-status",
     "wallet-lib",
-    "zakura/pir-transparent",
+    "zakura/transparent-private-wallet",
 )
 
 

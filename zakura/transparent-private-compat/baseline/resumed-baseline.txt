@@ -1,0 +1,4 @@
+replayed pass: PassReport { state: Ready, progress: Progress { covered_through: 3428392, outcome: Stalled }, commits: 3, retired: 1, publication_changed: false, failed_entries: FailedEntries { entries: 1, held: 1 } }
+replayed settlement: Ok(Some(ApplyStats { applied: 3, qualified: 3, window_grew: false }))
+settled pass: PassReport { state: Ready, progress: Progress { covered_through: 3428392, outcome: Stalled }, commits: 3, retired: 0, publication_changed: false, failed_entries: FailedEntries { entries: 1, held: 1 } }
+settled settlement: Ok(Some(ApplyStats { applied: 3, qualified: 3, window_grew: false }))

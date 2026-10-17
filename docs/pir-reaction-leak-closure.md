@@ -109,7 +109,7 @@ was a hash of the txid and attempt count.
 - Jitter comes from the wallet's random source for every outcome, so tests
   can seed it.
 - HTTP 4xx refusals (`TxidError::Refused`) move from `Protocol` to
-  `Unavailable` in `deferral` (`zakura/pir-transparent/src/txid/display_facts.rs:108`).
+  `Unavailable` in `deferral` (`zakura/transparent-private-wallet/src/txid/display_facts.rs:108`).
   The server refuses before it evaluates the query.
 - A row's third content failure marks it given up. It leaves both the due list
   and the parked list. Without public authority its receipt reads as
@@ -142,7 +142,7 @@ Tests:
 
 ### B. One recovery pass per sync
 
-`PassPlan::next` (`zakura/pir-transparent/src/plan.rs:225`) starts another pass
+`PassPlan::next` (`zakura/transparent-private-wallet/src/plan.rs:225`) starts another pass
 at once when a settled commit grew the address window, when the watched
 addresses changed, or when the pass ran out of budget (`Retry::More`). A
 service that forges a receive near the end of the window triggers that next
@@ -302,7 +302,7 @@ bump that follows. Its own sync loop must also stop reacting to reply content
 - No padding of page counts. Change C sends dummies only to complete a shape
   the wallet had already committed to.
 - No change to Enhance query timing, status polling, or broadcast.
-- No change to import discovery (`zakura/pir-transparent/src/discover.rs`). Its
+- No change to import discovery (`zakura/transparent-private-wallet/src/discover.rs`). Its
   extra passes run once per import, which the service can see anyway.
 - No check against a service that sets every filter bit to make all watched
   scripts match (see change B), and no defence against one that publishes fake
