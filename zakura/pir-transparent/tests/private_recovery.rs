@@ -1983,6 +1983,41 @@ impl Fixture {
             .collect()
     }
 
+    /// Page sweeps the service received from the `from`th request on, in a shard of
+    /// `tables` page tables. Page cover sends whole sweeps over every page table of
+    /// a shard of at most three, so each sweep queries each table once.
+    fn page_sweeps(&self, from: usize, tables: u32) -> usize {
+        let queries = self.pages_queries(from);
+        let all: BTreeSet<u32> = (0..tables).collect();
+        assert_eq!(queries.len() % all.len(), 0, "whole sweeps: {queries:?}");
+        for sweep in queries.chunks(all.len()) {
+            assert_eq!(
+                sweep.iter().copied().collect::<BTreeSet<_>>(),
+                all,
+                "{queries:?}"
+            );
+        }
+        queries.len() / all.len()
+    }
+
+    /// What the companion holds of the history: the receives it recovered, and
+    /// the bytes of fragments its unfinished walks saved. A pass that reads any
+    /// of the history raises one or the other.
+    fn history_read(&self) -> (i64, i64) {
+        let db = self.companion_db();
+        let receives = db
+            .query_row("SELECT COUNT(*) FROM receives", [], |row| row.get(0))
+            .unwrap();
+        let fragments = db
+            .query_row(
+                "SELECT COALESCE(SUM(length(fragments)), 0) FROM pending_work",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (receives, fragments)
+    }
+
     /// Rows in the companion's run cache.
     fn cached_runs(&self) -> i64 {
         self.companion_db()
@@ -2019,11 +2054,8 @@ fn a_history_across_page_shards_recovers_and_catch_up_stops_at_the_cached_run() 
         outpoints
     };
     assert_eq!(f.spendable().unwrap(), expected);
-    assert_eq!(
-        f.pages_queries(0),
-        vec![1, 0],
-        "the head run, then the older one"
-    );
+    // The head run, then the older one: two sweeps over both page tables.
+    assert_eq!(f.page_sweeps(0, 2), 2, "one sweep per run");
     // Only the run in the sealed page shard is final, so only it is cached.
     assert_eq!(f.cached_runs(), 1);
     f.assert_private(&[0, 1, 2]);
@@ -2041,10 +2073,11 @@ fn a_history_across_page_shards_recovers_and_catch_up_stops_at_the_cached_run() 
         outpoints
     };
     assert_eq!(f.spendable().unwrap(), expected);
-    // pages-2's head and pages-1's run, now sealed; pages-0's is cached.
+    // pages-2's head and pages-1's run, now sealed; pages-0's is cached. Two
+    // sweeps over the three page tables, where a fresh wallet below pays four.
     assert_eq!(
-        f.pages_queries(seen),
-        vec![2, 1],
+        f.page_sweeps(seen, 3),
+        2,
         "the walk stops at the cached run"
     );
     assert_eq!(f.cached_runs(), 2);
@@ -2060,16 +2093,26 @@ fn a_history_across_page_shards_recovers_and_catch_up_stops_at_the_cached_run() 
     assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
     fresh.activate();
     assert_eq!(fresh.spendable().unwrap(), expected);
-    assert_eq!(fresh.pages_queries(0), vec![2, 1, 0]);
+    // Three runs, padded to four sweeps.
+    assert_eq!(fresh.page_sweeps(0, 3), 4);
     fresh.assert_private(&[0, 1, 2]);
 }
 
 /// A real page lookup respects small query and byte budgets and resumes from
 /// SQLite after every pass, including midway through a run with many fragments.
+/// Under page cover a pass stops between sweeps, here of the one page table that
+/// holds rows: one query is one sweep, the query budget fits the directory and
+/// two sweeps, and the byte budgets fit the page setup and one or two sweeps,
+/// never the run's round of the other fragments. Every pass keeps what it read,
+/// so each reads more and the history finishes.
 #[test]
 fn small_page_budgets_recover_a_long_history_across_restarts() {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
-    for (queries, private_bytes) in [(1, 96 << 20), (256, 1)] {
+    for (queries, private_bytes) in [
+        (4, 96 << 20),
+        (256, TIGHT_PAGE_BYTES),
+        (256, SMALL_PAGE_BYTES),
+    ] {
         let birthday = H0 + 600;
         let mut f = Fixture::new(birthday, H0 + 619);
         f.trust_service();
@@ -2103,6 +2146,7 @@ fn small_page_budgets_recover_a_long_history_across_restarts() {
         f.pass().unwrap();
         let mut complete = false;
         let mut saved_fragments = false;
+        let mut read = f.history_read();
         for _ in 0..40 {
             f.companion = None;
             let mut bounded = config(f.account);
@@ -2120,9 +2164,10 @@ fn small_page_budgets_recover_a_long_history_across_restarts() {
             );
             let seen = f.server.requests().len();
             let pass = f.pass().unwrap();
+            let sent = f.pages_queries(seen);
             assert!(
-                f.pages_queries(seen).len() <= 1,
-                "a one-query or one-byte pass dispatched more than one page query"
+                sent.len() as u64 <= queries,
+                "a pass sends no more page queries than its budget: {sent:?}"
             );
             saved_fragments |= f
                 .companion_db()
@@ -2133,6 +2178,12 @@ fn small_page_budgets_recover_a_long_history_across_restarts() {
                 )
                 .unwrap()
                 > 0;
+            let now = f.history_read();
+            assert!(
+                now > read,
+                "{queries} queries, {private_bytes} bytes: a pass read nothing more: {read:?}"
+            );
+            read = now;
             if pass.batch.progress.outcome == Outcome::Complete {
                 complete = true;
                 break;
@@ -2150,6 +2201,14 @@ fn small_page_budgets_recover_a_long_history_across_restarts() {
         f.assert_private(&[0, 1, 2]);
     }
 }
+
+/// Byte budgets for [`small_page_budgets_recover_a_long_history_across_restarts`]:
+/// the page setup and two sweeps, and the page setup and one. Neither fits the
+/// run's round of its other fragments, which a pass once had to fit whole: at
+/// 80,000 bytes the walk then sent the round's first sweep in every pass and
+/// never finished.
+const SMALL_PAGE_BYTES: u64 = 120_000;
+const TIGHT_PAGE_BYTES: u64 = 80_000;
 
 /// The last height the re-cut tests publish, and the wallet's tip.
 const RECUT_TIP: u64 = H0 + 549;
