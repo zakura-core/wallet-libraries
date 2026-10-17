@@ -85,7 +85,6 @@ schemerz.workspace = true
 schemerz-rusqlite.workspace = true
 time.workspace = true
 uuid = { workspace = true, features = ["v4"] }
-regex = { workspace = true }
 
 # Dependencies used internally:
 # (Breaking upgrades to these are usually backwards-compatible, but check MSRVs.)
@@ -103,6 +102,7 @@ rand_chacha = { workspace = true, optional = true }
 tempfile = { version = "3.5.0", optional = true }
 
 [dev-dependencies]
+regex.workspace = true
 ambassador.workspace = true
 assert_matches.workspace = true
 bls12_381.workspace = true

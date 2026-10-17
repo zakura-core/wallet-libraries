@@ -3,7 +3,6 @@
 use std::{borrow::BorrowMut, collections::HashSet, fmt, rc::Rc};
 
 use rand_core::Rng;
-use regex::Regex;
 use schemerz::{Migration as _, Migrator, MigratorError};
 use schemerz_rusqlite::{RusqliteAdapter, RusqliteMigration};
 use secrecy::SecretVec;
@@ -765,28 +764,111 @@ fn verify_sqlite_version_compatibility(
     let sqlite_version =
         conn.query_row("SELECT sqlite_version()", [], |row| row.get::<_, String>(0))?;
 
-    let version_re = Regex::new(r"^(?<major>[0-9]+)\.(?<minor>[0-9]+).*$").unwrap();
-    let captures =
-        version_re
-            .captures(&sqlite_version)
-            .ok_or(WalletMigrationError::DatabaseNotSupported(
-                "Unknown".to_owned(),
-            ))?;
-    let parse_version_part = |part: &str| {
-        captures[part].parse::<u32>().map_err(|_| {
-            WalletMigrationError::CorruptedData(format!(
-                "Cannot decode SQLite {} version component {}",
-                part, &captures[part]
-            ))
-        })
-    };
-    let major = parse_version_part("major")?;
-    let minor = parse_version_part("minor")?;
+    let (major, minor) = parse_sqlite_version(&sqlite_version)?;
 
     if major != SQLITE_MAJOR_VERSION || minor < MIN_SQLITE_MINOR_VERSION {
         Err(WalletMigrationError::DatabaseNotSupported(sqlite_version))
     } else {
         Ok(())
+    }
+}
+
+/// Reads the leading major/minor numbers, accepting SQLite's patch/build suffix.
+fn parse_sqlite_version(version: &str) -> Result<(u32, u32), WalletMigrationError> {
+    let unknown = || WalletMigrationError::DatabaseNotSupported("Unknown".to_owned());
+    let (major, rest) = version.split_once('.').ok_or_else(unknown)?;
+    let minor_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+    // The previous version check accepted any suffix except a newline.
+    if major.is_empty()
+        || !major.bytes().all(|b| b.is_ascii_digit())
+        || minor_len == 0
+        || rest.contains('\n')
+    {
+        return Err(unknown());
+    }
+    let parse = |part: &str, value: &str| {
+        value.parse::<u32>().map_err(|_| {
+            WalletMigrationError::CorruptedData(format!(
+                "Cannot decode SQLite {} version component {}",
+                part, value
+            ))
+        })
+    };
+    Ok((parse("major", major)?, parse("minor", &rest[..minor_len])?))
+}
+
+#[cfg(test)]
+mod sqlite_version_tests {
+    use regex::Regex;
+
+    use super::{WalletMigrationError, parse_sqlite_version};
+
+    #[test]
+    fn sqlite_version_reads_major_minor_and_accepts_suffixes() {
+        for version in ["3.35", "3.35.0", "3.35.0-custom", "003.035.1", "3.35\r"] {
+            assert_eq!(parse_sqlite_version(version).unwrap(), (3, 35));
+        }
+        assert_eq!(parse_sqlite_version("4.0.1").unwrap(), (4, 0));
+        assert_eq!(parse_sqlite_version("3.34.9").unwrap(), (3, 34));
+    }
+
+    // Keep the old expression as an independent acceptance/error oracle. Regex
+    // remains a development dependency for schema comparison tests as well.
+    fn regex_version(regex: &Regex, version: &str) -> Result<(u32, u32), WalletMigrationError> {
+        let captures = regex
+            .captures(version)
+            .ok_or_else(|| WalletMigrationError::DatabaseNotSupported("Unknown".to_owned()))?;
+        let parse = |part: &str| {
+            captures[part].parse::<u32>().map_err(|_| {
+                WalletMigrationError::CorruptedData(format!(
+                    "Cannot decode SQLite {} version component {}",
+                    part, &captures[part]
+                ))
+            })
+        };
+        Ok((parse("major")?, parse("minor")?))
+    }
+
+    #[test]
+    fn sqlite_version_matches_previous_parser_and_errors() {
+        let regex = Regex::new(r"^(?<major>[0-9]+)\.(?<minor>[0-9]+).*$").unwrap();
+        let components = [
+            "",
+            "0",
+            "3",
+            "35",
+            "0035",
+            "+3",
+            "-3",
+            " 3",
+            "٣",
+            "３",
+            "4294967295",
+            "4294967296",
+            "999999999999999999999999999999",
+        ];
+        let suffixes = [
+            "", ".1", "-custom", " extra", "β", "\0", "\r", "\n", "\nextra", "\u{2028}",
+        ];
+        for major in components {
+            for minor in components {
+                for suffix in suffixes {
+                    let version = format!("{major}.{minor}{suffix}");
+                    assert_eq!(
+                        parse_sqlite_version(&version).map_err(|error| format!("{error:?}")),
+                        regex_version(&regex, &version).map_err(|error| format!("{error:?}")),
+                        "version {version:?}",
+                    );
+                }
+            }
+        }
+        for version in ["", "3", ".", "3\n.35", "3.35\n", "3.35.1\n"] {
+            assert_eq!(
+                parse_sqlite_version(version).map_err(|error| format!("{error:?}")),
+                regex_version(&regex, version).map_err(|error| format!("{error:?}")),
+                "version {version:?}",
+            );
+        }
     }
 }
 
