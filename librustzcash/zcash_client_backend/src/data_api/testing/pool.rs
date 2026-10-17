@@ -3563,6 +3563,9 @@ where
 
     let (h, _) = st.generate_next_block_including(txid1);
     st.scan_cached_blocks(h, 1);
+    // Include the new payment in the next spending anchor.
+    let (anchor_ready_height, _) = st.generate_empty_block();
+    st.scan_cached_blocks(anchor_ready_height, 1);
 
     assert_eq!(st.get_total_balance(account2), bal_2);
     assert_eq!(st.get_total_balance(account1), bal_1);
@@ -3607,7 +3610,11 @@ where
     let dfvk3 = T::sk_to_fvk(T::usk_to_sk(&usk3));
 
     // Creating a new account with the original birthday forces a rescan.
-    st.scan_cached_blocks(birthday.height(), 2);
+    let tip = st.latest_cached_block().unwrap().height();
+    st.scan_cached_blocks(
+        birthday.height(),
+        usize::try_from(tip - birthday.height()).unwrap() + 1,
+    );
 
     let bal_3 = Zatoshis::from_u64(20000).unwrap();
     let addr3 = T::fvk_default_address(&dfvk3);
