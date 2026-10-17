@@ -145,11 +145,40 @@ fn skipped() -> BTreeSet<usize> {
         .unwrap_or_default()
 }
 
+/// How `ONE_TIME_IVK_FUZZ_PROFILE` biases the worlds. Its name joins the scenario ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Profile {
+    Default,
+    /// Restores after spends, with the directory down or the app stopping at first, so
+    /// discovery finds payments behind the scan (the late path and the spend journal).
+    Late,
+    /// Every world reorgs.
+    Reorg,
+}
+
+impl Profile {
+    /// The profile `ONE_TIME_IVK_FUZZ_PROFILE` names.
+    fn from_env() -> Self {
+        match std::env::var("ONE_TIME_IVK_FUZZ_PROFILE").as_deref() {
+            Ok("late") => Self::Late,
+            Ok("reorg") => Self::Reorg,
+            Ok("") | Err(_) => Self::Default,
+            Ok(other) => panic!("unknown ONE_TIME_IVK_FUZZ_PROFILE {other}"),
+        }
+    }
+}
+
 /// The scenario seed `seed` generates.
 fn scenario(seed: u64) -> Scenario {
-    let plan = Plan::generate(seed);
+    let profile = Profile::from_env();
+    let plan = Plan::generate(seed, profile);
+    let name = match profile {
+        Profile::Default => String::new(),
+        Profile::Late => "late-".into(),
+        Profile::Reorg => "reorg-".into(),
+    };
     Scenario {
-        id: format!("Z-fuzz-{seed:06}"),
+        id: format!("Z-fuzz-{name}{seed:06}"),
         group: FUZZ,
         title: format!("Randomized world, seed {seed}"),
         summary: plan.notes.join("; "),
@@ -360,7 +389,7 @@ struct Plan {
 
 impl Plan {
     /// The world seed `seed` generates.
-    fn generate(seed: u64) -> Self {
+    fn generate(seed: u64, profile: Profile) -> Self {
         let mut r = Rng::new(seed);
         let horizon = r.weighted(&[(8 * HOUR, 30), (2 * DAY, 40), (5 * DAY, 20), (35 * DAY, 10)]);
         let fresh = r.chance(40);
@@ -371,7 +400,7 @@ impl Plan {
         };
         let a2 = r.chance(25);
         let read_lag = r.weighted(&[(MINUTE, 85), (30 * MINUTE, 10), (6 * HOUR, 5)]);
-        let reorg = r.chance(25);
+        let reorg = profile == Profile::Reorg || r.chance(25);
         let mut s = Schedule::new();
         let mut notes = vec![format!("horizon {}", span_of(horizon))];
         if fresh {
@@ -396,7 +425,11 @@ impl Plan {
                 if fresh { ", fresh" } else { "" }
             ));
         }
-        let count = r.weighted(&[(1usize, 10), (2, 25), (3, 30), (4, 20), (6, 15)]);
+        let count = if profile == Profile::Late {
+            r.weighted(&[(3usize, 40), (4, 30), (6, 30)])
+        } else {
+            r.weighted(&[(1usize, 10), (2, 25), (3, 30), (4, 20), (6, 15)])
+        };
         let mut swaps = Vec::new();
         let mut payouts: Vec<(i64, Vec<(usize, u64)>)> = Vec::new();
         for _ in 0..count {
@@ -459,7 +492,12 @@ impl Plan {
             .max(horizon);
         let end = last + 2 * HOUR;
         // Seed restores, sometimes just after a payout.
-        let restores = r.weighted(&[(0usize, 35), (1, 45), (2, 20)]);
+        let late = profile == Profile::Late;
+        let restores = if late {
+            r.weighted(&[(1usize, 60), (2, 40)])
+        } else {
+            r.weighted(&[(0usize, 35), (1, 45), (2, 20)])
+        };
         let mut created = vec![(A, 0)];
         if a2 {
             created.push((A2, 0));
@@ -470,7 +508,7 @@ impl Plan {
                 let i = r.range(0, payouts.len() as i64) as usize;
                 payouts[i].0 + r.pick(&[BLOCK_SECS, 3 * BLOCK_SECS, HOUR])
             } else {
-                r.range(20 * MINUTE, horizon)
+                r.range(if late { horizon / 2 } else { 20 * MINUTE }, horizon)
             };
             let between = Birthday::Between(r.range(10, 95) as u32);
             let birthday = r.weighted(&[
@@ -496,7 +534,12 @@ impl Plan {
                 NAMES[slot],
                 span_of(at)
             );
-            match r.weighted(&[(0, 60), (1, 15), (2, 10), (3, 15)]) {
+            let trouble = if late {
+                [(0, 0), (1, 70), (2, 0), (3, 30)]
+            } else {
+                [(0, 60), (1, 15), (2, 10), (3, 15)]
+            };
+            match r.weighted(&trouble) {
                 1 => {
                     let len = r.range(10 * MINUTE, 6 * HOUR);
                     s.at(at, Step::Directory { slot, up: false });
@@ -529,11 +572,40 @@ impl Plan {
             }
             notes.push(note);
             created.push((slot, at));
+            // The restored device quotes incoming swaps of its own.
+            if r.chance(40) {
+                for _ in 0..r.weighted(&[(1usize, 70), (2, 30)]) {
+                    let quote_at = at + r.range(30 * MINUTE, DAY);
+                    if quote_at >= end - HOUR {
+                        continue;
+                    }
+                    let id = swaps.len();
+                    let deadline_in = r.pick(&[20 * MINUTE, HOUR, 3 * HOUR]);
+                    let wallet = W { slot, acct: 0 };
+                    swaps.push(SwapPlan {
+                        kind: Kind::Incoming,
+                        wallet,
+                        deadline_in,
+                    });
+                    let note =
+                        plan_incoming(&mut r, &mut s, &mut payouts, id, quote_at, deadline_in);
+                    notes.push(format!(
+                        "I-swap {id} on {} at +{}, deadline {}: {note}",
+                        wallet.name(),
+                        span_of(quote_at),
+                        span_of(deadline_in)
+                    ));
+                }
+            }
         }
         // Spends of one-time notes, through ordinary sends.
-        let spends = r.weighted(&[(0usize, 50), (1, 25), (2, 17), (3, 8)]);
+        let spends = if late {
+            r.weighted(&[(2usize, 50), (3, 50)])
+        } else {
+            r.weighted(&[(0usize, 50), (1, 25), (2, 17), (3, 8)])
+        };
         for _ in 0..spends {
-            let at = r.range(horizon / 4, end);
+            let at = r.range(horizon / 4, if late { horizon / 2 } else { end });
             let candidates: Vec<usize> = created
                 .iter()
                 .filter(|(slot, t)| *t < at && *slot != A2)
@@ -2361,8 +2433,10 @@ impl<'p> Exec<'p> {
             let from = rt.funded_height.unwrap_or(rt.quoted_height);
             let limit = rt.deadline + COMPLETION_LIMIT_SECS - DAY;
             if h > from && t < limit && self.open_for(i) {
+                // Its own discovery may list the payment first (a fresh account runs a
+                // pass once issuance registers a seen key for a lookup).
                 return Some((
-                    Class::FoundLive,
+                    Class::FoundAutomatically,
                     format!(
                         "{} quoted {} and scans it until a final status or 30 days past the deadline",
                         w.name(),
@@ -2420,7 +2494,7 @@ impl<'p> Exec<'p> {
             && p.key.index < reach
         {
             return Some((
-                Class::FoundLive,
+                Class::FoundAutomatically,
                 format!(
                     "NEAR was given {} within a day of {}'s first discovery pass, so the restored key scans for 24 hours",
                     p.key.label(),
