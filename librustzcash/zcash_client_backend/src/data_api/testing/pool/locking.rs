@@ -205,6 +205,8 @@ pub fn note_locking_height_boundary<T: ShieldedPoolTester>(
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(50000);
     let (_, _, _) = st.add_a_single_note_checking_balance(value);
+    // Include the funding notes in the anchor before testing lock eligibility.
+    st.add_empty_blocks(1);
 
     let account = st.test_account().cloned().unwrap();
     let account_id = account.id();
@@ -271,6 +273,8 @@ pub fn clear_locked_outputs<T: ShieldedPoolTester>(
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(50000);
     let (_, _, _) = st.add_a_single_note_checking_balance(value);
+    // Include the funding notes in the anchor before testing lock eligibility.
+    st.add_empty_blocks(1);
 
     let account = st.test_account().cloned().unwrap();
     let account_id = account.id();
@@ -472,6 +476,8 @@ pub fn lock_expiry_restores_spendability<T: ShieldedPoolTester>(
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(50000);
     let (_, _, _) = st.add_a_single_note_checking_balance(value);
+    // Include the funding notes in the anchor before testing lock eligibility.
+    st.add_empty_blocks(1);
 
     let account_id = st.test_account().unwrap().id();
     let tip = st.latest_cached_block().unwrap().height();
@@ -566,6 +572,8 @@ pub fn lock_conflict_and_batch_atomicity<T: ShieldedPoolTester>(
     let value1 = Zatoshis::const_from_u64(60000);
     let value2 = Zatoshis::const_from_u64(40000);
     st.add_notes_checking_balance([[value1, value2]]);
+    // Include the funding notes in the anchor before testing lock eligibility.
+    st.add_empty_blocks(1);
 
     let account_id = st.test_account().unwrap().id();
     let far_expiry = BlockHeight::from(u32::MAX);
@@ -964,6 +972,8 @@ pub fn check_note_locking_model<T: ShieldedPoolTester>(
         Zatoshis::const_from_u64(80000),
     ];
     st.add_notes_checking_balance([values]);
+    // Include the funding notes in the anchor before testing lock eligibility.
+    st.add_empty_blocks(1);
     let total = values
         .iter()
         .try_fold(Zatoshis::ZERO, |acc, v| acc + *v)

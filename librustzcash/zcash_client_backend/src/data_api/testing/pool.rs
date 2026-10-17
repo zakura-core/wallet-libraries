@@ -3239,7 +3239,7 @@ pub fn spend_fails_on_unverified_notes<T: ShieldedPoolTester>(
         summary.as_ref().and_then(|s| s.progress().recovery()),
         no_recovery
     );
-    assert_eq!(summary.map(|s| s.progress().scan()), Some(Ratio::new(3, 3)));
+    assert_eq!(summary.map(|s| s.progress().scan()), Some(Ratio::new(2, 2)));
 
     // Spend fails because there are insufficient verified notes
     let extsk2 = T::sk(&[0xf5; 32]);
@@ -3885,7 +3885,8 @@ pub fn external_address_change_spends_detected_in_restore_from_seed<T: ShieldedP
         &dfvk2,
     ));
 
-    st.scan_cached_blocks(st.sapling_activation_height(), 2);
+    let from = st.sapling_activation_height();
+    st.scan_cached_blocks(from, usize::try_from(h - from).unwrap() + 1);
 
     assert_eq!(st.get_total_balance(account2), amount_sent);
     assert_eq!(st.get_total_balance(account1), amount_left);
@@ -5421,10 +5422,18 @@ where
     // Scan the cache
     st.scan_cached_blocks(h, 2);
 
-    // Spendable balance should reflect both received notes
+    // Only the first note is included in the selected anchor.
     assert_eq!(
         st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+        value
+    );
+    assert_eq!(
+        st.get_total_balance(account.id()),
         (value + value2).unwrap()
+    );
+    assert_eq!(
+        st.get_pending_shielded_balance(account.id(), ConfirmationsPolicy::MIN),
+        value2
     );
 
     // "Rewind" to height of last scanned block (this is a no-op)
@@ -5433,30 +5442,49 @@ where
     // Spendable balance should be unaltered
     assert_eq!(
         st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
-        (value + value2).unwrap()
-    );
-
-    // Rewind so that one block is dropped
-    st.wallet_mut().truncate_to_height(h).unwrap();
-
-    // Spendable balance should only contain the first received note;
-    // the rest should be pending.
-    assert_eq!(
-        st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
         value
+    );
+    assert_eq!(
+        st.get_total_balance(account.id()),
+        (value + value2).unwrap()
     );
     assert_eq!(
         st.get_pending_shielded_balance(account.id(), ConfirmationsPolicy::MIN),
         value2
     );
 
+    // Rewind so that one block is dropped
+    st.wallet_mut().truncate_to_height(h).unwrap();
+
+    // Neither note is included in the anchor after rewinding.
+    assert_eq!(
+        st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+        Zatoshis::ZERO
+    );
+    assert_eq!(
+        st.get_pending_shielded_balance(account.id(), ConfirmationsPolicy::MIN),
+        (value + value2).unwrap()
+    );
+    assert_eq!(
+        st.get_total_balance(account.id()),
+        (value + value2).unwrap()
+    );
+
     // Scan the cache again
     st.scan_cached_blocks(h, 2);
 
-    // Account balance should again reflect both received notes
+    // Rescanning includes the first note in the anchor again.
     assert_eq!(
         st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+        value
+    );
+    assert_eq!(
+        st.get_total_balance(account.id()),
         (value + value2).unwrap()
+    );
+    assert_eq!(
+        st.get_pending_shielded_balance(account.id(), ConfirmationsPolicy::MIN),
+        value2
     );
 }
 
