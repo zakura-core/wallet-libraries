@@ -76,8 +76,8 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # The end-to-end tests publish shards and serve them in process with the real
 # publisher and native evaluation; the native round trips answer queries with
 # the server's operations. Tests only: the wallet never depends on the server.
-zakura-transparent-private-server = { path = "../transparent-private-server", features = ["testing"] }
-zakura-pir-native = { path = "../pir-native", features = ["client", "server"] }
+zakura-transparent-private-server = { version = "=0.0.1-rc0", path = "../transparent-private-server", features = ["testing"] }
+zakura-pir-native = { version = "=0.0.1-rc2", path = "../pir-native", features = ["client", "server"] }
 axum = "0.7"
 tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
 regex = { workspace = true, features = ["std"] }

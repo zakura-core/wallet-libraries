@@ -122,7 +122,7 @@ pub enum StopCause {
 ///
 /// ```no_run
 /// # use rusqlite::Connection;
-/// # use crate::{
+/// # use zakura_transparent_private_wallet::{
 /// #     Companion, HttpExchange, PassLimits, PassPlan, Step, Trust, Ungated, WalletChain,
 /// # };
 /// # use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerRead as _;

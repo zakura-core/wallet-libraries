@@ -36,7 +36,7 @@ use crate::http::HttpExchange;
 ///
 /// ```no_run
 /// use std::time::{Instant, SystemTime};
-/// use crate::{
+/// use zakura_transparent_private_wallet::{
 ///     DetailAnswer, DetailRun, DetailStep, HttpExchange, TxidDisplayService, TxidError,
 /// };
 /// use zcash_client_backend::data_api::transparent_ledger::TransparentDetailWrite;
