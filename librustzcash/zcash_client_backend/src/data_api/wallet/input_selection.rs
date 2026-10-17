@@ -1019,7 +1019,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                     }
 
                     return Err(InputSelectorError::Selection(
-                        GreedyInputSelectorError::UnsupportedAddress(Box::new(addr)),
+                        GreedyInputSelectorError::UnsupportedAddress(addr),
                     ));
                 }
             }
@@ -1747,9 +1747,17 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
 
             let new_available = shielded_inputs.total_value()?;
             if new_available <= prior_available && !transparent_inputs_changed {
+                // `amount_required` was computed over the transparent inputs as well as the
+                // notes, so the value reported against it must count both.
+                let transparent_available = transparent_inputs
+                    .iter()
+                    .map(|input| input.value())
+                    .sum::<Option<Zatoshis>>()
+                    .ok_or(BalanceError::Overflow)?;
                 return Err(InputSelectorError::InsufficientFunds {
                     required: amount_required,
-                    available: new_available,
+                    available: (new_available + transparent_available)
+                        .ok_or(BalanceError::Overflow)?,
                 });
             } else {
                 // If the set of selected shielded notes has grown, or the transparent
@@ -2086,7 +2094,7 @@ where
         && let Address::Unified(addr) = &recipient_address
     {
         return Err(InputSelectorError::Selection(
-            GreedyInputSelectorError::UnsupportedAddress(Box::new(addr.clone())),
+            GreedyInputSelectorError::UnsupportedAddress(addr.clone()),
         ));
     }
 
@@ -2324,7 +2332,7 @@ fn build_proposal<FeeRuleT: FeeRule + Clone, NoteRef>(
         .expect("removing payments from a TransactionRequest preserves validity");
 
         let mut steps = vec![];
-        steps.push(Step::from_parts(
+        let step0 = Step::from_parts(
             &[],
             tr0,
             payment_pools,
@@ -2336,11 +2344,12 @@ fn build_proposal<FeeRuleT: FeeRule + Clone, NoteRef>(
             false,
             #[cfg(feature = "orchard")]
             ironwood_active,
-        )?);
+        )?;
+        steps.push(step0);
 
         let tr1 =
             TransactionRequest::new(ephemeral_step.tr1_payments).expect("valid by construction");
-        steps.push(Step::from_parts(
+        let step1 = Step::from_parts(
             &steps,
             tr1,
             ephemeral_step.tr1_payment_pools,
@@ -2352,7 +2361,8 @@ fn build_proposal<FeeRuleT: FeeRule + Clone, NoteRef>(
             false,
             #[cfg(feature = "orchard")]
             ironwood_active,
-        )?);
+        )?;
+        steps.push(step1);
 
         return Proposal::multi_step(
             fee_rule.clone(),
@@ -2762,7 +2772,7 @@ where
         }
         Address::Unified(ua) if ua.has_sapling() => Ok(PoolType::SAPLING),
         Address::Unified(ua) => Err(InputSelectorError::Selection(
-            GreedyInputSelectorError::UnsupportedAddress(Box::new(ua)),
+            GreedyInputSelectorError::UnsupportedAddress(ua),
         )),
         Address::Transparent(_) | Address::Tex(_) => Err(InputSelectorError::Proposal(
             ProposalError::ShieldingRequiresShieldedRecipient,
