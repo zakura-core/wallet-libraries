@@ -1727,7 +1727,7 @@ mod tests {
 
         #[test]
         fn witnesses() {
-            super::check_witnesses(None, new_tree::<OrchardPoolTester>);
+            super::check_witnesses(new_tree::<OrchardPoolTester>);
         }
 
         #[test]
@@ -1873,7 +1873,7 @@ mod tests {
 
     #[test]
     fn sapling_witnesses() {
-        check_witnesses(None, new_tree::<SaplingPoolTester>);
+        check_witnesses(new_tree::<SaplingPoolTester>);
     }
 
     #[test]
