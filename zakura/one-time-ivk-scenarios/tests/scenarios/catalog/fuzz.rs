@@ -570,6 +570,8 @@ impl Plan {
                 }
                 _ => {}
             }
+            // The app syncs at once, after any trouble above takes hold.
+            s.at(at, Step::Sync(slot));
             notes.push(note);
             created.push((slot, at));
             // The restored device quotes incoming swaps of its own.
@@ -2166,7 +2168,6 @@ impl<'p> Exec<'p> {
                 u32::from(height)
             ),
         );
-        self.sync(ctx, slot);
     }
 
     /// A reorg `depth` blocks deep. The wallets' transactions it removes are mined again
@@ -2344,6 +2345,31 @@ impl<'p> Exec<'p> {
             }
         }
         self.judge(ctx);
+        // What the world exercised, for the report and coverage counts.
+        for slot in 0..4 {
+            let Some(dev) = self.slots[slot] else {
+                continue;
+            };
+            let late: i64 = ctx
+                .get(dev)
+                .conn()
+                .query_row("SELECT COUNT(*) FROM harness_late", [], |r| r.get(0))
+                .expect("late candidates");
+            let rewinds = ctx.get(dev).rewinds.len();
+            ctx.metric(
+                format!("{} late candidates", NAMES[slot]),
+                late as f64,
+                "payments",
+            );
+            ctx.metric(
+                format!("{} rewinds", NAMES[slot]),
+                rewinds as f64,
+                "rewinds",
+            );
+        }
+        let passes: usize = self.passes.values().map(Vec::len).sum();
+        ctx.metric("completed discovery passes", passes as f64, "passes");
+        ctx.metric("one-time payments", self.pays.len() as f64, "payments");
     }
 
     /// Judges every payment for every wallet account of its seed account.

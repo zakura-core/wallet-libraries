@@ -258,7 +258,8 @@ impl Device {
         let clock = chain.clock(skew);
         let mut db = open(&path, &clock, 0);
         init_wallet_db(&mut db, Some(SecretVec::new(seed.to_vec()))).expect("the schema migrates");
-        // Records every directory candidate, which the wallet deletes once it settles.
+        // Records every directory candidate, which the wallet deletes once it settles, and
+        // which of them were late (behind the scan) rather than scan hints.
         Connection::open(&path)
             .and_then(|conn| {
                 conn.execute_batch(
@@ -268,6 +269,16 @@ impl Device {
                          ON ironwood_one_time_payment_recovery BEGIN
                          INSERT OR IGNORE INTO harness_candidates
                              VALUES (NEW.txid, NEW.action_index);
+                     END;
+                     CREATE TABLE harness_late (txid BLOB, action_index INTEGER,
+                         PRIMARY KEY (txid, action_index));
+                     CREATE TRIGGER harness_late_insert AFTER INSERT
+                         ON ironwood_one_time_payment_recovery WHEN NEW.scan_hint = 0 BEGIN
+                         INSERT OR IGNORE INTO harness_late VALUES (NEW.txid, NEW.action_index);
+                     END;
+                     CREATE TRIGGER harness_late_update AFTER UPDATE OF scan_hint
+                         ON ironwood_one_time_payment_recovery WHEN NEW.scan_hint = 0 BEGIN
+                         INSERT OR IGNORE INTO harness_late VALUES (NEW.txid, NEW.action_index);
                      END;",
                 )
             })
