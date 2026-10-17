@@ -119,14 +119,21 @@ class PublishingTests(unittest.TestCase):
                      for directory in workspace["members"]]
         members = {package["name"] for package in manifests if package.get("publish") is not False}
         self.assertEqual({p["name"] for p in packages}, members)
-        # The temporary IPIR cleanup pin still declares its registry family;
-        # no service-owned package may become a publication prerequisite.
-        self.assertEqual(upstream, [
+        # The facade pins the complete Common family. Publication must wait for
+        # those exact registry versions when development uses a git revision.
+        facade = release.tomllib.loads((release.ROOT / "wallet-lib/Cargo.toml").read_text())
+        common_prerequisites = sorted({
+            (dependency["package"], dependency["version"].removeprefix("="))
+            for dependency in facade["dependencies"].values()
+            if isinstance(dependency, dict)
+            and dependency.get("git") == "https://github.com/zakura-core/common.git"
+        })
+        self.assertEqual(upstream, sorted(common_prerequisites + [
             ("inspiring", "0.1.0-rc.3"),
             ("ipir-native-client", "0.1.0-rc.1"),
             ("ipir-sp", "0.1.0-rc.7"),
             ("reinspiring", "0.1.3-rc.1"),
-        ])
+        ]))
 
     def test_wallet_pir_packages_are_refused_under_any_source(self):
         declarations = (

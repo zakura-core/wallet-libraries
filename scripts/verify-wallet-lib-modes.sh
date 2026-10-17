@@ -300,7 +300,7 @@ expected = {
 }
 with open(sys.argv[2], "rb") as manifest_file:
     protocol = tomllib.load(manifest_file)["rewire"]["zcash_protocol"]
-required_version = protocol["version"]
+required_version = protocol["version"].removeprefix("=")
 required_source = f"git+{protocol['git']}?rev={protocol['rev']}#{protocol['rev']}"
 problems = [
     f"{name}: expected {required_version} from {required_source}, found {packages.get(name, 'missing')}"
