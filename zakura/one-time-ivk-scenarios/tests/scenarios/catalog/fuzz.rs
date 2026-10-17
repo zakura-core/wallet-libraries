@@ -20,7 +20,8 @@
 //!
 //! Seeds come from `ONE_TIME_IVK_FUZZ_SEEDS` (`start..end` or one seed; three by
 //! default). A failure prints the seed, how to replay it, and the last steps.
-//! `ONE_TIME_IVK_FUZZ_SKIP` drops plan steps by number, to minimize a failing seed.
+//! `ONE_TIME_IVK_FUZZ_SKIP` drops plan steps by number, to minimize a failing seed, and
+//! `ONE_TIME_IVK_FUZZ_TRACE` streams the trace as a replay runs.
 //! Regression scenarios for what the worlds found run with `ONE_TIME_IVK_FUZZ_FINDINGS=1`.
 //!
 //! Left out: payers other than NEAR's zero OVK, mempool payouts, refund quotes on a
@@ -1419,6 +1420,10 @@ impl<'p> Exec<'p> {
             span_of(ctx.chain.now() - self.t0),
             u32::from(ctx.chain.tip())
         ));
+        // `ONE_TIME_IVK_FUZZ_TRACE` streams the trace while a replay runs.
+        if std::env::var_os("ONE_TIME_IVK_FUZZ_TRACE").is_some() {
+            eprintln!("{}", self.trace.last().expect("just pushed"));
+        }
         ctx.log(actor, text);
     }
 
