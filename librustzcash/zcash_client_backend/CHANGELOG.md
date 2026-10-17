@@ -20,6 +20,11 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- ZIP 318 anchor retention, canonical crossing fees, and rolling expiry now follow
+  the network's NU7 block spacing. `AnchorRetention::new` and `union`, and
+  `PoolMigrationParams::new`, require a `BlockSpacing` argument; the implicit
+  conversion from `AnchorRetentionInterval` is removed.
+
 - `OneTimeIvkRestoreWrite::finish_one_time_nullifier_recovery` may release only part of the
   retained evidence per call; it returns true once release reaches the tip.
 
