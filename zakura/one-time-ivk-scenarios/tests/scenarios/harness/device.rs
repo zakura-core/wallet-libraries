@@ -460,6 +460,7 @@ impl Device {
     /// The scanning half of [`Self::sync`]. Returns the blocks it scanned.
     pub fn scan(&mut self, chain: &Chain) -> u64 {
         let mut scanned = 0u64;
+        let mut rewound = 0u32;
         let account = self.account;
         let tip = chain.tip();
         self.db.update_chain_tip(tip).expect("the tip updates");
@@ -525,6 +526,16 @@ impl Device {
                 };
                 self.rewinds.push((u32::from(at), u32::from(to)));
                 self.db.update_chain_tip(tip).expect("the tip updates");
+                // A wallet that rewinds over and over in one scan never syncs.
+                rewound += 1;
+                if rewound > 20 {
+                    let last = &self.rewinds[self.rewinds.len() - 5..];
+                    panic!(
+                        "{} rewinds {rewound} times in one scan to tip {}: (conflict, rewound to) {last:?}",
+                        self.name,
+                        u32::from(tip)
+                    );
+                }
             }
         }
         self.db

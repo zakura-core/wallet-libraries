@@ -2387,7 +2387,20 @@ impl<'p> Exec<'p> {
     /// transactions that much later. The new branch outgrows the old by `tail` blocks.
     fn reorg(&mut self, ctx: &mut Ctx, depth: u32, tail: u32, late: Option<i64>) {
         let tip = ctx.chain.tip();
-        let to = u32::from(tip).saturating_sub(depth).max(self.floor);
+        // A wallet rewinds only to a tree checkpoint at or above its birthday, and wallets
+        // checkpoint only blocks with Ironwood outputs, here every tenth. A reorg between a
+        // birthday and its first checkpoint leaves any wallet, one-time keys or not,
+        // rewinding forever, so no reorg reaches below the first checkpoint of a birthday.
+        let births = self
+            .births
+            .values()
+            .map(|b| b.div_ceil(10) * 10)
+            .max()
+            .unwrap_or(0);
+        let to = u32::from(tip)
+            .saturating_sub(depth)
+            .max(self.floor)
+            .max(births);
         if to >= u32::from(tip) {
             return;
         }
