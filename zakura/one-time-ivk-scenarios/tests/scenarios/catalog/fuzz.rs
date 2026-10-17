@@ -1282,6 +1282,8 @@ struct Exec<'p> {
     odd_publication: bool,
     /// Per slot, runs of consecutive stable syncs downloading (filters, witnesses, lookups).
     streaks: BTreeMap<usize, (u32, u32, u32)>,
+    /// Each slot's sync heights.
+    synced_at: BTreeMap<usize, Vec<u32>>,
     violations: Vec<String>,
     /// Violation names already reported, each once.
     reported: BTreeSet<String>,
@@ -1315,6 +1317,7 @@ impl<'p> Exec<'p> {
             troubled: BTreeSet::new(),
             odd_publication: false,
             streaks: BTreeMap::new(),
+            synced_at: BTreeMap::new(),
             violations: Vec::new(),
             reported: BTreeSet::new(),
             trace: Vec::new(),
@@ -1585,6 +1588,10 @@ impl<'p> Exec<'p> {
     fn sync(&mut self, ctx: &mut Ctx, slot: usize) -> SyncReport {
         let dev = self.slots[slot].expect("the device exists");
         let report = ctx.sync(dev);
+        self.synced_at
+            .entry(slot)
+            .or_default()
+            .push(u32::from(ctx.chain.tip()));
         let req = Requests::of(&report.requests);
         let mut text = format!(
             "{} syncs: scanned {}, found {}+{}, {} requests ({} filters, {} witnesses, {} queries)",
@@ -2442,18 +2449,37 @@ impl<'p> Exec<'p> {
                 );
             }
         }
-        // Quiet: a synced wallet with nothing pending makes no directory request.
+        // Quiet: once a sync leaves nothing pending and makes no request (work a scan
+        // registers, such as a funding memo's key, may still cost one more), the next
+        // syncs make no directory request either.
         for &slot in &slots {
-            for _ in 0..3 {
+            let mut quiet = 0;
+            let mut requests = Vec::new();
+            for _ in 0..8 {
                 ctx.mine(1);
                 let report = self.sync(ctx, slot);
-                if !report.pending && !report.requests.is_empty() {
-                    self.violation(
-                        ctx,
-                        format!("{}'s quiet syncs make no directory requests", NAMES[slot]),
-                        format!("a sync with nothing pending made {:?}", report.requests),
-                    );
+                if quiet > 0 && !report.requests.is_empty() {
+                    requests = report.requests.clone();
+                    break;
                 }
+                if !report.pending && report.requests.is_empty() {
+                    quiet += 1;
+                    if quiet > 3 {
+                        break;
+                    }
+                }
+            }
+            if quiet <= 3 {
+                let detail = if requests.is_empty() {
+                    "no sync left nothing pending without a request".to_string()
+                } else {
+                    format!("after a quiet sync, a sync made {requests:?}")
+                };
+                self.violation(
+                    ctx,
+                    format!("{}'s quiet syncs make no directory requests", NAMES[slot]),
+                    detail,
+                );
             }
         }
         for w in self.plan.final_rechecks.clone() {
@@ -2651,6 +2677,29 @@ impl<'p> Exec<'p> {
                             "first"
                         },
                         pass.end,
+                        p.key.label()
+                    ),
+                ));
+            }
+        }
+        // A refund key another device funded: the wallet recovers it from the funding memo
+        // and discovery looks it up in its next run (see `discover`), so a refund already
+        // on chain when the wallet first scanned past the memo is found a few syncs later.
+        if let Some(funded) = rt.funded_height.filter(|f| *f >= self.births[&w]) {
+            let tips = self
+                .synced_at
+                .get(&w.slot)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let first = tips.iter().position(|t| *t >= funded + 3);
+            let listed = first.is_some_and(|i| tips[i] >= h + 3 && tips.len() - i >= 3);
+            if p.key.refund && plan.wallet.slot != w.slot && listed {
+                return Some((
+                    Class::FoundAutomatically,
+                    format!(
+                        "{} first scanned past {}'s funding memo at {funded} after this refund, \
+                         and discovery looks up a key registered after it finished in its next run",
+                        w.name(),
                         p.key.label()
                     ),
                 ));
