@@ -2842,6 +2842,9 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             // confirmations to be spent.
             let is_spendable = witness_stabilized
                 || (any_spendable
+                    && received_height
+                        .zip(anchor_height)
+                        .is_some_and(|(received, anchor)| received <= anchor)
                     && max_priority <= ScanPriority::Scanned
                     && confirmations_policy.confirmations_until_spendable(
                         target_height,
