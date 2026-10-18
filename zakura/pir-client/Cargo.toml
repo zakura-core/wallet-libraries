@@ -155,12 +155,12 @@ rustix = { version = "1", optional = true, default-features = false, features = 
 [[test]]
 name = "transparent_engine_store_schema_upgrade"
 path = "tests/transparent/engine_store_schema_upgrade.rs"
-required-features = ["transparent", "engine-store"]
+required-features = ["transparent", "engine-store", "engine-conformance"]
 
 [[test]]
 name = "transparent_engine_store_semantics"
 path = "tests/transparent/engine_store_semantics.rs"
-required-features = ["transparent", "engine-store"]
+required-features = ["transparent", "engine-store", "engine-conformance"]
 
 [[test]]
 name = "transparent_engine_birthday_to_balance"
