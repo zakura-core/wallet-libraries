@@ -1,4 +1,11 @@
-use super::*;
+use std::cell::Cell;
+
+use zcash_client_backend::data_api::chain::scan_cached_blocks_with_one_time_ivks;
+
+use super::{scanning::DuringScan, *};
+use crate::wallet::one_time_ivk::restore::tests::discovery::{
+    key8, late_fixture, one_time_notes, siblings, witness_at,
+};
 
 /// The journal's entries as `(height, tx_index, txid)`.
 fn entries(st: &State) -> Vec<(u32, u16, Vec<u8>)> {
@@ -149,4 +156,50 @@ fn coverage_is_per_account() {
         [],
     );
     assert_eq!(left, 1);
+}
+
+/// A late payment admitted while a batch that spends it is scanning, after the scanner
+/// loaded the wallet's nullifiers, is marked spent when the batch is stored.
+#[test]
+fn a_note_admitted_during_a_batch_is_spent_by_it() {
+    let (mut st, candidate, _) = late_fixture();
+    let account = st.test_account().unwrap().id();
+    let (anchor, path) = (tip(&st), witness_at(&st, candidate.position));
+    let prior = st.latest_cached_block().unwrap().chain_state().clone();
+    let note = candidate
+        .encrypted_note
+        .decrypt(&parent(&st), key8())
+        .unwrap();
+    let spender = IronwoodFvk(parent(&st));
+    let (height, _) = st.generate_next_block_spending(
+        &spender,
+        (*note.nullifier(), Zatoshis::const_from_u64(100_000)),
+        unified(foreign_receiver()),
+        Zatoshis::const_from_u64(20_000),
+    );
+    let network = *st.network();
+    let path_to_db = st.wallet().data_file_path();
+    let mut scanning_db =
+        WalletDb::for_path(path_to_db, network, test_clock(), test_rng()).unwrap();
+    let source = DuringScan {
+        inner: st.cache(),
+        at: 1,
+        reads: Cell::new(0),
+        run: || {
+            let mut db = WalletDb::for_path(path_to_db, network, test_clock(), test_rng()).unwrap();
+            db.record_one_time_witness(
+                account,
+                key8(),
+                candidate.position,
+                anchor,
+                siblings(&path),
+                clock_now(),
+            )
+            .unwrap();
+        },
+    };
+    scan_cached_blocks_with_one_time_ivks(&network, &source, &mut scanning_db, height, &prior, 1)
+        .unwrap();
+    assert_eq!(source.reads.get(), 2);
+    assert_eq!(one_time_notes(&st), [(100_000, true)]);
 }

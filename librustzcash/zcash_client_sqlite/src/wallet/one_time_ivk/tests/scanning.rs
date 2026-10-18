@@ -383,14 +383,16 @@ fn reactivating_an_open_key_rescans_only_blocks_below_its_start() {
     assert_eq!(queued(&st), vec![first..first + 2]);
 }
 
-/// Registers a key after the scanner captures its keys, before its first cache read.
-struct RegisterDuringScan<'a, B, F> {
-    inner: &'a B,
-    register: F,
-    ran: Cell<bool>,
+/// Runs `run` once, before cache read `at` of a scan. The scanner captures its keys before
+/// read 0, its trial decryption, and the wallet's nullifiers before read 1.
+pub(super) struct DuringScan<'a, B, F> {
+    pub(super) inner: &'a B,
+    pub(super) at: usize,
+    pub(super) run: F,
+    pub(super) reads: Cell<usize>,
 }
 
-impl<B: BlockSource, F: Fn()> BlockSource for RegisterDuringScan<'_, B, F> {
+impl<B: BlockSource, F: Fn()> BlockSource for DuringScan<'_, B, F> {
     type Error = B::Error;
 
     fn with_blocks<C, E>(
@@ -402,8 +404,8 @@ impl<B: BlockSource, F: Fn()> BlockSource for RegisterDuringScan<'_, B, F> {
     where
         C: FnMut(CompactBlock) -> Result<(), error::Error<E, Self::Error>>,
     {
-        if !self.ran.replace(true) {
-            (self.register)();
+        if self.reads.replace(self.reads.get() + 1) == self.at {
+            (self.run)();
         }
         self.inner.with_blocks(from, limit, callback)
     }
@@ -420,10 +422,11 @@ fn key_activated_mid_batch_is_requeued_for_the_blocks_it_missed() {
     let network = *st.network();
     let path = st.wallet().data_file_path();
     let mut scanning_db = WalletDb::for_path(path, network, test_clock(), test_rng()).unwrap();
-    let source = RegisterDuringScan {
+    let source = DuringScan {
         inner: st.cache(),
-        ran: Cell::new(false),
-        register: || {
+        at: 0,
+        reads: Cell::new(0),
+        run: || {
             let mut db = WalletDb::for_path(path, network, test_clock(), test_rng()).unwrap();
             reserve_key(&mut db, account, Purpose::Receive, paid);
         },
