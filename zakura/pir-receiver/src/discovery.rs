@@ -10,7 +10,10 @@ use receiver_directory::{
     snapshot::{FilterSet, check_next},
 };
 use receiver_pir::{AcceptedCoverage, transport::DirectoryClient};
-use zakura_one_time_ivk::{KeyId, Purpose, swap::RESTORE_WATCH_SECS};
+use zakura_one_time_ivk::{
+    KeyId, Purpose,
+    swap::{RESTORE_WATCH_SECS, provider_read_is_current},
+};
 use zakura_receiver_crypto::{
     Receiver,
     witness::{Publication, WitnessSnapshot},
@@ -48,12 +51,6 @@ const CHUNK: u64 = 100;
 const PARALLEL_LOOKUPS: usize = 8;
 /// Pages one lookup reads in a call; the wallet keeps the cursor for the next.
 const PAGES_PER_LOOKUP: u32 = 64;
-/// How long before `now` a provider's recent set may have last read its feed and still
-/// rule a receiver out. A quote made after that read is missing from the set.
-const RECENT_SET_MAX_AGE_SECS: i64 = 15 * 60;
-/// How far after `now` a provider's recent set may have last read its feed, for a
-/// provider clock slightly ahead of the caller's.
-const RECENT_SET_CLOCK_SKEW_SECS: i64 = 60;
 
 /// Why a discovery run, or one key's lookup, stopped. `E` is the wallet's error type.
 #[derive(Debug, thiserror::Error)]
@@ -683,9 +680,7 @@ fn covers_restore_watch(set: &FilterSet, now: i64) -> bool {
         (Some(window), Some(since), Some(until)) => {
             window >= RESTORE_WATCH_SECS
                 && since <= until.saturating_sub(window)
-                && (now.saturating_sub(RECENT_SET_MAX_AGE_SECS)
-                    ..=now.saturating_add(RECENT_SET_CLOCK_SKEW_SECS))
-                    .contains(&until)
+                && provider_read_is_current(until, now)
         }
         _ => false,
     }
@@ -774,6 +769,7 @@ async fn join_all<F: Future>(futures: impl IntoIterator<Item = F>) -> Vec<F::Out
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zakura_one_time_ivk::swap::PROVIDER_READ_MAX_AGE_SECS;
 
     /// A recent set of `window_secs` from a feed that started at `since_unix` and last
     /// read the provider at `until_unix`.
@@ -813,7 +809,7 @@ mod tests {
         assert!(!covers_restore_watch(&recent(None, started, read), now));
         assert!(!covers_restore_watch(&recent(Some(watch), None, read), now));
         // So can a set whose feed stalled: quotes after its last read are missing.
-        let stalled = now - RECENT_SET_MAX_AGE_SECS - 1;
+        let stalled = now - PROVIDER_READ_MAX_AGE_SECS - 1;
         let started = Some(stalled - RESTORE_WATCH_SECS);
         assert!(!covers_restore_watch(
             &recent(Some(watch), started, stalled),

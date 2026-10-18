@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add `swap::provider_read_is_current`, with `PROVIDER_READ_MAX_AGE_SECS` (15
+  minutes) and `PROVIDER_READ_CLOCK_SKEW_SECS` (1 minute): when a provider's
+  set of given receivers, by the start of its last complete read, can rule a
+  receiver out. Discovery's recent sets and issuance's seen sets share it.
+
 ## [0.0.1-rc0] - 2026-10-14
 
 ### Added
