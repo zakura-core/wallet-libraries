@@ -47,8 +47,8 @@
 //! This profile is experimental: ipir-sp's cryptographic gates for the native
 //! path remain open, and correctness certificates are snapshot-specific.
 
-use ipir_sp::bits::{contiguous_bytes_to_u64s, u64s_to_contiguous_bytes};
-use ipir_sp::native::{NativeProfile, NativePublicSetup};
+use ipir_native_client::bits::{contiguous_bytes_to_u64s, u64s_to_contiguous_bytes};
+use ipir_native_client::{NativeProfile, NativePublicSetup};
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;

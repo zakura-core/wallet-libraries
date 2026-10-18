@@ -115,10 +115,14 @@ parameters. Enable `proving-tests` for real proving fixtures; the `proving` and
 consumers, including fixture availability and the engine's transport-free graph.
 
 The PIR clients temporarily pin the IPIR family to the main revision that merged
-[IPIR PR 38](https://github.com/valargroup/ipir-sp/pull/38), which removes CLI-only
-dependencies from the library. Keep IPIR, InspiRING and ReinspiRING on the same
-source when repinning, since their exposed types must share one identity.
-Repin to the published family after that change is released.
+[IPIR PR 39](https://github.com/valargroup/ipir-sp/pull/39). Native query setup uses
+`ipir-native-client`, so Transparent, Status and receiver clients do not import
+IPIR's evaluator or SimplePIR. The receiver's explicit `server` feature still
+uses the evaluator. Enhance still uses IPIR's legacy parameter metadata for its
+published identities; removing that dependency needs a separate metadata split.
+Keep IPIR, its native client, InspiRING and ReinspiRING on the same source when
+repinning, since their exposed types must share one identity. Repin to the
+published family after the extracted client is released.
 
 ## CI and completion
 

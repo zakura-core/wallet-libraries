@@ -123,6 +123,7 @@ class PublishingTests(unittest.TestCase):
         # no service-owned package may become a publication prerequisite.
         self.assertEqual(upstream, [
             ("inspiring", "0.1.0-rc.3"),
+            ("ipir-native-client", "0.1.0-rc.1"),
             ("ipir-sp", "0.1.0-rc.7"),
             ("reinspiring", "0.1.3-rc.1"),
         ])

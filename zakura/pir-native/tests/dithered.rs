@@ -2,7 +2,7 @@
 //!
 //! Nothing here touches the 49-bit query, whose bytes `golden.rs` pins.
 
-use ipir_sp::bits::u64s_to_contiguous_bytes;
+use ipir_native_client::bits::u64s_to_contiguous_bytes;
 use rand::RngCore;
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
 use sha2::{Digest, Sha256};

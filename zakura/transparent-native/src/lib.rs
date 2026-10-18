@@ -646,7 +646,11 @@ mod tests {
         for (row, col) in [(0, 0), (0, 2_047), (1, 5), (1, 2_047)] {
             assert_eq!(
                 row_coefficient(&rows, 4_096, row, col) as u64,
-                ipir_sp::bits::read_bits(&rows[row * 4_096..(row + 1) * 4_096], col * 16, 16)
+                ipir_native_client::bits::read_bits(
+                    &rows[row * 4_096..(row + 1) * 4_096],
+                    col * 16,
+                    16
+                )
             );
         }
     }

@@ -5,7 +5,7 @@
 //! every value (source revision 8448d274). A change here changes what Enhance,
 //! Status and Transparent servers publish or answer, and what wallets send.
 
-use ipir_sp::bits::u64s_to_contiguous_bytes;
+use ipir_native_client::bits::u64s_to_contiguous_bytes;
 use rand::RngCore;
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
 use sha2::{Digest, Sha256};
