@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Wallet-independent candidate transparent recovery records"
-publish = false
 
 [features]
 default = []

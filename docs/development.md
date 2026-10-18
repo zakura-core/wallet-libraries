@@ -140,7 +140,7 @@ proving-key caches and the cargo test runner.
 ### GitHub Actions
 
 Use **Publish crates** from `main` in `zakura-core/wallet-libraries`. The workflow
-uses the exact commit selected by the dispatch, and reads versions from all twenty-one
+uses the exact commit selected by the dispatch, and reads versions from all twenty-two
 crate manifests. It does not create tags, change versions, or publish wallet-pir.
 Successful **Verify wallet libraries** CI for that exact main commit is required;
 wait for it to finish before dispatching the release workflow.
@@ -154,7 +154,7 @@ that each crate has the right publisher configuration.
 
 Before the first run, a repository administrator must create the `crates-io`
 GitHub Environment, allow only the `main` branch, and require approval by `ebfull`
-(self-approval is allowed, matching Zakura). An owner of **each of the twenty-one crates**
+(self-approval is allowed, matching Zakura). An owner of **each of the twenty-two crates**
 must configure this Trusted Publisher on crates.io:
 
 | Setting | Value |
@@ -164,13 +164,13 @@ must configure this Trusted Publisher on crates.io:
 | Workflow filename | `publish-crates.yml` |
 | Environment | `crates-io` |
 
-Use `python3 scripts/publish-crates.py --plan` to list the twenty-one names and versions.
+Use `python3 scripts/publish-crates.py --plan` to list the twenty-two names and versions.
 Check every crate's publisher settings, including names already reserved by a
 placeholder release. Trusted Publishing needs existing crate names.
 Check that the five `zakura-transparent-{native,events,filter,shard,txid-client}`
 names and the three receiver names, `zakura-receiver-crypto`,
 `zakura-receiver-directory`, and `zakura-receiver-pir`, are reserved. Reserve
-`zakura-filters` as well. Reserve any missing names and configure each crate's Trusted Publisher before the first run
+`zakura-filters` and `zakura-transparent-recovery-types` as well. Reserve any missing names and configure each crate's Trusted Publisher before the first run
 that includes it. No permanent API token or new Infisical secret is required.
 
 Choose **publish** for an actual release. It repeats verification for the dispatch
@@ -260,7 +260,7 @@ required before candidate facts can affect financial state.
 hashes explicitly and preserves explorer display order. The backend re-exports
 the shared records with its existing hash type, so its database interface keeps
 one record definition without requiring a Common change. The contract package
-is unpublished for this POC; no release or downstream adoption is implied.
+has not been released; no publishing or downstream adoption is implied.
 
 The `recovery-without-backend` example opens and reopens a companion using caller
 chain information and no wallet backend. Dependency-graph verification builds

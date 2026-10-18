@@ -18,6 +18,7 @@ import server_graph  # noqa: E402
 # Include optional and development dependencies in the order, since Cargo
 # resolves them when it prepares the package for the registry.
 ORDER = (
+    "zakura/transparent-recovery-types",
     "zakura/filters",
     "zakura/pir-enhance-types",
     "zakura/pir-native",
