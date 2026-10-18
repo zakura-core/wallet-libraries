@@ -1,4 +1,10 @@
 //! Encoding-validated Enhance PIR records shared by clients and wallet backends.
+//!
+//! The optional `http-endpoint` feature also exposes the configured HTTP endpoint
+//! type used by PIR clients, without adding HTTP parsing to record-only consumers.
+
+#[cfg(feature = "http-endpoint")]
+pub mod endpoint;
 
 pub const RECORD_BYTES: usize = 653;
 

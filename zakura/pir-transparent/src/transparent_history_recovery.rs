@@ -121,7 +121,7 @@ impl TransparentHistoryRecovery {
                 && config.private_bytes > 0,
             "recovery bounds must be positive",
         )?;
-        zakura_pir_endpoint::Endpoint::parse(&config.origin).map_err(failure)?;
+        zakura_pir_enhance_types::endpoint::Endpoint::parse(&config.origin).map_err(failure)?;
         let store = SqliteStore::open(&path).map_err(failure)?;
         let mut catalog = Connection::open(path).map_err(failure)?;
         catalog

@@ -23,3 +23,10 @@ metadata is trusted indexer data, and send-only association can require trust
 in the server when decryption cannot authenticate the action.
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
+## Configured client endpoints
+
+The optional `http-endpoint` feature provides a small HTTP endpoint type shared
+by the PIR clients. It uses the `http` crate without URL or ICU dependencies;
+record-only consumers keep their dependency-free production graph. See the
+[endpoint syntax and normalization rules](endpoint.md).

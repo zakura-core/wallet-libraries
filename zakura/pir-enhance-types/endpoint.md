@@ -1,6 +1,6 @@
 # Configured PIR HTTP endpoints
 
-`zakura-pir-endpoint` validates the service addresses configured for PIR clients
+The optional `zakura-pir-enhance-types::endpoint` module validates the service addresses configured for PIR clients
 and appends their routes without a browser URL parser or Unicode hostname tables.
 It uses the `http` crate for URI parsing and performs no network access.
 

@@ -26,7 +26,6 @@ zcash_protocol = { workspace = true, optional = true }
 orchard = { workspace = true, optional = true, features = ["zip32-addresses"] }
 zcash_note_encryption = { workspace = true, optional = true }
 futures-util = "0.3"
-zakura-pir-endpoint = { version = "=0.0.1-rc0", path = "../pir-endpoint" }
 base64 = "0.22"
 hex.workspace = true
 ipir-sp = { version = "=0.1.0-rc.7", git = "https://github.com/valargroup/ipir-sp", rev = "1d637dba8a9e6dcf749a2054e33ea8ff03fac8c9", features = ["native-reinspiring"] }
@@ -38,7 +37,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror = "2"
-zakura-pir-enhance-types = { version = "=0.0.1-rc1", path = "../pir-enhance-types" }
+zakura-pir-enhance-types = { version = "=0.0.1-rc1", path = "../pir-enhance-types", features = ["http-endpoint"] }
 zakura-pir-native = { version = "=0.0.1-rc2", path = "../pir-native" }
 
 [dev-dependencies]

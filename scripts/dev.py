@@ -23,7 +23,8 @@ CONFIGS = {
     "pczt": (["-p", "zakura-pczt"], ["internal-tests"]),
     "sqlite": (["-p", "zakura-client-sqlite"], ["test-dependencies"]),
     "enhance-wallet": (["-p", "zakura-pir-enhance"], ["wallet"]),
-    "enhance": (["-p", "zakura-pir-enhance"], []),
+    # Select the shared types too so its opt-in endpoint tests run with the client.
+    "enhance": (["-p", "zakura-pir-enhance", "-p", "zakura-pir-enhance-types"], []),
     "enhance-testing": (["-p", "zakura-pir-enhance"], ["testing"]),
     # The recovery engine alone, and with its SQLite store, the store suite and
     # the reference HTTP adapters, without the wallet.
