@@ -154,6 +154,11 @@ def main():
                     ["cargo", "check", "--locked", "--quiet", "--manifest-path",
                      str(Path(temporary) / name / "Cargo.toml")], check=True,
                 )
+            if name in {"receiver-client", "receiver-server"}:
+                source = "pub use subject::Client;\n" if name == "receiver-client" else "pub use subject::server::Server;\n"
+                (Path(temporary) / name / "src/lib.rs").write_text(source)
+                subprocess.run(["cargo", "check", "--locked", "--quiet", "--manifest-path",
+                                str(Path(temporary) / name / "Cargo.toml")], check=True)
             for product in ("enhance", "status", "transparent"):
                 for role in ("client", "publisher", "query-server"):
                     if name == f"{product}-{role}":

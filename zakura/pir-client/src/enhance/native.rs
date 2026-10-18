@@ -3,8 +3,8 @@
 //! `enhance-pir` crate. Snapshot and request binding come from the versioned
 //! `EPQ7` envelope, exactly as for v7; only the PIR payloads differ.
 //!
-//! The protocol-neutral primitives live in `zakura-pir-native` and are
-//! re-exported here. This module holds the Enhance-specific shape and seeds:
+//! Shared profile descriptions live in `zakura-pir-protocol`; client
+//! preparation and decoding live in this package's `native` module. This module holds the Enhance-specific shape and seeds:
 //! query masks are derived from the same per-shard setup seed as v7, so they
 //! stay stable across publications.
 //!

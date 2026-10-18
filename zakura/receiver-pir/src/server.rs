@@ -7,7 +7,7 @@ use receiver_directory::{
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use zakura_pir_client::native::NativePreprocessed;
+use zakura_pir_server_core::native::NativePreprocessed;
 
 /// A publication prepared for PIR evaluation.
 #[derive(Clone)]
@@ -53,13 +53,15 @@ impl Server {
         let server = IPIRServer::<u16>::new_auto_kernel(params, values, false, true);
         let padded = server.db_rows_padded();
         let db = server.db();
-        let hint = zakura_pir_client::native::hint(&profile.masks, profile.rows, COLS, |col| {
-            &db[col * padded..col * padded + profile.rows]
-        })
-        .map_err(|_| Error::Pir)?;
-        let preprocessed =
-            zakura_pir_client::native::preprocess(&profile.setup, &hint).map_err(|_| Error::Pir)?;
-        let public = zakura_pir_client::native::publish(&preprocessed).map_err(|_| Error::Pir)?;
+        let hint =
+            zakura_pir_server_core::native::hint(&profile.masks, profile.rows, COLS, |col| {
+                &db[col * padded..col * padded + profile.rows]
+            })
+            .map_err(|_| Error::Pir)?;
+        let preprocessed = zakura_pir_server_core::native::preprocess(&profile.setup, &hint)
+            .map_err(|_| Error::Pir)?;
+        let public =
+            zakura_pir_server_core::native::publish(&preprocessed).map_err(|_| Error::Pir)?;
         let manifest = Manifest {
             protocol: PROTOCOL.into(),
             directory: snapshot.manifest,
@@ -140,7 +142,7 @@ impl Server {
             return Err(Error::Revision);
         }
         let profile = profile(rows)?;
-        let (keys, query) = zakura_pir_client::native::parse_with(
+        let (keys, query) = zakura_pir_query_server::native::parse_with(
             &profile.setup,
             &body[HEADER_BYTES..],
             profile.rows,
@@ -153,8 +155,12 @@ impl Server {
             .map_err(|_| Error::Pir)?;
         let mut response = body[..HEADER_BYTES].to_vec();
         response.extend(
-            zakura_pir_client::native::pack(&self.prepared.preprocessed, &keys, &intermediate)
-                .map_err(|_| Error::Pir)?,
+            zakura_pir_query_server::native::pack(
+                &self.prepared.preprocessed,
+                &keys,
+                &intermediate,
+            )
+            .map_err(|_| Error::Pir)?,
         );
         Ok(response)
     }

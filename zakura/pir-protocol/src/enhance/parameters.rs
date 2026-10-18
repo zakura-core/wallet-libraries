@@ -665,7 +665,7 @@ pub struct TransportParameters {
     /// Bit width the first-dimension query is transmitted at.
     ///
     /// Derived from `(q, p, db_rows)` by
-    /// [`crate::modulus_switch::query_modulus_bits`] and raised to the selected
+    /// the pinned previous transport provider and raised to the selected
     /// profile's conservative floor. It must be recomputed whenever the shape
     /// or profile changes, never copied across parameter sets.
     pub query_bits: usize,
