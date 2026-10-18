@@ -1,5 +1,5 @@
 [package]
-name = "zakura-gcs"
+name = "zakura-filters"
 version = "0.0.1-rc0"
 description = "Shared Golomb-coded set codec for Zakura wallet filters"
 edition.workspace = true

@@ -3,7 +3,7 @@ use bitcoin::{
     bip158::{BitStreamReader as UpstreamBits, GcsFilterReader, GcsFilterWriter as UpstreamWriter},
     consensus::{Decodable, Encodable, encode::VarInt},
 };
-use zakura_gcs::{BitStreamReader, GcsFilterWriter, read_compact_size, write_compact_size};
+use zakura_filters::{BitStreamReader, GcsFilterWriter, read_compact_size, write_compact_size};
 
 #[test]
 fn filter_bytes_match_upstream_for_every_application_profile() {

@@ -39,7 +39,7 @@ There is no BIP 157 peer verification and no service signalling here.
 
 ### Dependency note
 
-The `zakura-gcs` crate supplies the shared codec extracted from rust-bitcoin
+The `zakura-filters` crate supplies the shared codec extracted from rust-bitcoin
 0.32.102. Production retains `bitcoin_hashes` and its I/O support, without the
 Bitcoin transaction/address stack or its secp256k1 dependency. The exactly pinned
 `bitcoin` crate remains a development-only byte and matching oracle.

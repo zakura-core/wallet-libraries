@@ -1,4 +1,4 @@
-pub(crate) use zakura_gcs::GcsFilterWriter;
+pub(crate) use zakura_filters::GcsFilterWriter;
 
 #[cfg(test)]
 mod tests {

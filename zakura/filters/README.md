@@ -1,4 +1,4 @@
-# zakura-gcs
+# zakura-filters
 
 The byte codec shared by transparent activity filters and receiver-directory filters.
 It contains a Golomb-coded set writer, a bit reader, and canonical CompactSize

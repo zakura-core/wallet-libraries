@@ -30,7 +30,7 @@ cli = ["client", "dep:clap"]
 
 [dependencies]
 # Shared byte codec; application profiles and strict validation stay here.
-zakura-gcs = { version = "=0.0.1-rc0", path = "../gcs" }
+zakura-filters = { version = "=0.0.1-rc0", path = "../filters" }
 bitcoin_hashes = { version = "=0.14.101", default-features = false, features = ["std"] }
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }

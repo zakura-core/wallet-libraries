@@ -167,7 +167,7 @@ placeholder release. Trusted Publishing needs existing crate names.
 Check that the five `zakura-transparent-{native,events,filter,shard,txid-client}`
 names and the three receiver names, `zakura-receiver-crypto`,
 `zakura-receiver-directory`, and `zakura-receiver-pir`, are reserved. Reserve
-`zakura-gcs` as well. Reserve any missing names and configure each crate's Trusted Publisher before the first run
+`zakura-filters` as well. Reserve any missing names and configure each crate's Trusted Publisher before the first run
 that includes it. No permanent API token or new Infisical secret is required.
 
 Choose **publish** for an actual release. It repeats verification for the dispatch

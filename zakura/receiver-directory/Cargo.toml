@@ -19,7 +19,7 @@ path = "src/lib.rs"
 # The wire codec alone: this crate parses structure and checks no cryptography.
 zakura-receiver-crypto = { version = "=0.0.1-rc0", path = "../receiver-crypto", default-features = false }
 # Codec only: no Bitcoin transaction types or elliptic-curve implementation.
-zakura-gcs = { version = "=0.0.1-rc0", path = "../gcs" }
+zakura-filters = { version = "=0.0.1-rc0", path = "../filters" }
 bitcoin_hashes = { version = "=0.14.101", default-features = false, features = ["std"] }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }

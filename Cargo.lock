@@ -7677,7 +7677,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zakura-gcs"
+name = "zakura-filters"
 version = "0.0.1-rc0"
 dependencies = [
  "bitcoin",
@@ -8140,7 +8140,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
- "zakura-gcs",
+ "zakura-filters",
  "zakura-receiver-crypto",
 ]
 
@@ -8289,7 +8289,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
- "zakura-gcs",
+ "zakura-filters",
 ]
 
 [[package]]

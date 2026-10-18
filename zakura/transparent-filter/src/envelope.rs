@@ -201,7 +201,7 @@ pub struct FilterBatch {
 }
 
 pub(crate) fn write_compact_size(out: &mut Vec<u8>, value: u64) {
-    zakura_gcs::write_compact_size(out, value).expect("in-memory CompactSize write");
+    zakura_filters::write_compact_size(out, value).expect("in-memory CompactSize write");
 }
 
 /// Cursor over a byte slice that never panics and never over-reads.

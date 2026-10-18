@@ -1,7 +1,7 @@
 //! Public receiver filters that a wallet tests locally before any lookup.
 //!
 //! A publication's filter file holds labeled sets of receivers, each a BIP 158
-//! Golomb-coded set built with the shared `zakura_gcs` codec as Transparent's filters are. The
+//! Golomb-coded set built with the shared `zakura_filters` codec as Transparent's filters are. The
 //! directory's own set, [`PAID`], holds every receiver with a payment in the publication.
 //! A swap provider's feed adds `<provider>/recent`, the receivers it was given within a
 //! window, and `<provider>/seen`, every payout or refund receiver it was given since its
@@ -17,7 +17,7 @@ use crate::{Error, Hash, ReceiverBytes};
 use bitcoin_hashes::siphash24;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use zakura_gcs::{read_compact_size, BitStreamReader, GcsFilterWriter};
+use zakura_filters::{read_compact_size, BitStreamReader, GcsFilterWriter};
 
 /// Golomb-Rice parameter of every set.
 pub const P: u8 = 10;

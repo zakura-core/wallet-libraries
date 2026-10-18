@@ -26,7 +26,7 @@ impl<'a, R: Read + ?Sized> BitStreamReader<'a, R> {
     ///
     /// # Examples
     /// ```
-    /// # use zakura_gcs::BitStreamReader;
+    /// # use zakura_filters::BitStreamReader;
     /// # let data = vec![0xff];
     /// # let mut input = data.as_slice();
     /// let mut reader = BitStreamReader::new(&mut input); // input contains all 1's
