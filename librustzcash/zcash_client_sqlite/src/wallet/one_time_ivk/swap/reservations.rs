@@ -214,11 +214,24 @@ fn release(conn: &Connection, key: i64, now: i64) -> Result<(), SqliteClientErro
 }
 
 /// Retires never-quoted reservation `key`, whose address the provider was given by
-/// another device of the seed: it is released and recorded seen, so it is never issued,
-/// and keeps scanning, since that swap may pay it, until it closes like any released key.
+/// another device of the seed: it is released and recorded seen, so it is never issued.
+/// That swap may still pay it, so the key gets an inconclusive placeholder operation due
+/// at `now`, which keeps it scanning until `COMPLETION_LIMIT_SECS` after `now` (see
+/// `WalletDb::close_finished_one_time_keys`), however earlier reservations' operations
+/// ended. The placeholder has no request, so no draft or reclaim rule counts it, and its
+/// empty deposit address matches no status. Retiring again adds no second placeholder.
 fn retire(conn: &Connection, key: i64, now: i64) -> Result<(), SqliteClientError> {
     record_provider_seen(conn, key)?;
-    release(conn, key, now)
+    release(conn, key, now)?;
+    conn.execute(
+        "INSERT INTO ironwood_one_time_operations
+            (one_time_key_id, reference, deadline, begun_at, observed_at, expectation)
+         SELECT ?1, '', ?2, ?2, ?2, 3
+         WHERE NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations
+             WHERE one_time_key_id = ?1 AND request IS NULL)",
+        params![key, now],
+    )?;
+    Ok(())
 }
 
 /// Checks never-quoted reservation `key` with `receiver` before its address is first

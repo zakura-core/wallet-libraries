@@ -113,9 +113,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// Once it has passed, the next attempt gets another address. Only the current
     /// reservation's requests count, not a reissued address's earlier ones, though a
     /// reservation made before `ONE_TIME_IVK_DISCOVERY` counts every request on its key.
-    /// A draft never quoted needs a fresh set, and is retired if the set holds it.
-    /// Reserving a new address needs a set that is fresh at `now` (see
-    /// [`ReservationPolicy::SeenUnavailable`]).
+    /// A draft never quoted needs a fresh set, and is retired if the set holds it: never
+    /// issued again, and scanned until `COMPLETION_LIMIT_SECS` after, in case the other
+    /// device's swap pays it. Reserving a new address needs a set that is fresh at `now`
+    /// (see [`ReservationPolicy::SeenUnavailable`]).
     pub fn prepare_receive_reservation(
         &mut self,
         account: AccountUuid,
@@ -148,7 +149,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// prepares another address. A reservation's first request needs `seen`, the
     /// provider's current set, fresh at `now` (see [`ReservationPolicy::SeenUnavailable`]);
     /// if the set holds the address, another device gave it to the provider, so the
-    /// reservation is retired and the request refused as stale.
+    /// reservation is retired (see [`Self::prepare_receive_reservation`]) and the request
+    /// refused as stale.
     pub fn begin_receive_operation(
         &mut self,
         account: AccountUuid,

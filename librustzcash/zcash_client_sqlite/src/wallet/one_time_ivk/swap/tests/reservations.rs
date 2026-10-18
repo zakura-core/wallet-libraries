@@ -1453,3 +1453,49 @@ fn coverage_uses_the_real_request_time() {
     let reissued = try_prepare_seen(&mut st, later, (NOW, later), &[]);
     assert_eq!(refusal(reissued), Some(ReservationPolicy::Limit));
 }
+
+/// A reissued address retired because another device quoted it keeps scanning until the
+/// completion limit after it was retired, though its earlier reservation's request ended
+/// long before, so a payment from that device's swap is still found. Retiring records one
+/// placeholder operation, which later checks do not repeat.
+#[test]
+fn a_retired_reissued_address_keeps_scanning() {
+    use zakura_one_time_ivk::swap::COMPLETION_LIMIT_SECS;
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let lost = prepare(&mut st, NOW);
+    begin(&mut st, &lost, "lost").unwrap().unwrap();
+    let now = NOW + 60 + RECEIVE_RECLAIM_SECONDS;
+    assert_eq!(reap(&mut st, now), [0]);
+    abandon_indices(&mut st, 1..RECEIVE_GAP_LIMIT);
+    let key = prepare_seen(&mut st, now, covering(now), &[]);
+    assert_eq!(key.key_id(), lost.key_id());
+    let held = [key.receiver().to_raw_address_bytes()];
+    let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
+    let holds = ProviderSeen {
+        since: 0,
+        until: now,
+        contains: &contains,
+    };
+    for request in ["other", "again"] {
+        let refused = begin_seen(&mut st, &key, request, (now + 60, now), Some(&holds));
+        assert_eq!(refusal(refused), Some(Stale));
+    }
+    assert!(!reserved(&st, &key));
+    let next = try_prepare(&mut st, now, Some(&holds)).unwrap().unwrap();
+    assert_ne!(next.key_id(), key.key_id());
+    let sql = "SELECT COUNT(*) FROM ironwood_one_time_operations WHERE request IS NULL";
+    assert_eq!(value::<i64>(st.wallet().conn(), sql, []), 1);
+    let through = tip(&st).height;
+    close_at(st.wallet_mut().db_mut(), account, now, through);
+    assert!(active_from(&st, key.key_id()).is_some());
+    pay(&mut st, key.full_viewing_key(), 10_000);
+    assert!(holds_note(&st, key.key_id()));
+    confirm(&mut st);
+    let limit = now + COMPLETION_LIMIT_SECS;
+    let through = tip(&st).height;
+    close_at(st.wallet_mut().db_mut(), account, limit - 1, through);
+    assert!(active_from(&st, key.key_id()).is_some());
+    close_at(st.wallet_mut().db_mut(), account, limit, through);
+    assert_eq!(active_from(&st, key.key_id()), None);
+}

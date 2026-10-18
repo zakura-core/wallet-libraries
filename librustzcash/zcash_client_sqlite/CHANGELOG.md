@@ -32,11 +32,13 @@ and this library adheres to Rust's notion of
   takes the caller's `now`) and a reservation's first `WalletDb::begin_receive_operation`
   (which now takes `seen`) return the new `ReservationPolicy::SeenUnavailable` unless the
   set's last read began within 15 minutes before, and at most a minute after, the
-  caller's clock. A reservation never quoted that the set holds is retired. An incoming
-  swap attempt keeps its address across quotes: the draft is resumed until its latest
-  request's deadline passes, and `begin_receive_operation` then refuses the reservation
-  as `ReservationPolicy::Stale`. A reissued address's earlier requests do not count, and a
-  reservation made before `ONE_TIME_IVK_DISCOVERY` counts every request on its key.
+  caller's clock. A reservation never quoted that the set holds is retired, and its key
+  scans until `COMPLETION_LIMIT_SECS` after, in case another device's swap pays it. An
+  incoming swap attempt keeps its address across quotes: the draft is resumed until its
+  latest request's deadline passes, and `begin_receive_operation` then refuses the
+  reservation as `ReservationPolicy::Stale`. A reissued address's earlier requests do not
+  count, and a reservation made before `ONE_TIME_IVK_DISCOVERY` counts every request on
+  its key.
 - One-time IVK restore no longer retains Ironwood nullifiers: restore sweeps, their
   retention floors, coverage marks, replays and stepped release are gone, and the nullifier
   map prunes Ironwood nullifiers like the other pools'. The migration drops the
