@@ -49,17 +49,24 @@ def check_role_api(directory, product, role):
 
 
 def check_previous_native(directory):
-    """Exercise both directions against immutable pre-packaging code, not a second new copy."""
+    """Cross both directions with pinned pre-packaging code, independently of workspace features."""
     directory.mkdir()
     (directory / "src").mkdir()
     dependencies = [
-        f'previous_native = {{ package = "zakura-pir-native", git = "https://github.com/zakura-core/wallet-libraries", rev = "4631f32f815f160ccd561540e7ae92e026fc7ee5" }}',
+        'previous_native = { package = "zakura-pir-native", git = "https://github.com/zakura-core/wallet-libraries", rev = "4631f32f815f160ccd561540e7ae92e026fc7ee5" }',
     ]
-    for alias, package in (("candidate_client", "client"), ("candidate_core", "server-core"), ("candidate_query", "query-server"), ("candidate_protocol", "protocol")):
-        dependencies.append(f'{alias} = {{ package = "zakura-pir-{package}", path = "{ROOT / "zakura" / ("pir-" + package)}", features = ["native"] }}' if package in {"client", "protocol"} else f'{alias} = {{ package = "zakura-pir-{package}", path = "{ROOT / "zakura" / ("pir-" + package)}" }}')
-    (directory / "Cargo.toml").write_text('[package]\nname = "frozen-native-counterpart"\nversion = "0.0.0"\nedition = "2024"\n[workspace]\n[dependencies]\n' + "\n".join(dependencies) + "\n")
+    roles = (("candidate_client", "client"), ("candidate_core", "server-core"),
+             ("candidate_query", "query-server"), ("candidate_protocol", "protocol"))
+    for alias, role in roles:
+        path = ROOT / "zakura" / ("pir-" + role)
+        features = ', features = ["native"]' if role in {"client", "protocol"} else ""
+        dependencies.append(f'{alias} = {{ package = "zakura-pir-{role}", path = {json.dumps(str(path))}{features} }}')
+    manifest = ('[package]\nname = "frozen-native-counterpart"\nversion = "0.0.0"\nedition = "2024"\n'
+                '[workspace]\n[profile.test]\nopt-level = 3\n[dependencies]\n')
+    (directory / "Cargo.toml").write_text(manifest + "\n".join(dependencies) + "\n")
     (directory / "src/main.rs").write_text((ROOT / "scripts/probes/frozen_pir.rs").read_text())
-    subprocess.run(["cargo", "run", "--quiet", "--manifest-path", str(directory / "Cargo.toml")], check=True)
+    subprocess.run(["cargo", "run", "--profile", "test", "--quiet", "--manifest-path",
+                    str(directory / "Cargo.toml")], check=True)
 
 
 def main():
