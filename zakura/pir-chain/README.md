@@ -2,8 +2,10 @@
 
 `zakura-server-chain` reads Zakura node data for the PIR services in wallet-pir and
 interprets it, returning plain values (bytes, heights, amounts, positions) that the
-services map onto their own records. It is the only place those services touch
-node or Zakura Common types.
+services map onto their own records. It owns the chain interpretation boundary used by those services. RPC ingestion
+uses the published Common wallet primitives to decode transactions and calculate
+transaction IDs, with default features disabled to avoid wallet builders and
+proving circuits. It does not compile Zakura node packages or RocksDB.
 
 - `rpc`: the node JSON-RPC client. `NodeClient::new` rereads a cookie file on every
   request and bounds every response; `NodeClient::from_cookie_file` reads it once.
@@ -36,12 +38,19 @@ node or Zakura Common types.
   transactions, or was written by a pruned checkpoint-syncing node, is refused with
   an error. Its errors carry only this crate's types. Its `zakura-state` revision
   must match the running node's format.
-- `testing` (feature): synthetic transactions, block envelopes and a JSON-RPC node
+- `testing` (feature): enables the pinned node chain crate for independent synthetic
+  fixtures. Production decoding still uses Common. Synthetic transactions, block envelopes and a JSON-RPC node
   double built with the node's own encoders, for service tests.
 
 Receiver backfill and the combined Enhance block reader currently use mainnet
 activation rules. `Network::Testnet` provides explicit identity/height queries; it
 does not configure the RPC client or enable Testnet backfill.
+
+The optional RocksDB reader retains its node dependencies and disk-format pin.
+Blocks cross from the node reader into the shared extractor through canonical
+serialization and Common decoding; database opening and previous-output lookups
+still use the node implementation. This adds a conversion step to direct block
+reads; no backfill throughput improvement is claimed.
 
 This crate is server-only. It lives in the separate `zakura/pir-chain/` workspace
 with its own lockfile, so no wallet build resolves the node's packages. It may use
@@ -58,6 +67,7 @@ From the repository root:
 ```sh
 python3 scripts/dev.py doctor --config server
 python3 scripts/dev.py verify --only server-graph
+python3 scripts/dev.py test --config server-rpc
 python3 scripts/dev.py test --config server
 python3 scripts/dev.py lint --config server
 ```
@@ -66,3 +76,9 @@ The graph check also builds fresh wallet-component and server consumers, with an
 without fixture support, using independent lockfiles. It checks the default,
 Zakura and upstream wallet facade graphs for node/server packages. It proves this adapter boundary; the unrelated older wallet PIR
 adapters are outside this change and still need their separate ownership migration.
+
+Historical mainnet and testnet block vectors compare the RPC decoder against the
+pinned node decoder, including genesis, transaction IDs, output bytes and Merkle
+roots. Ironwood fixtures compare the action fields. The fresh production consumer
+check rejects active node or RocksDB dependencies while allowing the optional
+RocksDB and fixture configurations to resolve them.

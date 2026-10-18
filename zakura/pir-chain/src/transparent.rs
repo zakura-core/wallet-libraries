@@ -16,11 +16,11 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use crate::chain::Block;
 use serde_json::json;
-use zakura_chain::block::Block;
-use zakura_chain::serialization::{ZcashDeserialize, ZcashSerialize};
-use zakura_chain::transaction::{self, Transaction};
-use zakura_chain::transparent::{Input as ChainInput, OutPoint, Utxo};
+
+use crate::chain::{Hash as TxHash, Transaction};
+use crate::chain::{Input as ChainInput, OutPoint, Utxo};
 
 use crate::{NodeClient, NodeError};
 
@@ -60,14 +60,14 @@ impl Output {
 
     /// The output whose consensus encoding is `raw`.
     pub fn from_consensus_bytes(raw: &[u8]) -> Result<Self, NodeError> {
-        zakura_chain::transparent::Output::zcash_deserialize(raw)
+        crate::chain::Output::zcash_deserialize(raw)
             .map(|output| chain_output(&output))
             .map_err(|error| NodeError::Transaction("<output>".into(), error.to_string()))
     }
 }
 
 /// `output` as this crate returns it.
-fn chain_output(output: &zakura_chain::transparent::Output) -> Output {
+fn chain_output(output: &crate::chain::Output) -> Output {
     Output {
         value: u64::from(output.value),
         script: output.lock_script.as_raw_bytes().to_vec(),
@@ -75,11 +75,10 @@ fn chain_output(output: &zakura_chain::transparent::Output) -> Output {
 }
 
 /// `output` as the node represents it, refusing a value outside the money range.
-fn node_output(output: &Output) -> Result<zakura_chain::transparent::Output, String> {
-    Ok(zakura_chain::transparent::Output {
-        value: zakura_chain::amount::Amount::try_from(output.value)
-            .map_err(|error| error.to_string())?,
-        lock_script: zakura_chain::transparent::Script::new(&output.script),
+fn node_output(output: &Output) -> Result<crate::chain::Output, String> {
+    Ok(crate::chain::Output {
+        value: crate::chain::Amount::try_from(output.value).map_err(|error| error.to_string())?,
+        lock_script: crate::chain::Script::new(&output.script),
     })
 }
 
@@ -264,7 +263,7 @@ impl FetchedBlock {
 
     /// The header time the miner stamped, in Unix seconds.
     pub fn time(&self) -> i64 {
-        self.0.header.time.timestamp()
+        self.0.header.time
     }
 
     /// The height the coinbase transaction commits to, if it has one.
@@ -319,10 +318,10 @@ impl FetchedBlock {
 pub(crate) fn extract(
     transactions: &[Arc<Transaction>],
     previous: &mut impl PreviousOutputs,
-    height: u32,
+    _height: u32,
 ) -> Result<Vec<TransparentTransaction>, ExtractError> {
     // Every output this block creates, keyed by outpoint, for same-block spends.
-    let mut created: HashMap<OutPoint, zakura_chain::transparent::Output> = HashMap::new();
+    let mut created: HashMap<OutPoint, crate::chain::Output> = HashMap::new();
     for transaction in transactions {
         let txid = transaction.hash();
         for (index, output) in transaction.outputs().iter().enumerate() {
@@ -361,10 +360,10 @@ pub(crate) fn extract(
                             source,
                         })?
                         .ok_or_else(|| ExtractError::MissingPreviousOutput(label(outpoint)))?;
-                    zakura_chain::transparent::Output {
-                        value: zakura_chain::amount::Amount::try_from(found.value)
+                    crate::chain::Output {
+                        value: crate::chain::Amount::try_from(found.value)
                             .map_err(|e| ExtractError::Metadata(e.to_string()))?,
-                        lock_script: zakura_chain::transparent::Script::new(&found.script),
+                        lock_script: crate::chain::Script::new(&found.script),
                     }
                 }
             };
@@ -377,17 +376,7 @@ pub(crate) fn extract(
                     script: output.lock_script.as_raw_bytes().to_vec(),
                 },
             });
-            if prevouts
-                .insert(
-                    *outpoint,
-                    Utxo {
-                        output,
-                        height: zakura_chain::block::Height(height),
-                        from_coinbase: false,
-                    },
-                )
-                .is_some()
-            {
+            if prevouts.insert(*outpoint, Utxo { output }).is_some() {
                 return Err(ExtractError::Metadata("duplicate transaction input".into()));
             }
         }
@@ -396,11 +385,8 @@ pub(crate) fn extract(
         let fee = if coinbase {
             Fee::NotApplicable
         } else {
-            let balance = transaction
-                .value_balance(&prevouts)
-                .map_err(|e| ExtractError::Metadata(e.to_string()))?;
-            let fee = balance
-                .remaining_transaction_value()
+            let fee = transaction
+                .fee(&prevouts)
                 .map_err(|e| ExtractError::Metadata(e.to_string()))?;
             Fee::Exact(u64::from(fee))
         };
@@ -432,8 +418,8 @@ pub(crate) fn extract(
 /// stays correct across reorganizations; a reorganized-out transaction is only a
 /// wasted entry. Eviction removes whole transactions; the budget counts outputs.
 pub struct OutputCache {
-    outputs: HashMap<OutPoint, zakura_chain::transparent::Output>,
-    order: VecDeque<(transaction::Hash, u32)>,
+    outputs: HashMap<OutPoint, crate::chain::Output>,
+    order: VecDeque<(TxHash, u32)>,
     count: usize,
     capacity: usize,
 }
@@ -489,7 +475,7 @@ impl OutputCache {
         }
     }
 
-    fn get(&self, outpoint: &OutPoint) -> Option<&zakura_chain::transparent::Output> {
+    fn get(&self, outpoint: &OutPoint) -> Option<&crate::chain::Output> {
         self.outputs.get(outpoint)
     }
 
@@ -517,7 +503,7 @@ struct RpcPreviousOutputs<'a> {
 impl PreviousOutputs for RpcPreviousOutputs<'_> {
     fn previous_output(&mut self, txid: [u8; 32], index: u32) -> Result<Option<Output>, BoxError> {
         let outpoint = OutPoint {
-            hash: transaction::Hash(txid),
+            hash: TxHash(txid),
             index,
         };
         if let Some(output) = self.cache.get(&outpoint) {
@@ -751,8 +737,8 @@ mod tests {
 
     fn spend(txid: [u8; 32], index: u32) -> zakura_chain::transparent::Input {
         zakura_chain::transparent::Input::PrevOut {
-            outpoint: OutPoint {
-                hash: transaction::Hash(txid),
+            outpoint: zakura_chain::transparent::OutPoint {
+                hash: zakura_chain::transaction::Hash(txid),
                 index,
             },
             unlock_script: zakura_chain::transparent::Script::new(&[0x47, 0x30]),
@@ -764,11 +750,18 @@ mod tests {
         inputs: Vec<zakura_chain::transparent::Input>,
         outputs: Vec<zakura_chain::transparent::Output>,
     ) -> Arc<Transaction> {
-        Arc::new(Transaction::V1 {
-            inputs,
-            outputs,
-            lock_time: zakura_chain::transaction::LockTime::unlocked(),
-        })
+        {
+            use zakura_chain::serialization::ZcashSerialize;
+            let node = zakura_chain::transaction::Transaction::V1 {
+                inputs,
+                outputs,
+                lock_time: zakura_chain::transaction::LockTime::unlocked(),
+            };
+            Arc::new(
+                Transaction::zcash_deserialize(node.zcash_serialize_to_vec().unwrap().as_slice())
+                    .unwrap(),
+            )
+        }
     }
 
     /// The exact fee counts every input, including one whose spent script is empty,
@@ -949,7 +942,7 @@ mod tests {
         assert!(
             cache
                 .get(&OutPoint {
-                    hash: transaction::Hash([1; 32]),
+                    hash: TxHash([1; 32]),
                     index: 0,
                 })
                 .is_none()

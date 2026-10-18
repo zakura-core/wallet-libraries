@@ -80,6 +80,28 @@ def metadata(manifest, locked=True, no_deps=False):
     return json.loads(subprocess.check_output(command, cwd=ROOT, text=True))
 
 
+def rpc_dependency_problems(graph, node_packages):
+    """The active RPC consumer must compile no node packages or RocksDB."""
+    packages = {package["id"]: package for package in graph["packages"]}
+    nodes = {node["id"]: node for node in graph["resolve"]["nodes"]}
+    pending = [graph["resolve"]["root"]]
+    visited = set()
+    errors = []
+    while pending:
+        package_id = pending.pop()
+        if package_id in visited:
+            continue
+        visited.add(package_id)
+        package = packages[package_id]
+        name = package["name"]
+        if name in node_packages or name in {"rocksdb", "librocksdb-sys"}:
+            errors.append(f"RPC consumer compiles node/database package {name}")
+        for dependency in nodes[package_id]["deps"]:
+            if any(kind["kind"] != "dev" for kind in dependency["dep_kinds"]):
+                pending.append(dependency["pkg"])
+    return errors
+
+
 def main():
     manifest = tomllib.loads((ROOT / "manifests/sources.toml").read_text())
     server = manifest["server"]
@@ -147,6 +169,8 @@ fn main() {
             (consumer / "src/main.rs").write_text(source)
             fresh = metadata(consumer / "Cargo.toml", locked=False)
             errors.extend(problems(fresh, owned, nodes, wallet=kind == "wallet"))
+            if kind == "server-production":
+                errors.extend(rpc_dependency_problems(fresh, nodes))
             if not errors:
                 subprocess.run(["cargo", "check", "--locked", "--manifest-path", str(consumer / "Cargo.toml")], cwd=ROOT, check=True)
         # Each mutually exclusive facade backend must remain free of both

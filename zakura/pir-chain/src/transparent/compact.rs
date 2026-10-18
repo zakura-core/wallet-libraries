@@ -1,6 +1,6 @@
 //! Compact blocks reconstructed from raw blocks, in the fields of lightwalletd's
 //! `CompactBlock` message, independently of any service's journal.
-use zakura_chain::{serialization::ZcashSerialize, transparent::Input};
+use crate::chain::{Action, Input};
 
 use super::{FetchedBlock, Output};
 
@@ -90,16 +90,22 @@ impl FetchedBlock {
                 })
                 .collect();
             let sapling_spends = tx
-                .sapling_nullifiers()
-                .map(|nf| <[u8; 32]>::from(*nf))
+                .wallet()
+                .sapling_bundle()
+                .into_iter()
+                .flat_map(|bundle| bundle.shielded_spends())
+                .map(|spend| spend.nullifier().0)
                 .collect();
             let sapling_outputs = tx
-                .sapling_outputs()
+                .wallet()
+                .sapling_bundle()
+                .into_iter()
+                .flat_map(|bundle| bundle.shielded_outputs())
                 .map(|output| {
                     Ok(CompactSaplingOutput {
-                        cmu: output.cm_u.to_bytes().to_vec(),
-                        ephemeral_key: output.ephemeral_key.zcash_serialize_to_vec()?,
-                        ciphertext: output.enc_ciphertext.zcash_serialize_to_vec()?[..52].to_vec(),
+                        cmu: output.cmu().to_bytes().to_vec(),
+                        ephemeral_key: output.ephemeral_key().0.to_vec(),
+                        ciphertext: output.enc_ciphertext()[..52].to_vec(),
                     })
                 })
                 .collect::<Result<Vec<_>, std::io::Error>>()?;
@@ -135,7 +141,7 @@ impl FetchedBlock {
             height,
             hash: block.hash().0,
             prev_hash: block.header.previous_block_hash.0,
-            time: u32::try_from(block.header.time.timestamp())?,
+            time: u32::try_from(block.header.time)?,
             transactions,
             sapling_tree_size: after[0],
             orchard_tree_size: after[1],
@@ -146,11 +152,11 @@ impl FetchedBlock {
     }
 }
 
-fn action(a: &zakura_chain::orchard::Action) -> Result<CompactAction, std::io::Error> {
+fn action(a: Action) -> Result<CompactAction, std::io::Error> {
     Ok(CompactAction {
         nullifier: <[u8; 32]>::from(a.nullifier).to_vec(),
         cmx: <[u8; 32]>::from(a.cm_x).to_vec(),
-        ephemeral_key: a.ephemeral_key.zcash_serialize_to_vec()?,
-        ciphertext: a.enc_ciphertext.zcash_serialize_to_vec()?[..52].to_vec(),
+        ephemeral_key: a.ephemeral_key.to_vec(),
+        ciphertext: a.enc_ciphertext[..52].to_vec(),
     })
 }

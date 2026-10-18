@@ -11,11 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Deserialize;
 use serde_json::json;
-use zakura_chain::amount::{Amount, NonNegative};
-use zakura_chain::block::Block;
-use zakura_chain::serialization::ZcashDeserialize;
-use zakura_chain::transaction::{self, Transaction};
-use zakura_chain::transparent::{Input, OutPoint, Utxo};
+
+use crate::chain::{Amount, Block, Hash as TxHash, Input, OutPoint, Transaction, Utxo};
 
 use crate::fee::{self, OutputCache};
 use crate::{Network, NodeClient, NodeError};
@@ -179,7 +176,7 @@ impl NodeClient {
             .filter(|tx| tx.ironwood_actions().next().is_some() && fee::needs_prevouts(tx))
             .flat_map(|tx| tx.inputs().iter().filter_map(Input::outpoint))
             .collect();
-        let mut values: HashMap<OutPoint, Amount<NonNegative>> = HashMap::new();
+        let mut values: HashMap<OutPoint, Amount> = HashMap::new();
         if !wanted.is_empty() {
             let in_block: HashMap<_, _> = block
                 .transactions
@@ -257,10 +254,7 @@ impl NodeClient {
     ///
     /// A transaction the node does not have (-5) is an error, never an
     /// absent input value.
-    async fn transactions(
-        &self,
-        txids: &[transaction::Hash],
-    ) -> Result<Vec<Transaction>, NodeError> {
+    async fn transactions(&self, txids: &[TxHash]) -> Result<Vec<Transaction>, NodeError> {
         let entries = self
             .batch::<String>(
                 "getrawtransaction",
@@ -311,7 +305,7 @@ pub fn raw_transaction_actions(
         })?;
         utxos.insert(
             OutPoint {
-                hash: transaction::Hash(txid),
+                hash: TxHash(txid),
                 index,
             },
             fee::spent_output(value),
@@ -356,8 +350,8 @@ fn transaction_actions(
 
 fn output_value(
     outpoint: &OutPoint,
-    outputs: &[zakura_chain::transparent::Output],
-) -> Result<Amount<NonNegative>, NodeError> {
+    outputs: &[crate::chain::Output],
+) -> Result<Amount, NodeError> {
     outputs
         .get(outpoint.index as usize)
         .map(|output| output.value)

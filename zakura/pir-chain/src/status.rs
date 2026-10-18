@@ -1,6 +1,6 @@
 //! Status's chain reads: a canonical block's transaction IDs and the mempool's.
+use crate::chain::Block;
 use serde_json::json;
-use zakura_chain::{block::Block, serialization::ZcashDeserialize};
 
 use crate::{NodeClient, NodeError};
 
@@ -25,7 +25,7 @@ impl NodeClient {
         let canonical = self
             .block_hash_display(height)
             .await?
-            .parse::<zakura_chain::block::Hash>()
+            .parse::<crate::chain::Hash>()
             .map_err(|error| NodeError::Block(format!("invalid canonical hash: {error}")))?
             .0;
         if hash.0 != canonical {
@@ -47,7 +47,7 @@ impl NodeClient {
         displayed
             .into_iter()
             .map(|id| {
-                id.parse::<zakura_chain::transaction::Hash>()
+                id.parse::<crate::chain::Hash>()
                     .map(|hash| hash.0)
                     .map_err(|error| NodeError::Block(format!("invalid mempool txid: {error}")))
             })

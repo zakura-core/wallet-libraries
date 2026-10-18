@@ -3129,14 +3129,20 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
  "tracing",
  "zakura-chain",
+ "zakura-orchard",
+ "zakura-primitives",
+ "zakura-protocol",
  "zakura-receiver-crypto",
  "zakura-state",
  "zakura-test",
+ "zakura-transparent",
+ "zcash_script",
 ]
 
 [[package]]

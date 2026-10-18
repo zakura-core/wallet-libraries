@@ -58,13 +58,10 @@ pub enum NodeError {
 /// for as many of the smallest transactions as fit in a maximum-size block (about
 /// 4.7 MB), plus 64 KiB for the envelope and the block's other fields. That exceeds a
 /// maximum-size raw block's hex (4 MB), as the assertion below keeps.
-pub const RPC_RESPONSE_BYTES: usize = (zakura_chain::block::MAX_BLOCK_BYTES
-    / zakura_chain::transaction::MIN_TRANSPARENT_TX_SIZE)
-    as usize
-    * 128
-    + 64 * 1024;
-const _: () =
-    assert!(RPC_RESPONSE_BYTES > 2 * zakura_chain::block::MAX_BLOCK_BYTES as usize + 64 * 1024);
+pub const RPC_RESPONSE_BYTES: usize =
+    (crate::chain::MAX_BLOCK_BYTES / crate::chain::MIN_TRANSPARENT_TX_SIZE) as usize * 128
+        + 64 * 1024;
+const _: () = assert!(RPC_RESPONSE_BYTES > 2 * crate::chain::MAX_BLOCK_BYTES as usize + 64 * 1024);
 
 /// Whole-response bound for Enhance, Status and Transparent, including batches.
 const SHARED_RPC_RESPONSE_BYTES: usize = 64 * 1024 * 1024;

@@ -18,6 +18,7 @@
 //! and is never part of a wallet build.
 #![forbid(unsafe_code)]
 
+mod chain;
 pub mod enhance;
 mod fee;
 pub mod hash;
@@ -41,6 +42,7 @@ pub enum Network {
 }
 
 impl Network {
+    #[cfg(feature = "rocksdb")]
     pub(crate) fn node(self) -> zakura_chain::parameters::Network {
         match self {
             Self::Mainnet => zakura_chain::parameters::Network::Mainnet,
@@ -50,14 +52,23 @@ impl Network {
 
     /// The network's genesis block hash, in protocol byte order.
     pub fn genesis_hash(self) -> [u8; 32] {
-        self.node().genesis_hash().0
+        crate::hash::parse_display(match self {
+            Self::Mainnet => "00040fe8ec8471911baa1db1266ea15dd06b4a8a5c453883c000b031973dce08",
+            Self::Testnet => "05a60a92d99d85997cce3b87616c089f6124d7342af37106edc76126334a2c38",
+        })
+        .expect("fixed genesis hash")
     }
 
     /// The first height with an Ironwood note commitment tree (NU6.3).
     pub fn ironwood_activation(self) -> u32 {
-        zakura_chain::parameters::NetworkUpgrade::Nu6_3
-            .activation_height(&self.node())
-            .expect("Ironwood activates on every supported network")
-            .0
+        zcash_protocol::consensus::Parameters::activation_height(
+            &match self {
+                Self::Mainnet => zcash_protocol::consensus::Network::MainNetwork,
+                Self::Testnet => zcash_protocol::consensus::Network::TestNetwork,
+            },
+            zcash_protocol::consensus::NetworkUpgrade::Nu6_3,
+        )
+        .expect("Ironwood activates on every supported network")
+        .into()
     }
 }

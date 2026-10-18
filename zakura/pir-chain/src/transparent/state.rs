@@ -59,6 +59,7 @@ use super::{
 use crate::Network;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use zakura_chain::serialization::ZcashSerialize;
 use zakura_chain::transparent::{OutPoint, Output};
 use zakura_state::{Config, HashOrHeight, PruningConfig, ReadStateService, StorageMode, ZakuraDb};
 
@@ -70,6 +71,8 @@ pub enum StateError {
     Open { path: PathBuf, reason: String },
     #[error("the Zakura state database at {path} is not an archive database: {reason}")]
     NotArchive { path: PathBuf, reason: &'static str },
+    #[error("could not decode finalized block at height {height}: {reason}")]
+    Decode { height: u64, reason: String },
     #[error("the state database holds no block at height {0}")]
     MissingBlock(u64),
     #[error("the state database holds no finalized tip")]
@@ -157,7 +160,19 @@ impl StateReader {
     pub fn fetch_block(&self, height: u64) -> Result<FetchedBlock, StateError> {
         self.db
             .block(HashOrHeight::Height(to_height(height)?))
-            .map(FetchedBlock)
+            .map(|block| {
+                let bytes = block
+                    .zcash_serialize_to_vec()
+                    .map_err(|e| StateError::Decode {
+                        height,
+                        reason: e.to_string(),
+                    })?;
+                FetchedBlock::from_exact_bytes(&bytes).map_err(|e| StateError::Decode {
+                    height,
+                    reason: e.to_string(),
+                })
+            })
+            .transpose()?
             .ok_or(StateError::MissingBlock(height))
     }
 

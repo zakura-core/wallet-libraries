@@ -8,9 +8,8 @@
 //! module never substitutes zero, guesses, or sums only the inputs it found.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use zakura_chain::amount::{Amount, NonNegative};
-use zakura_chain::transaction::{self, Transaction};
-use zakura_chain::transparent::{Input, OutPoint, Output, Script, Utxo};
+
+use crate::chain::{Amount, Hash as TxHash, Input, OutPoint, Output, Script, Transaction, Utxo};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum FeeError {
@@ -33,8 +32,7 @@ pub(crate) fn outpoint_label(outpoint: &OutPoint) -> String {
 ///
 /// `utxos` must hold the output spent by every transparent input. A coinbase
 /// transaction has no fee of its own and is answered without reading `utxos`.
-/// Presence is checked here first: `Transaction::value_balance` panics on a
-/// missing outpoint.
+/// Presence and duplicate spends are checked before calculating the balance.
 pub(crate) fn transaction_fee(
     transaction: &Transaction,
     utxos: &HashMap<OutPoint, Utxo>,
@@ -55,15 +53,7 @@ pub(crate) fn transaction_fee(
             return Err(FeeError::MissingPrevout(outpoint_label(&outpoint)));
         }
     }
-    let remaining = transaction
-        .value_balance(utxos)
-        .map_err(|error| FeeError::ValueBalance(error.to_string()))?
-        .remaining_transaction_value()
-        .map_err(|error| FeeError::Negative(error.to_string()))?;
-    let fee: i64 = remaining.into();
-    u64::try_from(fee)
-        .map(Some)
-        .map_err(|_| FeeError::Negative(fee.to_string()))
+    transaction.fee(utxos).map(Some).map_err(FeeError::Negative)
 }
 
 /// Whether publishing this transaction's fee needs spent-output values.
@@ -93,8 +83,8 @@ pub const DEFAULT_CACHE_OUTPUTS: usize = 250_000;
 /// transaction is either fully present or absent, while the budget counts
 /// outputs because transaction counts are a poor proxy for memory.
 pub(crate) struct OutputCache {
-    values: HashMap<OutPoint, Amount<NonNegative>>,
-    order: VecDeque<(transaction::Hash, u32)>,
+    values: HashMap<OutPoint, Amount>,
+    order: VecDeque<(TxHash, u32)>,
     outputs: usize,
     capacity: usize,
 }
@@ -114,7 +104,7 @@ impl OutputCache {
         self.insert_outputs(transaction.hash(), transaction.outputs());
     }
 
-    pub(crate) fn insert_outputs(&mut self, txid: transaction::Hash, outputs: &[Output]) {
+    pub(crate) fn insert_outputs(&mut self, txid: TxHash, outputs: &[Output]) {
         if outputs.is_empty()
             || self.values.contains_key(&OutPoint {
                 hash: txid,
@@ -150,7 +140,7 @@ impl OutputCache {
         }
     }
 
-    pub(crate) fn get(&self, outpoint: &OutPoint) -> Option<Amount<NonNegative>> {
+    pub(crate) fn get(&self, outpoint: &OutPoint) -> Option<Amount> {
         self.values.get(outpoint).copied()
     }
 
@@ -160,39 +150,37 @@ impl OutputCache {
     }
 }
 
-/// The spent output passed to `value_balance`, which reads only its value.
-///
-/// Height and coinbase origin feed maturity checks, not the value pool; the
-/// script is not retained by the cache.
-pub(crate) fn spent_output(value: Amount<NonNegative>) -> Utxo {
-    Utxo::new(
-        Output {
+/// The cached spent output retains only its value; fee calculation needs no script.
+pub(crate) fn spent_output(value: Amount) -> Utxo {
+    Utxo {
+        output: Output {
             value,
             lock_script: Script::new(&[]),
         },
-        zakura_chain::block::Height(0),
-        false,
-    )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use zakura_chain::serialization::{ZcashDeserialize, ZcashSerialize};
-    use zakura_chain::transaction::LockTime;
+    use zakura_chain::{
+        transaction::{self, LockTime, Transaction as NodeTransaction},
+        transparent::{Input as NodeInput, Output as NodeOutput, Script as NodeScript},
+    };
 
-    fn amount(value: i64) -> Amount<NonNegative> {
-        Amount::try_from(value).unwrap()
+    fn amount(value: i64) -> Amount {
+        Amount::from_nonnegative_i64(value).unwrap()
     }
 
-    fn output(value: i64) -> Output {
-        Output {
-            value: amount(value),
-            lock_script: Script::new(&[0x51]),
+    fn output(value: i64) -> NodeOutput {
+        NodeOutput {
+            value: zakura_chain::amount::Amount::try_from(value).unwrap(),
+            lock_script: NodeScript::new(&[0x51]),
         }
     }
 
-    fn reparse(transaction: Transaction) -> Transaction {
+    fn reparse(transaction: NodeTransaction) -> Transaction {
         Transaction::zcash_deserialize(transaction.zcash_serialize_to_vec().unwrap().as_slice())
             .unwrap()
     }
@@ -203,20 +191,20 @@ mod tests {
         Transaction::zcash_deserialize(bytes.as_slice()).unwrap()
     }
 
-    fn spend(seed: u8, index: u32) -> Input {
-        Input::PrevOut {
-            outpoint: OutPoint {
+    fn spend(seed: u8, index: u32) -> NodeInput {
+        NodeInput::PrevOut {
+            outpoint: zakura_chain::transparent::OutPoint {
                 hash: transaction::Hash([seed; 32]),
                 index,
             },
-            unlock_script: Script::new(&[0x51]),
+            unlock_script: NodeScript::new(&[0x51]),
             sequence: u32::MAX,
         }
     }
 
     /// The fixture's Ironwood actions with replaced transparent parts.
-    fn mixed(inputs: Vec<Input>, outputs: Vec<Output>, ironwood: i64) -> Transaction {
-        let Transaction::V6 {
+    fn mixed(inputs: Vec<NodeInput>, outputs: Vec<NodeOutput>, ironwood: i64) -> Transaction {
+        let NodeTransaction::V6 {
             network_upgrade,
             lock_time,
             expiry_height,
@@ -224,13 +212,18 @@ mod tests {
             orchard_shielded_data,
             mut ironwood_shielded_data,
             ..
-        } = fixture()
+        } = NodeTransaction::zcash_deserialize(
+            hex::decode(include_str!("../tests/fixtures/ironwood-fee-expiry.hex").trim())
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap()
         else {
             panic!("fixture is V6");
         };
         ironwood_shielded_data.as_mut().unwrap().value_balance =
-            Amount::try_from(ironwood).unwrap();
-        reparse(Transaction::V6 {
+            zakura_chain::amount::Amount::try_from(ironwood).unwrap();
+        reparse(NodeTransaction::V6 {
             network_upgrade,
             lock_time,
             expiry_height,
@@ -242,10 +235,21 @@ mod tests {
         })
     }
 
-    fn utxos(values: &[(Input, i64)]) -> HashMap<OutPoint, Utxo> {
+    fn utxos(values: &[(NodeInput, i64)]) -> HashMap<OutPoint, Utxo> {
         values
             .iter()
-            .map(|(input, value)| (input.outpoint().unwrap(), spent_output(amount(*value))))
+            .map(|(input, value)| {
+                (
+                    {
+                        let p = input.outpoint().unwrap();
+                        OutPoint {
+                            hash: TxHash(p.hash.0),
+                            index: p.index,
+                        }
+                    },
+                    spent_output(amount(*value)),
+                )
+            })
             .collect()
     }
 
@@ -270,9 +274,10 @@ mod tests {
         let tx = mixed(vec![spend(1, 0), spend(2, 1)], vec![], -100_000);
         assert_eq!(
             transaction_fee(&tx, &utxos(&[(spend(1, 0), 420_000)])),
-            Err(FeeError::MissingPrevout(outpoint_label(
-                &spend(2, 1).outpoint().unwrap()
-            )))
+            Err(FeeError::MissingPrevout(outpoint_label(&OutPoint {
+                hash: TxHash([2; 32]),
+                index: 1
+            })))
         );
         let duplicate = mixed(vec![spend(1, 0), spend(1, 0)], vec![], -100_000);
         assert!(matches!(
@@ -288,8 +293,8 @@ mod tests {
 
     #[test]
     fn coinbase_has_no_fee_and_reads_no_utxos() {
-        let coinbase = reparse(Transaction::V4 {
-            inputs: vec![Input::Coinbase {
+        let coinbase = reparse(NodeTransaction::V4 {
+            inputs: vec![NodeInput::Coinbase {
                 height: zakura_chain::block::Height(3_500_000),
                 data: vec![0; 4],
                 sequence: u32::MAX,
@@ -307,7 +312,7 @@ mod tests {
     #[test]
     fn cache_evicts_whole_transactions_by_output_budget() {
         let make = |seed: u8, count: usize| {
-            reparse(Transaction::V4 {
+            reparse(NodeTransaction::V4 {
                 inputs: vec![spend(seed, 0)],
                 outputs: (0..count).map(|i| output(1 + i as i64)).collect(),
                 lock_time: LockTime::unlocked(),

@@ -7,15 +7,20 @@ use crate::NodeError;
 
 /// The display-order hex of the protocol-order block or transaction hash `hash`.
 pub fn display(hash: &[u8; 32]) -> String {
-    zakura_chain::block::Hash(*hash).to_string()
+    {
+        let mut bytes = *hash;
+        bytes.reverse();
+        hex::encode(bytes)
+    }
 }
 
 /// The protocol-order bytes of the display-order hex hash `displayed`.
 pub fn parse_display(displayed: &str) -> Result<[u8; 32], NodeError> {
-    displayed
-        .parse::<zakura_chain::block::Hash>()
-        .map(|hash| hash.0)
-        .map_err(|error| NodeError::Block(format!("invalid hash {displayed:?}: {error}")))
+    let mut bytes: [u8; 32] = hex::decode(displayed)?
+        .try_into()
+        .map_err(|_| NodeError::Block("hash is not 32 bytes".into()))?;
+    bytes.reverse();
+    Ok(bytes)
 }
 
 #[cfg(test)]
