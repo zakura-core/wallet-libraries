@@ -317,7 +317,8 @@ fn reusable(
 }
 
 /// Releases `account`'s settled paid reservations and reclaims abandoned unpaid ones
-/// scanned empty (see [`reusable`]), whose keys stop scanning. Returns the reclaimed
+/// scanned empty (see [`reusable`]), whose keys stop scanning. One never quoted whose
+/// address the provider has is retired instead (see [`retire`]). Returns the reclaimed
 /// incoming indices.
 pub(in crate::wallet::one_time_ivk) fn reap<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
@@ -358,16 +359,21 @@ pub(in crate::wallet::one_time_ivk) fn reap<P: Parameters>(
     }
     let open = conn
         .prepare(&format!(
-            "SELECT k.id, k.key_index FROM ironwood_one_time_keys k
+            "SELECT k.id, k.key_index, k.provider_seen = 1 AND {LATEST_DEADLINE} IS NULL
+             FROM ironwood_one_time_keys k
              WHERE k.account_id = ?1 AND {RESERVED} ORDER BY k.key_index"
         ))?
-        .query_map([owner.0], |r| Ok((r.get::<_, i64>(0)?, r.get(1)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
+        .query_map([owner.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<Vec<(i64, Vec<u8>, bool)>, _>>()?;
     let mut reclaimed = Vec::new();
-    for (key, index) in open {
+    for (key, index, held) in open {
         if reusable(conn, key, now, deadline_now)? && scanned_empty(conn, key)? {
-            abandon(conn, key, now)?;
-            reclaimed.push(decode_index(index)?);
+            if held {
+                retire(conn, key, now)?;
+            } else {
+                abandon(conn, key, now)?;
+                reclaimed.push(decode_index(index)?);
+            }
         }
     }
     Ok(reclaimed)

@@ -1499,3 +1499,39 @@ fn a_retired_reissued_address_keeps_scanning() {
     close_at(st.wallet_mut().db_mut(), account, limit, through);
     assert_eq!(active_from(&st, key.key_id()), None);
 }
+
+/// A draft never quoted here that idles past the cooldown is retired, not reclaimed, once
+/// a fresh seen set shows another device quoted it, so its key keeps scanning until the
+/// completion limit after and that device's payment is still found.
+#[test]
+fn an_idle_draft_another_device_quoted_keeps_scanning() {
+    use zakura_one_time_ivk::swap::COMPLETION_LIMIT_SECS;
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let draft = prepare(&mut st, NOW);
+    let now = NOW + RECEIVE_RECLAIM_SECONDS;
+    let held = [draft.receiver().to_raw_address_bytes()];
+    let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
+    let holds = ProviderSeen {
+        since: 0,
+        until: now,
+        contains: &contains,
+    };
+    let through = tip(&st).height;
+    chain_agrees(st.wallet().db(), now);
+    let db = st.wallet_mut().db_mut();
+    let next = db.prepare_receive_reservation(account, now, through, Some(&holds));
+    assert_eq!(next.unwrap().unwrap().key_id().index(), 1);
+    assert!(!reserved(&st, &draft));
+    close_at(st.wallet_mut().db_mut(), account, now, through);
+    assert!(active_from(&st, draft.key_id()).is_some());
+    pay(&mut st, draft.full_viewing_key(), 10_000);
+    assert!(holds_note(&st, draft.key_id()));
+    confirm(&mut st);
+    let limit = now + COMPLETION_LIMIT_SECS;
+    let through = tip(&st).height;
+    close_at(st.wallet_mut().db_mut(), account, limit - 1, through);
+    assert!(active_from(&st, draft.key_id()).is_some());
+    close_at(st.wallet_mut().db_mut(), account, limit, through);
+    assert_eq!(active_from(&st, draft.key_id()), None);
+}
