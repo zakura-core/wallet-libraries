@@ -13,7 +13,7 @@
 
 use rusqlite::Connection;
 use zcash_client_backend::data_api::transparent_ledger::{
-    CommitRejection, RecoveryRevision, TransparentLedgerRead, TransparentLedgerWrite as _,
+    CommitRejection, TransparentLedgerRead, TransparentLedgerWrite as _,
 };
 use zcash_client_sqlite::{AccountUuid, WalletDb, error::SqliteClientError};
 use zcash_protocol::consensus;
@@ -343,7 +343,14 @@ pub(crate) fn apply_commits<P: consensus::Parameters, CL, R>(
     trust: Trust,
     gate: &mut impl WriteGate,
     start: impl FnOnce(),
-) -> Result<(ApplyStats, Vec<RecoveryRevision>, Option<u64>), ApplyFailure> {
+) -> Result<
+    (
+        ApplyStats,
+        Vec<zakura_transparent_recovery_types::RecoveryRevision>,
+        Option<u64>,
+    ),
+    ApplyFailure,
+> {
     let progress = batch.progress();
     let mut stats = ApplyStats::default();
     let apply_failure = |error, stats| ApplyFailure {
@@ -366,6 +373,7 @@ pub(crate) fn apply_commits<P: consensus::Parameters, CL, R>(
     }
     start();
     for (index, commit) in commits.into_iter().enumerate() {
+        let commit = commit.map_block_hash(crate::wallet_boundary::wallet_block_hash);
         let applied = gate
             .write(|| match trust {
                 Trust::Observed => wallet.apply_transparent_ledger_commit(commit),

@@ -8,7 +8,7 @@
 #[cfg(feature = "test-dependencies")]
 use ambassador::delegatable_trait;
 use zcash_primitives::{block::BlockHash, transaction::TxId};
-use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
+use zcash_protocol::value::Zatoshis;
 
 use super::{Balance, WalletRead, wallet::ConfirmationsPolicy};
 
@@ -26,17 +26,7 @@ mod recovery;
 #[cfg(feature = "transparent-inputs")]
 pub use recovery::*;
 
-/// A locally accepted block: its height and the hash the wallet holds for that height.
-///
-/// Coverage through `H` can support a transaction targeting `H + 1`; the future block has
-/// no accepted hash to check. A publisher's asserted hash never substitutes for a local one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ChainPoint {
-    /// Height of the accepted block.
-    pub height: BlockHeight,
-    /// The wallet's hash for the block at `height`.
-    pub hash: BlockHash,
-}
+pub type ChainPoint = zakura_transparent_recovery_types::ChainPoint<BlockHash>;
 
 /// Source authorization for transparent discovery and financial authority.
 ///
@@ -152,23 +142,7 @@ pub enum RecoveryCompletion {
     Blocked,
 }
 
-/// Why candidate recovery for an account is not yet complete.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum CandidateBlocker {
-    /// No local target exists.
-    ChainUnknown,
-    /// Some watched address lacks continuous coverage from its required start to the target.
-    IncompleteCoverage,
-    /// Pages remain open.
-    PendingPages,
-    /// A mined spend consumes an output that has not been recovered.
-    UnresolvedSpends,
-    /// A range recorded as unsupported is not covered by any source.
-    UnsupportedRanges,
-    /// Activity near the end of a derived window needs addresses that this account's keys
-    /// cannot derive, or reaches the last non-hardened index, which the wallet cannot store.
-    WindowUnderivable,
-}
+pub use zakura_transparent_recovery_types::CandidateBlocker;
 
 /// A reason transparent financial authority is unavailable, or an account cannot be activated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

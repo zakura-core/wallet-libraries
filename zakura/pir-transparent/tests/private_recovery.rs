@@ -223,8 +223,22 @@ impl Seen {
         let seen = Self {
             state: report.state,
             progress: report.progress,
-            commits: held.map_or(vec![], |batch| batch.commits().to_vec()),
-            retired: held.map_or(vec![], |batch| batch.retired_revisions().to_vec()),
+            commits: held.map_or(vec![], |batch| {
+                batch
+                    .commits()
+                    .iter()
+                    .cloned()
+                    .map(|commit| commit.map_block_hash(|hash| BlockHash(hash.0)))
+                    .collect()
+            }),
+            retired: held.map_or(vec![], |batch| {
+                batch
+                    .retired_revisions()
+                    .iter()
+                    .cloned()
+                    .map(|revision| revision.map_block_hash(|hash| BlockHash(hash.0)))
+                    .collect()
+            }),
         };
         assert_eq!(
             (seen.commits.len(), seen.retired.len()),
@@ -458,7 +472,13 @@ impl Fixture {
     }
 
     /// Records every address `watch` names, for [`Fixture::assert_private`].
-    fn note_watched(&mut self, watch: &TransparentAddressWatchSet<AccountUuid>) {
+    fn note_watched(
+        &mut self,
+        watch: &zakura_pir_transparent::recovery_types::TransparentAddressWatchSet<
+            AccountUuid,
+            impl zakura_pir_transparent::RecoveryHash,
+        >,
+    ) {
         self.watched.extend(
             watch
                 .addresses
@@ -3121,7 +3141,16 @@ fn retirements_are_acknowledged_only_after_trusted_reconciliation_commits() {
     // Observed trust refuses the batch before applying anything.
     let before = f.dump(true);
     let batch = f.recover().unwrap();
-    assert_eq!(batch.retired_revisions(), &[first_tail.clone()][..]);
+    assert_eq!(
+        batch
+            .retired_revisions()
+            .iter()
+            .cloned()
+            .map(|revision| revision.map_block_hash(|hash| BlockHash(hash.0)))
+            .collect::<Vec<_>>()
+            .as_slice(),
+        &[first_tail.clone()][..]
+    );
     let failure = f.settle(batch, Trust::Observed).unwrap_err();
     assert!(matches!(failure.error, ApplyError::Unreconciled));
     assert_eq!(failure.stats, Default::default());
@@ -3129,7 +3158,16 @@ fn retirements_are_acknowledged_only_after_trusted_reconciliation_commits() {
 
     // Every commit applies, but the companion cannot record the acknowledgment.
     let batch = f.recover().unwrap();
-    assert_eq!(batch.retired_revisions(), &[first_tail.clone()][..]);
+    assert_eq!(
+        batch
+            .retired_revisions()
+            .iter()
+            .cloned()
+            .map(|revision| revision.map_block_hash(|hash| BlockHash(hash.0)))
+            .collect::<Vec<_>>()
+            .as_slice(),
+        &[first_tail.clone()][..]
+    );
     let commits = batch.commits().len();
     let companion = Connection::open(f.companion_path()).unwrap();
     companion
@@ -3153,7 +3191,16 @@ fn retirements_are_acknowledged_only_after_trusted_reconciliation_commits() {
     // Unacknowledged, the retirement is listed again; the replay changes
     // nothing in the wallet and is acknowledged.
     let batch = f.recover().unwrap();
-    assert_eq!(batch.retired_revisions(), &[first_tail.clone()][..]);
+    assert_eq!(
+        batch
+            .retired_revisions()
+            .iter()
+            .cloned()
+            .map(|revision| revision.map_block_hash(|hash| BlockHash(hash.0)))
+            .collect::<Vec<_>>()
+            .as_slice(),
+        &[first_tail.clone()][..]
+    );
     let applied = f.settle(batch, Trust::Trusted).unwrap();
     assert_eq!(applied.retired, 1);
     assert_eq!(f.dump(true), reconciled);
@@ -3192,7 +3239,16 @@ fn stale_middle_retirement_batch_preserves_reconciliation_across_reopen() {
     f.publish(&shards, SEAL);
     let batch = f.recover().unwrap();
     assert_eq!(batch.state(), BatchState::Ready);
-    assert_eq!(batch.retired_revisions(), &[retired.clone()][..]);
+    assert_eq!(
+        batch
+            .retired_revisions()
+            .iter()
+            .cloned()
+            .map(|revision| revision.map_block_hash(|hash| BlockHash(hash.0)))
+            .collect::<Vec<_>>()
+            .as_slice(),
+        &[retired.clone()][..]
+    );
     let commits = batch.commits().len();
     assert_eq!(commits, 5);
     once_after_new_revision(
@@ -3231,7 +3287,16 @@ fn stale_middle_retirement_batch_preserves_reconciliation_across_reopen() {
     f.open();
     let replay = f.recover().unwrap();
     assert_eq!(replay.state(), BatchState::Ready);
-    assert_eq!(replay.retired_revisions(), &[retired.clone()][..]);
+    assert_eq!(
+        replay
+            .retired_revisions()
+            .iter()
+            .cloned()
+            .map(|revision| revision.map_block_hash(|hash| BlockHash(hash.0)))
+            .collect::<Vec<_>>()
+            .as_slice(),
+        &[retired.clone()][..]
+    );
     assert_eq!(replay.commits().len(), commits);
     let applied = f.settle(replay, Trust::Trusted).unwrap();
     assert_eq!(applied.stats.applied, commits);

@@ -8,11 +8,11 @@ use crate::engine_store::SqliteStore;
 use transparent::bundle::OutPoint;
 use transparent_events::TransparentEvent;
 use transparent_filter::ShardMap;
-use zcash_client_backend::data_api::transparent_ledger::{
+use zakura_transparent_recovery_types::{
     AddressRange, ChainPoint, PageRequest, ReceiveEvent, SpendEvent, TransparentAddressWatchSet,
     TransparentLedgerCommit, WatchedAddress,
 };
-use zcash_primitives::transaction::TxId;
+use zcash_protocol::TxId;
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
 use super::commit_builder::{CommitBuilder, RevisionCommits, accepted_shard_anchor};

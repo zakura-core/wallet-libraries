@@ -21,7 +21,7 @@ use crate::engine_store::SqliteStore;
 use rusqlite::Connection;
 use std::{any::Any, path::Path, time::Duration};
 use transparent_filter::ShardMap;
-use zcash_client_backend::data_api::transparent_ledger::TransparentAddressWatchSet;
+use zakura_transparent_recovery_types::TransparentAddressWatchSet;
 
 pub(crate) use preflight::{
     check_publication_limits, ensure_mainnet_publication, refuse_parent_filters, service_geometry,
@@ -150,6 +150,25 @@ impl TransparentHistoryRecovery {
     /// catalog and fails with [`RecoveryError::PublicationChanged`], which `pass` retries
     /// once.
     pub(crate) fn recover<A, C, F, T>(
+        &mut self,
+        watch: &TransparentAddressWatchSet<A, impl crate::RecoveryHash>,
+        chain: &C,
+        filters: &mut F,
+        transport: &mut T,
+    ) -> Result<RecoveryBatch<A>, RecoveryError>
+    where
+        A: Copy + std::fmt::Debug,
+        C: ChainView,
+        F: FilterSource,
+        T: ShardTransport,
+    {
+        let watch = watch
+            .clone()
+            .map_block_hash(crate::RecoveryHash::into_recovery_hash);
+        self.recover_with_contract(&watch, chain, filters, transport)
+    }
+
+    fn recover_with_contract<A, C, F, T>(
         &mut self,
         watch: &TransparentAddressWatchSet<A>,
         chain: &C,

@@ -1,8 +1,8 @@
 use transparent::address::TransparentAddress;
-use zcash_client_backend::data_api::transparent_ledger::{
+use zakura_transparent_recovery_types::RecoveryBlockHash as BlockHash;
+use zakura_transparent_recovery_types::{
     AccountLifecycle, ChainPoint, CommitRejection, StaleCommit, WatchOrigin, WatchedAddress,
 };
-use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::BlockHeight;
 
 use super::*;

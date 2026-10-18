@@ -32,7 +32,7 @@ fn retired() -> RecoveryRevision {
         revision: vec![2; 32],
         lineage: 1,
         sealed: false,
-        publication: zcash_client_backend::data_api::transparent_ledger::PublicationAnchor {
+        publication: zakura_transparent_recovery_types::PublicationAnchor {
             height: block_height(1).unwrap(),
             hash: BlockHash([3; 32]),
         },

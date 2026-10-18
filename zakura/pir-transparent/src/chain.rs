@@ -1,7 +1,7 @@
 //! The wallet's own scanned chain as the independent view a pass is checked against.
 
 use crate::engine::{Acceptance, Anchor, ChainView};
-use zcash_client_backend::data_api::{WalletRead, transparent_ledger::ChainPoint};
+use zcash_client_backend::data_api::WalletRead;
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::BlockHeight;
 
@@ -17,13 +17,19 @@ use crate::convert::{block_hash_from_display, height_u64};
 /// publisher. Build it with the target of the watch set the pass recovers.
 pub struct WalletChain<'a, W: ?Sized> {
     wallet: &'a W,
-    target: ChainPoint,
+    target: zakura_transparent_recovery_types::ChainPoint,
 }
 
 impl<'a, W: WalletRead + ?Sized> WalletChain<'a, W> {
     /// A view of `wallet`'s scanned blocks through `target`.
-    pub fn new(wallet: &'a W, target: ChainPoint) -> Self {
-        Self { wallet, target }
+    pub fn new(
+        wallet: &'a W,
+        target: zakura_transparent_recovery_types::ChainPoint<impl crate::RecoveryHash>,
+    ) -> Self {
+        Self {
+            wallet,
+            target: target.map_block_hash(crate::RecoveryHash::into_recovery_hash),
+        }
     }
 
     /// The wallet's hash at `height`, when `height` is at or below the target and
@@ -43,7 +49,7 @@ impl<W: WalletRead + ?Sized> ChainView for WalletChain<'_, W> {
             None => Acceptance::Unknown,
             Some(held)
                 if block_hash_from_display(hash_display_hex)
-                    .is_ok_and(|offered| offered == held) =>
+                    .is_ok_and(|offered| offered.0 == held.0) =>
             {
                 Acceptance::Accepted
             }
@@ -67,6 +73,7 @@ impl<W: WalletRead + ?Sized> ChainView for WalletChain<'_, W> {
 mod tests {
     use super::*;
     use zcash_client_backend::data_api::testing::TestBuilder;
+    use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
     use zcash_client_sqlite::testing::{BlockCache, db::TestDbFactory};
 
     #[test]

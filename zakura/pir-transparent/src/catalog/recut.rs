@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, btree_map::Entry};
 
 use rusqlite::{Connection, OptionalExtension, Transaction};
-use zcash_client_backend::data_api::transparent_ledger::RecoveryRevision;
+use zakura_transparent_recovery_types::RecoveryRevision;
 
 use super::identity::Published;
 use crate::batch::WithdrawnCause;

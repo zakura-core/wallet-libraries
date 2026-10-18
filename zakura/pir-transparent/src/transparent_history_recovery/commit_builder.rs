@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::engine::{Acceptance, ChainView};
-use zcash_client_backend::data_api::transparent_ledger::{
+use zakura_transparent_recovery_types::{
     ChainPoint, RecoveryRevision, TransparentLedgerCommit, TransparentRecoveryContext,
 };
 

@@ -33,6 +33,8 @@ CONFIGS = {
     # The Transparent filter's wallet HTTP client, which no other lane enables.
     "transparent-filter-client": (["-p", "zakura-transparent-filter"], ["client"]),
     "transparent-pir": (["-p", "zakura-pir-transparent"], ["wallet"]),
+    "transparent-recovery-types": (["-p", "zakura-transparent-recovery-types"], ["transparent-inputs"]),
+    "transparent-recovery": (["-p", "zakura-pir-transparent"], ["recovery"]),
     "transparent-pir-sqlite": (["-p", "zakura-pir-transparent"], ["sqlite"]),
     "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing", "reqwest"]),
     "pir-receiver": (["-p", "zakura-pir-receiver"], ["wallet"]),

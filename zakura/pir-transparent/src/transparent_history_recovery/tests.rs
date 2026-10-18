@@ -21,14 +21,14 @@ use transparent_events::{FeeState, TransparentEvent};
 use transparent_filter::MAINNET_GENESIS_DISPLAY;
 use transparent_filter::wire::MAX_SUPERSEDED;
 use transparent_filter::{Recut, SealParameters, ShardMapEntry, SupersededShard};
-use zcash_client_backend::data_api::transparent_ledger::{
+use zakura_transparent_recovery_types::RecoveryBlockHash as BlockHash;
+use zakura_transparent_recovery_types::{
     AccountLifecycle, PendingPage, WatchOrigin, WatchedAddress,
 };
-use zcash_client_backend::data_api::transparent_ledger::{
+use zakura_transparent_recovery_types::{
     AddressRange, ChainPoint, PageRequest, TransparentLedgerCommit, WholeTransactionFee,
 };
-use zcash_client_backend::data_api::transparent_ledger::{PublicationAnchor, RecoveryRevision};
-use zcash_primitives::block::BlockHash;
+use zakura_transparent_recovery_types::{PublicationAnchor, RecoveryRevision};
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 const MORE: Progress = Progress {
     covered_through: 0,

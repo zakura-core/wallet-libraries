@@ -210,6 +210,7 @@ fn possible_wallet_export_survives_crash_before_ack_and_withdrawal() {
     adapter.acknowledge_applied(&acknowledged).unwrap();
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
     use zcash_client_backend::data_api::{
@@ -236,7 +237,10 @@ fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
         .with_data_store_factory(TestDbFactory::file_backed())
         .with_block_cache(BlockCache::new())
         .with_initial_chain_state(|_, _| InitialChainState {
-            chain_state: ChainState::empty(block_height(start - 1).unwrap(), parent),
+            chain_state: ChainState::empty(
+                block_height(start - 1).unwrap(),
+                zcash_primitives::block::BlockHash(parent.0),
+            ),
             prior_sapling_roots: vec![],
             prior_orchard_roots: vec![],
         })
@@ -253,7 +257,12 @@ fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
         .wallet_mut()
         .db_mut()
         .set_transparent_ledger_mode(PrivateRequired);
-    let watch = wallet.wallet().db().transparent_watch_set(account).unwrap();
+    let watch = wallet
+        .wallet()
+        .db()
+        .transparent_watch_set(account)
+        .unwrap()
+        .map_block_hash(crate::RecoveryHash::into_recovery_hash);
     let target = watch.target.unwrap();
     publication.shards[0].end_height = u64::from(u32::from(target.height));
     publication.shards[0].terminal_block_hash = target.hash.to_string();
@@ -311,13 +320,21 @@ fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
         wallet
             .wallet_mut()
             .db_mut()
-            .apply_transparent_ledger_commit(commit.clone())
+            .apply_transparent_ledger_commit(
+                commit
+                    .clone()
+                    .map_block_hash(crate::wallet_boundary::wallet_block_hash),
+            )
             .unwrap();
     }
     wallet
         .wallet_mut()
         .db_mut()
-        .qualify_transparent_revision(&retired)
+        .qualify_transparent_revision(
+            &retired
+                .clone()
+                .map_block_hash(crate::wallet_boundary::wallet_block_hash),
+        )
         .unwrap();
     let wallet_path = wallet.wallet().conn().path().unwrap().to_owned();
     // Coverage rows the wallet durably holds under `revision`.
@@ -412,7 +429,12 @@ fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
         wallet
             .wallet_mut()
             .db_mut()
-            .qualify_transparent_revision(&successor.revision)
+            .qualify_transparent_revision(
+                &successor
+                    .revision
+                    .clone()
+                    .map_block_hash(crate::wallet_boundary::wallet_block_hash)
+            )
             .is_err()
     );
     assert_eq!(
@@ -446,12 +468,21 @@ fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
     wallet
         .wallet_mut()
         .db_mut()
-        .qualify_transparent_revision(&successor.revision)
+        .qualify_transparent_revision(
+            &successor
+                .revision
+                .clone()
+                .map_block_hash(crate::wallet_boundary::wallet_block_hash),
+        )
         .unwrap();
     wallet
         .wallet_mut()
         .db_mut()
-        .apply_transparent_ledger_commit(successor.clone())
+        .apply_transparent_ledger_commit(
+            successor
+                .clone()
+                .map_block_hash(crate::wallet_boundary::wallet_block_hash),
+        )
         .unwrap();
     // A reopened wallet must observe the committed reconciliation before
     // acknowledgement: the retired evidence is withdrawn, and the successor

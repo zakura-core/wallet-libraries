@@ -29,6 +29,8 @@ python3 scripts/dev.py verify
 | `enhance` | Enhance PIR; default features |
 | `enhance-testing` | Enhance PIR; `testing` (the synthetic Ironwood output fixture service tests authenticate PIR-returned records with) |
 | `transparent-filter-client` | Transparent filter with its wallet HTTP `client` (profile validation and bounded streaming responses) |
+| `transparent-recovery-types` | Shared recovery records and byte-preserving hash conversions |
+| `transparent-recovery` | Transparent recovery, companion storage and txid lookup through caller transports, without the wallet backend or proving stack |
 | `transparent-pir` | Transparent PIR adapter; `wallet` |
 | `transparent-pir-sqlite` | Transparent PIR adapter; `sqlite` (`wallet` plus the SQLite apply-and-acknowledge integration and the in-process end-to-end tests) |
 | `transparent-pir-testing` | Transparent PIR adapter; `sqlite`, `testing` and `reqwest` (the test support applications build their recovery and txid display tests on; the private recovery and discovery tests go through the HTTP transport) |
@@ -243,3 +245,24 @@ recompiling only after checking a successful receipt against the clean checkout,
 commit, selection, and ordered versions. Ordinary `--publish` retains its dry-run
 checks before uploads. Every packaging command uses `--locked`; release commands
 must not rewrite the workspace lockfile.
+
+### Standalone transparent recovery
+
+The `zakura-pir-transparent` feature `recovery` opens the companion, runs recovery
+and returns candidate batches using `zakura-transparent-recovery-types`. It does
+not depend on the wallet backend, PCZT or shielded circuits. The existing `wallet`
+feature adds `WalletChain` and wallet txid-detail orchestration; `sqlite` also adds
+settlement. Standalone batches can be inspected or discarded, never acknowledged
+through a new public operation. Wallet validation and durable settlement remain
+required before candidate facts can affect financial state.
+
+`RecoveryBlockHash` holds internal-order bytes. The wallet boundary converts
+hashes explicitly and preserves explorer display order. The backend re-exports
+the shared records with its existing hash type, so its database interface keeps
+one record definition without requiring a Common change. The contract package
+is unpublished for this POC; no release or downstream adoption is implied.
+
+The `recovery-without-backend` example opens and reopens a companion using caller
+chain information and no wallet backend. Dependency-graph verification builds
+and runs it as a fresh external consumer, where workspace test features cannot
+supply a missing production dependency.

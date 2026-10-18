@@ -5,7 +5,7 @@ use rusqlite::{Connection, Transaction};
 #[cfg(any(test, feature = "sqlite"))]
 use rusqlite::{TransactionBehavior, params};
 #[cfg(any(test, feature = "sqlite"))]
-use zcash_client_backend::data_api::transparent_ledger::RecoveryRevision;
+use zakura_transparent_recovery_types::RecoveryRevision;
 
 use crate::error::{RecoveryError, failure};
 

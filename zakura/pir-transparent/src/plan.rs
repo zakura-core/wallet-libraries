@@ -5,7 +5,7 @@
 //! wallet runs the passes, settles them and stops; the plan only says which.
 
 use rusqlite::Connection;
-use zcash_client_backend::data_api::transparent_ledger::TransparentAddressWatchSet;
+use zakura_transparent_recovery_types::TransparentAddressWatchSet;
 use zcash_client_sqlite::{AccountUuid, WalletDb};
 use zcash_protocol::consensus;
 
@@ -172,7 +172,11 @@ pub struct PassPlan<A> {
 
 impl<A> PassPlan<A> {
     /// A plan for the account whose watch set is `watch`, freshly read.
-    pub fn new(watch: TransparentAddressWatchSet<A>, limits: PassLimits) -> Self {
+    pub fn new(
+        watch: TransparentAddressWatchSet<A, impl crate::RecoveryHash>,
+        limits: PassLimits,
+    ) -> Self {
+        let watch = watch.map_block_hash(crate::RecoveryHash::into_recovery_hash);
         Self {
             watch,
             limits,
@@ -227,9 +231,9 @@ impl<A> PassPlan<A> {
         &mut self,
         report: &PassReport,
         settled: &Result<Option<Applied>, ApplyFailure>,
-        fresh: TransparentAddressWatchSet<A>,
+        fresh: TransparentAddressWatchSet<A, impl crate::RecoveryHash>,
     ) -> Step {
-        self.watch = fresh;
+        self.watch = fresh.map_block_hash(crate::RecoveryHash::into_recovery_hash);
         if let BatchState::Withdrawn(cause) = report.state {
             return Step::Hold(HoldCause::Withdrawn(cause));
         }

@@ -23,9 +23,7 @@ use transparent_shard::display::{
     DisplaySealParams, NATIVE_SCHEMA, TXID_4K8,
 };
 use transparent_shard::manifest::TableGeometry;
-use zcash_client_backend::data_api::transparent_ledger::{
-    RecoveryRevision, TransparentLedgerCommit,
-};
+use zakura_transparent_recovery_types::{RecoveryRevision, TransparentLedgerCommit};
 
 use crate::batch::{BatchState, RecoveryBatch};
 use crate::http::{HttpMethod, HttpReply};
@@ -33,17 +31,28 @@ use crate::progress::Progress;
 
 /// A batch as a pass returns it: `commits` (empty unless `state` is ready), the pass's
 /// `progress`, and the retired revisions it resolves.
-pub fn batch<A>(
-    commits: Vec<TransparentLedgerCommit<A>>,
+pub fn batch<A, Hash: crate::RecoveryHash>(
+    commits: Vec<TransparentLedgerCommit<A, Hash>>,
     progress: Progress,
     state: BatchState,
-    retired: Vec<RecoveryRevision>,
+    retired: Vec<RecoveryRevision<Hash>>,
 ) -> RecoveryBatch<A> {
     assert!(
         state == BatchState::Ready || (commits.is_empty() && retired.is_empty()),
         "only a ready batch has commits or retirements"
     );
-    RecoveryBatch::unissued(commits, progress, state, retired)
+    RecoveryBatch::unissued(
+        commits
+            .into_iter()
+            .map(|commit| commit.map_block_hash(crate::RecoveryHash::into_recovery_hash))
+            .collect(),
+        progress,
+        state,
+        retired
+            .into_iter()
+            .map(|revision| revision.map_block_hash(crate::RecoveryHash::into_recovery_hash))
+            .collect(),
+    )
 }
 
 /// Applies `batch` through `TransparentHistoryRecovery::apply_and_acknowledge_gated`'s commit loop,

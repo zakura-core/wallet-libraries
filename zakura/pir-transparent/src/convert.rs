@@ -2,10 +2,8 @@
 
 use transparent::address::TransparentAddress;
 use transparent_events::FeeState;
-use zcash_client_backend::data_api::transparent_ledger::{
-    TransactionMetadata, WholeTransactionFee,
-};
-use zcash_primitives::block::BlockHash;
+use zakura_transparent_recovery_types::RecoveryBlockHash as BlockHash;
+use zakura_transparent_recovery_types::{TransactionMetadata, WholeTransactionFee};
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
 use crate::error::{RecoveryError, ensure_valid, failure};

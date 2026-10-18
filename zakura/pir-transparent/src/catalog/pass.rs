@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use zcash_client_backend::data_api::transparent_ledger::{PublicationAnchor, RecoveryRevision};
-use zcash_primitives::block::BlockHash;
+use zakura_transparent_recovery_types::RecoveryBlockHash as BlockHash;
+use zakura_transparent_recovery_types::{PublicationAnchor, RecoveryRevision};
 use zcash_protocol::consensus::BlockHeight;
 
 use super::exports::prune_catalog;

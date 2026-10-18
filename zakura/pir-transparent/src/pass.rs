@@ -2,7 +2,7 @@
 //! one retry after a publication change, and the ready batch held for its settlement.
 
 use crate::engine::ChainView;
-use zcash_client_backend::data_api::transparent_ledger::TransparentAddressWatchSet;
+use zakura_transparent_recovery_types::TransparentAddressWatchSet;
 
 use crate::batch::{self, BatchState, RecoveryBatch};
 use crate::error::RecoveryError;
@@ -172,7 +172,7 @@ impl TransparentHistoryRecovery {
     /// held back.
     pub fn pass<A, C, E>(
         &mut self,
-        watch: &TransparentAddressWatchSet<A>,
+        watch: &TransparentAddressWatchSet<A, impl crate::RecoveryHash>,
         chain: &C,
         exchange: E,
         limit: usize,

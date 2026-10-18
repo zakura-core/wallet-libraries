@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use transparent_txid_client::{TxidDisplayClient, TxidError, TxidLookup};
 
-use super::display_facts::map_sha256;
+use super::map_sha256;
 use crate::http::{HttpExchange, TxidHttp};
 
 /// How often a lookup polls for the client another lookup holds.

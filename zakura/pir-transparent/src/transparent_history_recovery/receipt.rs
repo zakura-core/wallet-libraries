@@ -3,9 +3,7 @@
 
 use crate::engine::WalletStore;
 use sha2::{Digest, Sha256};
-use zcash_client_backend::data_api::transparent_ledger::{
-    RecoveryRevision, TransparentLedgerCommit,
-};
+use zakura_transparent_recovery_types::{RecoveryRevision, TransparentLedgerCommit};
 
 use super::TransparentHistoryRecovery;
 use crate::batch::{BatchState, RecoveryBatch};

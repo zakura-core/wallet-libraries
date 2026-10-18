@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use crate::engine::transport::{FilterSource, ShardTransport};
 use crate::engine::{Acceptance, Anchor, ChainView, ServiceGeometry, WalletStore};
 use transparent_filter::{MAINNET_GENESIS_DISPLAY, NETWORK, ShardMap, wire::MAX_SUPERSEDED};
-use zcash_client_backend::data_api::transparent_ledger::TransparentAddressWatchSet;
+use zakura_transparent_recovery_types::TransparentAddressWatchSet;
 
 use super::{SCHEMA, TransparentHistoryRecovery};
 use crate::convert::{address_script, height_u64};

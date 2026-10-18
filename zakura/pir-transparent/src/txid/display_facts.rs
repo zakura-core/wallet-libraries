@@ -16,10 +16,7 @@ use transparent_txid_client::{
     TxidError, TxidLookup,
 };
 
-/// Decodes a display map digest as the client reports it (hex).
-pub fn map_sha256(hex: &str) -> Option<[u8; 32]> {
-    hex::decode(hex).ok()?.try_into().ok()
-}
+use super::map_sha256;
 
 /// The address an entry's address slot names: `None` for a script without one.
 fn address(slot: &Address) -> Result<Option<TransparentAddress>, RecoveryError> {

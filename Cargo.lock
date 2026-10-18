@@ -7576,6 +7576,7 @@ dependencies = [
  "zakura-protocol",
  "zakura-sapling-crypto",
  "zakura-transparent",
+ "zakura-transparent-recovery-types",
  "zakura-zip321",
  "zcash_encoding 0.4.0",
  "zcash_script",
@@ -8038,6 +8039,7 @@ dependencies = [
  "zakura-transparent-events",
  "zakura-transparent-filter",
  "zakura-transparent-native",
+ "zakura-transparent-recovery-types",
  "zakura-transparent-shard",
  "zakura-transparent-txid-client",
 ]
@@ -8288,6 +8290,15 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "zakura-pir-native",
+]
+
+[[package]]
+name = "zakura-transparent-recovery-types"
+version = "0.0.1-rc0"
+dependencies = [
+ "hex",
+ "zakura-protocol",
+ "zakura-transparent",
 ]
 
 [[package]]

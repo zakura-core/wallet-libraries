@@ -1,9 +1,7 @@
 //! What one pass returns: its candidate commits, its progress, and whether the commits
 //! may reach the wallet.
 
-use zcash_client_backend::data_api::transparent_ledger::{
-    RecoveryRevision, TransparentLedgerCommit,
-};
+use zakura_transparent_recovery_types::{RecoveryRevision, TransparentLedgerCommit};
 
 use crate::progress::{FailedEntries, Outcome, Progress, Retry};
 #[cfg(doc)]

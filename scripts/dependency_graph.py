@@ -37,12 +37,21 @@ def main():
     # proving consumer also ensures the real fixture remains available.
     pczt_macros = {"serde_with_macros", "darling", "darling_core", "darling_macro", "ident_case", "strsim"}
     endpoint_stack = {"url", "idna", "idna_adapter", "icu_provider", "icu_normalizer", "icu_properties"}
+    recovery_forbidden = {
+        "zakura-client-backend", "zakura-client-sqlite", "zakura-primitives", "zakura-pczt",
+        "zakura-orchard", "zakura-orchard-legacy", "zakura-sapling-crypto",
+        "zakura-halo2-proofs", "zakura-halo2-gadgets", "zakura-bellman",
+    }
     cases = [
         ("record-types", "zakura/pir-enhance-types", [], endpoint_stack | {"http", "bytes"}, set()),
         ("endpoint", "zakura/pir-enhance-types", ["http-endpoint"], endpoint_stack, {"http"}),
         ("enhance", "zakura/pir-enhance", [], endpoint_stack, {"zakura-pir-enhance-types"}),
         ("transparent-wallet", "zakura/pir-transparent", ["wallet"],
          endpoint_stack, {"zakura-pir-enhance-types"}),
+        ("recovery-types", "zakura/transparent-recovery-types", ["transparent-inputs"],
+         recovery_forbidden, {"zakura-protocol"}),
+        ("recovery", "zakura/pir-transparent", ["recovery"],
+         recovery_forbidden | endpoint_stack, {"zakura-transparent-recovery-types"}),
         ("wallet", "librustzcash/zcash_client_sqlite", ["orchard", "transparent-inputs"],
          {"prost-build", "tonic-prost-build", "which", "regex", "regex-automata", "regex-syntax"} | pczt_macros, set()),
         ("pczt", "librustzcash/pczt", [], pczt_macros, {"serde_with"}),
@@ -71,6 +80,15 @@ def main():
             missing = required - names
             if unexpected or missing:
                 raise RuntimeError(f"{name}: unexpected {sorted(unexpected)}; missing {sorted(missing)}")
+            if name == "recovery":
+                # Build and execute actual recovery APIs outside workspace feature unification.
+                example = ROOT / "zakura/pir-transparent/examples/recovery-without-backend.rs"
+                source = example.read_text().replace("zakura_pir_transparent", "subject")
+                (Path(temporary) / name / "src/main.rs").write_text(source)
+                subprocess.run(
+                    ["cargo", "run", "--locked", "--quiet", "--manifest-path",
+                     str(Path(temporary) / name / "Cargo.toml")], check=True,
+                )
             receipt[name] = graph
             print(f"{name}: {len(graph) - 1} dependency packages; boundary passed", flush=True)
     output = Path(os.environ["CARGO_TARGET_DIR"]) / "dependency-graphs.json"

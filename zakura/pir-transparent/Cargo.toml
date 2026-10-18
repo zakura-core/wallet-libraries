@@ -23,13 +23,17 @@ engine-conformance = ["engine"]
 reqwest = ["engine", "dep:reqwest"]
 # Applying a batch to a SQLite wallet and acknowledging it in one call.
 sqlite = ["wallet", "dep:zcash_client_sqlite"]
-wallet = ["engine-store", "dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol", "dep:transparent", "dep:transparent-txid-client", "dep:same-file", "dep:rustix", "dep:zakura-pir-enhance-types"]
+## Adds the wallet backend chain view and transaction-detail orchestration.
+wallet = ["recovery", "dep:zcash_client_backend", "dep:zcash_primitives"]
+## Standalone candidate recovery and companion storage, without wallet/proving dependencies.
+recovery = ["engine-store", "dep:zakura-transparent-recovery-types", "dep:zcash_protocol", "dep:transparent", "dep:transparent-txid-client", "dep:same-file", "dep:rustix", "dep:zakura-pir-enhance-types"]
 # Test support for applications: batches no companion issued, their settlement, a
 # fake txid display publication, and a shard service fixture in process that
 # evaluates real PIR. Never enable it in a production build.
 testing = ["wallet", "engine-conformance", "dep:axum"]
 
 [dependencies]
+zakura-transparent-recovery-types = { path = "../transparent-recovery-types", version = "=0.0.1-rc0", features = ["transparent-inputs"], optional = true }
 zcash_client_backend = { workspace = true, optional = true, features = ["transparent-inputs"] }
 zcash_client_sqlite = { version = "0.1.0-rc9", path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", optional = true, features = ["transparent-inputs"] }
 zcash_primitives = { workspace = true, optional = true }
@@ -114,3 +118,7 @@ required-features = ["engine-store", "engine-conformance"]
 [[test]]
 name = "engine_store_schema_upgrade"
 required-features = ["engine-store", "engine-conformance"]
+
+[[example]]
+name = "recovery-without-backend"
+required-features = ["recovery"]

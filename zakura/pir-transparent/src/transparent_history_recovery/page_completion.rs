@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use crate::engine::{Acceptance, ChainView};
 use sha2::{Digest, Sha256};
 use transparent::address::TransparentAddress;
-use zcash_client_backend::data_api::transparent_ledger::{
+use zakura_transparent_recovery_types::{
     AddressRange, ChainPoint, PageRequest, TransparentAddressWatchSet, TransparentLedgerCommit,
     TransparentRecoveryContext,
 };

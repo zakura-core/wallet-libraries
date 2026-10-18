@@ -7,7 +7,7 @@ use crate::engine::{
     Acceptance, Anchor, ChainView, ScriptEntry, ScriptOrigin, StaticScripts, WalletStore,
 };
 use transparent_filter::ShardMap;
-use zcash_client_backend::data_api::transparent_ledger::TransparentAddressWatchSet;
+use zakura_transparent_recovery_types::TransparentAddressWatchSet;
 
 use super::TransparentHistoryRecovery;
 use crate::convert::{address_script, height_u64};

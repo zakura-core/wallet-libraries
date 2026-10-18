@@ -10,7 +10,7 @@
 use crate::engine::SetIdentity;
 use sha2::{Digest, Sha256};
 use transparent_filter::{ShardMapEntry, SupersededShard};
-use zcash_client_backend::data_api::transparent_ledger::{PublicationAnchor, RecoveryRevision};
+use zakura_transparent_recovery_types::{PublicationAnchor, RecoveryRevision};
 
 use crate::convert::{block_hash_from_display, block_height};
 use crate::error::{RecoveryError, failure};
