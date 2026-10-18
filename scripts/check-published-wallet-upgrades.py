@@ -14,6 +14,7 @@ Separate consumers retain their own dependency families; no user wallet is accep
 import argparse
 import fcntl
 import json
+import re
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -50,8 +51,22 @@ def source_tree(root, rev):
     dest = root / f"source-{rev}"
     archive = subprocess.run(["git", "archive", rev], cwd=ROOT, check=True, capture_output=True).stdout
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-        tar.extractall(dest, filter="data")
+        # The `data` filter needs Python 3.12; the archive is this repository's own tree.
+        try:
+            tar.extractall(dest, filter="data")
+        except TypeError:
+            tar.extractall(dest)
     return dest
+
+
+def workspace_version(package):
+    """The version this workspace's root manifest requires of `package`."""
+    for line in (ROOT / "Cargo.toml").read_text().splitlines():
+        if f'package = "{package}"' in line:
+            match = re.search(r'version = "([^"]+)"', line)
+            if match:
+                return match.group(1)
+    raise SystemExit(f"no {package} version in the workspace manifest")
 
 
 def consumer(root, version):
@@ -67,8 +82,18 @@ def consumer(root, version):
     ]:
         source = f'path = {json.dumps(str(tree / "librustzcash" / directory))}' if tree else f'version = "=0.1.0-{version}"'
         manifest += f'{alias} = {{ package = "{package}", {source}, features = ["orchard", "transparent-inputs", "test-dependencies"] }}\n'
-    manifest += 'zcash_primitives = { package = "zakura-primitives", version = "=1.2.0" }\nzcash_protocol = "=0.10.4"\n' if version == "rc5" else 'zcash_primitives = { package = "zakura-primitives", version = "=2.0.0" }\nzcash_protocol = { package = "zakura-protocol", version = "=2.0.0" }\n'
-    manifest += 'transparent = { package = "zcash_transparent", version = "=0.10.0" }\n' if version == "rc5" else 'transparent = { package = "zakura-transparent", version = "=2.0.0" }\n'
+    if version == "rc5":
+        manifest += 'zcash_primitives = { package = "zakura-primitives", version = "=1.2.0" }\nzcash_protocol = "=0.10.4"\n'
+        manifest += 'transparent = { package = "zcash_transparent", version = "=0.10.0" }\n'
+    else:
+        # The current tree uses the workspace's Zakura Common family; rc7 and pre-migrations use 2.0.0.
+        for alias, package in [
+            ("zcash_primitives", "zakura-primitives"),
+            ("zcash_protocol", "zakura-protocol"),
+            ("transparent", "zakura-transparent"),
+        ]:
+            common = workspace_version(package) if version == "current" else "2.0.0"
+            manifest += f'{alias} = {{ package = "{package}", version = "={common}" }}\n'
     # Pin the PCZT prerelease used by Vizor: caret prerelease resolution otherwise selects
     # rc4's newer dependency family while testing rc5's published writer.
     if version == "rc5":
