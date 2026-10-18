@@ -17,7 +17,7 @@ workspace = true
 [features]
 cli = ["dep:zakura-pir-publisher","transparent", "reqwest", "dep:clap"]
 default = []
-native = ["dep:zakura-pir-protocol", "zakura-pir-protocol/native", "dep:ipir-native-client", "dep:reinspiring", "dep:rand", "dep:rand_chacha"]
+native = ["dep:zakura-pir-protocol", "zakura-pir-protocol/native", "dep:reinspiring", "dep:rand", "dep:rand_chacha"]
 enhance = ["zakura-pir-publisher?/enhance", "zakura-pir-query-server?/enhance", "zakura-pir-server-core?/enhance","native", "zakura-pir-protocol/enhance", "zakura-pir-protocol/http-endpoint", "dep:futures-util", "dep:base64", "dep:hex", "dep:serde", "dep:serde_json", "dep:sha2", "dep:thiserror"]
 status = ["zakura-pir-publisher?/status", "zakura-pir-query-server?/status", "zakura-pir-server-core?/status","native", "zakura-pir-protocol/status", "dep:hex", "dep:serde", "dep:serde_json", "dep:sha2", "dep:thiserror", "dep:zcash_protocol"]
 transparent = ["zakura-pir-publisher?/transparent", "zakura-pir-query-server?/transparent", "zakura-pir-server-core?/transparent","zakura-pir-protocol/filter-matching", "native", "zakura-pir-protocol/transparent", "dep:base64", "dep:hex", "dep:serde", "dep:serde_json", "dep:sha2", "dep:thiserror"]
@@ -61,7 +61,6 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 axum = { version = "0.7", optional = true }
 tonic = { workspace = true, optional = true, features = ["transport"] }
 tokio = { workspace = true, optional = true, features = ["time"] }
-ipir-native-client = { version = "=0.1.0-rc.1", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2", optional = true }
 zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc0", optional = true }
 
 [target]
@@ -72,6 +71,7 @@ zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc0", option
 rustix = { version = "1", optional = true, default-features = false, features = ["std", "fs"] }
 
 [dev-dependencies]
+ipir-native-client = { version = "=0.1.0-rc.1", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
 bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
 zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", version = "0.1.0-rc9", features = ["orchard", "test-dependencies", "transparent-inputs", "unstable"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
@@ -88,7 +88,6 @@ regex = { workspace = true, features = ["std"] }
 tower = { version = "0.5", features = ["util"] }
 hex = { workspace = true, features = ["std"] }
 sha2 = { workspace = true }
-ipir-native-client = { version = "=0.1.0-rc.1", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
 rand = "0.8"
 rand_chacha = { workspace = true }
 flate2 = "1"

@@ -48,6 +48,20 @@ def check_role_api(directory, product, role):
     source.write_text(f"pub use subject::{product};\n")
 
 
+def check_previous_native(directory):
+    """Exercise both directions against immutable pre-packaging code, not a second new copy."""
+    directory.mkdir()
+    (directory / "src").mkdir()
+    dependencies = [
+        f'previous_native = {{ package = "zakura-pir-native", git = "https://github.com/zakura-core/wallet-libraries", rev = "4631f32f815f160ccd561540e7ae92e026fc7ee5" }}',
+    ]
+    for alias, package in (("candidate_client", "client"), ("candidate_core", "server-core"), ("candidate_query", "query-server"), ("candidate_protocol", "protocol")):
+        dependencies.append(f'{alias} = {{ package = "zakura-pir-{package}", path = "{ROOT / "zakura" / ("pir-" + package)}", features = ["native"] }}' if package in {"client", "protocol"} else f'{alias} = {{ package = "zakura-pir-{package}", path = "{ROOT / "zakura" / ("pir-" + package)}" }}')
+    (directory / "Cargo.toml").write_text('[package]\nname = "frozen-native-counterpart"\nversion = "0.0.0"\nedition = "2024"\n[workspace]\n[dependencies]\n' + "\n".join(dependencies) + "\n")
+    (directory / "src/main.rs").write_text((ROOT / "scripts/probes/frozen_pir.rs").read_text())
+    subprocess.run(["cargo", "run", "--quiet", "--manifest-path", str(directory / "Cargo.toml")], check=True)
+
+
 def main():
     # Check both feature-off libraries and real consumer capabilities. The
     # proving consumer also ensures the real fixture remains available.
@@ -60,9 +74,9 @@ def main():
     }
     # Full wallets also need SHA-1 through zcash_script; only protocol-only
     # consumers can forbid it independently of the IPIR evaluator boundary.
-    native_evaluators = {"ipir-sp", "simplepir-kernel", "clap", "env_logger"}
+    native_evaluators = {"ipir-native-client", "ipir-sp", "simplepir-kernel", "clap", "env_logger"}
     server_roles = {"zakura-pir-publisher", "zakura-pir-query-server", "zakura-pir-server-core", "zakura-server-chain"}
-    wallet_roles = {"zakura-pir-client", "zakura-client-backend", "zakura-client-sqlite"}
+    wallet_roles = {"ipir-native-client", "zakura-pir-client", "zakura-client-backend", "zakura-client-sqlite"}
     cases = [
         ("record-types", "zakura/pir-protocol", ["enhance"], endpoint_stack | server_roles | {"http", "bytes", "ipir-native-client", "reinspiring"}, set()),
         ("endpoint", "zakura/pir-protocol", ["http-endpoint"], endpoint_stack | server_roles, {"http"}),
@@ -70,21 +84,21 @@ def main():
         ("recovery", "zakura/pir-client", ["recovery"], recovery_forbidden | endpoint_stack | server_roles | native_evaluators, {"zakura-pir-protocol"}),
         ("wallet", "librustzcash/zcash_client_sqlite", ["orchard", "transparent-inputs"], {"prost-build", "tonic-prost-build", "which", "regex", "regex-automata", "regex-syntax"} | pczt_macros, set()),
         ("pczt", "librustzcash/pczt", [], pczt_macros, {"serde_with"}),
-        ("pir", "zakura/pir-client", ["native"], native_evaluators | server_roles | {"sha1"}, {"ipir-native-client"}),
+        ("pir", "zakura/pir-client", ["native"], native_evaluators | server_roles | {"sha1"}, {"reinspiring"}),
         ("status-policy", "zakura/pir-client", ["status"], recovery_forbidden | server_roles | native_evaluators | {"tonic", "tonic-prost", "tokio", "hyper", "hyper-util", "h2"}, {"zakura-protocol"}),
         ("status-lightwalletd", "zakura/pir-client", ["lightwalletd"], server_roles, {"zakura-client-backend", "tonic", "tokio"}),
-        ("receiver-client", "zakura/receiver-pir", [], native_evaluators | server_roles | {"sha1"}, {"ipir-native-client"}),
+        ("receiver-client", "zakura/receiver-pir", [], native_evaluators | server_roles | {"sha1"}, {"reinspiring"}),
         ("receiver-server", "zakura/receiver-pir", ["server"], set(), {"ipir-sp", "simplepir-kernel"}),
         ("filter", "zakura/pir-protocol", ["transparent"], {"bitcoin", "secp256k1", "secp256k1-sys"} | server_roles, {"bitcoin_hashes"}),
         ("filters", "zakura/filters", [], {"bitcoin", "secp256k1", "secp256k1-sys"}, {"bitcoin_hashes"}),
         ("receiver-directory", "zakura/receiver-directory", [], {"bitcoin", "secp256k1", "secp256k1-sys"}, {"zakura-filters", "bitcoin_hashes"}),
-        ("receiver-wallet", "zakura/pir-receiver", ["wallet"], {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"} | native_evaluators | server_roles, {"zakura-filters", "ipir-native-client"}),
+        ("receiver-wallet", "zakura/pir-receiver", ["wallet"], {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"} | native_evaluators | server_roles, {"zakura-filters", "reinspiring"}),
         ("test-support", "librustzcash/zcash_client_sqlite", ["test-dependencies"], {"wagyu-zcash-parameters"}, set()),
         ("proving", "librustzcash/zcash_client_sqlite", ["pczt-tests"], set(), {"wagyu-zcash-parameters"}),
     ]
     for product in ("enhance", "status", "transparent"):
         cases.extend([
-            (f"{product}-client", "zakura/pir-client", [product], server_roles | native_evaluators | endpoint_stack, {"zakura-pir-protocol", "ipir-native-client"}),
+            (f"{product}-client", "zakura/pir-client", [product], server_roles | native_evaluators | endpoint_stack, {"zakura-pir-protocol", "reinspiring"}),
             (f"{product}-publisher", "zakura/pir-publisher", [product], wallet_roles | {"zakura-pir-query-server", "zakura-server-chain"}, {"zakura-pir-protocol", "zakura-pir-server-core"}),
             (f"{product}-query-server", "zakura/pir-query-server", [product], wallet_roles | {"zakura-pir-publisher", "zakura-server-chain"}, {"zakura-pir-protocol", "zakura-pir-server-core"}),
         ])
@@ -139,6 +153,7 @@ def main():
                         check_role_api(Path(temporary) / name, product, role)
             receipt[name] = graph
             print(f"{name}: {len(graph) - 1} dependency packages; boundary passed", flush=True)
+        check_previous_native(Path(temporary) / "frozen-native-counterpart")
     output = Path(os.environ["CARGO_TARGET_DIR"]) / "dependency-graphs.json"
     output.write_text(json.dumps(receipt, indent=2) + "\n")
     print(f"graphs: {output}")

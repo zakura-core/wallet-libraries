@@ -36,7 +36,7 @@ use crate::transparent::http::HttpExchange;
 ///
 /// ```no_run
 /// use std::time::{Instant, SystemTime};
-/// use zakura_pir_transparent::{
+/// use zakura_pir_client::transparent::{
 ///     DetailAnswer, DetailRun, DetailStep, HttpExchange, TxidDisplayService, TxidError,
 /// };
 /// use zcash_client_backend::data_api::transparent_ledger::TransparentDetailWrite;

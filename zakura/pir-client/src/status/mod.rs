@@ -1,5 +1,18 @@
 //! Private status observations and explicit source policy.
-pub use zakura_pir_protocol::status::*;
+//! Queries go through the accepted-anchor transport; the raw selector stays private.
+//! ```compile_fail
+//! use zakura_pir_client::status::Client;
+//! ```
+//! ```compile_fail
+//! use zakura_pir_client::status::decode_row;
+//! ```
+pub use zakura_pir_protocol::status::{
+    AcceptedAnchor, AcceptedAnchors, AnchorVerifier, COLS, Error, HEADER_BYTES, Hash, ITEM_BITS,
+    LocalCoverageContext, MAX_AGE_MS, MAX_ENTRIES, MAX_FUTURE_SKEW_MS, Manifest, Observation,
+    PROTOCOL, QUERY_MAGIC, ROW_BYTES, ROWS, Record, SLOT_BYTES, SLOTS, bucket, native_packing_seed,
+    native_setup_seed,
+};
+use zakura_pir_protocol::status::{anchor_accepted, decode_row};
 pub mod policy;
 pub mod transport;
 use rand::{Rng, rngs::OsRng};

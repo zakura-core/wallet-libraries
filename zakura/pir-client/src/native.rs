@@ -1,9 +1,9 @@
 //! Native operations owned by the client role.
-use ipir_native_client::bits::{contiguous_bytes_to_u64s, u64s_to_contiguous_bytes};
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use reinspiring::native::NativeTwoMaskCiphertext;
 pub use reinspiring::native::{NativeKeys, NativePreprocessed, NativeSecret};
+use zakura_pir_protocol::native::bits::{contiguous_bytes_to_u64s, u64s_to_contiguous_bytes};
 pub use zakura_pir_protocol::native::*;
 /// Operations available only to this role.
 pub trait ProfileClientExt {

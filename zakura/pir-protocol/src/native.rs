@@ -1,5 +1,8 @@
 //! Fixed native profiles, shared setup derivation and byte lengths.
-use ipir_native_client::{NativeProfile, NativePublicSetup};
+use rand::{RngCore, SeedableRng};
+use rand_chacha::ChaCha20Rng;
+use sha2::{Digest, Sha256};
+pub mod bits;
 pub use reinspiring::native::NativeSetup;
 use reinspiring::native::{NativeParams, SecretDistribution};
 /// Ciphertext modulus.
@@ -109,10 +112,43 @@ impl Profile {
         rows: usize,
         cols: usize,
     ) -> Result<Vec<Vec<u64>>, String> {
-        let profile = NativeProfile::new(self.params(), rows, cols).map_err(|e| e.to_string())?;
-        Ok(NativePublicSetup::new(profile, seed, [0; 32])
-            .query_masks()
-            .to_vec())
+        let parameters = self.params();
+        if rows == 0
+            || cols == 0
+            || !rows.is_multiple_of(D)
+            || !cols.is_multiple_of(D)
+            || rows
+                .checked_mul(cols)
+                .filter(|&n| {
+                    n <= if parameters.p() <= 256 {
+                        1 << 31
+                    } else {
+                        1 << 30
+                    }
+                })
+                .is_none()
+            || parameters.sampler() != SecretDistribution::Gaussian
+            || parameters.p() > 65536
+        {
+            return Err(reinspiring::ReinspiringError::InvalidParams(
+                "invalid native IPIR profile or database shape".into(),
+            )
+            .to_string());
+        }
+        // Preserve NativePublicSetup's default-profile expansion byte for byte.
+        // The deployed table protocols use these masks even for two-mask replies.
+        let mut hash = Sha256::new();
+        hash.update(b"ipir-sp/native/v1/setup");
+        hash.update(parameters.encoding());
+        for value in [rows, cols, 49.min(Q_BITS), (self.p_bits + 6).min(Q_BITS)] {
+            hash.update((value as u64).to_le_bytes());
+        }
+        hash.update(seed);
+        hash.update([0; 32]);
+        let mut generator = ChaCha20Rng::from_seed(hash.finalize().into());
+        Ok((0..rows / D)
+            .map(|_| (0..D).map(|_| generator.next_u64() & (Q - 1)).collect())
+            .collect())
     }
 
     /// Uploaded `K_g` packing key.
@@ -321,3 +357,51 @@ pub const PREPARED_BLOCK_MAX_BYTES: u64 = P16.prepared_block_max_bytes();
 pub const PREPARED_BLOCK_MIN_BYTES: u64 = P16.prepared_block_min_bytes();
 /// The encoding's magic and block count.
 pub const PREPARED_HEADER_BYTES: u64 = 16;
+
+#[cfg(test)]
+mod previous_setup_compatibility {
+    use super::*;
+    #[test]
+    fn mask_derivation_matches_the_previous_provider_for_both_profiles() {
+        for profile in [P8, P16] {
+            for (rows, cols) in [(D, D), (2 * D, 3 * D), (16 * D, 6 * D)] {
+                let previous =
+                    ipir_native_client::NativeProfile::new(profile.params(), rows, cols).unwrap();
+                for seed in [[0; 32], [0x91; 32]] {
+                    let previous =
+                        ipir_native_client::NativePublicSetup::new(previous.clone(), seed, [0; 32]);
+                    assert_eq!(
+                        profile.public_query_masks(seed, rows, cols).unwrap(),
+                        previous.query_masks()
+                    );
+                }
+            }
+            for (rows, cols) in [
+                (0, D),
+                (D, 0),
+                (D + 1, D),
+                (D, D + 1),
+                (usize::MAX, D),
+                (1 << 21, 1 << 21),
+            ] {
+                let previous = ipir_native_client::NativeProfile::new(profile.params(), rows, cols)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
+                let current = profile.public_query_masks([0; 32], rows, cols).map(|_| ());
+                assert_eq!(current, previous);
+            }
+        }
+    }
+    #[test]
+    fn bit_codec_matches_the_previous_provider_at_every_served_width() {
+        let words = [0, 1, 3, 127, 65535, 0x123456789abc, u64::MAX];
+        for width in [8, 10, 16, 19, 22, 27, 28, 29, 44, 49, 54, 64] {
+            let expected = ipir_native_client::bits::u64s_to_contiguous_bytes(&words, width);
+            assert_eq!(bits::u64s_to_contiguous_bytes(&words, width), expected);
+            assert_eq!(
+                bits::contiguous_bytes_to_u64s(&expected, width),
+                ipir_native_client::bits::contiguous_bytes_to_u64s(&expected, width)
+            );
+        }
+    }
+}

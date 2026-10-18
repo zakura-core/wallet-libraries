@@ -1,8 +1,8 @@
 //! Native operations owned by the query-server role.
-use ipir_native_client::bits::{contiguous_bytes_to_u64s, u64s_to_contiguous_bytes};
 use rayon::prelude::*;
 pub use reinspiring::native::{NativeKeys, NativePreprocessed, NativeSecret};
 use std::borrow::Borrow;
+use zakura_pir_protocol::native::bits::{contiguous_bytes_to_u64s, u64s_to_contiguous_bytes};
 pub use zakura_pir_protocol::native::*;
 pub use zakura_pir_server_core::native::{ProfilePublicationExt, publish};
 /// Operations available only to this role.

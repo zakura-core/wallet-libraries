@@ -7992,6 +7992,8 @@ dependencies = [
  "http",
  "ipir-native-client",
  "ipir-sp",
+ "rand 0.8.8",
+ "rand_chacha 0.3.1",
  "reinspiring",
  "serde",
  "serde_json",
@@ -8028,7 +8030,6 @@ version = "0.0.1-rc0"
 dependencies = [
  "bitcoin",
  "hex",
- "ipir-native-client",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
  "rayon",
@@ -8065,7 +8066,6 @@ version = "0.0.1-rc0"
 dependencies = [
  "bitcoin",
  "hex",
- "ipir-native-client",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
  "rayon",

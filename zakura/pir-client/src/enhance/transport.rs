@@ -57,8 +57,8 @@ pub trait Transport {
 /// There is no unchecked constructor or conversion from an allocated `Vec`.
 ///
 /// ```compile_fail
-/// use zakura_pir_enhance::transport::{Request, ResponseBody, Transport};
-/// use zakura_pir_enhance::ClientError;
+/// use zakura_pir_client::enhance::transport::{Request, ResponseBody, Transport};
+/// use zakura_pir_client::enhance::ClientError;
 /// struct Unbounded;
 /// impl Transport for Unbounded {
 ///     async fn execute(&self, _: Request) -> Result<ResponseBody, ClientError> {

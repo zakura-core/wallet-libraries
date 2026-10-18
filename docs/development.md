@@ -122,9 +122,9 @@ parameters. Enable `proving-tests` for real proving fixtures; the `proving` and
 consumers, including fixture availability and the engine's transport-free graph.
 
 The PIR clients temporarily pin the IPIR family to the main revision that merged
-[IPIR PR 39](https://github.com/valargroup/ipir-sp/pull/39). Native query setup uses
-`ipir-native-client`, so Transparent, Status and receiver clients do not import
-IPIR's evaluator or SimplePIR. The receiver's explicit `server` feature still
+[IPIR PR 39](https://github.com/valargroup/ipir-sp/pull/39). Native setup derivation and byte framing live in the shared protocol package;
+client encryption and server operations use ReinspiRING directly. Production
+roles do not import IPIR's native-client facade, evaluator or SimplePIR. The receiver's explicit `server` feature still
 uses the evaluator. Enhance retains the legacy parameter metadata as a shared serialized contract,
 with tests against the previous provider; its production client no longer
 depends on the IPIR evaluator.

@@ -1,8 +1,8 @@
 //! Native operations owned by the server-core role.
-use ipir_native_client::bits::u64s_to_contiguous_bytes;
 use rayon::prelude::*;
 pub use reinspiring::native::{NativeKeys, NativePreprocessed, NativeSecret};
 use std::borrow::Borrow;
+use zakura_pir_protocol::native::bits::u64s_to_contiguous_bytes;
 pub use zakura_pir_protocol::native::*;
 /// Operations available only to this role.
 pub trait ProfilePublicationExt {
