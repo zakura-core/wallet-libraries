@@ -1,7 +1,7 @@
 //! Public receiver filters that a wallet tests locally before any lookup.
 //!
 //! A publication's filter file holds labeled sets of receivers, each a BIP 158
-//! Golomb-coded set built with `bitcoin::bip158` as Transparent's filters are. The
+//! Golomb-coded set built with the shared `zakura_gcs` codec as Transparent's filters are. The
 //! directory's own set, [`PAID`], holds every receiver with a payment in the publication.
 //! A swap provider's feed adds `<provider>/recent`, the receivers it was given within a
 //! window, and `<provider>/seen`, every payout or refund receiver it was given since its
@@ -14,13 +14,10 @@
 //! Decoding reads every value and checks the padding before any match, because the
 //! upstream reader's `match_any` stops at the first match and never checks the tail.
 use crate::{Error, Hash, ReceiverBytes};
-use bitcoin::{
-    bip158::{BitStreamReader, GcsFilterWriter},
-    consensus::{encode::VarInt, Decodable},
-    hashes::siphash24,
-};
+use bitcoin_hashes::siphash24;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use zakura_gcs::{read_compact_size, BitStreamReader, GcsFilterWriter};
 
 /// Golomb-Rice parameter of every set.
 pub const P: u8 = 10;
@@ -113,9 +110,7 @@ impl Filter {
     /// range, zero padding and nothing after it.
     fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let mut rest = bytes;
-        let count = VarInt::consensus_decode(&mut rest)
-            .map_err(|_| Error::Malformed)?
-            .0;
+        let count = read_compact_size(&mut rest).map_err(|_| Error::Malformed)?;
         // Each value takes at least `P + 1` bits; bound the count before allocating.
         if count > u64::from(u32::MAX) || count * (u64::from(P) + 1) > rest.len() as u64 * 8 {
             return Err(Error::Malformed);
@@ -320,6 +315,16 @@ mod tests {
                 members.iter().map(|r| r.as_slice())
             )
             .unwrap());
+        let mut expected = Vec::new();
+        let mut upstream = bitcoin::bip158::GcsFilterWriter::new(&mut expected, k0, k1, M, P);
+        for receiver in &members {
+            upstream.add_element(receiver);
+        }
+        upstream.finish().unwrap();
+        assert_eq!(
+            filter.bytes, expected,
+            "receiver filter bytes must remain unchanged"
+        );
         assert_eq!(filter.count(), 100);
         assert_eq!(Filter::build(&key, members.iter().chain(&members)), filter);
     }
@@ -369,6 +374,13 @@ mod tests {
         let mut padded = one.clone();
         *padded.last_mut().unwrap() |= 1;
         assert!(Filter::decode(&one).is_ok() && Filter::decode(&padded).is_err());
+        let valid = Filter::build(&key, &receivers(100, 3)).bytes;
+        for end in 0..valid.len() {
+            assert!(Filter::decode(&valid[..end]).is_err());
+        }
+        let mut trailing = valid;
+        trailing.push(0);
+        assert!(Filter::decode(&trailing).is_err());
         let mut magic = bytes.clone();
         magic[0] ^= 1;
         assert!(Filters::decode(&magic).is_err());
@@ -380,7 +392,7 @@ mod tests {
 
     /// A set of `count` equal values, which strictly decodes.
     fn zeros(count: u64) -> Filter {
-        use bitcoin::consensus::Encodable;
+        use bitcoin::consensus::{encode::VarInt, Encodable};
         let mut bytes = Vec::new();
         VarInt(count).consensus_encode(&mut bytes).unwrap();
         // Each zero delta is a zero unary quotient and a zero `P`-bit remainder.

@@ -1,0 +1,17 @@
+[package]
+name = "zakura-gcs"
+version = "0.0.1-rc0"
+description = "Shared Golomb-coded set codec for Zakura wallet filters"
+edition.workspace = true
+rust-version.workspace = true
+license = "CC0-1.0"
+repository.workspace = true
+readme = "README.md"
+
+[dependencies]
+bitcoin_hashes = { version = "=0.14.101", default-features = false, features = ["std"] }
+bitcoin-io = { version = "=0.1.101", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# Independent byte/decoding oracle, excluded from library consumers.
+bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }

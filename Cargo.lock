@@ -7677,6 +7677,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zakura-gcs"
+version = "0.0.1-rc0"
+dependencies = [
+ "bitcoin",
+ "bitcoin-io",
+ "bitcoin_hashes",
+]
+
+[[package]]
 name = "zakura-halo2-gadgets"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8125,11 +8134,13 @@ name = "zakura-receiver-directory"
 version = "0.0.1-rc0"
 dependencies = [
  "bitcoin",
+ "bitcoin_hashes",
  "hex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
+ "zakura-gcs",
  "zakura-receiver-crypto",
 ]
 
@@ -8270,7 +8281,6 @@ name = "zakura-transparent-filter"
 version = "0.0.1-rc0"
 dependencies = [
  "bitcoin",
- "bitcoin-io",
  "bitcoin_hashes",
  "clap",
  "hex",
@@ -8279,6 +8289,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
+ "zakura-gcs",
 ]
 
 [[package]]

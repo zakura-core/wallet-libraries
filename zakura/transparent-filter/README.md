@@ -39,7 +39,7 @@ There is no BIP 157 peer verification and no service signalling here.
 
 ### Dependency note
 
-`bitcoin` is pinned exactly (`=0.32.102`) and used only for
-`bip158::GcsFilterWriter` and `hashes::siphash24`. Its `std` feature pulls in
-`secp256k1`, which this crate never uses; that weight matters for a mobile
-build and is recorded as a follow-up rather than worked around here.
+The `zakura-gcs` crate supplies the shared codec extracted from rust-bitcoin
+0.32.102. Production retains `bitcoin_hashes` and its I/O support, without the
+Bitcoin transaction/address stack or its secp256k1 dependency. The exactly pinned
+`bitcoin` crate remains a development-only byte and matching oracle.

@@ -29,9 +29,9 @@ client = ["dep:reqwest", "dep:serde_json"]
 cli = ["client", "dep:clap"]
 
 [dependencies]
-# The codec in src/gcs.rs was extracted from bitcoin 0.32.102.
+# Shared byte codec; application profiles and strict validation stay here.
+zakura-gcs = { version = "=0.0.1-rc0", path = "../gcs" }
 bitcoin_hashes = { version = "=0.14.101", default-features = false, features = ["std"] }
-bitcoin-io = { version = "=0.1.101", default-features = false, features = ["std"] }
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
