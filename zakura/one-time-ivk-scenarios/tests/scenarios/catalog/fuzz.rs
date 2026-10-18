@@ -2696,7 +2696,9 @@ impl<'p> Exec<'p> {
         ctx.metric("one-time payments", self.pays.len() as f64, "payments");
     }
 
-    /// Judges every payment for every wallet account of its seed account.
+    /// Judges every payment for every wallet account of its seed account. A payment the
+    /// wallet credited once must still be held at the height the chain mined it, even when
+    /// no rule of [`Self::promise`] covers it.
     fn judge(&mut self, ctx: &mut Ctx) {
         let ws: Vec<W> = self.wallets.keys().copied().collect();
         for w in ws {
@@ -2720,9 +2722,18 @@ impl<'p> Exec<'p> {
                 let p = &self.pays[i];
                 let (expected, rationale) = match promise {
                     Some((class, why)) => (class, why),
-                    None if credit.is_some() && held.is_none() => (
+                    // Deleted, left unmined or left at a replaced height, it is missed.
+                    None if credit.is_some() => (
                         Class::FoundAutomatically,
-                        "the wallet credited it once; a reorg cannot strand a receipt".into(),
+                        format!(
+                            "the wallet credited it once, so it must hold it where the chain \
+                             mined it ({}); a reorg cannot strand a receipt",
+                            match held.as_ref().map(|r| r.mined_height) {
+                                None => "it holds no receipt".to_string(),
+                                Some(None) => "its receipt is unmined".to_string(),
+                                Some(Some(h)) => format!("its receipt is at {h}"),
+                            }
+                        ),
                     ),
                     None => (
                         if actual.found() {
