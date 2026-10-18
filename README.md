@@ -236,3 +236,5 @@ scripts/
   verify-vendor-ancestry.sh   the recorded vendor commit is an ancestor
   discover-upstream-updates.py
 ```
+
+PIR integration uses separate [client, publisher and query-server packages](docs/pir-packages.md).

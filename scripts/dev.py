@@ -15,40 +15,45 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = {
-    "default": (["--workspace", "--exclude", "zakura-wallet-lib", "--exclude", "zakura-pir-enhance", "--exclude", "zakura-pir-transparent", "--exclude", "zakura-pir-receiver", "--exclude", "zakura-one-time-ivk-scenarios"], []),
+    # Wallet defaults exclude application adapters and the mutually exclusive facade.
+    "default": (["--workspace", "--exclude", "zakura-wallet-lib", "--exclude", "zakura-pir-client", "--exclude", "zakura-pir-receiver", "--exclude", "zakura-one-time-ivk-scenarios"], []),
     "orchard": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "test-dependencies"]),
     "transparent": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "test-dependencies", "unstable"]),
     "transparent-import": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "transparent-key-import", "test-dependencies", "unstable"]),
     "proving": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "transparent-key-import", "test-dependencies", "pczt-tests", "proving-tests", "unstable"]),
     "pczt": (["-p", "zakura-pczt"], ["internal-tests"]),
     "sqlite": (["-p", "zakura-client-sqlite"], ["test-dependencies"]),
-    "enhance-wallet": (["-p", "zakura-pir-enhance"], ["wallet"]),
-    # Select the shared types too so its opt-in endpoint tests run with the client.
-    "enhance": (["-p", "zakura-pir-enhance", "-p", "zakura-pir-enhance-types"], []),
-    "enhance-testing": (["-p", "zakura-pir-enhance"], ["testing"]),
-    # The recovery engine alone, and with its SQLite store, the store suite and
-    # the reference HTTP adapters, without the wallet.
-    "transparent-engine": (["-p", "zakura-pir-transparent"], ["engine"]),
-    "transparent-engine-store": (["-p", "zakura-pir-transparent"], ["engine-store", "engine-conformance", "reqwest"]),
-    # The Transparent filter's wallet HTTP client, which no other lane enables.
-    "transparent-filter-client": (["-p", "zakura-transparent-filter"], ["client"]),
-    "transparent-pir": (["-p", "zakura-pir-transparent"], ["wallet"]),
-    "transparent-recovery-types": (["-p", "zakura-transparent-recovery-types"], ["transparent-inputs"]),
-    "transparent-recovery": (["-p", "zakura-pir-transparent"], ["recovery"]),
-    "transparent-pir-sqlite": (["-p", "zakura-pir-transparent"], ["sqlite"]),
-    "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing", "reqwest"]),
+    # Product lanes retain their existing behavior and select the consolidated client.
+    "enhance-wallet": (["-p", "zakura-pir-client"], ["enhance", "wallet"]),
+    "enhance": (["-p", "zakura-pir-client"], ["enhance"]),
+    "enhance-testing": (["-p", "zakura-pir-client"], ["enhance", "testing"]),
+    # Engine, standalone recovery and wallet settlement are independent capabilities.
+    "transparent-engine": (["-p", "zakura-pir-client"], ["transparent", "engine"]),
+    "transparent-engine-store": (["-p", "zakura-pir-client"], ["transparent", "engine-store", "engine-conformance", "reqwest"]),
+    "transparent-filter-client": (["-p", "zakura-pir-client"], ["transparent", "reqwest"]),
+    "transparent-pir": (["-p", "zakura-pir-client"], ["transparent", "transparent-wallet"]),
+    "transparent-recovery-types": (["-p", "zakura-pir-protocol"], ["transparent-inputs"]),
+    "transparent-recovery": (["-p", "zakura-pir-client"], ["transparent", "recovery"]),
+    "transparent-pir-sqlite": (["-p", "zakura-pir-client"], ["transparent", "sqlite"]),
+    "transparent-pir-testing": (["-p", "zakura-pir-client"], ["transparent", "sqlite", "testing", "engine-conformance", "reqwest"]),
     "pir-receiver": (["-p", "zakura-pir-receiver"], ["wallet"]),
-    "transaction-status-core": (["-p", "zakura-transaction-status", "--no-default-features"], []),
-    "transaction-status-lightwalletd": (["-p", "zakura-transaction-status", "--no-default-features"], ["lightwalletd"]),
+    # Public lightwalletd transport remains explicitly selected.
+    "transaction-status-core": (["-p", "zakura-pir-client"], ["status"]),
+    "transaction-status-lightwalletd": (["-p", "zakura-pir-client"], ["status", "lightwalletd"]),
     "receiver-wire": (["-p", "zakura-receiver-crypto", "--no-default-features"], []),
-    # The receiver PIR evaluator with its client: runs the golden vectors.
     "receiver-pir-server": (["-p", "zakura-receiver-pir"], ["server"]),
     "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
-    # The separate zakura/pir-chain workspace has its own lockfile. Its opt-in
-    # RocksDB reader is tested here; fresh consumers check the feature off.
+    # Node readers retain their separate workspace and lockfile.
     "server-rpc": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing", "transparent", "enhance", "status", "receiver"]),
     "server": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing", "rocksdb", "enhance", "status", "receiver"]),
+    # Role lanes cover formats and server-only helpers independently.
+    "pir-protocol": (["-p", "zakura-pir-protocol"], ["enhance", "status", "transparent-inputs", "native", "http-endpoint"]),
+    "pir-server": (["-p", "zakura-pir-server-core", "-p", "zakura-pir-publisher", "-p", "zakura-pir-query-server"], ["enhance", "status", "transparent"]),
+    "pir-client": (["-p", "zakura-pir-client"], ["enhance", "status", "transparent", "native"]),
+    # Final local feature-interaction coverage; independent CI lanes remain authoritative.
+    "pir-integration": (["-p", "zakura-pir-protocol", "-p", "zakura-pir-server-core", "-p", "zakura-pir-publisher", "-p", "zakura-pir-query-server", "-p", "zakura-pir-client"], ["enhance", "status", "transparent", "transparent-inputs", "native", "http-endpoint", "sqlite", "testing", "engine-conformance", "reqwest", "lightwalletd", "cli"]),
 }
+
 VERIFY = ("server-graph", "zakura-graph", "wallet-lib-modes", "vendor-ancestry", "dependency-graph")
 
 

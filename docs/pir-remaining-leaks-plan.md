@@ -198,7 +198,7 @@ chance, at most 1 in 1,024 per shard (change E). That is about
 60 × shards in range ÷ 1,024 extra directory queries per restore: about 2 from
 genesis (33 shards). Filter downloads do not change.
 
-Tests, in `zakura/pir-transparent/tests/private_recovery.rs`:
+Tests, in `zakura/pir-client/tests/transparent/private_recovery.rs`:
 
 - **One sync.** Receives at 0, 9, 18 and 25 restore in one sync. Reverted, 4.
 - **Past the window.** Receives at 0, 45, 52 and 60 take 4 syncs, one per
@@ -268,7 +268,7 @@ None of the PIR changes above touches the transport.
   mining. The fixed window already makes the stop independent of mining, and
   the start follows the broadcast, which the broadcast service sees anyway.
 - No match-rate check on filters (change E shows it is not needed).
-- No change to import discovery (`zakura/pir-transparent/src/discover.rs`).
+- No change to import discovery (`zakura/pir-client/src/transparent/discover.rs`).
   A forged event plus inflated pages can force another pass, but only once per
   import the user starts, and the service already sees the import range.
 - No cover or padding queries, and no server change.

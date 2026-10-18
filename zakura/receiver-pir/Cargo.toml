@@ -23,7 +23,7 @@ server = ["dep:ipir-sp"]
 hex = "0.4"
 receiver-directory = { package = "zakura-receiver-directory", version = "=0.0.1-rc0", path = "../receiver-directory" }
 ipir-sp = { version = "=0.1.0-rc.7", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2", optional = true }
-pir-native = { package = "zakura-pir-native", version = "=0.0.1-rc2", path = "../pir-native" }
+zakura-pir-client = { path = "../pir-client", version = "=0.0.1-rc0", features = ["native"] }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

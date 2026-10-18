@@ -199,7 +199,9 @@ impl IronwoodEnhanceRequestId {
     }
 }
 
-pub use zakura_pir_enhance_types::{EnhanceRecord, EnhanceRecordParts, EnhanceTransactionMetadata};
+pub use zakura_pir_protocol::enhance::record::{
+    EnhanceRecord, EnhanceRecordParts, EnhanceTransactionMetadata,
+};
 
 /// Chain state to which a PIR snapshot is anchored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

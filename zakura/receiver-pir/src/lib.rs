@@ -7,11 +7,11 @@ pub mod server;
 pub mod transport;
 
 pub use client::{Client, Query};
-use pir_native::{NativeSetup, D};
 use receiver_directory::{snapshot, Hash};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
+use zakura_pir_client::native::{NativeSetup, D};
 
 /// The session protocol: the shared `pir-native` two-mask profile, one row per
 /// 2,048-coefficient packing block.
@@ -139,10 +139,13 @@ fn profile(rows: u32) -> Result<&'static Profile, Error> {
             };
             Profile {
                 rows: rows as usize,
-                masks: pir_native::P16
+                masks: zakura_pir_client::native::P16
                     .public_query_masks(seed(b"query-masks"), rows as usize, COLS)
                     .expect("supported receiver PIR geometry"),
-                setup: NativeSetup::new(pir_native::params(), seed(b"packing-setup")),
+                setup: NativeSetup::new(
+                    zakura_pir_client::native::params(),
+                    seed(b"packing-setup"),
+                ),
             }
         }),
     )
@@ -151,17 +154,17 @@ fn profile(rows: u32) -> Result<&'static Profile, Error> {
 /// Exact public setup length for a supported publication.
 pub fn public_bytes(rows: u32) -> Result<usize, Error> {
     validate_rows(rows)?;
-    Ok(pir_native::public_len(COLS))
+    Ok(zakura_pir_client::native::public_len(COLS))
 }
 
 /// Exact request length, including the session header and packing key.
 pub fn query_bytes(rows: u32) -> Result<usize, Error> {
     validate_rows(rows)?;
-    Ok(HEADER_BYTES + pir_native::request_len(rows as usize))
+    Ok(HEADER_BYTES + zakura_pir_client::native::request_len(rows as usize))
 }
 
 /// Exact response length for a supported publication.
 pub fn response_bytes(rows: u32) -> Result<usize, Error> {
     validate_rows(rows)?;
-    Ok(HEADER_BYTES + pir_native::response_len(COLS))
+    Ok(HEADER_BYTES + zakura_pir_client::native::response_len(COLS))
 }

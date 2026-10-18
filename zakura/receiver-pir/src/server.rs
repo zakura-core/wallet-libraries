@@ -1,13 +1,13 @@
 //! Immutable CPU evaluator. HTTP admission and concurrency limits belong to the service.
 use crate::{profile, query_bytes, Error, Manifest, COLS, HEADER_BYTES, MAGIC, PROTOCOL};
 use ipir_sp::{server::IPIRServer, SimplePirProfile};
-use pir_native::NativePreprocessed;
 use receiver_directory::{
     snapshot::{Snapshot, ROW_BYTES},
     Hash,
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use zakura_pir_client::native::NativePreprocessed;
 
 /// A publication prepared for PIR evaluation.
 #[derive(Clone)]
@@ -42,8 +42,8 @@ impl Server {
             SimplePirProfile::P16Q48,
         )
         .map_err(|_| Error::Pir)?;
-        params.query_bits = pir_native::QUERY_BITS;
-        params.q_prime_1 = 1 << pir_native::RESPONSE_BITS;
+        params.query_bits = zakura_pir_client::native::QUERY_BITS;
+        params.q_prime_1 = 1 << zakura_pir_client::native::RESPONSE_BITS;
         let values = snapshot
             .data
             .as_chunks::<2>()
@@ -53,12 +53,13 @@ impl Server {
         let server = IPIRServer::<u16>::new_auto_kernel(params, values, false, true);
         let padded = server.db_rows_padded();
         let db = server.db();
-        let hint = pir_native::hint(&profile.masks, profile.rows, COLS, |col| {
+        let hint = zakura_pir_client::native::hint(&profile.masks, profile.rows, COLS, |col| {
             &db[col * padded..col * padded + profile.rows]
         })
         .map_err(|_| Error::Pir)?;
-        let preprocessed = pir_native::preprocess(&profile.setup, &hint).map_err(|_| Error::Pir)?;
-        let public = pir_native::publish(&preprocessed).map_err(|_| Error::Pir)?;
+        let preprocessed =
+            zakura_pir_client::native::preprocess(&profile.setup, &hint).map_err(|_| Error::Pir)?;
+        let public = zakura_pir_client::native::publish(&preprocessed).map_err(|_| Error::Pir)?;
         let manifest = Manifest {
             protocol: PROTOCOL.into(),
             directory: snapshot.manifest,
@@ -139,17 +140,20 @@ impl Server {
             return Err(Error::Revision);
         }
         let profile = profile(rows)?;
-        let (keys, query) =
-            pir_native::parse_with(&profile.setup, &body[HEADER_BYTES..], profile.rows)
-                .map_err(|_| Error::Malformed)?;
+        let (keys, query) = zakura_pir_client::native::parse_with(
+            &profile.setup,
+            &body[HEADER_BYTES..],
+            profile.rows,
+        )
+        .map_err(|_| Error::Malformed)?;
         let intermediate = self
             .prepared
             .server
-            .try_multiply_power_of_two(pir_native::Q, &query)
+            .try_multiply_power_of_two(zakura_pir_client::native::Q, &query)
             .map_err(|_| Error::Pir)?;
         let mut response = body[..HEADER_BYTES].to_vec();
         response.extend(
-            pir_native::pack(&self.prepared.preprocessed, &keys, &intermediate)
+            zakura_pir_client::native::pack(&self.prepared.preprocessed, &keys, &intermediate)
                 .map_err(|_| Error::Pir)?,
         );
         Ok(response)

@@ -4,11 +4,11 @@
 mod common;
 use common::{manifest, receiver, record};
 use ipir_sp::bits::u64s_to_contiguous_bytes;
-use pir_native::{NativeKeys, NativeSecret, NativeSetup, D, Q, QUERY_BITS, Q_BITS};
 use rand_chacha::{rand_core::SeedableRng, ChaCha20Rng};
 use receiver_directory::snapshot::{lookup_row, row_for, Snapshot, MIN_ROWS, ROW_BYTES};
 use receiver_pir::{server::Server, AcceptedCoverage, Client, HEADER_BYTES, MAGIC, PROTOCOL};
 use sha2::{Digest, Sha256};
+use zakura_pir_client::native::{NativeKeys, NativeSecret, NativeSetup, D, Q, QUERY_BITS, Q_BITS};
 
 fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
@@ -42,12 +42,15 @@ fn the_protocol_reproduces_its_pinned_bytes() {
     let id = server.manifest().id().unwrap();
 
     // `RPQ1`, the session ID, a nonce, then the packing key and the selection.
-    let masks = pir_native::P16
+    let masks = zakura_pir_client::native::P16
         .public_query_masks(seed(b"query-masks", MIN_ROWS), rows, cols)
         .unwrap();
-    let setup = NativeSetup::new(pir_native::params(), seed(b"packing-setup", MIN_ROWS));
+    let setup = NativeSetup::new(
+        zakura_pir_client::native::params(),
+        seed(b"packing-setup", MIN_ROWS),
+    );
     let mut rng = ChaCha20Rng::from_seed([21; 32]);
-    let secret = NativeSecret::sample(&pir_native::params(), &mut rng);
+    let secret = NativeSecret::sample(&zakura_pir_client::native::params(), &mut rng);
     let keys = NativeKeys::generate_one_key(&setup, &secret, &mut rng).unwrap();
     let selection = secret
         .encrypt_selection(&masks[..rows / D], target, &mut rng)
@@ -61,8 +64,13 @@ fn the_protocol_reproduces_its_pinned_bytes() {
 
     let response = server.respond(&request).unwrap();
     assert_eq!(response[..HEADER_BYTES], request[..HEADER_BYTES]);
-    let row =
-        pir_native::decode_cols(&secret, server.public(), &response[HEADER_BYTES..], cols).unwrap();
+    let row = zakura_pir_client::native::decode_cols(
+        &secret,
+        server.public(),
+        &response[HEADER_BYTES..],
+        cols,
+    )
+    .unwrap();
     assert_eq!(
         row,
         snapshot.data[target * ROW_BYTES..(target + 1) * ROW_BYTES]

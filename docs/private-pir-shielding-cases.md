@@ -262,7 +262,7 @@ script, transaction-ID, outpoint, or parent-output lookups.
 
 At the inspected `main` snapshot:
 
-- [Enhance records](../zakura/pir-enhance-types/src/lib.rs) contain separate
+- [Enhance records](../zakura/pir-protocol/src/enhance/record/mod.rs) contain separate
   transparent input/output presence flags, encrypted Ironwood fields, and
   optional whole-transaction fee metadata. That metadata is not authenticated
   by note decryption.

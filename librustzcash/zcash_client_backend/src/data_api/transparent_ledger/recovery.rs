@@ -2,20 +2,21 @@
 
 use zcash_primitives::block::BlockHash;
 
-pub use zakura_transparent_recovery_types::{
+pub use zakura_pir_protocol::transparent::recovery::{
     AccountLifecycle, AddressRange, CommitOutcome, CommitRejection, ForgottenTransparentLedger,
     IntegrityFailure, InvalidCommit, MAX_RECOVERY_IDENTIFIER_LEN, PageRequest, ReceiveEvent,
     RefusedCommit, SpendEvent, StaleCommit, WatchOrigin, WatchedAddress,
 };
 
 pub type TransparentRecoveryContext<AccountId> =
-    zakura_transparent_recovery_types::TransparentRecoveryContext<AccountId, BlockHash>;
+    zakura_pir_protocol::transparent::recovery::TransparentRecoveryContext<AccountId, BlockHash>;
 pub type TransparentAddressWatchSet<AccountId> =
-    zakura_transparent_recovery_types::TransparentAddressWatchSet<AccountId, BlockHash>;
-pub type PublicationAnchor = zakura_transparent_recovery_types::PublicationAnchor<BlockHash>;
-pub type RecoveryRevision = zakura_transparent_recovery_types::RecoveryRevision<BlockHash>;
-pub type PendingPage = zakura_transparent_recovery_types::PendingPage<BlockHash>;
+    zakura_pir_protocol::transparent::recovery::TransparentAddressWatchSet<AccountId, BlockHash>;
+pub type PublicationAnchor =
+    zakura_pir_protocol::transparent::recovery::PublicationAnchor<BlockHash>;
+pub type RecoveryRevision = zakura_pir_protocol::transparent::recovery::RecoveryRevision<BlockHash>;
+pub type PendingPage = zakura_pir_protocol::transparent::recovery::PendingPage<BlockHash>;
 pub type TransparentLedgerCommit<AccountId> =
-    zakura_transparent_recovery_types::TransparentLedgerCommit<AccountId, BlockHash>;
+    zakura_pir_protocol::transparent::recovery::TransparentLedgerCommit<AccountId, BlockHash>;
 pub type CandidateRecovery<AccountId> =
-    zakura_transparent_recovery_types::CandidateRecovery<AccountId, BlockHash>;
+    zakura_pir_protocol::transparent::recovery::CandidateRecovery<AccountId, BlockHash>;

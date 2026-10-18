@@ -5,6 +5,8 @@ and Linux. `rust-toolchain.toml` pins the CI/development compiler; the facade
 verification also checks a fresh Rust 1.97 consumer. Protobuf regeneration
 requires the pinned compiler described below; ordinary builds do not.
 
+The PIR package and feature map is in [PIR packages](pir-packages.md).
+
 ## Commands
 
 ```sh
@@ -25,6 +27,9 @@ python3 scripts/dev.py verify
 | `pczt` | PCZT; `internal-tests`, including signing and end-to-end proof construction |
 | `proving` | Backend + SQLite; real Sapling proving fixtures, migration tests, standalone-key shielding and PCZT integration tests |
 | `sqlite` | SQLite; `test-dependencies`, without Orchard |
+| `pir-protocol` | Shared formats, native identities and byte compatibility |
+| `pir-client` | All three transport-free product clients |
+| `pir-server` | Publisher and query-server packages, all three products |
 | `enhance-wallet` | Enhance PIR; `wallet` |
 | `enhance` | Enhance PIR; default features |
 | `enhance-testing` | Enhance PIR; `testing` (the synthetic Ironwood output fixture service tests authenticate PIR-returned records with) |
@@ -120,8 +125,9 @@ The PIR clients temporarily pin the IPIR family to the main revision that merged
 [IPIR PR 39](https://github.com/valargroup/ipir-sp/pull/39). Native query setup uses
 `ipir-native-client`, so Transparent, Status and receiver clients do not import
 IPIR's evaluator or SimplePIR. The receiver's explicit `server` feature still
-uses the evaluator. Enhance still uses IPIR's legacy parameter metadata for its
-published identities; removing that dependency needs a separate metadata split.
+uses the evaluator. Enhance retains the legacy parameter metadata as a shared serialized contract,
+with tests against the previous provider; its production client no longer
+depends on the IPIR evaluator.
 Keep IPIR, its native client, InspiRING and ReinspiRING on the same source when
 repinning, since their exposed types must share one identity. Repin to the
 published family after the extracted client is released.
@@ -146,7 +152,7 @@ proving-key caches and the cargo test runner.
 ### GitHub Actions
 
 Use **Publish crates** from `main` in `zakura-core/wallet-libraries`. The workflow
-uses the exact commit selected by the dispatch, and reads versions from all twenty-two
+uses the exact commit selected by the dispatch, and reads versions from the selected
 crate manifests. It does not create tags, change versions, or publish wallet-pir.
 Successful **Verify wallet libraries** CI for that exact main commit is required;
 wait for it to finish before dispatching the release workflow.
@@ -160,7 +166,7 @@ that each crate has the right publisher configuration.
 
 Before the first run, a repository administrator must create the `crates-io`
 GitHub Environment, allow only the `main` branch, and require approval by `ebfull`
-(self-approval is allowed, matching Zakura). An owner of **each of the twenty-two crates**
+(self-approval is allowed, matching Zakura). An owner of **each selected crate**
 must configure this Trusted Publisher on crates.io:
 
 | Setting | Value |
@@ -170,14 +176,12 @@ must configure this Trusted Publisher on crates.io:
 | Workflow filename | `publish-crates.yml` |
 | Environment | `crates-io` |
 
-Use `python3 scripts/publish-crates.py --plan` to list the twenty-two names and versions.
+Use `python3 scripts/publish-crates.py --plan` to list the selected names and versions.
 Check every crate's publisher settings, including names already reserved by a
 placeholder release. Trusted Publishing needs existing crate names.
-Check that the five `zakura-transparent-{native,events,filter,shard,txid-client}`
-names and the three receiver names, `zakura-receiver-crypto`,
-`zakura-receiver-directory`, and `zakura-receiver-pir`, are reserved. Reserve
-`zakura-filters` and `zakura-transparent-recovery-types` as well. Reserve any missing names and configure each crate's Trusted Publisher before the first run
-that includes it. No permanent API token or new Infisical secret is required.
+Before a release, reserve the five new `zakura-pir-{protocol,client,publisher,query-server,server-core}`
+names and configure their Trusted Publishers. The packaging POC itself does not
+publish crates or change publisher settings. No permanent API token or new Infisical secret is required.
 
 Choose **publish** for an actual release. It repeats verification for the dispatch
 commit, requires environment approval, then acquires its temporary credential.
@@ -254,9 +258,9 @@ must not rewrite the workspace lockfile.
 
 ### Standalone transparent recovery
 
-The `zakura-pir-transparent` feature `recovery` opens the companion, runs recovery
-and returns candidate batches using `zakura-transparent-recovery-types`. It does
-not depend on the wallet backend, PCZT or shielded circuits. The existing `wallet`
+The `zakura-pir-client` feature `recovery` opens the companion, runs recovery
+and returns candidate batches using `zakura-pir-protocol::transparent::recovery`. It does
+not depend on the wallet backend, PCZT or shielded circuits. The `transparent-wallet`
 feature adds `WalletChain` and wallet txid-detail orchestration; `sqlite` also adds
 settlement. Standalone batches can be inspected or discarded, never acknowledged
 through a new public operation. Wallet validation and durable settlement remain
@@ -268,7 +272,7 @@ the shared records with its existing hash type, so its database interface keeps
 one record definition without requiring a Common change. The contract package
 has not been released; no publishing or downstream adoption is implied.
 
-The `recovery-without-backend` example opens and reopens a companion using caller
+The `transparent_recovery-without-backend` example opens and reopens a companion using caller
 chain information and no wallet backend. Dependency-graph verification builds
 and runs it as a fresh external consumer, where workspace test features cannot
 supply a missing production dependency.
