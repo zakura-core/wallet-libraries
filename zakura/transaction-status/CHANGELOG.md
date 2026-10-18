@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- A default-enabled `lightwalletd` feature. Disabling default features keeps
+  status policy available without the wallet backend or gRPC transport.
+
 ## [0.0.1-rc3] - 2026-10-16
 
 ### Changed

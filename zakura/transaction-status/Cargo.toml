@@ -10,13 +10,18 @@ readme = "README.md"
 categories.workspace = true
 keywords = ["zcash", "wallet", "privacy"]
 
+[features]
+default = ["lightwalletd"]
+## Bundled public status source using lightwalletd's GetTransaction RPC.
+lightwalletd = ["dep:zcash_client_backend", "dep:zcash_primitives", "dep:tonic", "dep:tokio"]
+
 [dependencies]
 zakura-pir-status = { version = "=0.0.1-rc2", path = "../pir-status" }
-zcash_client_backend = { workspace = true, features = ["lightwalletd-tonic", "lightwalletd-tonic-transport"] }
-zcash_primitives.workspace = true
+zcash_client_backend = { workspace = true, optional = true, features = ["lightwalletd-tonic", "lightwalletd-tonic-transport"] }
+zcash_primitives = { workspace = true, optional = true }
 zcash_protocol.workspace = true
-tonic = { workspace = true, features = ["transport"] }
-tokio = { workspace = true, features = ["time"] }
+tonic = { workspace = true, optional = true, features = ["transport"] }
+tokio = { workspace = true, optional = true, features = ["time"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "time"] }

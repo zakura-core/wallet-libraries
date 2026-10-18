@@ -12,7 +12,7 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def consumer_graph(directory, dependency, features):
+def consumer_graph(directory, dependency, features, *, default_features=True):
     """Resolve one path dependency outside the workspace's feature unification."""
     package = directory.name
     subject = tomllib.loads((ROOT / dependency / "Cargo.toml").read_text())["package"]["name"]
@@ -22,7 +22,7 @@ def consumer_graph(directory, dependency, features):
         f'[package]\nname = "{package}"\nversion = "0.0.0"\nedition = "2024"\n'
         '[workspace]\nresolver = "2"\n[dependencies]\n'
         f'subject = {{ package = {json.dumps(subject)}, path = {json.dumps(str(ROOT / dependency))}, '
-        f'features = {json.dumps(features)} }}\n'
+        f'features = {json.dumps(features)}, default-features = {json.dumps(default_features)} }}\n'
     )
     result = subprocess.check_output(
         ["cargo", "tree", "--manifest-path", str(directory / "Cargo.toml"),
@@ -61,6 +61,13 @@ def main():
         ("pir", "zakura/pir-native", [], native_evaluators | {"sha1"}, {"ipir-native-client"}),
         ("status-client", "zakura/pir-status", [], native_evaluators | {"sha1"}, {"ipir-native-client"}),
         ("receiver-client", "zakura/receiver-pir", [], native_evaluators | {"sha1"}, {"ipir-native-client"}),
+        ("status-policy", "zakura/transaction-status", [],
+         recovery_forbidden | {"tonic", "tonic-prost", "tokio", "hyper", "hyper-util", "h2"},
+         {"zakura-pir-status", "zakura-protocol"}),
+        ("status-default", "zakura/transaction-status", [], set(),
+         {"zakura-client-backend", "tonic", "tokio"}),
+        ("status-lightwalletd", "zakura/transaction-status", ["lightwalletd"], set(),
+         {"zakura-client-backend", "tonic", "tokio"}),
         ("receiver-server", "zakura/receiver-pir", ["server"], set(), {"ipir-sp", "simplepir-kernel"}),
         ("filter", "zakura/transparent-filter", [], {"bitcoin", "secp256k1", "secp256k1-sys"},
          {"bitcoin_hashes"}),
@@ -78,10 +85,14 @@ def main():
         ("proving", "librustzcash/zcash_client_sqlite", ["pczt-tests"],
          set(), {"wagyu-zcash-parameters"}),
     ]
+    defaults_disabled = {"status-policy", "status-lightwalletd"}
     receipt = {}
     with tempfile.TemporaryDirectory(prefix="wallet-dependency-graph-") as temporary:
         for name, dependency, features, forbidden, required in cases:
-            graph = consumer_graph(Path(temporary) / name, dependency, features)
+            graph = consumer_graph(
+                Path(temporary) / name, dependency, features,
+                default_features=name not in defaults_disabled,
+            )
             names = {line.split()[0] for line in graph}
             unexpected = forbidden & names
             missing = required - names
@@ -94,6 +105,29 @@ def main():
                 (Path(temporary) / name / "src/main.rs").write_text(source)
                 subprocess.run(
                     ["cargo", "run", "--locked", "--quiet", "--manifest-path",
+                     str(Path(temporary) / name / "Cargo.toml")], check=True,
+                )
+            if name == "status-policy":
+                # The example constructs a TxId using the same protocol package
+                # as the workspace, without reaching through transaction parsing.
+                protocol = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["dependencies"]["zcash_protocol"]
+                manifest = Path(temporary) / name / "Cargo.toml"
+                with manifest.open("a") as consumer:
+                    fields = ", ".join(f"{key} = {json.dumps(value)}" for key, value in protocol.items())
+                    consumer.write(f"zcash_protocol = {{ {fields} }}\n")
+                example = ROOT / "zakura/transaction-status/examples/private-source.rs"
+                source = example.read_text().replace("zakura_transaction_status", "subject")
+                (Path(temporary) / name / "src/main.rs").write_text(source)
+                subprocess.run(
+                    ["cargo", "run", "--quiet", "--manifest-path",
+                     str(Path(temporary) / name / "Cargo.toml")], check=True,
+                )
+            if name in {"status-default", "status-lightwalletd"}:
+                (Path(temporary) / name / "src/lib.rs").write_text(
+                    "pub use subject::lightwalletd::{LightwalletdSource, observe_response};\n"
+                )
+                subprocess.run(
+                    ["cargo", "check", "--locked", "--quiet", "--manifest-path",
                      str(Path(temporary) / name / "Cargo.toml")], check=True,
                 )
             receipt[name] = graph

@@ -38,6 +38,8 @@ CONFIGS = {
     "transparent-pir-sqlite": (["-p", "zakura-pir-transparent"], ["sqlite"]),
     "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing", "reqwest"]),
     "pir-receiver": (["-p", "zakura-pir-receiver"], ["wallet"]),
+    "transaction-status-core": (["-p", "zakura-transaction-status", "--no-default-features"], []),
+    "transaction-status-lightwalletd": (["-p", "zakura-transaction-status", "--no-default-features"], ["lightwalletd"]),
     "receiver-wire": (["-p", "zakura-receiver-crypto", "--no-default-features"], []),
     # The receiver PIR evaluator with its client: runs the golden vectors.
     "receiver-pir-server": (["-p", "zakura-receiver-pir"], ["server"]),

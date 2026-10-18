@@ -9,6 +9,19 @@ use zcash_client_backend::proto::service::{
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, BranchId};
 
+impl From<tonic::Status> for StatusError {
+    fn from(status: tonic::Status) -> Self {
+        use tonic::Code;
+        match status.code() {
+            Code::Unimplemented => Self::Unsupported,
+            Code::Unavailable => Self::Unavailable,
+            Code::DeadlineExceeded => Self::Timeout,
+            Code::Cancelled => Self::Cancelled,
+            code => Self::Transport { code: code as i32 },
+        }
+    }
+}
+
 const TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The opener is called only when public status is selected. This lets a
@@ -141,6 +154,14 @@ fn decode(txid: TxId, raw: RawTransaction) -> Result<StatusObservation, StatusEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_errors_never_produce_local_storage() {
+        for code in 0..=16 {
+            let status = tonic::Status::new(tonic::Code::from(code), "");
+            assert_ne!(StatusError::from(status), StatusError::LocalStorage);
+        }
+    }
 
     #[test]
     fn only_explicit_not_found_means_absence() {

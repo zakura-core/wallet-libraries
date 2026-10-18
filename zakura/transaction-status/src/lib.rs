@@ -4,12 +4,12 @@
 //! when the selected source fails. Applications supply their own private PIR
 //! source, including its independently verified chain anchor and transport.
 
+#[cfg(feature = "lightwalletd")]
 pub mod lightwalletd;
 
 use std::fmt;
 use zakura_pir_status::LocalCoverageContext;
-use zcash_primitives::transaction::TxId;
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::{TxId, consensus::BlockHeight};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusMode {
@@ -69,19 +69,6 @@ impl From<zakura_pir_status::Error> for StatusError {
             Error::Cancelled => Self::Cancelled,
             Error::Malformed => Self::Malformed,
             Error::Capacity | Error::Unavailable | Error::Pir => Self::Unavailable,
-        }
-    }
-}
-
-impl From<tonic::Status> for StatusError {
-    fn from(status: tonic::Status) -> Self {
-        use tonic::Code;
-        match status.code() {
-            Code::Unimplemented => Self::Unsupported,
-            Code::Unavailable => Self::Unavailable,
-            Code::DeadlineExceeded => Self::Timeout,
-            Code::Cancelled => Self::Cancelled,
-            code => Self::Transport { code: code as i32 },
         }
     }
 }
@@ -326,10 +313,6 @@ mod tests {
             Error::Pir,
         ] {
             assert_ne!(StatusError::from(error), StatusError::LocalStorage);
-        }
-        for code in 0..=16 {
-            let status = tonic::Status::new(tonic::Code::from(code), "");
-            assert_ne!(StatusError::from(status), StatusError::LocalStorage);
         }
     }
 
