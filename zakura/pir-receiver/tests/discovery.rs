@@ -93,6 +93,24 @@ fn tip(st: &State) -> ChainPoint {
     }
 }
 
+/// The publication ending at the stored block `height`, as the wallet's chain has it.
+fn stored_publication(st: &State, height: BlockHeight) -> PublicationEnd {
+    st.wallet()
+        .conn()
+        .query_row(
+            "SELECT hash, ironwood_commitment_tree_size FROM blocks WHERE height = ?1",
+            [u32::from(height)],
+            |r| {
+                Ok(PublicationEnd {
+                    height,
+                    hash: r.get(0)?,
+                    tree_size: r.get(1)?,
+                })
+            },
+        )
+        .unwrap()
+}
+
 /// The test account's Orchard key, which its one-time keys derive from.
 fn parent(st: &State) -> FullViewingKey {
     FullViewingKey::from(st.test_account().unwrap().usk().orchard())
@@ -463,6 +481,28 @@ impl WriteLock for NoLock {
     }
 }
 
+/// Forwards to a [`Directory`] but fails every witness download, as when the common
+/// witness file cannot be fetched.
+struct WithoutWitnesses<'a>(&'a Directory);
+
+impl Transport for WithoutWitnesses<'_> {
+    async fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>, DirectoryError> {
+        if url.contains("/witness/") {
+            return Err(DirectoryError::Transport("witnesses unavailable".into()));
+        }
+        self.0.get(url, limit).await
+    }
+
+    async fn post(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        limit: usize,
+    ) -> Result<Vec<u8>, DirectoryError> {
+        self.0.post(url, body, limit).await
+    }
+}
+
 /// Runs discovery for `account` at [`NOW`].
 async fn run(
     st: &mut State,
@@ -562,21 +602,7 @@ async fn closed_key_paid_later(fresh: bool) {
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     let index = 1_000_000_000;
     // An earlier pass saw the key unpaid, so it closed.
-    let end = tip(&st);
-    let tree_size: u64 = st
-        .wallet()
-        .conn()
-        .query_row(
-            "SELECT ironwood_commitment_tree_size FROM blocks WHERE height = ?1",
-            [u32::from(end.height)],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let earlier = PublicationEnd {
-        height: end.height,
-        hash: end.hash.0,
-        tree_size,
-    };
+    let earlier = stored_publication(&st, tip(&st).height);
     let seen = FilterCheck {
         key: KeyId::new(Purpose::Receive, index),
         seen: true,
@@ -796,6 +822,49 @@ async fn issuance_skips_a_refund_address_in_the_fetched_seen_sets() {
     );
 }
 
+/// A run that left only an inclusion path to fetch, here because the witness file failed
+/// to download, fetches it in the next run and completes.
+#[tokio::test]
+async fn a_run_with_only_a_path_due_fetches_it() {
+    let mut r = restored(&[3]);
+    let directory = serve(&r.records, r.through);
+    assert!(
+        run(&mut r.st, r.account, WithoutWitnesses(&directory))
+            .await
+            .is_err()
+    );
+    let status = r.st.wallet().db().one_time_discovery(r.account, NOW);
+    let status = status.unwrap().unwrap();
+    assert!(status.enumeration.is_none() && status.lookups.is_empty());
+    assert_eq!(status.witnesses.len(), 1);
+    let found = run_clean(&mut r.st, &directory).await;
+    assert!(found.complete);
+    assert_eq!(balance(&r.st), VALUE);
+}
+
+/// A search left unfinished against an older publication starts over from index zero
+/// against a newer one, so a key it had already passed is checked against the newer
+/// filters.
+#[tokio::test]
+async fn an_unfinished_search_starts_over_on_a_newer_publication() {
+    let mut r = restored(&[5]);
+    let older = stored_publication(&r.st, BlockHeight::from(ACTIVATION));
+    let partway = EnumerationCursor {
+        next: FIRST_WINDOW,
+        reach: FIRST_WINDOW + 10,
+    };
+    let db = r.st.wallet_mut().db_mut();
+    let receive = Purpose::Receive;
+    assert!(
+        db.record_one_time_filter_checks(r.account, older, receive, &[], partway, false, NOW)
+            .unwrap()
+    );
+    let directory = serve(&r.records, r.through);
+    let found = run_clean(&mut r.st, &directory).await;
+    assert!(found.complete);
+    assert_eq!(balance(&r.st), VALUE);
+}
+
 /// A key issuance registers for a lookup after the pass finished, from a provider's seen
 /// set, waits without a lookup request for a publication that reaches the blocks the
 /// wallet scanned without it. That publication's lookup finds its payment without starting
@@ -836,4 +905,25 @@ async fn a_key_registered_after_the_pass_waits_for_a_newer_publication() {
         !requests.iter().any(|r| r.contains("/filters/")),
         "{requests:?}"
     );
+}
+
+/// A lookup resumed from its cursor starts over from page zero when the record before the
+/// cursor changed, here because an earlier revision omitted a payment, so it finds that
+/// payment.
+#[tokio::test]
+async fn a_lookup_whose_cursor_record_changed_starts_over() {
+    let mut r = restored(&[3, 3]);
+    let commitments: Vec<_> = r.records.iter().map(|x| x.payment.cmx).collect();
+    let mut second = r.records[1].clone();
+    (second.page, second.total) = (0, 1);
+    let omitting = Directory::new(publish(&[second], &commitments, r.through, &provider(&[])));
+    run_clean(&mut r.st, &omitting).await;
+    assert_eq!(balance(&r.st), VALUE);
+    // Check swap history reads the paid key's history again from its cursor.
+    let db = r.st.wallet_mut().db_mut();
+    db.recheck_one_time_key_history(r.account).unwrap();
+    let directory = serve(&r.records, r.through);
+    let found = run_clean(&mut r.st, &directory).await;
+    assert!(found.complete);
+    assert_eq!(balance(&r.st), 2 * VALUE);
 }
