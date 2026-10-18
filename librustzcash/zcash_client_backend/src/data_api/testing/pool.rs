@@ -7033,7 +7033,7 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
                 network.activation_height(NetworkUpgrade::Canopy).unwrap() + ZIP212_GRACE_PERIOD,
             );
 
-            // Ironwood is not active at these test heights, so its tree is empty.
+            // No Ironwood notes have been mined in the initial chain state.
             #[cfg(feature = "orchard")]
             let ironwood_initial_tree = Frontier::empty();
 
@@ -7188,29 +7188,26 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     let pczt_proven = Prover::new(pczt_updated)
         .create_orchard_proof(orchard_pk)
         .unwrap()
+        .create_ironwood_proof(orchard_pk)
+        .unwrap()
         .create_sapling_proofs(&sapling_prover, &sapling_prover)
         .unwrap()
         .finish();
 
-    // The signer view of a v5 PCZT commits to the same transaction effects. V5
-    // anchors are retained, while Orchard effecting fields are compacted using
-    // the v2 PCZT encoding. Passing the proof-bearing authoritative copy also
+    // The default network has NU6.3 active, so this is a v6 transaction. Its
+    // compact signer view removes shielded anchors while preserving the signed
+    // transaction effects. Passing the proof-bearing authoritative copy also
     // exercises redaction of data that the external Signer does not need.
     let original_sighash = Signer::new(pczt_proven.clone()).unwrap().shielded_sighash();
     let original_len = pczt_proven.clone().serialize().unwrap().len();
     let signer_view = redact_pczt_for_signer(&pczt_proven, SignerView::Compact);
     assert_eq!(
         *signer_view.global().tx_version(),
-        zcash_protocol::constants::V5_TX_VERSION,
+        zcash_protocol::constants::V6_TX_VERSION,
     );
-    assert_eq!(
-        signer_view.sapling().anchor(),
-        pczt_proven.sapling().anchor()
-    );
-    assert_eq!(
-        signer_view.orchard().anchor(),
-        pczt_proven.orchard().anchor()
-    );
+    assert!(signer_view.sapling().anchor().is_none());
+    assert!(signer_view.orchard().anchor().is_none());
+    assert!(signer_view.ironwood().anchor().is_none());
     if !signer_view.orchard().actions().is_empty() {
         assert!(pczt::v1::Pczt::try_from(signer_view.clone()).is_err());
         assert!(
@@ -7240,6 +7237,10 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
         original_sighash,
     );
     assert_eq!(full_view.orchard().anchor(), pczt_proven.orchard().anchor());
+    assert_eq!(
+        full_view.ironwood().anchor(),
+        pczt_proven.ironwood().anchor()
+    );
     assert_eq!(full_view.sapling().anchor(), pczt_proven.sapling().anchor());
     assert_eq!(
         full_view.orchard().zkproof().is_some(),
@@ -7281,15 +7282,12 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
             .proprietary()
             .contains_key("zcash_client_backend:output_info")
     }));
-    if *full_view.global().tx_version() == zcash_protocol::constants::V5_TX_VERSION {
-        let full_view_bytes = full_view.clone().serialize().unwrap();
-        assert!(pczt::v1::Pczt::try_from(full_view).is_ok());
-        assert_eq!(
-            u32::from_le_bytes(full_view_bytes[4..8].try_into().unwrap()),
-            1,
-            "the full signer view of a v5 PCZT serializes in the v1 encoding",
-        );
-    }
+    let full_view_bytes = full_view.serialize().unwrap();
+    assert_eq!(
+        u32::from_le_bytes(full_view_bytes[4..8].try_into().unwrap()),
+        2,
+        "a v6 transaction requires the v2 PCZT encoding",
+    );
 
     // Apply signatures to the transported signer view, then combine the
     // contribution with the proof-bearing authoritative copy.
@@ -8656,11 +8654,49 @@ pub fn shielding_coinbase_to_orchard_receiver_delivers_via_ironwood<Dsf>(
         "status intent is dormant while the transaction is mined",
     );
 
-    st.truncate_to_height(mined_height - 1);
+    st.truncate_to_height_retaining_cache(mined_height - 1);
     assert_eq!(
         st.get_tx_from_history(sent_txid)
             .unwrap()
             .expect("sent transaction is retained across the rewind")
+            .mined_height(),
+        None,
+    );
+    assert!(
+        !st.wallet()
+            .transaction_status_work()
+            .unwrap()
+            .iter()
+            .any(|work| work.txid() == sent_txid),
+        "status work waits for the retained inclusion block to be checked",
+    );
+
+    // Re-observing the same block restores inclusion without a status lookup.
+    st.scan_cached_blocks(mined_height, 1);
+    assert_eq!(
+        st.get_tx_from_history(sent_txid)
+            .unwrap()
+            .unwrap()
+            .mined_height(),
+        Some(mined_height),
+    );
+    assert!(
+        !st.wallet()
+            .transaction_status_work()
+            .unwrap()
+            .iter()
+            .any(|work| work.txid() == sent_txid),
+    );
+
+    // A different block cannot restore inclusion and must expose status work.
+    st.truncate_to_height(mined_height - 1);
+    let (replacement_height, _) = st.generate_empty_block();
+    assert_eq!(replacement_height, mined_height);
+    st.scan_cached_blocks(replacement_height, 1);
+    assert_eq!(
+        st.get_tx_from_history(sent_txid)
+            .unwrap()
+            .unwrap()
             .mined_height(),
         None,
     );
@@ -8670,7 +8706,7 @@ pub fn shielding_coinbase_to_orchard_receiver_delivers_via_ironwood<Dsf>(
             .unwrap()
             .iter()
             .any(|work| work.txid() == sent_txid),
-        "rewinding the mined block reactivates the durable status intent",
+        "scanning a replacement block reactivates the durable status intent",
     );
 }
 
