@@ -7576,7 +7576,8 @@ mod tests {
 
     /// When the rewind target is below every account's birthday but the caller acknowledges
     /// the lowering by including the account in `reset_account_birthdays`, the rewind
-    /// proceeds and the listed account's birthday is lowered to the new floor.
+    /// proceeds and the listed account's birthday is lowered to the new floor. An account
+    /// declared fresh for one-time IVK discovery is no longer, since it now has history.
     #[test]
     fn rewind_to_chain_state_below_all_birthdays_with_account_in_reset_succeeds() {
         let mut st = TestBuilder::new()
@@ -7590,6 +7591,24 @@ mod tests {
         // account's birthday, so the safeguard fires when the caller hasn't
         // acknowledged any reset.
         let target_height = original_birthday - 10;
+        let fresh = |st: &TestState<_, crate::testing::db::TestDb, _>| -> bool {
+            st.wallet()
+                .conn()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_fresh_accounts)",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        st.wallet()
+            .conn()
+            .execute_batch(
+                "INSERT INTO ironwood_one_time_fresh_accounts (account_id)
+                 SELECT id FROM accounts",
+            )
+            .unwrap();
+        assert!(fresh(&st));
 
         st.wallet_mut()
             .rewind_to_chain_state(
@@ -7603,6 +7622,7 @@ mod tests {
             account_birthday(st.wallet().conn(), account_id),
             Ok(b) if b == target_height + 1
         );
+        assert!(!fresh(&st));
     }
 
     /// `rewind_to_chain_state` must reject `reset_account_birthdays` containing an

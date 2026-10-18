@@ -646,19 +646,20 @@ mod tests {
             Zatoshis::const_from_u64(5),
         );
         st.scan_cached_blocks(h3, 1);
-        // Without `orchard`, which cannot settle discovery, a pass over a publication the
-        // scan has yet to judge refuses them too, and so does a late candidate, which waits
-        // for the scan to cover its blocks.
+        // Without `orchard`, which cannot settle discovery, a pass or a lookup that read a
+        // publication the scan has yet to judge refuses them too, and so does a late
+        // candidate, which waits for the scan to cover its blocks.
         #[cfg(not(feature = "orchard"))]
         {
             let pending = u32::from(h3) + 10;
             st.wallet()
                 .conn()
-                .execute(
+                .execute_batch(&format!(
                     "INSERT INTO ironwood_one_time_publications (height, hash, tree_size)
-                     VALUES (?1, zeroblob(32), 0)",
-                    [pending],
-                )
+                     VALUES ({pending}, zeroblob(32), 0);
+                     INSERT INTO ironwood_one_time_lookups (one_time_key_id, done_height)
+                     SELECT id, {pending} FROM ironwood_one_time_keys;"
+                ))
                 .unwrap();
             let (h4, _, _) = st.generate_next_block(
                 &fvk,
@@ -671,6 +672,12 @@ mod tests {
                     "INSERT INTO ironwood_one_time_discovery
                         (account_id, publication_height, publication_hash)
                      SELECT id, ?1, zeroblob(32) FROM accounts",
+                ),
+                (
+                    "ironwood_one_time_lookup_reads",
+                    "INSERT INTO ironwood_one_time_lookup_reads
+                        (one_time_key_id, publication_height, publication_hash)
+                     SELECT id, ?1, zeroblob(32) FROM ironwood_one_time_keys",
                 ),
                 (
                     "ironwood_one_time_payment_recovery",
@@ -700,8 +707,9 @@ mod tests {
         }
     }
 
-    /// A rewind removes the spend journal above its rescan floor and has discovery judge a
-    /// publication there again in every build, since an `orchard` build may reopen the
+    /// A rewind removes the spend journal above its rescan floor, has discovery judge a
+    /// publication there again, from the first replaced block, and restarts a lookup cursor
+    /// that passed a record there, in every build, since an `orchard` build may reopen the
     /// wallet and read that state.
     #[test]
     fn a_rewind_repairs_one_time_state_in_every_build() {
@@ -720,7 +728,7 @@ mod tests {
         let fvk = SaplingPoolTester::test_account_fvk(&st);
         let value = Zatoshis::const_from_u64(5);
         let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
-        st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        let (h2, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
         let (h3, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
         st.scan_cached_blocks(h1, 3);
         let conn = st.wallet().conn();
@@ -736,9 +744,21 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO ironwood_one_time_publications (height, hash, tree_size, state)
-             VALUES (?1, zeroblob(32), 0, 1), (?1, randomblob(32), 0, 2)",
-            [u32::from(h3)],
+             VALUES (?1, zeroblob(32), 0, 1), (?1, randomblob(32), 0, 2),
+                 (?2, zeroblob(32), 0, 1)",
+            [u32::from(h3), u32::from(h2)],
         )
+        .unwrap();
+        // A lookup done through the publication, whose cursor last applied a record at h2.
+        conn.execute_batch(&format!(
+            "INSERT INTO ironwood_one_time_keys
+                 (account_id, purpose, key_index, receiver, scan_from, advances_allocation)
+             SELECT id, 1, zeroblob(8), zeroblob(43), 0, 1 FROM accounts LIMIT 1;
+             INSERT INTO ironwood_one_time_lookups
+                 (one_time_key_id, done_height, applied, last_position, last_nullifier,
+                  last_height)
+             SELECT id, {h3}, 1, 0, zeroblob(32), {h2} FROM ironwood_one_time_keys;"
+        ))
         .unwrap();
         st.wallet_mut().truncate_to_height(h1).unwrap();
         // The publications, accepted or rejected, wait to be judged again, and the journal
@@ -755,5 +775,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(repaired, (0, 0, 0));
+        let cursor: (u32, Option<u32>, Option<u32>) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT applied, cutoff_height, last_height FROM ironwood_one_time_lookups",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(cursor, (0, Some(u32::from(h3)), None));
     }
 }
