@@ -1112,6 +1112,56 @@ fn a_rewind_below_a_looked_up_note_scans_its_key_again() {
     assert_eq!(mined, [Some(u32::from(candidate.height))]);
 }
 
+/// A pass that lists a key as recent watches it from the publication's end, even though
+/// issuance registered the key for a lookup from the provider's seen set before the pass.
+/// Once the watch ends, a later pass that lists it as recent again, as every key is without
+/// a current recent set, does not reopen it.
+#[test]
+fn a_pass_watches_a_recent_key_once_even_if_issuance_registered_it() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key = KeyId::new(Purpose::Receive, 0);
+    let receiver = derive(&st, key)
+        .address_at(0u32, Scope::External)
+        .to_raw_address_bytes();
+    let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| *r == receiver).collect();
+    let seen = ProviderSeen {
+        since: 0,
+        until: clock_now(),
+        contains: &contains,
+    };
+    let from = tip(&st).height + 1;
+    let db = st.wallet_mut().db_mut();
+    let issued = prepare_from(db, account, clock_now(), from, Some(&seen)).unwrap();
+    assert!(issued.is_ok_and(|k| k.key_id() != key));
+    let watch = |st: &State| -> (Option<u32>, bool) {
+        row(
+            st.wallet().conn(),
+            "SELECT active_from, closed_at IS NOT NULL FROM ironwood_one_time_keys
+             WHERE purpose = 1 AND key_index = ?1",
+            [key.index().to_be_bytes()],
+        )
+    };
+    assert_eq!(watch(&st), (None, false));
+    let recent = FilterCheck {
+        key,
+        seen: true,
+        paid: false,
+        recent: true,
+    };
+    let pass = discover(&mut st, account, &[recent]);
+    let start = u32::from(pass.height) + 1;
+    assert_eq!(watch(&st), (Some(start), false));
+    exec(
+        st.wallet().conn(),
+        "UPDATE ironwood_one_time_keys SET closed_at = 1 WHERE purpose = 1 AND key_index = ?1",
+        [key.index().to_be_bytes()],
+    );
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    discover(&mut st, account, &[recent]);
+    assert_eq!(watch(&st), (Some(start), true));
+}
+
 /// Pays `key` in a new scanned block, before the wallet scans with it, and returns the
 /// output as a directory candidate.
 fn pay_candidate(st: &mut State, key: KeyId) -> PendingPayment {

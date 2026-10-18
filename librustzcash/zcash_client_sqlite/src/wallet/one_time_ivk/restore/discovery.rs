@@ -433,13 +433,6 @@ pub(crate) fn record_filter_checks<P: Parameters>(
         if allocates {
             record_provider_seen(conn, id)?;
         }
-        // A key an earlier pass discovered already had its watch; another pass that lists
-        // it as recent (as every key is without a current recent set) must not reopen it.
-        let discovered: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1)",
-            [id],
-            |r| r.get(0),
-        )?;
         if check.paid && in_range {
             // A later pass reads a paid key's history again only if the key has no known
             // payment: an earlier pass found it unpaid, so the filter is newly positive. The
@@ -465,7 +458,16 @@ pub(crate) fn record_filter_checks<P: Parameters>(
                 params![id, u32::from(publication.height)],
             )?;
         }
-        if check.recent && !discovered {
+        // A key an earlier pass watched already had its watch; another pass that lists it
+        // as recent (as every key is without a current recent set) must not reopen it. A
+        // lookup does not count, since issuance registers seen keys for one before any pass.
+        if check.recent
+            && conn.execute(
+                "UPDATE ironwood_one_time_keys SET pass_watch_height = ?2
+                 WHERE id = ?1 AND pass_watch_height IS NULL",
+                params![id, u32::from(publication.height)],
+            )? == 1
+        {
             activate(conn, id, start.max(publication.height + 1))?;
         }
     }
