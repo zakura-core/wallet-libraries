@@ -137,13 +137,14 @@ const GIVEN: &str = "(k.provider_seen = 1
         WHERE o.one_time_key_id = k.id AND o.request IS NOT NULL
           AND (o.reference IS NOT NULL OR o.rejected = 1)))";
 
-/// The deadline of the latest request begun on incoming key `k`'s current reservation,
-/// the accepted one or else the requested one, or NULL if none was. A reissued address
-/// keeps its earlier reservations' requests, so a request belongs to the current one when
-/// begun no earlier than it was reserved: reserving moves `reserved_at` past every
-/// request's `begun_at`, and `begin` stores no `begun_at` before `reserved_at`.
+/// The deadline of the latest request on incoming key `k`'s current reservation, the
+/// accepted one or else the requested one, or NULL if none was begun. A reissued address
+/// keeps its earlier reservations' requests, so the current one's are those above its
+/// `reservation_floor`. A NULL floor counts every request on the key, so a reservation
+/// made before the floor existed is never mistaken for one never quoted.
 const LATEST_DEADLINE: &str = "(SELECT o.deadline FROM ironwood_one_time_operations o
-    WHERE o.one_time_key_id = k.id AND o.request IS NOT NULL AND o.begun_at >= k.reserved_at
+    WHERE o.one_time_key_id = k.id AND o.request IS NOT NULL
+      AND o.id > IFNULL(k.reservation_floor, 0)
     ORDER BY o.id DESC LIMIT 1)";
 
 /// SQL condition on `ironwood_one_time_keys k`: one of its quotes was started.
@@ -428,12 +429,11 @@ pub(in crate::wallet::one_time_ivk) fn begin(
     if !scanned_empty(conn, key)? {
         return Ok(Err(ReservationPolicy::Coverage));
     }
-    // The provider has the address from here on, so issuance avoids it. The request
-    // belongs to the current reservation (see [`LATEST_DEADLINE`]).
+    // The provider has the address from here on, so issuance avoids it.
     conn.execute(
         "INSERT INTO ironwood_one_time_operations
             (one_time_key_id, request, deadline, begun_at, observed_at)
-         SELECT ?1, ?2, ?3, MAX(?4, reserved_at), ?4 FROM ironwood_one_time_keys WHERE id = ?1",
+         VALUES (?1, ?2, ?3, ?4, ?4)",
         params![key, request, deadline, now],
     )?;
     Ok(Ok(()))
@@ -756,11 +756,11 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
         Discovery::Scan,
         now,
     )?;
-    // Earlier reservations' requests stay behind this one (see [`LATEST_DEADLINE`]).
+    // Earlier reservations' requests stay below the floor (see [`LATEST_DEADLINE`]).
     conn.execute(
         "UPDATE ironwood_one_time_keys
-         SET released_at = NULL, reserved_at = MAX(?2, IFNULL((SELECT MAX(begun_at) + 1
-             FROM ironwood_one_time_operations WHERE one_time_key_id = ?1), ?2))
+         SET reserved_at = ?2, released_at = NULL, reservation_floor = IFNULL(
+             (SELECT MAX(id) FROM ironwood_one_time_operations WHERE one_time_key_id = ?1), 0)
          WHERE id = ?1",
         params![key, now],
     )?;

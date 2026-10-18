@@ -35,7 +35,8 @@ and this library adheres to Rust's notion of
   caller's clock. A reservation never quoted that the set holds is retired. An incoming
   swap attempt keeps its address across quotes: the draft is resumed until its latest
   request's deadline passes, and `begin_receive_operation` then refuses the reservation
-  as `ReservationPolicy::Stale`.
+  as `ReservationPolicy::Stale`. A reissued address's earlier requests do not count, and a
+  reservation made before `ONE_TIME_IVK_DISCOVERY` counts every request on its key.
 - One-time IVK restore no longer retains Ironwood nullifiers: restore sweeps, their
   retention floors, coverage marks, replays and stepped release are gone, and the nullifier
   map prunes Ironwood nullifiers like the other pools'. The migration drops the

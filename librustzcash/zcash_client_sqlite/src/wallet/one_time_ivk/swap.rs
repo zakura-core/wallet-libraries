@@ -110,9 +110,12 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// open reservation not started, paid or awaiting a payment, is resumed while its
     /// latest request's deadline (the accepted one, or else the requested one) has not
     /// passed by the earlier of `now` and the latest block time, even without a fresh set.
-    /// Once it has passed, the next attempt gets another address. A draft never quoted
-    /// needs a fresh set, and is retired if the set holds it. Reserving a new address
-    /// needs a set that is fresh at `now` (see [`ReservationPolicy::SeenUnavailable`]).
+    /// Once it has passed, the next attempt gets another address. Only the current
+    /// reservation's requests count, not a reissued address's earlier ones, though a
+    /// reservation made before `ONE_TIME_IVK_DISCOVERY` counts every request on its key.
+    /// A draft never quoted needs a fresh set, and is retired if the set holds it.
+    /// Reserving a new address needs a set that is fresh at `now` (see
+    /// [`ReservationPolicy::SeenUnavailable`]).
     pub fn prepare_receive_reservation(
         &mut self,
         account: AccountUuid,

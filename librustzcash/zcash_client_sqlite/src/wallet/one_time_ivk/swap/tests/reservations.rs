@@ -1354,3 +1354,102 @@ fn a_started_reservation_is_never_resumed() {
         "started"
     );
 }
+
+/// A day, in seconds.
+const DAY: i64 = 24 * 60 * 60;
+
+/// `request`'s stored request time.
+fn begun_at(st: &State, request: &str) -> i64 {
+    let sql = "SELECT begun_at FROM ironwood_one_time_operations WHERE request = ?1";
+    value(st.wallet().conn(), sql, [request])
+}
+
+/// A reservation without an operation floor, as one made before the floor existed, counts
+/// every request on its key, even one begun before `reserved_at` after the clock was set
+/// back. While its latest request is live it is resumed, not retired, though the set holds
+/// the address its own request gave the provider. Once that request has expired, `begin`
+/// refuses another as stale, and with only unknown outcomes it stays reserved until reaped.
+#[test]
+fn a_reservation_without_a_floor_counts_every_request() {
+    for case in ["live", "expired"] {
+        let mut st = fixture();
+        let r = prepare(&mut st, NOW);
+        begin(&mut st, &r, "old").unwrap().unwrap();
+        let sql = "UPDATE ironwood_one_time_keys SET reservation_floor = NULL, reserved_at = ?1
+                   WHERE purpose = 1 AND key_index = ?2";
+        let index = r.key_id().index().to_be_bytes();
+        exec(st.wallet().conn(), sql, rusqlite::params![NOW + 30, index]);
+        let held = [r.receiver().to_raw_address_bytes()];
+        if case == "live" {
+            chain_agrees(st.wallet().db(), NOW + 10);
+            let resumed = prepare_seen(&mut st, NOW + 10, covering(NOW + 10), &held);
+            assert_eq!(resumed.key_id(), r.key_id());
+            let edit = begin_seen(&mut st, &r, "edit", (NOW + 60, NOW + 10), None);
+            edit.unwrap().unwrap();
+        } else {
+            chain_agrees(st.wallet().db(), NOW + 60);
+            let seen = empty_seen(NOW + 60);
+            let late = begin_seen(&mut st, &r, "late", (NOW + 120, NOW + 60), Some(&seen));
+            assert_eq!(refusal(late), Some(Stale));
+            assert_eq!(operation(&st, "late"), None);
+            assert_eq!(prepare(&mut st, NOW + 60).key_id().index(), 1);
+        }
+        assert!(reserved(&st, &r), "{case}");
+    }
+}
+
+/// A reissued address's earlier requests belong to its earlier reservation, so the new
+/// one starts never quoted: it needs a fresh set before its first request, and takes one
+/// though the old request expired long ago.
+#[test]
+fn a_reissued_address_ignores_its_earlier_requests() {
+    let mut st = fixture();
+    let lost = prepare(&mut st, NOW);
+    begin(&mut st, &lost, "lost").unwrap().unwrap();
+    let now = NOW + 60 + RECEIVE_RECLAIM_SECONDS;
+    assert_eq!(reap(&mut st, now), [0]);
+    abandon_indices(&mut st, 1..RECEIVE_GAP_LIMIT);
+    let reissued = prepare_seen(&mut st, now, covering(now), &[]);
+    assert_eq!(reissued.key_id(), lost.key_id());
+    let unchecked = try_prepare(&mut st, now, None);
+    assert_eq!(refusal(unchecked), Some(SeenUnavailable));
+    let again = begin_seen(&mut st, &reissued, "again", (now + 60, now), None);
+    assert_eq!(refusal(again), Some(SeenUnavailable));
+    begin_at(&mut st, &reissued, "again", now + 60, now)
+        .unwrap()
+        .unwrap();
+    let resumed = try_prepare(&mut st, now + 10, None).unwrap().unwrap();
+    assert_eq!(resumed.key_id(), lost.key_id());
+}
+
+/// A request stores the caller's clock as its time, even behind a reservation made while
+/// the clock ran a day fast. An accepted deadline is checked against that time, so one
+/// still ahead of it is kept, though a block time ahead of the corrected clock has passed it.
+#[test]
+fn finish_checks_the_deadline_against_the_real_request_time() {
+    let mut st = fixture();
+    let r = prepare(&mut st, NOW + DAY);
+    chain_agrees(st.wallet().db(), NOW + 60 * 60);
+    begin_at(&mut st, &r, "corrected", NOW + 60 * 60, NOW)
+        .unwrap()
+        .unwrap();
+    assert_eq!(begun_at(&st, "corrected"), NOW);
+    let deadline = NOW + 30 * 60;
+    finish(&mut st, "corrected", &accepted("deposit", None, deadline)).unwrap();
+    assert_eq!(operation(&st, "corrected").unwrap().3, Some(deadline));
+}
+
+/// A seen set covers a request by its real time. Here the clock ran a day fast when the
+/// address was reserved and was set back before the request, which the provider's feed
+/// started too late to see, so the address counts as seen and is not reissued.
+#[test]
+fn coverage_uses_the_real_request_time() {
+    let mut st = fixture();
+    let lost = prepare(&mut st, NOW + DAY);
+    begin(&mut st, &lost, "lost").unwrap().unwrap();
+    let later = NOW + DAY + RECEIVE_RECLAIM_SECONDS;
+    assert_eq!(reap(&mut st, later), [0]);
+    abandon_indices(&mut st, 1..RECEIVE_GAP_LIMIT);
+    let reissued = try_prepare_seen(&mut st, later, (NOW, later), &[]);
+    assert_eq!(refusal(reissued), Some(ReservationPolicy::Limit));
+}
