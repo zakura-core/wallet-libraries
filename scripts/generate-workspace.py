@@ -12,7 +12,7 @@ applied to arrives untouched on the vendor branch.
 Four rules are applied to `[workspace.dependencies]`:
 
 1. a dependency named in the manifest's `[rewire]` table is redirected at the
-   configured Zakura fork and immutable revision, keeping the upstream key so
+   configured Zakura fork, version, and features, keeping the upstream key so
    crate sources are unchanged (`orchard = { package = "zakura-orchard", ... }`);
 2. a path dependency on a crate this repository vendors keeps its path,
    rewritten into the vendored directory, gains the crate's published name,
@@ -146,6 +146,10 @@ def main(argv: list[str]) -> int:
             for target_field in ("version", "package", "git", "rev"):
                 if target_field in target:
                     fields[target_field] = f'"{target[target_field]}"'
+            if "features" in target:
+                existing = re.findall(r'"([^"]+)"', fields.get("features", "[]"))
+                features = list(dict.fromkeys(existing + target["features"]))
+                fields["features"] = "[" + ", ".join(f'"{feature}"' for feature in features) + "]"
         elif "path" in fields:
             if package in vendored:
                 crate = vendored[package]

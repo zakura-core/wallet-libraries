@@ -19,7 +19,6 @@ use {
         note_encryption::{CompactAction, IronwoodDomain, OrchardDomain, OrchardNoteEncryption},
         value::{NoteValue, ValueCommitTrapdoor, ValueCommitment},
     },
-    ff::PrimeField,
     zcash_note_encryption::{
         COMPACT_NOTE_SIZE, Domain, ENC_CIPHERTEXT_SIZE, EphemeralKeyBytes, ShieldedOutput,
         try_output_recovery_with_pkd_esk,
@@ -223,7 +222,7 @@ pub(crate) mod testing {
     use {
         super::{Action, EncCiphertext, Output, Spend},
         alloc::collections::BTreeMap,
-        ff::Field,
+        ff::{Field, PrimeField},
         pasta_curves::pallas,
     };
 
@@ -246,7 +245,11 @@ pub(crate) mod testing {
     pub(crate) fn randomized_verification_key() -> [u8; 32] {
         let sk = orchard::keys::SpendingKey::from_bytes([7; 32]).unwrap();
         let ask = orchard::keys::SpendAuthorizingKey::from(&sk);
-        let randomized_signing_key = ask.randomize(&pallas::Scalar::ONE);
+        let alpha = orchard::primitives::redpallas::SpendAuthRandomizer::from_bytes(
+            pallas::Scalar::ONE.to_repr(),
+        )
+        .unwrap();
+        let randomized_signing_key = ask.randomize(&alpha);
         let rk: orchard::primitives::redpallas::VerificationKey<
             orchard::primitives::redpallas::SpendAuth,
         > = (&randomized_signing_key).into();
@@ -2296,7 +2299,7 @@ impl Bundle {
                                     .expect("path is length 32"),
                             )
                         }),
-                        alpha: spend.alpha().map(|alpha| alpha.to_repr()),
+                        alpha: spend.alpha().map(|alpha| alpha.to_bytes()),
                         zip32_derivation: spend.zip32_derivation().as_ref().map(|z| {
                             Zip32Derivation {
                                 seed_fingerprint: *z.seed_fingerprint(),

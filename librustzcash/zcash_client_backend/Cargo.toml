@@ -58,7 +58,7 @@ postcard = { workspace = true, optional = true }
 bip32 = { workspace = true, optional = true }
 
 # - Logging and metrics
-memuse.workspace = true
+memuse = { workspace = true, features = ["std"] }
 tracing.workspace = true
 
 # - Protobuf interfaces and gRPC bindings

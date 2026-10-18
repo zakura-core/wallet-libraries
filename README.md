@@ -70,7 +70,7 @@ Nothing is patched at the source level. `manifests/sources.toml` holds a
 Cargo dependency rename:
 
 ```toml
-orchard = { version = "3.0.0", package = "zakura-orchard" }
+orchard = { version = "4.0.0-rc0", package = "zakura-orchard" }
 ```
 
 The dependency key stays `orchard`, so every `orchard::` path in the vendored

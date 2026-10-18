@@ -7,6 +7,12 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the Zakura Common dependency family to `4.0.0-rc0`, including the
+  Orchard backend and proof API changes. The Zakura backend no longer enables
+  the removed `unstable-voting-circuits` feature.
+
 ## [0.1.0-rc8] - 2026-10-14
 
 ### Changed

@@ -8,7 +8,7 @@ use orchard::{
 };
 use pasta_curves::pallas;
 use prost::Message;
-use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 use zcash_client_backend::data_api::status::TransactionStatusRead;
 use zcash_client_backend::{
     data_api::{
@@ -44,7 +44,7 @@ fn encrypted_action(
     let encryptor = IronwoodNoteEncryption::new(Some(ovk), note, [4; 512]);
     let cmx = ExtractedNoteCommitment::from(note.commitment());
     let cv = ValueCommitment::from_bytes(&pallas::Point::generator().to_bytes()).unwrap();
-    let mut rng = ChaCha20Rng::from_seed([7; 32]);
+    let mut rng = StdRng::from_seed([7; 32]);
     let record = EnhanceRecord::from_parts(EnhanceRecordParts {
         enc_ciphertext_suffix: (encryptor.encrypt_note_plaintext())[52..]
             .try_into()
