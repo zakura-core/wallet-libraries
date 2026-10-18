@@ -388,7 +388,7 @@ pub(crate) fn extract(
             let fee = transaction
                 .fee(&prevouts)
                 .map_err(|e| ExtractError::Metadata(e.to_string()))?;
-            Fee::Exact(u64::from(fee))
+            Fee::Exact(fee)
         };
         extracted.push(TransparentTransaction {
             txid: transaction.hash().0,

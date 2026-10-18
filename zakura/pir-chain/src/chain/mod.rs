@@ -142,7 +142,9 @@ impl Block {
                 hashes.push(*hashes.last().expect("nonempty level"));
             }
             hashes = hashes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| {
                     let mut sha = Sha256::new();
                     sha.update(pair[0]);

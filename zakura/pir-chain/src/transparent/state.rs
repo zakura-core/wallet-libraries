@@ -346,7 +346,7 @@ impl StatePreviousOutputs<'_> {
         let output = transaction.outputs().get(outpoint.index as usize).cloned();
         if output.is_none() {
             tracing::warn!(
-                outpoint = %super::label(outpoint),
+                outpoint = %format!("{}:{}", outpoint.hash, outpoint.index),
                 outputs = transaction.outputs().len(),
                 "previous transaction has no output at this index"
             );

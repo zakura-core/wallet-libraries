@@ -154,8 +154,8 @@ impl FetchedBlock {
 
 fn action(a: Action) -> Result<CompactAction, std::io::Error> {
     Ok(CompactAction {
-        nullifier: <[u8; 32]>::from(a.nullifier).to_vec(),
-        cmx: <[u8; 32]>::from(a.cm_x).to_vec(),
+        nullifier: a.nullifier.to_vec(),
+        cmx: a.cm_x.to_vec(),
         ephemeral_key: a.ephemeral_key.to_vec(),
         ciphertext: a.enc_ciphertext[..52].to_vec(),
     })

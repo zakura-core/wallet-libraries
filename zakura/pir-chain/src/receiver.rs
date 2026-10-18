@@ -289,17 +289,17 @@ fn extract(block: &Block, height: u32, end_position: u64) -> Result<ReceiverBloc
         let coinbase = tx.is_coinbase();
         let txid = tx.hash().0;
         for (action_index, a) in tx.ironwood_actions().enumerate() {
-            indexed.commitments.push(a.cm_x.into());
+            indexed.commitments.push(a.cm_x);
             if coinbase {
                 indexed.coinbase_actions += 1;
             } else {
                 let action = Action {
-                    cv: a.cv.into(),
-                    nullifier: a.nullifier.into(),
-                    cmx: a.cm_x.into(),
-                    ephemeral_key: a.ephemeral_key.into(),
-                    enc_ciphertext: a.enc_ciphertext.into(),
-                    out_ciphertext: a.out_ciphertext.into(),
+                    cv: a.cv,
+                    nullifier: a.nullifier,
+                    cmx: a.cm_x,
+                    ephemeral_key: a.ephemeral_key,
+                    enc_ciphertext: a.enc_ciphertext,
+                    out_ciphertext: a.out_ciphertext,
                 };
                 if let Some(receiver) = action
                     .recover_receiver()

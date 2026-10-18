@@ -335,11 +335,11 @@ fn transaction_actions(
     Ok(transaction
         .ironwood_actions()
         .map(|action| EnhanceAction {
-            enc_ciphertext_suffix: <[u8; 580]>::from(action.enc_ciphertext)[52..]
+            enc_ciphertext_suffix: action.enc_ciphertext[52..]
                 .try_into()
                 .expect("fixed ciphertext suffix"),
-            cv_net: action.cv.into(),
-            out_ciphertext: action.out_ciphertext.into(),
+            cv_net: action.cv,
+            out_ciphertext: action.out_ciphertext,
             has_transparent_inputs,
             has_transparent_outputs,
             expiry_height,
