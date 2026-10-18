@@ -83,7 +83,7 @@ def main():
     # consumers can forbid it independently of the IPIR evaluator boundary.
     native_evaluators = {"ipir-native-client", "ipir-sp", "simplepir-kernel", "clap", "env_logger"}
     server_roles = {"zakura-pir-publisher", "zakura-pir-query-server", "zakura-pir-server-core", "zakura-server-chain"}
-    wallet_roles = {"ipir-native-client", "zakura-pir-client", "zakura-client-backend", "zakura-client-sqlite"}
+    wallet_roles = {"ipir-native-client", "zakura-pir-client", "zakura-client-backend", "zakura-client-sqlite", "zakura-protocol", "zakura-transparent", "zakura-orchard"}
     cases = [
         ("record-types", "zakura/pir-protocol", ["enhance"], endpoint_stack | server_roles | {"http", "bytes", "ipir-native-client", "reinspiring"}, set()),
         ("endpoint", "zakura/pir-protocol", ["http-endpoint"], endpoint_stack | server_roles, {"http"}),
@@ -96,7 +96,7 @@ def main():
         ("status-lightwalletd", "zakura/pir-client", ["lightwalletd"], server_roles, {"zakura-client-backend", "tonic", "tokio"}),
         ("receiver-client", "zakura/receiver-pir", [], native_evaluators | server_roles | {"sha1"}, {"reinspiring"}),
         ("receiver-server", "zakura/receiver-pir", ["server"], set(), {"ipir-sp", "simplepir-kernel"}),
-        ("filter", "zakura/pir-protocol", ["transparent"], {"bitcoin", "secp256k1", "secp256k1-sys"} | server_roles, {"bitcoin_hashes"}),
+        ("filter", "zakura/pir-protocol", ["transparent"], {"bitcoin", "secp256k1", "secp256k1-sys", "zakura-protocol", "zakura-transparent"} | server_roles, {"bitcoin_hashes"}),
         ("filters", "zakura/filters", [], {"bitcoin", "secp256k1", "secp256k1-sys"}, {"bitcoin_hashes"}),
         ("receiver-directory", "zakura/receiver-directory", [], {"bitcoin", "secp256k1", "secp256k1-sys"}, {"zakura-filters", "bitcoin_hashes"}),
         ("receiver-wallet", "zakura/pir-receiver", ["wallet"], {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"} | native_evaluators | server_roles, {"zakura-filters", "reinspiring"}),

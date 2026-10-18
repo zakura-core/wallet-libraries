@@ -21,11 +21,11 @@ transparent = [
     "dep:hex",
     "dep:base64",
     "dep:thiserror",
-    "dep:zcash_protocol",
     "dep:zakura-filters",
     "dep:bitcoin_hashes",
 ]
-transparent-inputs = ["transparent", "dep:transparent", "transparent/transparent-inputs"]
+recovery = ["transparent", "dep:zcash_protocol"]
+transparent-inputs = ["recovery", "dep:transparent", "transparent/transparent-inputs"]
 http-endpoint = ["dep:http"]
 
 [dependencies]

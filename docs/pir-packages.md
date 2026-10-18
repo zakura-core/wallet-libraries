@@ -18,7 +18,9 @@ do not depend on each other.
 
 The protocol package owns serialized records and native profile descriptions.
 Its `native` feature enables runtime parameter and public setup derivation;
-record-only users need only the appropriate product feature. Pure script
+record-only users need only the appropriate product feature. Wallet recovery
+records additionally select `recovery`; the client and backend enable that
+capability when needed. Server-only Transparent formats do not compile Common. Pure script
 matching is selected internally by the client. Publishers compile it only for
 tests that validate their filter output.
 
