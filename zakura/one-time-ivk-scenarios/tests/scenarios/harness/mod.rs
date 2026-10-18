@@ -335,7 +335,7 @@ impl Ctx {
         index: u64,
         deadline_in: i64,
     ) -> Result<String, ReservationPolicy> {
-        self.devices[dev.0].begin_incoming(&self.chain, index, deadline_in)
+        self.devices[dev.0].begin_incoming(&self.chain, &self.near, index, deadline_in)
     }
 
     /// Restarts the app on `dev`: its wallet database closes and opens again.

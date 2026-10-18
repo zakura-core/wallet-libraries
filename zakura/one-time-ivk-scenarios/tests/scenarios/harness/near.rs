@@ -4,6 +4,7 @@
 use receiver_directory::{ReceiverBytes, snapshot::ProviderSet};
 use zakura_one_time_ivk::swap::RESTORE_WATCH_SECS;
 use zakura_receiver_crypto::Receiver;
+use zcash_client_sqlite::wallet::one_time_ivk::swap::ProviderSeen;
 
 use super::chain::{DAY, MINUTE, T0};
 
@@ -77,6 +78,17 @@ impl Near {
         self.given
             .iter()
             .any(|(r, at, _)| r == receiver && *at >= self.feed_started && *at <= until)
+    }
+
+    /// Runs `f` with NEAR's seen set as a wallet fetches it at `now`, the device's clock.
+    pub fn with_seen<T>(&self, now: i64, f: impl FnOnce(&ProviderSeen<'_>) -> T) -> T {
+        let contains =
+            |receivers: &[[u8; 43]]| receivers.iter().map(|r| self.seen(r, now)).collect();
+        f(&ProviderSeen {
+            since: self.feed_started,
+            until: self.read_until(now),
+            contains: &contains,
+        })
     }
 
     /// The provider sets a publication made at `now` carries: `near-intents/recent`

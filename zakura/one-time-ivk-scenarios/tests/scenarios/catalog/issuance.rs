@@ -2,7 +2,7 @@
 //! an address NEAR was given is never issued for another swap, and neither is one that
 //! was paid.
 
-use zakura_one_time_ivk::Purpose;
+use zakura_one_time_ivk::{Purpose, swap::PROVIDER_READ_MAX_AGE_SECS};
 use zakura_one_time_ivk_scenarios::Class;
 use zcash_client_sqlite::wallet::one_time_ivk::swap::{
     OperationOutcome, RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS, ReceiveDeposit,
@@ -35,7 +35,7 @@ pub fn all() -> Vec<Scenario> {
     for covered in [true, false] {
         scenarios.push(restore_never_reissues(covered));
     }
-    for lag in [MINUTE, 30 * MINUTE] {
+    for lag in [MINUTE, 10 * MINUTE, 30 * MINUTE] {
         for after in [2 * MINUTE, 20 * MINUTE, 2 * HOUR] {
             scenarios.push(two_devices_incoming(after, lag));
         }
@@ -56,16 +56,24 @@ fn wallet(ctx: &mut Ctx, name: &str) -> Dev {
     dev
 }
 
-/// Reserves an address on `dev` and saves a quote request for it with a one-hour
-/// deadline, as the app does before the request leaves. Like the app, it answers `Gap`
-/// and `Coverage` by syncing and trying again, at most three times. Returns the index and
-/// the request, or the refusal.
-fn request_quote(ctx: &mut Ctx, dev: Dev) -> Result<(u64, String), ReservationPolicy> {
+/// A quote deadline that passes by the next block, so each swap attempt has expired
+/// before the next one, which then takes another address.
+const SHORT_QUOTE: i64 = MINUTE;
+
+/// Reserves an address on `dev` and saves a quote request for it with a deadline
+/// `deadline_in` seconds out, as the app does before the request leaves. Like the app, it
+/// answers `Gap` and `Coverage` by syncing and trying again, at most three times. Returns
+/// the index and the request, or the refusal.
+fn request_quote(
+    ctx: &mut Ctx,
+    dev: Dev,
+    deadline_in: i64,
+) -> Result<(u64, String), ReservationPolicy> {
     let mut attempt = 0;
     loop {
         let saved = ctx
             .prepare_incoming(dev)
-            .and_then(|index| Ok((index, ctx.begin_incoming(dev, index, HOUR)?)));
+            .and_then(|index| Ok((index, ctx.begin_incoming(dev, index, deadline_in)?)));
         match saved {
             Err(ReservationPolicy::Gap | ReservationPolicy::Coverage) if attempt < 3 => {
                 attempt += 1;
@@ -118,9 +126,10 @@ fn incoming_indices_advance() -> Scenario {
     }
 }
 
-/// Wallet A's quote requests are rejected until they fill the window. Their deadlines
-/// and the reclaim grace pass, the app restarts, and NEAR's seen set covers the requests
-/// without holding any of them. Issuance must wait rather than reissue a rejected address.
+/// Wallet A's quote requests are rejected until they fill the window, each swap attempt
+/// expiring before the next. Their deadlines and the reclaim grace pass, the app
+/// restarts, and NEAR's seen set covers the requests without holding any of them.
+/// Issuance must wait rather than reissue a rejected address.
 fn rejected_quotes_hold_addresses_back() -> Scenario {
     Scenario {
         id: "A3-rejected-quote-holds-address-back".into(),
@@ -137,7 +146,7 @@ fn rejected_quotes_hold_addresses_back() -> Scenario {
             let a = wallet(ctx, "A");
             let mut rejected = Vec::new();
             let refused = loop {
-                match request_quote(ctx, a) {
+                match request_quote(ctx, a, SHORT_QUOTE) {
                     Ok((index, request)) => {
                         ctx.finish_incoming(a, &request, &OperationOutcome::Rejected);
                         rejected.push(index);
@@ -257,8 +266,9 @@ fn unknown_outcomes_hit_the_limit() -> Scenario {
         title: "30 quote requests with unknown outcomes, then an outage ends".into(),
         summary:
             "A request whose outcome is unknown, such as a timeout, holds its address without \
-            moving the recovery gap. After 30 of them issuance waits (Limit). Once their deadlines \
-            and the two-hour cooldown pass, the lowest is reissued, though NEAR may have seen it."
+            moving the recovery gap. After 30 swap attempts with one each, each expiring before \
+            the next, issuance waits (Limit). Once their deadlines and the two-hour cooldown \
+            pass, the lowest is reissued, though NEAR may have seen it."
                 .into(),
         params: vec![("unknown outcomes".into(), "30".into())],
         slow: false,
@@ -266,7 +276,7 @@ fn unknown_outcomes_hit_the_limit() -> Scenario {
             let a = wallet(ctx, "A");
             for _ in 0..30 {
                 let index = ctx.prepare_incoming(a).expect("a reservation");
-                ctx.begin_incoming(a, index, HOUR)
+                ctx.begin_incoming(a, index, SHORT_QUOTE)
                     .expect("the request is saved");
                 ctx.mine(1);
                 ctx.sync(a);
@@ -293,12 +303,13 @@ fn unknown_outcomes_hit_the_limit() -> Scenario {
     }
 }
 
-/// Saves quote requests on `dev` that never reach NEAR, a block apart, until issuance
-/// refuses one. Returns the indices issued and the refusal.
+/// Saves quote requests on `dev` that never reach NEAR, a block apart, each for a swap
+/// attempt that expires before the next, until issuance refuses one. Returns the indices
+/// issued and the refusal.
 fn requests_until_refused(ctx: &mut Ctx, dev: Dev) -> (Vec<u64>, ReservationPolicy) {
     let mut issued = Vec::new();
     loop {
-        match request_quote(ctx, dev) {
+        match request_quote(ctx, dev, SHORT_QUOTE) {
             Ok((index, _)) => issued.push(index),
             Err(policy) => return (issued, policy),
         }
@@ -319,11 +330,12 @@ fn each_once(issued: &[u64], expected: std::ops::RangeInclusive<u64>) -> bool {
 }
 
 /// Wallet A sends a quote request for I0 that reaches NEAR, but its answer is lost, and
-/// the app restarts. A then saves quote requests that never reach NEAR until issuance
-/// waits, and NEAR's feed, `lag` behind, catches up. After the deadlines and cooldown, A
-/// goes through the window again, reusing only addresses NEAR never received.
+/// the app restarts with NEAR's feed `lag` behind. Over the 15 minutes a seen set may
+/// lag, issuance waits until the feed catches up. A then saves quote requests that never
+/// reach NEAR until issuance waits. After the deadlines and cooldown, A goes through the
+/// window again, reusing only addresses NEAR never received.
 fn lost_answer_near_saw(lag: i64) -> Scenario {
-    let behind = lag > HOUR;
+    let behind = lag > PROVIDER_READ_MAX_AGE_SECS;
     Scenario {
         id: format!("A4-lost-answer-near-saw-feed-{}-behind", span(lag)),
         group: ISSUANCE,
@@ -332,9 +344,9 @@ fn lost_answer_near_saw(lag: i64) -> Scenario {
             span(lag)
         ),
         summary: "A request whose answer was lost still gave NEAR the address. Once NEAR's seen \
-            set holds it, the address is never issued again. When later requests that never \
-            reached NEAR fill the 30-index window, issuance waits, then reuses only those, \
-            never the address NEAR saw."
+            set holds it, the address is never issued again. While the set is too far behind \
+            to show it, issuance waits. When later requests that never reached NEAR fill the \
+            30-index window, issuance waits, then reuses only those, never the address NEAR saw."
             .into(),
         params: vec![
             ("feed read lag".into(), span(lag)),
@@ -345,19 +357,33 @@ fn lost_answer_near_saw(lag: i64) -> Scenario {
         ],
         slow: false,
         run: Box::new(move |ctx| {
-            ctx.near.read_lag = lag;
             let a = wallet(ctx, "A");
-            let (index, _) = request_quote(ctx, a).expect("the request is saved");
+            let (index, _) = request_quote(ctx, a, SHORT_QUOTE).expect("the request is saved");
             let exposed = receiver_of(&ctx.get(a).key(Purpose::Receive, index));
             ctx.near.give(exposed, ctx.chain.now(), Role::Payout);
             ctx.log(
                 "A",
                 format!("NEAR receives the quote request for I{index}, but its answer is lost"),
             );
+            ctx.near.read_lag = lag;
             ctx.restart(a);
             ctx.mine(1);
             ctx.sync(a);
-            let (issued, refused) = requests_until_refused(ctx, a);
+            let (mut issued, mut refused) = requests_until_refused(ctx, a);
+            if behind {
+                ctx.check(
+                    "issuance waits while NEAR's seen set is too far behind to show I0",
+                    issued.is_empty() && refused == ReservationPolicy::SeenUnavailable,
+                    format!(
+                        "issued {issued:?}, then {refused:?}; ReservationPolicy::SeenUnavailable: issuance needs a set read within the last 15 minutes"
+                    ),
+                );
+                ctx.near.read_lag = MINUTE;
+                ctx.log("directory", "NEAR feed catches up: it trails by a minute");
+                ctx.mine(1);
+                ctx.sync(a);
+                (issued, refused) = requests_until_refused(ctx, a);
+            }
             ctx.log(
                 "A",
                 format!(
@@ -365,30 +391,16 @@ fn lost_answer_near_saw(lag: i64) -> Scenario {
                     issued.len()
                 ),
             );
-            // Until NEAR's set holds I0, it counts as seen without moving the gap, so a
-            // feed behind leaves the window ending at I29.
-            let first_end = RECEIVE_GAP_LIMIT - u64::from(behind);
+            // NEAR's set holds I0, which moves the gap one past it.
             ctx.check(
-                format!("the first pass issues I1 to I{first_end} once each, then issuance waits"),
-                each_once(&issued, 1..=first_end) && refused == ReservationPolicy::Limit,
+                format!(
+                    "the first pass issues I1 to I{RECEIVE_GAP_LIMIT} once each, then issuance waits"
+                ),
+                each_once(&issued, 1..=RECEIVE_GAP_LIMIT) && refused == ReservationPolicy::Limit,
                 format!("issued {issued:?}, then {refused:?}"),
             );
             ctx.wait(3 * HOUR);
             ctx.sync(a);
-            if behind {
-                let waiting = ctx.prepare_incoming(a);
-                ctx.check(
-                    "issuance still waits while NEAR's feed has not read the requests",
-                    waiting == Err(ReservationPolicy::Limit),
-                    format!(
-                        "{waiting:?}; ProviderSeen: a quote outside the set's read, widened by SEEN_SLACK_SECONDS, counts as seen"
-                    ),
-                );
-                ctx.near.read_lag = MINUTE;
-                ctx.log("directory", "NEAR feed catches up: it trails by a minute");
-                ctx.mine(1);
-                ctx.sync(a);
-            }
             let (again, refused_again) = requests_until_refused(ctx, a);
             ctx.log(
                 "A",
@@ -397,9 +409,7 @@ fn lost_answer_near_saw(lag: i64) -> Scenario {
                     again.len()
                 ),
             );
-            // NEAR's set now holds I0, which moves the gap one past it. With the feed
-            // behind, the first pass left I30 fresh.
-            let expected = if behind { RECEIVE_GAP_LIMIT } else { 1 };
+            let expected = 1;
             ctx.check(
                 format!("issuance resumes at I{expected}"),
                 again.first() == Some(&expected),
@@ -458,7 +468,7 @@ fn restart_resumes_request(started: bool) -> Scenario {
         slow: false,
         run: Box::new(move |ctx| {
             let a = wallet(ctx, "A");
-            let (index, request) = request_quote(ctx, a).expect("the request is saved");
+            let (index, request) = request_quote(ctx, a, HOUR).expect("the request is saved");
             let fvk = ctx.get(a).key(Purpose::Receive, index);
             ctx.near
                 .give(receiver_of(&fvk), ctx.chain.now(), Role::Payout);
@@ -627,7 +637,8 @@ fn two_devices_incoming(after: i64, lag: i64) -> Scenario {
             span(lag)
         ),
         summary: "A device learns of another's quotes only from NEAR's seen set, which lags the \
-            feed's last read. Inside that lag both devices can give NEAR the same address."
+            feed's last read. Inside that lag both devices can give NEAR the same address. A set \
+            more than 15 minutes behind makes both devices wait instead."
             .into(),
         params: vec![
             ("second quote after".into(), span(after)),
@@ -640,6 +651,21 @@ fn two_devices_incoming(after: i64, lag: i64) -> Scenario {
             let birthday = ctx.chain.tip() - 5;
             let b = ctx.device("B", SEED, birthday);
             ctx.sync(b);
+            if lag > PROVIDER_READ_MAX_AGE_SECS {
+                let first = ctx.quote_incoming(a, HOUR).map(|swap| swap.index);
+                ctx.wait(after);
+                ctx.sync(b);
+                let second = ctx.quote_incoming(b, HOUR).map(|swap| swap.index);
+                let waits = Err(ReservationPolicy::SeenUnavailable);
+                ctx.check(
+                    "neither device issues against a seen set too far behind",
+                    first == waits && second == waits,
+                    format!(
+                        "A {first:?}, B {second:?}; ReservationPolicy::SeenUnavailable: issuance needs a set read within the last 15 minutes"
+                    ),
+                );
+                return;
+            }
             let first = ctx.quote_incoming(a, HOUR).expect("A quotes");
             ctx.wait(after);
             ctx.sync(b);

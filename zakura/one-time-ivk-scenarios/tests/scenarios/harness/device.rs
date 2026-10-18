@@ -45,8 +45,7 @@ use zcash_client_sqlite::{
     wallet::{
         init::init_wallet_db,
         one_time_ivk::swap::{
-            OperationOutcome, ProviderSeen, ReceiveDeposit, ReservationPolicy,
-            verify_refund_funding_proposal,
+            OperationOutcome, ReceiveDeposit, ReservationPolicy, verify_refund_funding_proposal,
         },
     },
 };
@@ -761,32 +760,29 @@ impl Device {
         near: &Near,
     ) -> Result<u64, ReservationPolicy> {
         let now = self.now(chain);
-        let feed_now = self.feed_now(chain);
-        let contains =
-            |receivers: &[[u8; 43]]| receivers.iter().map(|r| near.seen(r, feed_now)).collect();
-        let seen = ProviderSeen {
-            since: near.feed_started,
-            until: near.read_until(feed_now),
-            contains: &contains,
-        };
-        self.db
-            .prepare_receive_reservation(self.account, now, chain.tip(), Some(&seen))
-            .expect("reservation")
-            .map(|key| key.key_id().index())
+        near.with_seen(self.feed_now(chain), |seen| {
+            self.db
+                .prepare_receive_reservation(self.account, now, chain.tip(), Some(seen))
+                .expect("reservation")
+                .map(|key| key.key_id().index())
+        })
     }
 
     /// Saves a quote request for the reservation at `index` just before it leaves the
-    /// device, returning its identity.
+    /// device, against NEAR's current seen set, returning its identity.
     pub fn begin_incoming(
         &mut self,
         chain: &Chain,
+        near: &Near,
         index: u64,
         deadline_in: i64,
     ) -> Result<String, ReservationPolicy> {
         let now = self.now(chain);
-        self.db
-            .begin_receive_operation(self.account, index, now + deadline_in, now)
-            .expect("the request is saved")
+        near.with_seen(self.feed_now(chain), |seen| {
+            self.db
+                .begin_receive_operation(self.account, index, now + deadline_in, now, Some(seen))
+                .expect("the request is saved")
+        })
     }
 
     /// Records how a quote request ended.
@@ -906,7 +902,7 @@ impl Device {
         deadline_in: i64,
     ) -> Result<IncomingSwap, ReservationPolicy> {
         let index = self.prepare_incoming(chain, near)?;
-        let request = self.begin_incoming(chain, index, deadline_in)?;
+        let request = self.begin_incoming(chain, near, index, deadline_in)?;
         let fvk = self.key(Purpose::Receive, index);
         near.give(receiver_of(&fvk), chain.now(), Role::Payout);
         // NEAR sets the accepted deadline by its own clock; the store keeps the earlier
@@ -934,24 +930,11 @@ impl Device {
         deadline_in: i64,
     ) -> Result<RefundSwap, ReservationPolicy> {
         let now = self.now(chain);
-        let feed_now = self.feed_now(chain);
-        let key = {
-            let seen_near = &*near;
-            let contains = |receivers: &[[u8; 43]]| {
-                receivers
-                    .iter()
-                    .map(|r| seen_near.seen(r, feed_now))
-                    .collect()
-            };
-            let seen = ProviderSeen {
-                since: near.feed_started,
-                until: near.read_until(feed_now),
-                contains: &contains,
-            };
+        let key = near.with_seen(self.feed_now(chain), |seen| {
             self.db
-                .reserve_refund_key(self.account, chain.tip(), Some(&seen))
-                .expect("refund reservation")?
-        };
+                .reserve_refund_key(self.account, now, chain.tip(), Some(seen))
+                .expect("refund reservation")
+        })?;
         let index = key.key_id().index();
         let deposit = near.zec_deposit_address();
         let deadline = now + deadline_in;
