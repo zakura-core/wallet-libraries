@@ -1287,12 +1287,39 @@ struct Given {
 #[derive(Clone, Copy, Debug)]
 struct Pass {
     end: u32,
+    /// The hash of the publication's last block, which tells a replacement pass through
+    /// the same height from the one it replaces.
+    hash: [u8; 32],
     /// When the NEAR feed the pass's filters came from was last read.
     feed_until: i64,
     /// The pass a Check swap history started.
     recheck: bool,
     /// The wallet's first completed pass.
     first: bool,
+    /// The first pass completed after a reorg, which replaces one the reorg may have
+    /// invalidated.
+    replacement: bool,
+}
+
+impl Pass {
+    /// Whether the oracle holds the pass to the payments its publication lists (see
+    /// [`Exec::pass_promises`]): a first, Check swap history or replacement pass.
+    fn judged(&self) -> bool {
+        self.first || self.recheck || self.replacement
+    }
+
+    /// The pass's kind, for the trace and the report.
+    fn kind(&self) -> &'static str {
+        if self.recheck {
+            "Check swap history"
+        } else if self.first {
+            "first"
+        } else if self.replacement {
+            "replacement"
+        } else {
+            "later"
+        }
+    }
 }
 
 /// How a wallet credited a payment.
@@ -1356,6 +1383,9 @@ struct Exec<'p> {
     /// Payments NEAR pays again after a reorg removed them: (due time, payment).
     repay: Vec<(i64, usize)>,
     passes: BTreeMap<W, Vec<Pass>>,
+    /// Wallets with a completed pass when a reorg happened, whose next new pass is its
+    /// replacement.
+    reorged: BTreeSet<W>,
     rechecking: BTreeSet<W>,
     /// Wallets running a Check swap history, whose finds count as the recheck's.
     in_recheck: BTreeSet<W>,
@@ -1396,6 +1426,7 @@ impl<'p> Exec<'p> {
             given: Vec::new(),
             repay: Vec::new(),
             passes: BTreeMap::new(),
+            reorged: BTreeSet::new(),
             rechecking: BTreeSet::new(),
             in_recheck: BTreeSet::new(),
             credits: BTreeMap::new(),
@@ -1790,28 +1821,29 @@ impl<'p> Exec<'p> {
             let Some(publication) = status.publication.filter(|_| status.complete) else {
                 continue;
             };
-            let end = u32::from(publication.height);
+            let (end, hash) = (u32::from(publication.height), publication.hash);
             let recheck = self.rechecking.remove(&w);
             let known = self.passes.entry(w).or_default();
-            if !recheck && known.last().is_some_and(|p| p.end == end) {
+            if !recheck && known.last().is_some_and(|p| p.end == end && p.hash == hash) {
                 continue;
             }
+            let first = known.is_empty();
+            let replacement = self.reorged.remove(&w) && !first && !recheck;
             let pass = Pass {
                 end,
+                hash,
                 feed_until: ctx.near.read_until(ctx.chain.now()),
                 recheck,
-                first: known.is_empty(),
+                first,
+                replacement,
             };
-            known.push(pass);
+            self.passes.entry(w).or_default().push(pass);
             self.note(
                 ctx,
                 &w.name(),
-                format!(
-                    "discovery complete through {end}{}",
-                    if recheck { " (Check swap history)" } else { "" }
-                ),
+                format!("discovery complete through {end} ({} pass)", pass.kind()),
             );
-            if pass.first || pass.recheck {
+            if pass.judged() {
                 self.judge_pass(ctx, w, pass);
             }
         }
@@ -2420,6 +2452,13 @@ impl<'p> Exec<'p> {
             "chain",
             format!("reorg: blocks above {to} are replaced"),
         );
+        let reorged: Vec<W> = self
+            .passes
+            .iter()
+            .filter(|(_, passes)| !passes.is_empty())
+            .map(|(w, _)| *w)
+            .collect();
+        self.reorged.extend(reorged);
         let mut again: Vec<(u32, bool, usize)> = Vec::new();
         for (i, p) in self.pays.iter_mut().enumerate() {
             if p.alive && u32::from(p.mined.height) > to {
@@ -2734,19 +2773,19 @@ impl<'p> Exec<'p> {
             return format!("before {}'s birthday {}", w.name(), self.births[&w]);
         }
         let passes = self.passes.get(&w).map(Vec::as_slice).unwrap_or(&[]);
-        let judged: Vec<&Pass> = passes.iter().filter(|p| p.first || p.recheck).collect();
+        let judged: Vec<&Pass> = passes.iter().filter(|p| p.judged()).collect();
         if self.plan.swaps[p.swap].wallet == w {
             return "its own key, after a status that lets the key close or past the limit".into();
         }
         if judged.is_empty() {
             return format!(
-                "{} has no first or recheck pass (a fresh account)",
+                "{} has no first, recheck or replacement pass (a fresh account)",
                 w.name()
             );
         }
         if judged.iter().all(|pass| pass.end < h) {
             return format!(
-                "after every first or recheck pass of {} (last through {})",
+                "after every first, recheck or replacement pass of {} (last through {})",
                 w.name(),
                 judged.iter().map(|p| p.end).max().unwrap_or(0)
             );
@@ -2772,8 +2811,8 @@ impl<'p> Exec<'p> {
 
     /// What the documented contract promises wallet `w` of payment `i`, and why, if
     /// anything: found live by the wallet that quoted the key while it scans, found by a
-    /// completed first or Check swap history discovery pass whose publication lists it,
-    /// or found live in a restored incoming key's 24-hour watch.
+    /// completed first, Check swap history or replacement discovery pass whose publication
+    /// lists it, or found live in a restored incoming key's 24-hour watch.
     fn promise(&self, ctx: &Ctx, w: W, i: usize) -> Option<(Class, String)> {
         let p = &self.pays[i];
         let h = u32::from(p.mined.height);
@@ -2801,7 +2840,7 @@ impl<'p> Exec<'p> {
             }
         }
         let passes = self.passes.get(&w).map(Vec::as_slice).unwrap_or(&[]);
-        for pass in passes.iter().filter(|p| p.first || p.recheck) {
+        for pass in passes.iter().filter(|p| p.judged()) {
             if self.pass_promises(ctx, w, pass, i) {
                 let class = if pass.recheck {
                     Class::FoundAfterRecheck
@@ -2813,11 +2852,7 @@ impl<'p> Exec<'p> {
                     format!(
                         "{}'s {} discovery pass completed through {} and its search reaches {}",
                         w.name(),
-                        if pass.recheck {
-                            "Check swap history"
-                        } else {
-                            "first"
-                        },
+                        pass.kind(),
                         pass.end,
                         p.key.label()
                     ),
