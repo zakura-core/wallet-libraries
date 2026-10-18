@@ -3,8 +3,9 @@
 //! abandoned, paid late), NEAR's payouts and refunds and statuses, spends of one-time
 //! notes, restores with various birthdays, a second install and a second account,
 //! directory outages, failing requests, app restarts in the middle of discovery, lagging,
-//! stale and bad publications, reorgs (with payouts mined again at once or paid again
-//! later), Check swap history, app restarts and a fast or slow device clock.
+//! stale and bad publications, reorgs (with transactions mined again at once if the new
+//! branch still accepts them, or payouts paid again later), Check swap history, app
+//! restarts and a fast or slow device clock.
 //!
 //! After every sync an oracle checks the wallet against the chain: it never shows a note
 //! the chain spent as unspent, never holds a note the chain does not have, never credits
@@ -1265,11 +1266,14 @@ struct OPay {
     tx: Option<Transaction>,
 }
 
-/// A transaction one of the seed's wallets built, which a reorg mines again.
+/// A transaction one of the seed's wallets built, which a reorg mines again if consensus
+/// still accepts it.
 struct OwnTx {
     tx: Transaction,
     height: u32,
     alive: bool,
+    /// The ZEC-to-X swap it funds, if any.
+    funds: Option<usize>,
 }
 
 /// NEAR was given `key` at `at` (chain time) by wallet `w`.
@@ -2164,6 +2168,7 @@ impl<'p> Exec<'p> {
             tx,
             height: u32::from(height),
             alive: true,
+            funds: Some(swap),
         });
         self.swaps[swap].funded_height = Some(u32::from(height));
         self.note(
@@ -2337,6 +2342,7 @@ impl<'p> Exec<'p> {
             tx,
             height: u32::from(height),
             alive: true,
+            funds: None,
         });
         self.note(
             ctx,
@@ -2384,8 +2390,11 @@ impl<'p> Exec<'p> {
     }
 
     /// A reorg `depth` blocks deep. The wallets' transactions it removes are mined again
-    /// on the new branch; NEAR's payouts are too, or, with `late`, paid again in new
-    /// transactions that much later. The new branch outgrows the old by `tail` blocks.
+    /// on the new branch if consensus still accepts them there (their anchor may be a root
+    /// only the old branch had), and stay unmined otherwise. NEAR's payouts are mined again
+    /// too, or, with `late` or an anchor the new branch lacks, paid again in new
+    /// transactions (that much later, or at the next step). A refund whose deposit stays
+    /// unmined is not paid again. The new branch outgrows the old by `tail` blocks.
     fn reorg(&mut self, ctx: &mut Ctx, depth: u32, tail: u32, late: Option<i64>) {
         let tip = ctx.chain.tip();
         // A wallet rewinds only to a tree checkpoint at or above its birthday, and wallets
@@ -2431,33 +2440,64 @@ impl<'p> Exec<'p> {
                 ctx.mine(1);
             }
             if own {
-                let height = ctx.chain.mine_tx(&self.own[i].tx);
-                self.own[i].height = u32::from(height);
-                self.own[i].alive = true;
-                self.note(
-                    ctx,
-                    "chain",
-                    format!(
-                        "a wallet's transaction is mined again at {}",
-                        u32::from(height)
-                    ),
-                );
-            } else if let Some(delay) = late {
-                self.repay.push((now + delay, i));
+                let tx = self.own[i].tx.clone();
+                match ctx.chain.accepts(&tx) {
+                    Ok(_) => {
+                        let height = ctx.chain.mine_tx(&tx);
+                        self.own[i].height = u32::from(height);
+                        self.own[i].alive = true;
+                        self.note(
+                            ctx,
+                            "chain",
+                            format!(
+                                "a wallet's transaction is mined again at {}",
+                                u32::from(height)
+                            ),
+                        );
+                    }
+                    Err(why) => {
+                        if let Some(swap) = self.own[i].funds {
+                            self.swaps[swap].funded_height = None;
+                        }
+                        self.note(
+                            ctx,
+                            "chain",
+                            format!(
+                                "a wallet's transaction from {old} stays unmined: consensus \
+                                 would refuse it on the new branch, since {why}"
+                            ),
+                        );
+                    }
+                }
+                continue;
+            }
+            let p = &self.pays[i];
+            let label = p.label.clone();
+            if p.key.refund && self.swaps[p.swap].funded_height.is_none() {
                 self.note(
                     ctx,
                     "NEAR",
-                    format!(
-                        "{} will be paid again in {}",
-                        self.pays[i].label,
-                        span_of(delay)
-                    ),
+                    format!("{label} is not paid again: its deposit stays unmined"),
+                );
+                continue;
+            }
+            let tx = p.tx.clone().expect("a signed payout");
+            let stale = ctx.chain.anchor_height(&tx).is_none();
+            if let Some(delay) = late.or(stale.then_some(0)) {
+                self.repay.push((now + delay, i));
+                let why = if stale {
+                    ", since its anchor is no root on the new branch"
+                } else {
+                    ""
+                };
+                self.note(
+                    ctx,
+                    "NEAR",
+                    format!("{label} will be paid again in {}{why}", span_of(delay)),
                 );
             } else {
-                let p = &self.pays[i];
-                let tx = p.tx.clone().expect("a signed payout");
                 let fvk = self.swaps[p.swap].fvk.clone().expect("a key");
-                let (label, value) = (p.label.clone(), p.mined.value);
+                let value = p.mined.value;
                 let mined = ctx.remine(&label, &tx, &fvk, value, Payer::Near);
                 self.note(
                     ctx,

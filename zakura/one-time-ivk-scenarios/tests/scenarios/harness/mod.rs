@@ -487,10 +487,13 @@ impl Ctx {
         mined
     }
 
-    /// NEAR's wallet, funded with 1,000 ZEC of Ironwood notes on first use. It pays with
-    /// real signed transactions, which a reorg can return to the chain.
+    /// NEAR's wallet, funded with ten 100 ZEC Ironwood notes on first use, scanned to the
+    /// tip. It pays with real signed transactions, which a reorg can return to the chain.
+    /// The scan lets a payment anchor at a root of the current branch, and the separate
+    /// notes leave funds while a payout a reorg removed still holds the note it spent.
     fn near_wallet(&mut self) -> Dev {
         if let Some(dev) = self.near_wallet {
+            self.devices[dev.0].scan(&self.chain);
             return dev;
         }
         let birthday = self.chain.tip() + 1;
@@ -498,7 +501,8 @@ impl Ctx {
         self.devices.push(device);
         let dev = Dev(self.devices.len() - 1);
         let fvk = self.devices[dev.0].fvk.clone();
-        self.chain.pay(&[(fvk, 1_000 * chain::ZEC)], Payer::Wallet);
+        self.chain
+            .pay(&vec![(fvk, 100 * chain::ZEC); 10], Payer::Wallet);
         self.chain.mine(10);
         self.devices[dev.0].scan(&self.chain);
         self.near_wallet = Some(dev);
@@ -507,7 +511,8 @@ impl Ctx {
 
     /// Mines a real transaction from NEAR's wallet paying `value` to `fvk`'s address, with
     /// the zero OVK when `payer` is NEAR, and returns the payment. Returns the transaction
-    /// too, so a reorg test can mine it again.
+    /// too, so a reorg test can mine it again. Panics if its anchor is no root of the
+    /// current branch, which consensus would refuse.
     pub fn pay_tx(
         &mut self,
         label: &str,
@@ -525,6 +530,10 @@ impl Ctx {
         };
         let to = fvk.address_at(0u32, orchard::keys::Scope::External);
         let tx = self.devices[near.0].send_to(to, value, ovk);
+        assert!(
+            self.chain.anchor_height(&tx).is_some(),
+            "NEAR's payout anchors at a root of the current branch"
+        );
         let height = self.chain.mine_tx(&tx);
         let mined = self.chain.record_payment(height, fvk, value, payer);
         self.devices[near.0].scan(&self.chain);

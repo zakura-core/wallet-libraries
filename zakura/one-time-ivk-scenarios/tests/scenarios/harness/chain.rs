@@ -830,6 +830,15 @@ impl Chain {
         })
     }
 
+    /// The latest block on this branch whose final Ironwood tree root is `tx`'s Ironwood
+    /// anchor, or `None` when no block's is or `tx` has no Ironwood bundle. Unlike
+    /// [`Self::accepts`], it checks nothing else, so it covers transactions with
+    /// transparent inputs too.
+    pub fn anchor_height(&mut self, tx: &Transaction) -> Option<BlockHeight> {
+        let bundle = tx.ironwood_bundle()?;
+        self.root_height(bundle.anchor())
+    }
+
     /// The latest block whose final Ironwood tree root is `anchor`, searching the last
     /// [`RECENT_ROOTS`] blocks before the rest of the chain.
     fn root_height(&mut self, anchor: &Anchor) -> Option<BlockHeight> {
