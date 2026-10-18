@@ -109,7 +109,76 @@ fn regressions() -> Vec<Scenario> {
         memo_after_pass(false),
         memo_after_pass(true),
         seen_after_pass(),
+        seen_before_first_pass(),
     ]
+}
+
+/// Seed 343: B1, a restored install, quotes on I0. A, a fresh account, then quotes on I1,
+/// and its issuance finds I0 in NEAR's seen set and registers it for a lookup. A's first
+/// pass lists I0 as recent, so it must watch I0 for a day although issuance registered it
+/// first, and find NEAR's payout half a day later.
+fn seen_before_first_pass() -> Scenario {
+    Scenario {
+        id: "Z-seen-key-before-first-pass".into(),
+        group: FUZZ,
+        title: "A fresh account registers another install's seen address before its first pass"
+            .into(),
+        summary: "A recent key issuance registered from the seen set before the pass still gets \
+            the pass's watch."
+            .into(),
+        params: vec![],
+        slow: false,
+        run: Box::new(|ctx| {
+            ctx.mine(20);
+            let birthday = ctx.chain.tip() + 1;
+            ctx.mine(5);
+            let a = ctx.device("A", SEED, birthday);
+            ctx.dev(a).feed_clock = true;
+            ctx.dev(a).mark_fresh();
+            ctx.mine(10);
+            ctx.sync(a);
+            ctx.wait(2 * DAY);
+            let b1 = ctx.device("B1", SEED, birthday);
+            ctx.dev(b1).feed_clock = true;
+            ctx.sync(b1);
+            let swap = ctx.quote_incoming(b1, HOUR).expect("B1's quote");
+            ctx.wait(3 * HOUR);
+            ctx.sync(a);
+            let other = ctx.quote_incoming(a, HOUR).expect("A's quote");
+            ctx.check(
+                "A skips B1's address",
+                other.index != swap.index,
+                format!("A issued {}", other.label()),
+            );
+            ctx.wait(12 * HOUR);
+            ctx.sync(a);
+            ctx.wait(12 * HOUR);
+            let payout = ctx.pay("payout", &swap.label(), &swap.fvk, ZEC / 2, Payer::Near);
+            ctx.mine(1);
+            ctx.observe_incoming(b1, &swap, "SUCCESS", Some(ZEC / 2));
+            for _ in 0..3 {
+                ctx.sync(a);
+                ctx.sync(b1);
+                ctx.mine(1);
+            }
+            ctx.expect(
+                b1,
+                "payout",
+                &swap.label(),
+                &payout,
+                Class::FoundLive,
+                "B1 quoted I0 and scans it.",
+            );
+            ctx.expect(
+                a,
+                "payout",
+                &swap.label(),
+                &payout,
+                Class::FoundAutomatically,
+                "A's first pass lists I0 as recent, so A watches it for a day from the pass.",
+            );
+        }),
+    }
 }
 
 /// The incoming side of [`memo_after_pass`]: A quotes and NEAR pays after A2 finished its
