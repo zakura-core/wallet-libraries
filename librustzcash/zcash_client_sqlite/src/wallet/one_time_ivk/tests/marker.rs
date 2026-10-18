@@ -51,7 +51,8 @@ fn markers(st: &mut State, txid: TxId) -> Vec<u64> {
 }
 
 /// A one-time note spent with nothing left over still carries a zero-value marker, and
-/// building the same spend without it is refused.
+/// building the same spend without it is refused, even when it pays the account's own
+/// internal address, which the built transaction's check alone would take for a marker.
 #[test]
 fn exact_one_time_spend_carries_a_zero_value_marker() {
     let mut st = one_time_funded(2_000_000);
@@ -85,6 +86,30 @@ fn exact_one_time_spend_carries_a_zero_value_marker() {
         account.usk(),
         OvkPolicy::Sender,
         &unmarked,
+    );
+    assert!(matches!(created, Err(Error::OneTimeSpendWithoutMarker)));
+    // The payment is made in Ironwood, so a payment to self there decrypts as internal.
+    assert_eq!(step.payment_pools()[&0], zcash_protocol::PoolType::IRONWOOD);
+    let internal = FullViewingKey::from(account.usk().orchard()).address_at(0u32, Scope::Internal);
+    let to_self = payment(&unified(internal), 1_990_000, None);
+    let to_self = Proposal::single_step(
+        zip321::TransactionRequest::new(vec![to_self]).unwrap(),
+        step.payment_pools().clone(),
+        vec![],
+        step.shielded_inputs().cloned(),
+        step.anchor_height().unwrap(),
+        TransactionBalance::new(vec![], step.balance().fee_required()).unwrap(),
+        *proposal.fee_rule(),
+        proposal.min_target_height(),
+        proposal.confirmations_policy(),
+        false,
+        true,
+    )
+    .unwrap();
+    let created = st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+        account.usk(),
+        OvkPolicy::Sender,
+        &to_self,
     );
     assert!(matches!(created, Err(Error::OneTimeSpendWithoutMarker)));
 
