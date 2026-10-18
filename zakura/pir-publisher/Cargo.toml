@@ -1,24 +1,29 @@
-
 [package]
 name = "zakura-pir-publisher"
 version = "0.0.1-rc0"
 edition = "2024"
 description = "PIR publication construction without request evaluation"
-
-[package.rust-version]
-workspace = true
-
-[package.license]
-workspace = true
-
-[package.repository]
-workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [features]
+# Product and capability features are explicit; no product is enabled by default.
 default = []
 enhance = ["zakura-pir-protocol/enhance"]
 status = ["zakura-pir-protocol/status"]
-transparent = ["dep:base64", "dep:hex", "dep:serde", "dep:serde_json", "dep:sha2", "dep:thiserror", "dep:zakura-filters", "dep:bitcoin_hashes", "zakura-pir-protocol/transparent", "zakura-pir-server-core/transparent"]
+transparent = [
+    "dep:base64",
+    "dep:hex",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:thiserror",
+    "dep:zakura-filters",
+    "dep:bitcoin_hashes",
+    "zakura-pir-protocol/transparent",
+    "zakura-pir-server-core/transparent",
+]
 
 [dependencies]
 zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc0", features = ["native"] }

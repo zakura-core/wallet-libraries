@@ -1,36 +1,96 @@
-
 [package]
 name = "zakura-pir-client"
 version = "0.0.1-rc0"
 edition = "2024"
 description = "Enhance, Status and Transparent PIR clients over caller-owned transports"
-
-[package.rust-version]
-workspace = true
-
-[package.license]
-workspace = true
-
-[package.repository]
-workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [features]
-cli = ["dep:zakura-pir-publisher","transparent", "reqwest", "dep:clap"]
+# Product and capability features are explicit; no product is enabled by default.
+cli = ["dep:zakura-pir-publisher", "transparent", "reqwest", "dep:clap"]
 default = []
-native = ["dep:zakura-pir-protocol", "zakura-pir-protocol/native", "dep:reinspiring", "dep:rand", "dep:rand_chacha"]
-enhance = ["zakura-pir-publisher?/enhance", "zakura-pir-query-server?/enhance", "zakura-pir-server-core?/enhance","native", "zakura-pir-protocol/enhance", "zakura-pir-protocol/http-endpoint", "dep:futures-util", "dep:base64", "dep:hex", "dep:serde", "dep:serde_json", "dep:sha2", "dep:thiserror"]
-status = ["zakura-pir-publisher?/status", "zakura-pir-query-server?/status", "zakura-pir-server-core?/status","native", "zakura-pir-protocol/status", "dep:hex", "dep:serde", "dep:serde_json", "dep:sha2", "dep:thiserror", "dep:zcash_protocol"]
-transparent = ["zakura-pir-publisher?/transparent", "zakura-pir-query-server?/transparent", "zakura-pir-server-core?/transparent","zakura-pir-protocol/filter-matching", "native", "zakura-pir-protocol/transparent", "dep:base64", "dep:hex", "dep:serde", "dep:serde_json", "dep:sha2", "dep:thiserror"]
-engine = ["transparent"]
+native = [
+    "dep:zakura-pir-protocol",
+    "zakura-pir-protocol/native",
+    "dep:reinspiring",
+    "dep:rand",
+    "dep:rand_chacha",
+]
+enhance = [
+    "zakura-pir-publisher?/enhance",
+    "zakura-pir-query-server?/enhance",
+    "native",
+    "zakura-pir-protocol/enhance",
+    "zakura-pir-protocol/http-endpoint",
+    "dep:futures-util",
+    "dep:base64",
+    "dep:hex",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:thiserror",
+]
+status = [
+    "zakura-pir-publisher?/status",
+    "zakura-pir-query-server?/status",
+    "native",
+    "zakura-pir-protocol/status",
+    "dep:hex",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:thiserror",
+    "dep:zcash_protocol",
+]
+transparent = [
+    "zakura-pir-publisher?/transparent",
+    "zakura-pir-query-server?/transparent",
+    "zakura-pir-server-core?/transparent",
+    "zakura-pir-protocol/filter-matching",
+    "native",
+    "zakura-pir-protocol/transparent",
+    "dep:base64",
+    "dep:hex",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:thiserror",
+]
 engine-store = ["transparent", "dep:rusqlite"]
 engine-conformance = ["transparent"]
-recovery = ["engine-store", "zakura-pir-protocol/transparent-inputs", "zakura-pir-protocol/http-endpoint", "dep:zcash_protocol", "dep:transparent", "dep:same-file", "dep:rustix"]
+recovery = [
+    "engine-store",
+    "zakura-pir-protocol/transparent-inputs",
+    "zakura-pir-protocol/http-endpoint",
+    "dep:zcash_protocol",
+    "dep:transparent",
+    "dep:same-file",
+    "dep:rustix",
+]
 wallet = ["dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol"]
 transparent-wallet = ["wallet", "recovery", "zcash_client_backend/transparent-inputs"]
 sqlite = ["transparent-wallet", "dep:zcash_client_sqlite"]
 reqwest = ["dep:reqwest"]
-lightwalletd = ["status", "dep:zcash_client_backend", "zcash_client_backend/lightwalletd-tonic", "zcash_client_backend/lightwalletd-tonic-transport", "dep:zcash_primitives", "dep:tonic", "dep:tokio"]
-testing = ["dep:zakura-pir-publisher", "dep:zakura-pir-query-server", "dep:zakura-pir-server-core","dep:orchard", "dep:zcash_note_encryption", "dep:rand_10", "dep:axum"]
+lightwalletd = [
+    "status",
+    "dep:zcash_client_backend",
+    "zcash_client_backend/lightwalletd-tonic",
+    "zcash_client_backend/lightwalletd-tonic-transport",
+    "dep:zcash_primitives",
+    "dep:tonic",
+    "dep:tokio",
+]
+testing = [
+    "dep:zakura-pir-publisher",
+    "dep:zakura-pir-query-server",
+    "dep:zakura-pir-server-core",
+    "dep:orchard",
+    "dep:zcash_note_encryption",
+    "dep:rand_10",
+    "dep:axum",
+]
 
 [dependencies]
 clap = { version = "4", features = ["derive"], optional = true }
@@ -63,13 +123,6 @@ tonic = { workspace = true, optional = true, features = ["transport"] }
 tokio = { workspace = true, optional = true, features = ["time"] }
 zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc0", optional = true }
 
-[target]
-
-[target.'cfg(unix)']
-
-[target.'cfg(unix)'.dependencies]
-rustix = { version = "1", optional = true, default-features = false, features = ["std", "fs"] }
-
 [dev-dependencies]
 ipir-native-client = { version = "=0.1.0-rc.1", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
 bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
@@ -96,6 +149,9 @@ zakura-pir-query-server = { path = "../pir-query-server", version = "=0.0.1-rc0"
 zakura-pir-publisher = { path = "../pir-publisher", version = "=0.0.1-rc0", features = ["transparent", "enhance", "status"] }
 zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc0", features = ["transparent"] }
 
+[target."cfg(unix)".dependencies]
+rustix = { version = "1", optional = true, default-features = false, features = ["std", "fs"] }
+
 [[test]]
 name = "transparent_engine_store_schema_upgrade"
 path = "tests/transparent/engine_store_schema_upgrade.rs"
@@ -109,7 +165,7 @@ required-features = ["transparent", "engine-store"]
 [[test]]
 name = "transparent_engine_birthday_to_balance"
 path = "tests/transparent/engine_birthday_to_balance.rs"
-required-features = ["transparent", "engine"]
+required-features = ["transparent"]
 
 [[test]]
 name = "transparent_private_recovery"
@@ -130,21 +186,6 @@ required-features = ["transparent-wallet", "transparent", "testing", "reqwest"]
 name = "transparent_detail_run"
 path = "tests/transparent/detail_run.rs"
 required-features = ["transparent-wallet", "transparent", "testing"]
-
-[[example]]
-name = "transparent_recover-activity"
-path = "examples/transparent/recover-activity.rs"
-required-features = ["transparent", "sqlite"]
-
-[[example]]
-name = "transparent_engine-store-reopen"
-path = "examples/transparent/engine-store-reopen.rs"
-required-features = ["transparent", "engine-store"]
-
-[[example]]
-name = "transparent_recovery-without-backend"
-path = "examples/transparent/recovery-without-backend.rs"
-required-features = ["transparent", "recovery"]
 
 [[test]]
 name = "enhance_protocol_contract"
@@ -186,6 +227,26 @@ name = "transparent_txid_client_map_bytes"
 path = "tests/transparent_txid_client/map_bytes.rs"
 required-features = ["transparent", "testing"]
 
+[[test]]
+name = "transparent_previous_companion"
+path = "tests/transparent/previous_companion.rs"
+required-features = ["recovery"]
+
+[[example]]
+name = "transparent_recover-activity"
+path = "examples/transparent/recover-activity.rs"
+required-features = ["transparent", "sqlite"]
+
+[[example]]
+name = "transparent_engine-store-reopen"
+path = "examples/transparent/engine-store-reopen.rs"
+required-features = ["transparent", "engine-store"]
+
+[[example]]
+name = "transparent_recovery-without-backend"
+path = "examples/transparent/recovery-without-backend.rs"
+required-features = ["transparent", "recovery"]
+
 [[example]]
 name = "transparent_txid_client_txid-quality-canary"
 path = "examples/transparent_txid_client/txid-quality-canary.rs"
@@ -200,8 +261,3 @@ required-features = ["status"]
 name = "transparent-filter-cli"
 path = "src/bin/transparent-filter-cli.rs"
 required-features = ["cli"]
-
-[[test]]
-name = "transparent_previous_companion"
-path = "tests/transparent/previous_companion.rs"
-required-features = ["recovery"]

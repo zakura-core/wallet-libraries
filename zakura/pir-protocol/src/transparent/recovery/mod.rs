@@ -12,9 +12,9 @@ mod mapping;
 mod metadata;
 pub use metadata::{TransactionMetadata, WholeTransactionFee};
 #[cfg(feature = "transparent-inputs")]
-mod recovery;
+mod records;
 #[cfg(feature = "transparent-inputs")]
-pub use recovery::*;
+pub use records::*;
 
 /// A locally accepted block: its height and the hash the wallet holds for that height.
 ///

@@ -265,6 +265,44 @@ fn peel(hashed: &[[usize; 3]], slots: usize) -> Option<Vec<(usize, usize)>> {
     (order.len() == hashed.len()).then_some(order)
 }
 
+/// Both candidate rows for a script in this shard.
+pub fn candidate_rows(shard_id: u64, script: &[u8], rows: u64) -> [u64; DIRECTORY_CHOICES] {
+    candidates(&bucket_salts(shard_id), script, rows)
+}
+/// Derives one of a shard's independently salted bucket keys.
+///
+/// Salting per shard means the same script lands in different rows in different
+/// shards, so an observer who learns one shard's row for a script learns
+/// nothing about where it sits in any other.
+fn bucket_salt(shard_id: u64, choice: usize) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"zcash-transparent-range-v1/directory-bucket\0");
+    hasher.update(shard_id.to_le_bytes());
+    hasher.update((choice as u32).to_le_bytes());
+    hasher.finalize().into()
+}
+/// A shard's bucket salts, for deriving many scripts' candidate rows.
+pub fn bucket_salts(shard_id: u64) -> [[u8; 32]; DIRECTORY_CHOICES] {
+    std::array::from_fn(|choice| bucket_salt(shard_id, choice))
+}
+/// [`candidate_rows`] under salts already derived for the shard.
+pub fn candidates(
+    salts: &[[u8; 32]; DIRECTORY_CHOICES],
+    script: &[u8],
+    rows: u64,
+) -> [u64; DIRECTORY_CHOICES] {
+    std::array::from_fn(|choice| bucket_for(&salts[choice], script, rows))
+}
+/// The row a script hashes to under one salt.
+pub fn bucket_for(salt: &[u8; 32], script: &[u8], rows: u64) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(salt);
+    hasher.update((script.len() as u32).to_le_bytes());
+    hasher.update(script);
+    let digest = hasher.finalize();
+    u64::from_le_bytes(digest[..8].try_into().expect("8 bytes")) % rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,42 +439,4 @@ mod tests {
         *padding.last_mut().expect("bits") |= 0x80;
         reject(&padding);
     }
-}
-
-/// Both candidate rows for a script in this shard.
-pub fn candidate_rows(shard_id: u64, script: &[u8], rows: u64) -> [u64; DIRECTORY_CHOICES] {
-    candidates(&bucket_salts(shard_id), script, rows)
-}
-/// Derives one of a shard's independently salted bucket keys.
-///
-/// Salting per shard means the same script lands in different rows in different
-/// shards, so an observer who learns one shard's row for a script learns
-/// nothing about where it sits in any other.
-fn bucket_salt(shard_id: u64, choice: usize) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"zcash-transparent-range-v1/directory-bucket\0");
-    hasher.update(shard_id.to_le_bytes());
-    hasher.update((choice as u32).to_le_bytes());
-    hasher.finalize().into()
-}
-/// A shard's bucket salts, for deriving many scripts' candidate rows.
-pub fn bucket_salts(shard_id: u64) -> [[u8; 32]; DIRECTORY_CHOICES] {
-    std::array::from_fn(|choice| bucket_salt(shard_id, choice))
-}
-/// [`candidate_rows`] under salts already derived for the shard.
-pub fn candidates(
-    salts: &[[u8; 32]; DIRECTORY_CHOICES],
-    script: &[u8],
-    rows: u64,
-) -> [u64; DIRECTORY_CHOICES] {
-    std::array::from_fn(|choice| bucket_for(&salts[choice], script, rows))
-}
-/// The row a script hashes to under one salt.
-pub fn bucket_for(salt: &[u8; 32], script: &[u8], rows: u64) -> u64 {
-    let mut hasher = Sha256::new();
-    hasher.update(salt);
-    hasher.update((script.len() as u32).to_le_bytes());
-    hasher.update(script);
-    let digest = hasher.finalize();
-    u64::from_le_bytes(digest[..8].try_into().expect("8 bytes")) % rows
 }

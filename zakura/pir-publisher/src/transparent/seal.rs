@@ -870,6 +870,32 @@ impl Sealer {
 }
 
 #[cfg(test)]
+fn test_event_pair(height: u32, nonce: u32) -> [TransparentEvent; 2] {
+    let mut txid = [0x12; 32];
+    txid[..4].copy_from_slice(&nonce.to_le_bytes());
+    [
+        TransparentEvent::Receive(zakura_pir_protocol::transparent::events::ReceiveEvent {
+            metadata: None,
+            height,
+            transaction_index: 0,
+            txid: Txid(txid),
+            output_index: u32::MAX,
+            value: u64::MAX,
+            coinbase: true,
+        }),
+        TransparentEvent::Spend(zakura_pir_protocol::transparent::events::SpendEvent {
+            metadata: None,
+            height,
+            transaction_index: u16::MAX,
+            spending_txid: Txid([0x34; 32]),
+            input_index: u32::MAX,
+            spent_txid: Txid(txid),
+            spent_output_index: u32::MAX,
+        }),
+    ]
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1847,30 +1873,4 @@ mod tests {
         assert_eq!(occupancy.packed_page_rows, 0);
         assert_eq!(occupancy.demand.paged_scripts(), 0);
     }
-}
-
-#[cfg(test)]
-fn test_event_pair(height: u32, nonce: u32) -> [TransparentEvent; 2] {
-    let mut txid = [0x12; 32];
-    txid[..4].copy_from_slice(&nonce.to_le_bytes());
-    [
-        TransparentEvent::Receive(zakura_pir_protocol::transparent::events::ReceiveEvent {
-            metadata: None,
-            height,
-            transaction_index: 0,
-            txid: Txid(txid),
-            output_index: u32::MAX,
-            value: u64::MAX,
-            coinbase: true,
-        }),
-        TransparentEvent::Spend(zakura_pir_protocol::transparent::events::SpendEvent {
-            metadata: None,
-            height,
-            transaction_index: u16::MAX,
-            spending_txid: Txid([0x34; 32]),
-            input_index: u32::MAX,
-            spent_txid: Txid(txid),
-            spent_output_index: u32::MAX,
-        }),
-    ]
 }

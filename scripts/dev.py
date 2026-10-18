@@ -28,7 +28,7 @@ CONFIGS = {
     "enhance": (["-p", "zakura-pir-client"], ["enhance"]),
     "enhance-testing": (["-p", "zakura-pir-client"], ["enhance", "testing"]),
     # Engine, standalone recovery and wallet settlement are independent capabilities.
-    "transparent-engine": (["-p", "zakura-pir-client"], ["transparent", "engine"]),
+    "transparent-engine": (["-p", "zakura-pir-client"], ["transparent"]),
     "transparent-engine-store": (["-p", "zakura-pir-client"], ["transparent", "engine-store", "engine-conformance", "reqwest"]),
     "transparent-filter-client": (["-p", "zakura-pir-client"], ["transparent", "reqwest"]),
     "transparent-pir": (["-p", "zakura-pir-client"], ["transparent", "transparent-wallet"]),

@@ -3,9 +3,6 @@
 //! The optional `http-endpoint` feature also exposes the configured HTTP endpoint
 //! type used by PIR clients, without adding HTTP parsing to record-only consumers.
 
-#[cfg(feature = "http-endpoint")]
-pub mod endpoint;
-
 pub const RECORD_BYTES: usize = 653;
 
 pub const RECORD_ENC_CIPHERTEXT_SUFFIX_OFFSET: usize = 0;

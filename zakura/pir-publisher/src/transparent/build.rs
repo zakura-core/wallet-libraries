@@ -29,6 +29,11 @@
 //! script's previous run, whose row is fixed because its page shard has
 //! already sealed; the directory entry points at the newest run.
 
+pub use zakura_pir_protocol::transparent::shard::choice::candidate_rows;
+
+pub use zakura_pir_protocol::transparent::shard::choice::bucket_for;
+use zakura_pir_protocol::transparent::shard::choice::{bucket_salts, candidates};
+
 use crate::transparent::events::TransparentEvent;
 use crate::transparent::filter::{
     BlockHash, FilterBytes, FilterError, ScriptBytes, ShardKey, build_range_filter_for,
@@ -2133,8 +2138,3 @@ mod tests {
         );
     }
 }
-
-pub use zakura_pir_protocol::transparent::shard::choice::candidate_rows;
-
-pub use zakura_pir_protocol::transparent::shard::choice::bucket_for;
-use zakura_pir_protocol::transparent::shard::choice::{bucket_salts, candidates};

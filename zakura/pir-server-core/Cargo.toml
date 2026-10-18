@@ -1,23 +1,15 @@
-
 [package]
 name = "zakura-pir-server-core"
 version = "0.0.1-rc0"
 edition = "2024"
 description = "Native preparation shared by PIR server roles"
-
-[package.rust-version]
-workspace = true
-
-[package.license]
-workspace = true
-
-[package.repository]
-workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [features]
+# Product and capability features are explicit; no product is enabled by default.
 default = []
-enhance = []
-status = []
 transparent = []
 
 [dependencies]

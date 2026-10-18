@@ -728,7 +728,7 @@ async fn fetch(
 }
 
 fn endpoint(base: &str, path: &str) -> Result<String, ClientError> {
-    let endpoint = zakura_pir_protocol::enhance::record::endpoint::Endpoint::parse(base)
+    let endpoint = zakura_pir_protocol::endpoint::Endpoint::parse(base)
         .map_err(|e| ClientError::Transport(e.to_string()))?;
     if !endpoint.is_https() && !endpoint.is_loopback() {
         return Err(ClientError::Transport(

@@ -30,8 +30,7 @@ retrieval engine and txid client. `engine-store` adds the SQLite engine store;
 wallet backend. `wallet` enables wallet adapters for the selected products;
 Transparent additionally selects `transparent-wallet`, which includes recovery
 and the backend's transparent inputs. `sqlite` adds Transparent settlement into
-the SQLite wallet. Existing engine capability names remain available to select
-storage and conformance independently.
+the SQLite wallet. Storage and conformance remain independently selectable.
 
 `reqwest` opts into bundled HTTP transports. `lightwalletd` enables the explicit
 public transaction status source under `status::policy::lightwalletd`. With no
@@ -77,3 +76,7 @@ The development lanes `pir-protocol`, `pir-client` and `pir-server` cover the
 consolidated packages. Existing product and wallet integration lanes retain their
 behavioral coverage. Fresh external consumers verify normal/build dependencies
 without workspace test-feature unification.
+
+The [trust and privacy contracts](pir-security.md) apply across all roles.
+
+Configured service endpoints use the shared `endpoint` module; its [syntax contract](pir-endpoints.md) is selected with `http-endpoint`.

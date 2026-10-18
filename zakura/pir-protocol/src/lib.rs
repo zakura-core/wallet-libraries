@@ -7,3 +7,6 @@ pub mod native;
 pub mod status;
 #[cfg(feature = "transparent")]
 pub mod transparent;
+
+#[cfg(feature = "http-endpoint")]
+pub mod endpoint;
