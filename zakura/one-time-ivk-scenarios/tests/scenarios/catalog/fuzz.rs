@@ -1299,6 +1299,8 @@ struct Pass {
     /// The first pass completed after a reorg, which replaces one the reorg may have
     /// invalidated.
     replacement: bool,
+    /// Completed while the account was declared fresh (see [`stored_pass`]).
+    fresh: bool,
 }
 
 impl Pass {
@@ -1374,7 +1376,8 @@ struct Exec<'p> {
     /// Each wallet account's handle.
     wallets: BTreeMap<W, Dev>,
     births: BTreeMap<W, u32>,
-    /// Accounts declared fresh, which have no discovery.
+    /// Accounts declared fresh, which run discovery only for work they started (see
+    /// [`stored_pass`]).
     fresh: BTreeSet<W>,
     swaps: Vec<SwapRt>,
     pays: Vec<OPay>,
@@ -1541,8 +1544,11 @@ impl<'p> Exec<'p> {
             self.run_step(ctx, step.clone());
         }
         self.step = plan.steps.len();
-        let end = ctx.chain.now() + HOUR;
-        self.repay_due(ctx, end);
+        // A reorg's repayment may fall days past the last step. Every one is paid before
+        // the world stabilizes, so `judge` holds the wallets to it.
+        let late = self.repay.len();
+        self.repay_due(ctx, i64::MAX);
+        ctx.metric("repayments after the plan", late as f64, "payments");
         self.finish(ctx);
     }
 
@@ -1555,14 +1561,16 @@ impl<'p> Exec<'p> {
         self.wallets.insert(w, dev);
     }
 
-    /// Pays again, in new transactions, the payouts whose time has come.
+    /// Pays again, in new transactions and in time order, the payouts due by `until`,
+    /// advancing the chain to each one's time.
     fn repay_due(&mut self, ctx: &mut Ctx, until: i64) {
-        let due: Vec<(i64, usize)> = self
+        let mut due: Vec<(i64, usize)> = self
             .repay
             .iter()
             .copied()
             .filter(|(t, _)| *t <= until)
             .collect();
+        due.sort();
         self.repay.retain(|(t, _)| *t > until);
         for (at, i) in due {
             ctx.chain.mine_until_next_at(at);
@@ -1811,17 +1819,21 @@ impl<'p> Exec<'p> {
                     .and_modify(|c| c.height = height)
                     .or_insert(Credit { class, height });
             }
-            if self.fresh.contains(&w) {
-                continue;
-            }
+            let fresh = self.fresh.contains(&w);
             let account = ctx.get(dev).account;
-            let Some(status) = ctx.get(dev).discovery(&ctx.chain, account) else {
+            let done = match ctx.get(dev).discovery(&ctx.chain, account) {
+                Some(status) => status
+                    .publication
+                    .filter(|_| status.complete)
+                    .map(|p| (u32::from(p.height), p.hash)),
+                // A fresh account's status is `None` once its work finished, which hides a
+                // completed pass, so the oracle reads the pass the wallet stored.
+                None if fresh => stored_pass(ctx, dev),
+                None => None,
+            };
+            let Some((end, hash)) = done else {
                 continue;
             };
-            let Some(publication) = status.publication.filter(|_| status.complete) else {
-                continue;
-            };
-            let (end, hash) = (u32::from(publication.height), publication.hash);
             let recheck = self.rechecking.remove(&w);
             let known = self.passes.entry(w).or_default();
             if !recheck && known.last().is_some_and(|p| p.end == end && p.hash == hash) {
@@ -1836,12 +1848,17 @@ impl<'p> Exec<'p> {
                 recheck,
                 first,
                 replacement,
+                fresh,
             };
             self.passes.entry(w).or_default().push(pass);
+            let of = if fresh { " of a fresh account" } else { "" };
             self.note(
                 ctx,
                 &w.name(),
-                format!("discovery complete through {end} ({} pass)", pass.kind()),
+                format!(
+                    "discovery complete through {end} ({} pass{of})",
+                    pass.kind()
+                ),
             );
             if pass.judged() {
                 self.judge_pass(ctx, w, pass);
@@ -2693,6 +2710,13 @@ impl<'p> Exec<'p> {
         }
         let passes: usize = self.passes.values().map(Vec::len).sum();
         ctx.metric("completed discovery passes", passes as f64, "passes");
+        let fresh = self
+            .passes
+            .values()
+            .flatten()
+            .filter(|p| p.fresh && p.judged())
+            .count();
+        ctx.metric("fresh accounts' judged passes", fresh as f64, "passes");
         ctx.metric("one-time payments", self.pays.len() as f64, "payments");
     }
 
@@ -3011,6 +3035,30 @@ fn notes(ctx: &Ctx, dev: Dev) -> Vec<Note> {
     .expect("notes")
     .collect::<Result<_, _>>()
     .expect("notes decode")
+}
+
+/// The end height and hash of the publication of the discovery pass `dev`'s account stored,
+/// if any. Read for a fresh account whose status is `None`, which means its work is
+/// complete, so a stored pass is a completed one.
+fn stored_pass(ctx: &Ctx, dev: Dev) -> Option<(u32, [u8; 32])> {
+    use rusqlite::OptionalExtension;
+    let device = ctx.get(dev);
+    let account = device.account.expose_uuid().as_bytes().to_vec();
+    device
+        .conn()
+        .query_row(
+            "SELECT d.publication_height, d.publication_hash
+             FROM ironwood_one_time_discovery d
+             JOIN accounts a ON a.id = d.account_id
+             WHERE a.uuid = ?1",
+            [account],
+            |row| {
+                let hash: Vec<u8> = row.get(1)?;
+                Ok((row.get(0)?, hash.try_into().expect("32-byte block hash")))
+            },
+        )
+        .optional()
+        .expect("the stored discovery pass")
 }
 
 /// The outputs directory lookups listed as payments in `dev`'s wallet file.
