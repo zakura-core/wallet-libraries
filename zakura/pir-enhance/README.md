@@ -92,3 +92,11 @@ has passed qualification.
 initial session construction. Recreate it from locally scanned state for the new
 manifest; a session ID match alone does not accept a new chain anchor. The
 higher-level `Client::accept_routing` API already takes this argument.
+
+## Endpoint syntax
+
+Configured service endpoints use explicit HTTP(S) addresses with ASCII or
+punycode hostnames, dotted-decimal IPv4 or bracketed IPv6. Paths use ASCII URI
+syntax; percent-encode spaces and Unicode characters. Credentials, queries,
+fragments, backslashes and browser-style IP shorthand are rejected. See the
+[endpoint syntax and normalization rules](../pir-endpoint/README.md).

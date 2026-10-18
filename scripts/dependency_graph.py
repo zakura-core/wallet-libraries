@@ -36,7 +36,12 @@ def main():
     # Check both feature-off libraries and real consumer capabilities. The
     # proving consumer also ensures the real fixture remains available.
     pczt_macros = {"serde_with_macros", "darling", "darling_core", "darling_macro", "ident_case", "strsim"}
+    endpoint_stack = {"url", "idna", "idna_adapter", "icu_provider", "icu_normalizer", "icu_properties"}
     cases = [
+        ("endpoint", "zakura/pir-endpoint", [], endpoint_stack, {"http"}),
+        ("enhance", "zakura/pir-enhance", [], endpoint_stack, {"zakura-pir-endpoint"}),
+        ("transparent-wallet", "zakura/pir-transparent", ["wallet"],
+         endpoint_stack, {"zakura-pir-endpoint"}),
         ("wallet", "librustzcash/zcash_client_sqlite", ["orchard", "transparent-inputs"],
          {"prost-build", "tonic-prost-build", "which", "regex", "regex-automata", "regex-syntax"} | pczt_macros, set()),
         ("pczt", "librustzcash/pczt", [], pczt_macros, {"serde_with"}),

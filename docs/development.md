@@ -137,7 +137,7 @@ proving-key caches and the cargo test runner.
 ### GitHub Actions
 
 Use **Publish crates** from `main` in `zakura-core/wallet-libraries`. The workflow
-uses the exact commit selected by the dispatch, and reads versions from all twenty-one
+uses the exact commit selected by the dispatch, and reads versions from all twenty-two
 crate manifests. It does not create tags, change versions, or publish wallet-pir.
 Successful **Verify wallet libraries** CI for that exact main commit is required;
 wait for it to finish before dispatching the release workflow.
@@ -151,7 +151,7 @@ that each crate has the right publisher configuration.
 
 Before the first run, a repository administrator must create the `crates-io`
 GitHub Environment, allow only the `main` branch, and require approval by `ebfull`
-(self-approval is allowed, matching Zakura). An owner of **each of the twenty-one crates**
+(self-approval is allowed, matching Zakura). An owner of **each of the twenty-two crates**
 must configure this Trusted Publisher on crates.io:
 
 | Setting | Value |
@@ -161,13 +161,13 @@ must configure this Trusted Publisher on crates.io:
 | Workflow filename | `publish-crates.yml` |
 | Environment | `crates-io` |
 
-Use `python3 scripts/publish-crates.py --plan` to list the twenty-one names and versions.
+Use `python3 scripts/publish-crates.py --plan` to list the twenty-two names and versions.
 Check every crate's publisher settings, including names already reserved by a
 placeholder release. Trusted Publishing needs existing crate names.
 Check that the five `zakura-transparent-{native,events,filter,shard,txid-client}`
 names and the three receiver names, `zakura-receiver-crypto`,
 `zakura-receiver-directory`, and `zakura-receiver-pir`, are reserved. Reserve
-`zakura-filters` as well. Reserve any missing names and configure each crate's Trusted Publisher before the first run
+`zakura-filters` and `zakura-pir-endpoint` as well. Reserve any missing names and configure each crate's Trusted Publisher before the first run
 that includes it. No permanent API token or new Infisical secret is required.
 
 Choose **publish** for an actual release. It repeats verification for the dispatch

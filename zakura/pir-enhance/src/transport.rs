@@ -728,28 +728,17 @@ async fn fetch(
 }
 
 fn endpoint(base: &str, path: &str) -> Result<String, ClientError> {
-    let mut url = url::Url::parse(base).map_err(|e| ClientError::Transport(e.to_string()))?;
-    let local_http = url.scheme() == "http"
-        && match url.host() {
-            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
-            None => false,
-        };
-    if !(url.scheme() == "https" || local_http)
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
+    let endpoint = zakura_pir_endpoint::Endpoint::parse(base)
+        .map_err(|e| ClientError::Transport(e.to_string()))?;
+    if !endpoint.is_https() && !endpoint.is_loopback() {
         return Err(ClientError::Transport(
             "PIR endpoint must be HTTPS (or loopback HTTP) without credentials, query or fragment"
                 .into(),
         ));
     }
-    url.set_path(&format!("{}{path}", url.path().trim_end_matches('/')));
-    Ok(url.into())
+    endpoint
+        .join(path)
+        .map_err(|e| ClientError::Transport(e.to_string()))
 }
 
 #[cfg(test)]
@@ -771,6 +760,11 @@ mod tests {
             "https://user@example.org",
             "https://example.org?a=1",
             "https://example.org/#x",
+            "http://localhost.example.org",
+            "http://localhost.",
+            "http://127.1",
+            "http://0x7f000001",
+            "https://bücher.example/",
         ] {
             assert!(endpoint(url, "/v1/enhance/init").is_err());
         }
@@ -789,6 +783,14 @@ mod tests {
         assert_eq!(
             endpoint("http://127.0.0.1:8080", "/v1/enhance/init").unwrap(),
             "http://127.0.0.1:8080/v1/enhance/init"
+        );
+        assert_eq!(
+            endpoint("http://[::1]:8080/base/", "/v1/enhance/init").unwrap(),
+            "http://[::1]:8080/base/v1/enhance/init"
+        );
+        assert_eq!(
+            endpoint("https://xn--bcher-kva.example/", "/v1/enhance/init").unwrap(),
+            "https://xn--bcher-kva.example/v1/enhance/init"
         );
     }
 }

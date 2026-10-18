@@ -23,7 +23,7 @@ engine-conformance = ["engine"]
 reqwest = ["engine", "dep:reqwest"]
 # Applying a batch to a SQLite wallet and acknowledging it in one call.
 sqlite = ["wallet", "dep:zcash_client_sqlite"]
-wallet = ["engine-store", "dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol", "dep:transparent", "dep:transparent-txid-client", "dep:same-file", "dep:rustix", "dep:url"]
+wallet = ["engine-store", "dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol", "dep:transparent", "dep:transparent-txid-client", "dep:same-file", "dep:rustix", "dep:zakura-pir-endpoint"]
 # Test support for applications: batches no companion issued, their settlement, a
 # fake txid display publication, and a shard service fixture in process that
 # evaluates real PIR. Never enable it in a production build.
@@ -43,7 +43,7 @@ serde_json = { workspace = true, optional = true }
 same-file = { version = "1.0.6", optional = true }
 base64 = { workspace = true, optional = true }
 thiserror = "2"
-url = { version = "2", optional = true }
+zakura-pir-endpoint = { version = "=0.0.1-rc0", path = "../pir-endpoint", optional = true }
 transparent-events = { package = "zakura-transparent-events", version = "=0.0.1-rc0", path = "../transparent-events", optional = true }
 transparent-filter = { package = "zakura-transparent-filter", version = "=0.0.1-rc0", path = "../transparent-filter", optional = true }
 transparent-txid-client = { package = "zakura-transparent-txid-client", version = "=0.0.1-rc0", path = "../transparent-txid-client", optional = true }

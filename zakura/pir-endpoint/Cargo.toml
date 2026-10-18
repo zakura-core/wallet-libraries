@@ -1,0 +1,19 @@
+[package]
+name = "zakura-pir-endpoint"
+version = "0.0.1-rc0"
+description = "Validation and path construction for configured PIR HTTP endpoints"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[dependencies]
+http = "1"
+
+[dev-dependencies]
+# Independent oracle for the conventional endpoint syntax this crate accepts.
+url = "2"
+
+[lints]
+workspace = true

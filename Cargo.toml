@@ -13,6 +13,7 @@ members = [
     "librustzcash/pczt",
     "librustzcash/zcash_client_backend",
     "librustzcash/zcash_client_sqlite",
+    "zakura/pir-endpoint",
     "zakura/filters",
     "wallet-lib",
     "zakura/pir-enhance",

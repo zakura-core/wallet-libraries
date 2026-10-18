@@ -121,16 +121,7 @@ impl TransparentHistoryRecovery {
                 && config.private_bytes > 0,
             "recovery bounds must be positive",
         )?;
-        let url = url::Url::parse(&config.origin).map_err(failure)?;
-        ensure_valid(
-            matches!(url.scheme(), "http" | "https")
-                && url.host_str().is_some()
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.query().is_none()
-                && url.fragment().is_none(),
-            "invalid explicit HTTP origin",
-        )?;
+        zakura_pir_endpoint::Endpoint::parse(&config.origin).map_err(failure)?;
         let store = SqliteStore::open(&path).map_err(failure)?;
         let mut catalog = Connection::open(path).map_err(failure)?;
         catalog

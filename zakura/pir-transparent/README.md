@@ -507,3 +507,11 @@ it refuses qualification and activation. It establishes retrieval and
 persistence, not ownership of those fixture funds or full wallet presentation.
 See [the development workflow](../../docs/development.md) for build ownership
 and validation configurations.
+
+## Endpoint syntax
+
+Configured service endpoints use explicit HTTP(S) addresses with ASCII or
+punycode hostnames, dotted-decimal IPv4 or bracketed IPv6. Paths use ASCII URI
+syntax; percent-encode spaces and Unicode characters. Credentials, queries,
+fragments, backslashes and browser-style IP shorthand are rejected. See the
+[endpoint syntax and normalization rules](../pir-endpoint/README.md).

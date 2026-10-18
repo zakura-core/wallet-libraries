@@ -27,7 +27,7 @@ vendored_directory = "librustzcash"
 vendor_branch = "vendor/librustzcash"
 upstream_manifest = "librustzcash/upstream-workspace.toml"
 # `zakura/` members are added here as they are written.
-extra_members = ["zakura/filters", "wallet-lib", "zakura/pir-enhance", "zakura/pir-enhance-types", "zakura/pir-native", "zakura/pir-status", "zakura/transaction-status", "zakura/pir-transparent", "zakura/one-time-ivk", "zakura/pir-receiver", "zakura/near-intents", "zakura/one-time-ivk-scenarios", "zakura/receiver-crypto", "zakura/transparent-native", "zakura/transparent-events", "zakura/transparent-filter", "zakura/transparent-shard", "zakura/transparent-txid-client", "zakura/receiver-directory", "zakura/receiver-pir"]
+extra_members = ["zakura/pir-endpoint", "zakura/filters", "wallet-lib", "zakura/pir-enhance", "zakura/pir-enhance-types", "zakura/pir-native", "zakura/pir-status", "zakura/transaction-status", "zakura/pir-transparent", "zakura/one-time-ivk", "zakura/pir-receiver", "zakura/near-intents", "zakura/one-time-ivk-scenarios", "zakura/receiver-crypto", "zakura/transparent-native", "zakura/transparent-events", "zakura/transparent-filter", "zakura/transparent-shard", "zakura/transparent-txid-client", "zakura/receiver-directory", "zakura/receiver-pir"]
 # The backend selector. Named separately because the verification scripts have
 # to build it one backend at a time, unlike every other member.
 facade = "wallet-lib"

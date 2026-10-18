@@ -48,6 +48,47 @@ fn config() -> TransparentHistoryRecoveryConfig {
     }
 }
 
+#[test]
+fn invalid_endpoint_is_rejected_before_creating_the_companion() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("companion.sqlite");
+    for origin in [
+        "https://user@example.org/",
+        "https://example.org/?",
+        "https://example.org/#",
+        "https://bücher.example/",
+        "https:example.org",
+        "http://127.1/",
+        "https://example.org/\\@other.example/",
+    ] {
+        let mut config = config();
+        config.origin = origin.into();
+        assert!(
+            TransparentHistoryRecovery::open(&path, config).is_err(),
+            "{origin}"
+        );
+        assert!(
+            !path.exists(),
+            "invalid endpoint created a companion: {origin}"
+        );
+    }
+}
+
+#[test]
+fn endpoint_validation_keeps_the_original_companion_binding() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("companion.sqlite");
+    let mut original = config();
+    original.origin = "http://EXAMPLE.ORG:80/base/".into();
+    // Transparent recovery still accepts non-loopback HTTP. The original
+    // configured bytes remain its identity even when endpoint parsing normalizes.
+    drop(TransparentHistoryRecovery::open(&path, original.clone()).unwrap());
+    drop(TransparentHistoryRecovery::open(&path, original).unwrap());
+    let mut canonical = config();
+    canonical.origin = "http://example.org/base/".into();
+    assert!(TransparentHistoryRecovery::open(&path, canonical).is_err());
+}
+
 fn map() -> ShardMap {
     serde_json::from_slice(MAP).unwrap()
 }
