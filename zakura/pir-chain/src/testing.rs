@@ -529,6 +529,7 @@ pub fn cookie(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Receiver directory blocks around the public zero-OVK refund.
+#[cfg(feature = "receiver")]
 pub mod receiver {
     use super::*;
 
@@ -679,6 +680,7 @@ pub mod receiver {
 }
 
 /// Status blocks.
+#[cfg(feature = "status")]
 pub mod status {
     use super::*;
 

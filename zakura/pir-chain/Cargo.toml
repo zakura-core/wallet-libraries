@@ -10,12 +10,18 @@ repository.workspace = true
 readme = "README.md"
 
 [features]
+# Consumers select the adapter they use; transport and hash helpers stay shared.
+default = []
+transparent = []
+enhance = []
+status = []
+receiver = ["dep:zakura-receiver-crypto"]
 ## Synthetic chain fixtures for service tests: raw blocks and transactions built
 ## with the node's own encoders.
 testing = ["dep:axum", "dep:zakura-chain", "tokio/net", "tokio/time"]
 ## Reading the node's RocksDB directly, as a secondary instance; see
 ## `transparent::state`.
-rocksdb = ["dep:zakura-state", "dep:zakura-chain"]
+rocksdb = ["transparent", "dep:zakura-state", "dep:zakura-chain"]
 
 [dependencies]
 axum = { version = "0.7", optional = true }
@@ -34,7 +40,7 @@ zcash_protocol = { package = "zakura-protocol", version = "=4.0.0-rc0" }
 transparent = { package = "zakura-transparent", version = "=4.0.0-rc0", default-features = false, features = ["std"] }
 orchard = { package = "zakura-orchard", version = "=4.0.0-rc0", default-features = false, features = ["std", "backend-halo2"] }
 zakura-state = { workspace = true, optional = true }
-zakura-receiver-crypto = { path = "../receiver-crypto" }
+zakura-receiver-crypto = { path = "../receiver-crypto", optional = true }
 
 [dev-dependencies]
 axum = "0.7"
@@ -48,19 +54,19 @@ zakura-test.workspace = true
 
 [[test]]
 name = "enhance"
-required-features = ["testing"]
+required-features = ["testing", "enhance"]
 
 [[test]]
 name = "receiver"
-required-features = ["testing"]
+required-features = ["testing", "receiver"]
 
 [[test]]
 name = "status"
-required-features = ["testing"]
+required-features = ["testing", "status"]
 
 [[test]]
 name = "transparent"
-required-features = ["testing"]
+required-features = ["testing", "transparent"]
 
 [[test]]
 name = "state"

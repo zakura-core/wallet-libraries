@@ -42,8 +42,8 @@ CONFIGS = {
     "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
     # The separate zakura/pir-chain workspace has its own lockfile. Its opt-in
     # RocksDB reader is tested here; fresh consumers check the feature off.
-    "server-rpc": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing"]),
-    "server": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing", "rocksdb"]),
+    "server-rpc": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing", "transparent", "enhance", "status", "receiver"]),
+    "server": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing", "rocksdb", "enhance", "status", "receiver"]),
 }
 VERIFY = ("server-graph", "zakura-graph", "wallet-lib-modes", "vendor-ancestry", "dependency-graph")
 

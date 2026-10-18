@@ -102,6 +102,23 @@ def rpc_dependency_problems(graph, node_packages):
     return errors
 
 
+
+def product_dependency_problems(graph, product):
+    """A fresh product consumer must not activate another adapter or receiver recovery."""
+    adapters = [p for p in graph["packages"] if p["name"] == "zakura-server-chain"]
+    if len(adapters) != 1:
+        return [f"{product}: expected one chain adapter"]
+    nodes = {n["id"]: n for n in graph["resolve"]["nodes"]}
+    adapter = nodes[adapters[0]["id"]]
+    active = set(adapter["features"]) & {"transparent", "enhance", "status", "receiver"}
+    errors = []
+    if active != ({product} if product else set()):
+        errors.append(f"{product}: unexpected active adapters {sorted(active)}")
+    if product != "receiver" and any(p["name"] == "zakura-receiver-crypto" for p in graph["packages"]):
+        errors.append(f"{product}: resolves receiver recovery")
+    return errors
+
+
 def main():
     manifest = tomllib.loads((ROOT / "manifests/sources.toml").read_text())
     server = manifest["server"]
@@ -129,6 +146,8 @@ def main():
              'fn main() { let _ = zakura_receiver_crypto::RECORD_BYTES; }\n'),
             ("server-production", f'zakura-server-chain = {{ path = "{workspace}" }}',
              'fn main() { let _ = zakura_server_chain::NodeClient::new("http://127.0.0.1:1".into(), None); }\n'),
+            ("server-fixtures", f'zakura-server-chain = {{ path = "{workspace}", default-features = false, features = ["testing"] }}',
+             'fn main() { let _ = zakura_server_chain::testing::Tx::from_bytes; }\n'),
             # The RocksDB reader's public surface: its errors carry only this
             # repository's own types, so a consumer needs no node package to match them.
             ("server-rocksdb", f'zakura-server-chain = {{ path = "{workspace}", features = ["rocksdb"] }}',
@@ -144,7 +163,7 @@ fn main() {
     }
 }
 '''),
-            ("server", f'zakura-server-chain = {{ path = "{workspace}", features = ["testing"] }}',
+            ("server", f'zakura-server-chain = {{ path = "{workspace}", features = ["testing", "transparent", "enhance", "status", "receiver"] }}',
              '''use zakura_server_chain::{Network, NodeClient, NodeError, receiver::ReceiverBlock, enhance::EnhanceBlock, status::StatusBlock};
 use zakura_server_chain::transparent::{CompactBlock, Fee, TransparentBlock};
 fn public_results(receiver: ReceiverBlock, enhance: EnhanceBlock, status: StatusBlock, transparent: TransparentBlock, compact: CompactBlock) {
@@ -171,8 +190,32 @@ fn main() {
             errors.extend(problems(fresh, owned, nodes, wallet=kind == "wallet"))
             if kind == "server-production":
                 errors.extend(rpc_dependency_problems(fresh, nodes))
+            if kind in {"server-production", "server-fixtures"}:
+                errors.extend(product_dependency_problems(fresh, None))
             if not errors:
                 subprocess.run(["cargo", "check", "--locked", "--manifest-path", str(consumer / "Cargo.toml")], cwd=ROOT, check=True)
+        product_types = {"transparent": "TransparentBlock", "enhance": "EnhanceBlock",
+                         "status": "StatusBlock", "receiver": "ReceiverBlock"}
+        for product, public_type in product_types.items():
+            for testing in (False, True):
+                features = [product, *(["testing"] if testing else [])]
+                consumer = Path(temporary) / ("product-" + product + ("-testing" if testing else ""))
+                (consumer / "src").mkdir(parents=True)
+                (consumer / "Cargo.toml").write_text(
+                    '[package]\nname = "product-consumer"\nversion = "0.0.0"\nedition = "2024"\n'
+                    '[dependencies]\nzakura-server-chain = { path = ' + json.dumps(str(workspace)) +
+                    ', default-features = false, features = ' + json.dumps(features) + ' }\n')
+                source = f'fn main() {{ let _: Option<zakura_server_chain::{product}::{public_type}> = None;'
+                if testing:
+                    source += ' let _ = zakura_server_chain::testing::Tx::from_bytes;'
+                (consumer / "src/main.rs").write_text(source + ' }\n')
+                fresh = metadata(consumer / "Cargo.toml", locked=False)
+                errors.extend(problems(fresh, owned))
+                errors.extend(product_dependency_problems(fresh, product))
+                if not testing:
+                    errors.extend(rpc_dependency_problems(fresh, nodes))
+                if not errors:
+                    subprocess.run(["cargo", "check", "--locked", "--manifest-path", str(consumer / "Cargo.toml")], cwd=ROOT, check=True)
         # Each mutually exclusive facade backend must remain free of both
         # node packages and wallet-pir ownership, including transitive packages.
         for mode, options in (

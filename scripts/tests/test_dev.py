@@ -123,7 +123,7 @@ class WorkflowTests(unittest.TestCase):
         args = argparse.Namespace(package=["zakura-server-chain"], config="server")
         command = dev.cargo_args(args)
         self.assertEqual(command[:4], ["--manifest-path", "zakura/pir-chain/Cargo.toml", "-p", "zakura-server-chain"])
-        self.assertEqual(command[command.index("--features") + 1], "testing,rocksdb")
+        self.assertEqual(command[command.index("--features") + 1], "testing,rocksdb,enhance,status,receiver")
 
     def test_server_doctor_checks_the_server_lockfile(self):
         args = argparse.Namespace(command="doctor", config="server", profile=None)

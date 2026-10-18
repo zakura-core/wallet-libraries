@@ -60,6 +60,20 @@ contain no package owned or released by wallet-pir. Service-facing values contai
 only library-owned records, errors, bytes, heights and network choices; node and
 Common types remain implementation details.
 
+## Product selection
+
+Default features enable only shared transport, hashes and network helpers. Select
+`transparent`, `enhance`, `status` or `receiver` explicitly on each consumer's
+`zakura-server-chain` dependency, with `default-features = false`. Only `receiver`
+enables receiver recovery. `rocksdb` implies `transparent` and adds the node's
+database reader. `testing` adds shared synthetic fixtures without selecting an
+adapter; the receiver and status fixture modules follow their product features.
+For example, Transparent service tests select `["transparent", "testing"]`.
+
+This separates adapter compilation, not the shared transaction parser or its
+cryptographic dependencies. Selecting all products in one workspace still unifies
+those features, so this change does not establish a build-time speedup.
+
 ## Validation
 
 From the repository root:

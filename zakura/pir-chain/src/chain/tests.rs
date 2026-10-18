@@ -85,6 +85,7 @@ fn ironwood_transactions_match_the_node_decoder() {
     }
 }
 
+#[cfg(feature = "transparent")]
 #[test]
 fn exact_block_reads_reject_truncation_and_trailing_bytes() {
     use crate::transparent::FetchedBlock;

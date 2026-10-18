@@ -19,14 +19,18 @@
 #![forbid(unsafe_code)]
 
 mod chain;
+#[cfg(feature = "enhance")]
 pub mod enhance;
 mod fee;
 pub mod hash;
+#[cfg(feature = "receiver")]
 pub mod receiver;
 pub mod rpc;
+#[cfg(feature = "status")]
 pub mod status;
 #[cfg(feature = "testing")]
 pub mod testing;
+#[cfg(feature = "transparent")]
 pub mod transparent;
 
 pub use fee::{DEFAULT_CACHE_OUTPUTS, FeeError};
