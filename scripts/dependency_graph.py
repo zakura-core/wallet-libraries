@@ -42,7 +42,9 @@ def main():
         "zakura-orchard", "zakura-orchard-legacy", "zakura-sapling-crypto",
         "zakura-halo2-proofs", "zakura-halo2-gadgets", "zakura-bellman",
     }
-    native_evaluators = {"ipir-sp", "simplepir-kernel", "sha1", "clap", "env_logger"}
+    # Full wallets also need SHA-1 through zcash_script; only protocol-only
+    # consumers can forbid it independently of the IPIR evaluator boundary.
+    native_evaluators = {"ipir-sp", "simplepir-kernel", "clap", "env_logger"}
     cases = [
         ("record-types", "zakura/pir-enhance-types", [], endpoint_stack | {"http", "bytes"}, set()),
         ("endpoint", "zakura/pir-enhance-types", ["http-endpoint"], endpoint_stack, {"http"}),
@@ -56,9 +58,9 @@ def main():
         ("wallet", "librustzcash/zcash_client_sqlite", ["orchard", "transparent-inputs"],
          {"prost-build", "tonic-prost-build", "which", "regex", "regex-automata", "regex-syntax"} | pczt_macros, set()),
         ("pczt", "librustzcash/pczt", [], pczt_macros, {"serde_with"}),
-        ("pir", "zakura/pir-native", [], native_evaluators, {"ipir-native-client"}),
-        ("status-client", "zakura/pir-status", [], native_evaluators, {"ipir-native-client"}),
-        ("receiver-client", "zakura/receiver-pir", [], native_evaluators, {"ipir-native-client"}),
+        ("pir", "zakura/pir-native", [], native_evaluators | {"sha1"}, {"ipir-native-client"}),
+        ("status-client", "zakura/pir-status", [], native_evaluators | {"sha1"}, {"ipir-native-client"}),
+        ("receiver-client", "zakura/receiver-pir", [], native_evaluators | {"sha1"}, {"ipir-native-client"}),
         ("receiver-server", "zakura/receiver-pir", ["server"], set(), {"ipir-sp", "simplepir-kernel"}),
         ("filter", "zakura/transparent-filter", [], {"bitcoin", "secp256k1", "secp256k1-sys"},
          {"bitcoin_hashes"}),
@@ -70,7 +72,7 @@ def main():
          {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"} | native_evaluators,
          {"zakura-filters", "ipir-native-client"}),
         ("engine", "zakura/pir-transparent", ["engine"],
-         {"url", "idna", "icu_provider", "bitcoin"} | native_evaluators, {"ipir-native-client"}),
+         {"url", "idna", "icu_provider", "bitcoin", "sha1"} | native_evaluators, {"ipir-native-client"}),
         ("test-support", "librustzcash/zcash_client_sqlite", ["test-dependencies"],
          {"wagyu-zcash-parameters"}, set()),
         ("proving", "librustzcash/zcash_client_sqlite", ["pczt-tests"],
