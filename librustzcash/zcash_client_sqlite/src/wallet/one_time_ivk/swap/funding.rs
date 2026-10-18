@@ -12,8 +12,9 @@ use zcash_protocol::{
 };
 
 use super::{
-    ProviderSeen, ReservationPolicy, issuance_start, lifecycle::record,
-    reservations::record_provider_seen,
+    ProviderSeen, ReservationPolicy, issuance_start,
+    lifecycle::record,
+    reservations::{fresh_seen, record_provider_seen},
 };
 use crate::wallet::one_time_ivk::{
     Discovery, KeyId, OneTimeKey, Purpose, account_key, activate, decode_index, index_after,
@@ -68,8 +69,9 @@ pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
 const REFUND_SEEN_PROBES: u32 = 100;
 
 /// The lowest refund index above every allocated one that no key is registered at and
-/// `seen` does not hold. A held index is registered for a lookup, since a swap
-/// may have paid it, and recorded as seen, so it is never issued. After
+/// `seen` does not hold, refused as [`ReservationPolicy::SeenUnavailable`] unless `seen`
+/// is fresh at `now` (see [`fresh_seen`]). A held index is registered for a lookup, since
+/// a swap may have paid it, and recorded as seen, so it is never issued. After
 /// [`REFUND_SEEN_PROBES`] held indices this returns [`ReservationPolicy::Gap`]; the keys
 /// registered so far stay, so a later reservation continues past them.
 pub(in crate::wallet::one_time_ivk) fn next_refund_index<P: Parameters>(
@@ -79,6 +81,10 @@ pub(in crate::wallet::one_time_ivk) fn next_refund_index<P: Parameters>(
     seen: Option<&ProviderSeen<'_>>,
     now: i64,
 ) -> Result<Result<u64, ReservationPolicy>, SqliteClientError> {
+    let seen = match fresh_seen(seen, now) {
+        Ok(seen) => seen,
+        Err(policy) => return Ok(Err(policy)),
+    };
     let (account_ref, parent) = account_key(conn, params, account)?;
     // SQLite orders fixed-width big-endian blobs numerically. Unlike INTEGER, this
     // represents the entire u64 index space, including u64::MAX.
@@ -101,16 +107,13 @@ pub(in crate::wallet::one_time_ivk) fn next_refund_index<P: Parameters>(
             |row| row.get::<_, bool>(0),
         )?;
         if !registered {
-            let Some(seen) = seen else {
-                return Ok(Ok(index));
-            };
             if probes == REFUND_SEEN_PROBES {
                 return Ok(Err(ReservationPolicy::Gap));
             }
             probes += 1;
             let key = KeyId::new(Purpose::Refund, index);
             let receiver = key.derive(&parent)?.address_at(0u32, Scope::External);
-            if !seen.holds(&receiver)? {
+            if !seen.holds(&receiver.to_raw_address_bytes())? {
                 return Ok(Ok(index));
             }
             let from = restore_start(conn, params, account_ref)?;

@@ -22,7 +22,7 @@ use zcash_protocol::{
     memo::MemoBytes,
 };
 
-use super::{OneTimeKey, account_key, unix_now};
+use super::{OneTimeKey, account_key};
 use crate::{AccountUuid, WalletDb, error::SqliteClientError, util::Clock};
 
 /// Why issuance or an incoming operation must wait. The app owns its wording.
@@ -36,6 +36,13 @@ pub enum ReservationPolicy {
     Stale,
     /// The wallet has not scanned this address through the chain tip.
     Coverage,
+    /// Issuance needs the provider's seen set read within the last
+    /// `PROVIDER_READ_MAX_AGE_SECS` of the caller's clock, and at most
+    /// `PROVIDER_READ_CLOCK_SKEW_SECS` ahead of it (see
+    /// [`zakura_one_time_ivk::swap::provider_read_is_current`]), to rule out an address
+    /// another device of the seed gave the provider. There was none, or it was older or
+    /// further ahead: fetch it again.
+    SeenUnavailable,
 }
 
 impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
@@ -54,19 +61,21 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, CL, R> {
     /// Reserves the next refund index, after recovering every funding memo so an index the
-    /// seed already used is never issued again, skipping any the provider's current seen
-    /// set holds (see [`ProviderSeen`]), if the caller could fetch it. `tip` is the
-    /// network's chain tip (see [`ISSUANCE_TIP_LAG`]). The key scans only once its funding
-    /// transaction is stored (see [`WalletDb::record_refund_operation`]). A seen set that
-    /// holds a long run of unissued indices yields [`ReservationPolicy::Gap`] after
-    /// registering a bounded number of them, which a later reservation continues past.
+    /// seed already used is never issued again, skipping any the provider's seen set holds
+    /// (see [`ProviderSeen`]). `seen` is the provider's current set, which must be fresh at
+    /// `now`, the caller's clock in Unix seconds, or issuance is refused as
+    /// [`ReservationPolicy::SeenUnavailable`]. `tip` is the network's chain tip (see
+    /// [`ISSUANCE_TIP_LAG`]). The key scans only once its funding transaction is stored
+    /// (see [`WalletDb::record_refund_operation`]). A seen set that holds a long run of
+    /// unissued indices yields [`ReservationPolicy::Gap`] after registering a bounded
+    /// number of them, which a later reservation continues past.
     pub fn reserve_refund_key(
         &mut self,
         account: AccountUuid,
+        now: i64,
         tip: BlockHeight,
         seen: Option<&ProviderSeen<'_>>,
     ) -> Result<Result<OneTimeKey, ReservationPolicy>, SqliteClientError> {
-        let now = unix_now(&self.clock);
         self.transactionally(|db| funding::reserve(db.conn.0, db.params, account, tip, seen, now))
     }
 
@@ -91,11 +100,19 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// Resumes the account's draft reservation or reserves an incoming address, scanned
     /// from the first unscanned block, after reclaiming abandoned reservations. See
     /// [`ProviderSeen`] for the addresses never issued and [`RECEIVE_GAP_LIMIT`] for the
-    /// window. `seen` is the provider's current set, if the caller could fetch it, and
-    /// `tip` the network's chain tip (see [`ISSUANCE_TIP_LAG`]). Issuance waits for the
-    /// account's discovery to register the indices its filters mark paid or seen (see
-    /// `DiscoveryStatus::complete`), and checks the set first, so the lookahead covers any
-    /// window its hits widen.
+    /// window. `seen` is the provider's current set, if the caller could fetch it, `now`
+    /// the caller's clock in Unix seconds, and `tip` the network's chain tip (see
+    /// [`ISSUANCE_TIP_LAG`]). Issuance waits for the account's discovery to register the
+    /// indices its filters mark paid or seen (see `DiscoveryStatus::complete`), and checks
+    /// the set first, so the lookahead covers any window its hits widen.
+    ///
+    /// One swap attempt keeps one address however often it is quoted again. The draft, an
+    /// open reservation not started, paid or awaiting a payment, is resumed while its
+    /// latest request's deadline (the accepted one, or else the requested one) has not
+    /// passed by the earlier of `now` and the latest block time, even without a fresh set.
+    /// Once it has passed, the next attempt gets another address. A draft never quoted
+    /// needs a fresh set, and is retired if the set holds it. Reserving a new address
+    /// needs a set that is fresh at `now` (see [`ReservationPolicy::SeenUnavailable`]).
     pub fn prepare_receive_reservation(
         &mut self,
         account: AccountUuid,
@@ -120,20 +137,28 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
 
     /// Saves an unknown outcome for a quote request on the reservation at incoming
     /// `index`, just before the request leaves the device, and returns the request's
-    /// identity. `deadline` is the deposit deadline it sends. The address must be
-    /// scanned empty through the chain tip.
+    /// identity. `deadline` is the deposit deadline it sends, and `now` the caller's clock
+    /// in Unix seconds. The address must be scanned empty through the chain tip.
+    ///
+    /// Refused as [`ReservationPolicy::Stale`] once the reservation's latest request has
+    /// expired as [`Self::prepare_receive_reservation`] judges it, so the next attempt
+    /// prepares another address. A reservation's first request needs `seen`, the
+    /// provider's current set, fresh at `now` (see [`ReservationPolicy::SeenUnavailable`]);
+    /// if the set holds the address, another device gave it to the provider, so the
+    /// reservation is retired and the request refused as stale.
     pub fn begin_receive_operation(
         &mut self,
         account: AccountUuid,
         index: u64,
         deadline: i64,
         now: i64,
+        seen: Option<&ProviderSeen<'_>>,
     ) -> Result<Result<String, ReservationPolicy>, SqliteClientError> {
         let mut id = [0; 16];
         self.rng.fill_bytes(&mut id);
         let request = hex::encode(id);
         self.transactionally(|db| {
-            reservations::begin(db.conn.0, account, index, &request, deadline, now)
+            reservations::begin(db.conn.0, account, index, &request, deadline, now, seen)
                 .map(|begun| begun.map(|()| request))
         })
     }

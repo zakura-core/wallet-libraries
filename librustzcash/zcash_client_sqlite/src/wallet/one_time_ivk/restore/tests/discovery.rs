@@ -712,9 +712,15 @@ fn a_fresh_account_rechecks_on_request() {
     assert!(!found.complete);
     assert_eq!(found.lookups.len(), 1);
     assert!(
-        prepare_from(db, account, clock_now(), after, None)
-            .unwrap()
-            .is_ok()
+        prepare_from(
+            db,
+            account,
+            clock_now(),
+            after,
+            Some(&empty_seen(clock_now()))
+        )
+        .unwrap()
+        .is_ok()
     );
     assert!(
         db.record_one_time_lookup(account, key, publication, 1, &[], true, clock_now())

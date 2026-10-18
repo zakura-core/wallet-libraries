@@ -814,7 +814,7 @@ async fn issuance_skips_a_refund_address_in_the_fetched_seen_sets() {
         contains: &contains,
     };
     let db = r.st.wallet_mut().db_mut();
-    let key = db.reserve_refund_key(r.account, r.through.height, Some(&seen));
+    let key = db.reserve_refund_key(r.account, NOW, r.through.height, Some(&seen));
     // Discovery registered the seen refund index, so issuance takes the next one.
     assert_eq!(
         key.unwrap().unwrap().key_id(),

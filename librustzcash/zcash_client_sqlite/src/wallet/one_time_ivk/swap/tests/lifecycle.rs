@@ -153,7 +153,7 @@ fn a_refund_owed_starts_an_unfunded_refund_key() {
         let from = next_height(&st);
         // Reserved as issuance does: it starts only when its funding transaction is stored.
         let db = st.wallet_mut().db_mut();
-        let key = db.reserve_refund_key(account, from - 1, None);
+        let key = reserve_refund(db, account, from - 1);
         let key = key.unwrap().unwrap().key_id();
         observe(db, account, key, "deposit", Active, 100).unwrap();
         let record = |db: &mut Db, s, at| {
@@ -185,15 +185,16 @@ fn a_refund_owed_during_a_pending_lookup_starts_the_key() {
             .address_at(0u32, Scope::External)
             .to_raw_address_bytes()];
         let contains = |r: &[[u8; 43]]| r.iter().map(|r| held.contains(r)).collect();
+        let now = clock_now();
         let seen = ProviderSeen {
             since: 0,
-            until: 0,
+            until: now,
             contains: &contains,
         };
         let through = tip(&st);
         // The provider saw the first refund address, so it awaits a lookup.
         let db = st.wallet_mut().db_mut();
-        let issued = db.reserve_refund_key(account, through.height, Some(&seen));
+        let issued = db.reserve_refund_key(account, now, through.height, Some(&seen));
         assert_eq!(issued.unwrap().unwrap().key_id().index(), 1);
         observe(db, account, key, "deposit", Active, 100).unwrap();
         let recorded =
@@ -412,10 +413,20 @@ fn incoming_key_closes_only_once_paid_and_released() {
     let from = next_height(&st);
     let now = registered_at();
     let db = st.wallet_mut().db_mut();
-    let reserved = prepare_from(db, account, now, from, None).unwrap().unwrap();
+    let reserved = prepare_from(db, account, now, from, Some(&empty_seen(now)))
+        .unwrap()
+        .unwrap();
     let index = reserved.key_id().index();
     tx(db, |c, _| {
-        store::swap::reservations::begin(c, account, index, "pending", now + DAY, now)
+        store::swap::reservations::begin(
+            c,
+            account,
+            index,
+            "pending",
+            now + DAY,
+            now,
+            Some(&empty_seen(now)),
+        )
     })
     .unwrap()
     .unwrap();
@@ -442,10 +453,20 @@ fn underpaid_reservation(st: &mut State) -> (OneTimeKey, i64) {
     let now = registered_at();
     let deadline = now + HOUR;
     let db = st.wallet_mut().db_mut();
-    let key = prepare_from(db, account, now, from, None).unwrap().unwrap();
+    let key = prepare_from(db, account, now, from, Some(&empty_seen(now)))
+        .unwrap()
+        .unwrap();
     let index = key.key_id().index();
     tx(db, |c, _| {
-        store::swap::reservations::begin(c, account, index, "swap", deadline, now)
+        store::swap::reservations::begin(
+            c,
+            account,
+            index,
+            "swap",
+            deadline,
+            now,
+            Some(&empty_seen(now)),
+        )
     })
     .unwrap()
     .unwrap();
@@ -485,7 +506,13 @@ fn a_started_reservation_left_active_stops_scanning_at_the_limit() {
     assert!(scanning_keys(&st).is_empty());
     let from = next_height(&st);
     let db = st.wallet_mut().db_mut();
-    let next = prepare_from(db, account, deadline + LIMIT, from, None);
+    let next = prepare_from(
+        db,
+        account,
+        deadline + LIMIT,
+        from,
+        Some(&empty_seen(deadline + LIMIT)),
+    );
     assert_ne!(next.unwrap().unwrap().key_id(), key.key_id());
 }
 
@@ -608,11 +635,21 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
     let now = registered_at();
     let deadline = now + HOUR;
     let db = st.wallet_mut().db_mut();
-    let reservation = prepare_from(db, account, now, from, None).unwrap().unwrap();
+    let reservation = prepare_from(db, account, now, from, Some(&empty_seen(now)))
+        .unwrap()
+        .unwrap();
     let index = reservation.key_id().index();
     for request in ["edit", "accepted"] {
         tx(db, |c, _| {
-            store::swap::reservations::begin(c, account, index, request, deadline, now)
+            store::swap::reservations::begin(
+                c,
+                account,
+                index,
+                request,
+                deadline,
+                now,
+                Some(&empty_seen(now)),
+            )
         })
         .unwrap()
         .unwrap();

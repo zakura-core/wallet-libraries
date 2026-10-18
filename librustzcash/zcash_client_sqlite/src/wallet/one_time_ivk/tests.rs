@@ -130,7 +130,8 @@ pub(super) fn reserve_in(
     now: i64,
 ) -> Result<OneTimeKey, SqliteClientError> {
     let index = if purpose == Purpose::Refund {
-        store::swap::funding::next_refund_index(c, p, account, None, now)?.unwrap()
+        let seen = Some(&empty_seen(now));
+        store::swap::funding::next_refund_index(c, p, account, seen, now)?.unwrap()
     } else {
         let sql = "SELECT MAX(k.key_index) FROM ironwood_one_time_keys k
                    JOIN accounts a ON a.id = k.account_id
@@ -184,6 +185,32 @@ pub(super) fn recover(
     })
     .unwrap()
     .1
+}
+
+/// Answers that a seen set holds none of `receivers`.
+pub(super) fn holds_nothing(receivers: &[[u8; 43]]) -> Vec<bool> {
+    vec![false; receivers.len()]
+}
+
+/// A seen set read at `now` that holds nothing and covers no quote: fresh at `now`, yet
+/// every quote still counts as seen, as without a set.
+pub(super) fn empty_seen(now: i64) -> ProviderSeen<'static> {
+    ProviderSeen {
+        since: now,
+        until: now,
+        contains: &holds_nothing,
+    }
+}
+
+/// Reserves `account`'s next refund key at the test clock's time, with an empty seen set
+/// read then (see [`empty_seen`]).
+pub(super) fn reserve_refund(
+    db: &mut Db,
+    account: AccountUuid,
+    tip: BlockHeight,
+) -> Policy<OneTimeKey> {
+    let now = clock_now();
+    db.reserve_refund_key(account, now, tip, Some(&empty_seen(now)))
 }
 
 /// Reserves like `WalletDb::prepare_receive_reservation`, scanning a new key from `from`,

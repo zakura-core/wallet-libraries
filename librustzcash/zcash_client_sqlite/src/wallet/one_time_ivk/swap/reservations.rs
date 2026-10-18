@@ -5,6 +5,7 @@ use zakura_one_time_ivk::swap::{
     Observation,
     OperationStatus::Terminal,
     ReceiptExpectation::{Positive, Unknown},
+    provider_read_is_current,
 };
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
@@ -43,8 +44,10 @@ pub const SEEN_SLACK_SECONDS: i64 = 60 * 60;
 ///
 /// A refund address the set holds is never issued either, which covers one an unfunded
 /// quote used, since no funding memo recovers it. An address another device of the same
-/// seed quoted is known only through the set, so one quoted within the feed's read lag
-/// before a restore can still be issued again.
+/// seed quoted is known only through the set, so issuing an address, or quoting a draft
+/// for the first time, needs a fresh set: one whose `until` is within
+/// [`zakura_one_time_ivk::swap::provider_read_is_current`]'s bounds of the caller's
+/// clock. One quoted elsewhere after that read can still be issued again.
 ///
 /// An app can fill it from a receiver directory's `Seen`, which
 /// `zakura_pir_receiver::fetch_seen` downloads.
@@ -64,13 +67,23 @@ impl ProviderSeen<'_> {
     /// refused, so a malformed answer cannot make a seen address issuable.
     pub(in crate::wallet::one_time_ivk) fn holds(
         &self,
-        receiver: &orchard::Address,
+        receiver: &[u8; 43],
     ) -> Result<bool, SqliteClientError> {
-        match (self.contains)(&[receiver.to_raw_address_bytes()])[..] {
+        match (self.contains)(&[*receiver])[..] {
             [hit] => Ok(hit),
             _ => Err(wrong_answer_count()),
         }
     }
+}
+
+/// `seen` if its read is current at `now`, the caller's wall clock (see
+/// [`provider_read_is_current`]), or else [`ReservationPolicy::SeenUnavailable`].
+pub(in crate::wallet::one_time_ivk) fn fresh_seen<'a, 's>(
+    seen: Option<&'a ProviderSeen<'s>>,
+    now: i64,
+) -> Result<&'a ProviderSeen<'s>, ReservationPolicy> {
+    seen.filter(|s| provider_read_is_current(s.until, now))
+        .ok_or(ReservationPolicy::SeenUnavailable)
 }
 
 /// The error for a seen set that answered for the wrong number of receivers.
@@ -116,6 +129,22 @@ const SEEN: &str = "(k.provider_seen = 1
         WHERE o.one_time_key_id = k.id AND o.request IS NOT NULL
           AND (o.reference IS NOT NULL OR o.rejected = 1
             OR o.begun_at < :since OR o.begun_at > :covered)))";
+
+/// Whether incoming key `k`'s address is seen whatever later sets say: a set held it, or
+/// the provider accepted or rejected a quote for it.
+const GIVEN: &str = "(k.provider_seen = 1
+    OR EXISTS(SELECT 1 FROM ironwood_one_time_operations o
+        WHERE o.one_time_key_id = k.id AND o.request IS NOT NULL
+          AND (o.reference IS NOT NULL OR o.rejected = 1)))";
+
+/// The deadline of the latest request begun on incoming key `k`'s current reservation,
+/// the accepted one or else the requested one, or NULL if none was. A reissued address
+/// keeps its earlier reservations' requests, so a request belongs to the current one when
+/// begun no earlier than it was reserved: reserving moves `reserved_at` past every
+/// request's `begun_at`, and `begin` stores no `begun_at` before `reserved_at`.
+const LATEST_DEADLINE: &str = "(SELECT o.deadline FROM ironwood_one_time_operations o
+    WHERE o.one_time_key_id = k.id AND o.request IS NOT NULL AND o.begun_at >= k.reserved_at
+    ORDER BY o.id DESC LIMIT 1)";
 
 /// SQL condition on `ironwood_one_time_keys k`: one of its quotes was started.
 pub(in crate::wallet::one_time_ivk) const STARTED: &str =
@@ -181,6 +210,43 @@ fn release(conn: &Connection, key: i64, now: i64) -> Result<(), SqliteClientErro
         params![key, now],
     )?;
     Ok(())
+}
+
+/// Retires never-quoted reservation `key`, whose address the provider was given by
+/// another device of the seed: it is released and recorded seen, so it is never issued,
+/// and keeps scanning, since that swap may pay it, until it closes like any released key.
+fn retire(conn: &Connection, key: i64, now: i64) -> Result<(), SqliteClientError> {
+    record_provider_seen(conn, key)?;
+    release(conn, key, now)
+}
+
+/// Checks never-quoted reservation `key` with `receiver` before its address is first
+/// exposed: refused without a `seen` set fresh at `now`, and retired (see [`retire`]) if
+/// the provider already has the address. Returns whether it can still be quoted.
+fn check_unquoted(
+    conn: &Connection,
+    key: i64,
+    receiver: &[u8; 43],
+    provider_seen: bool,
+    seen: Option<&ProviderSeen<'_>>,
+    now: i64,
+) -> Result<Result<bool, ReservationPolicy>, SqliteClientError> {
+    if !provider_seen {
+        let seen = match fresh_seen(seen, now) {
+            Ok(seen) => seen,
+            Err(policy) => return Ok(Err(policy)),
+        };
+        if !seen.holds(receiver)? {
+            return Ok(Ok(true));
+        }
+    }
+    retire(conn, key, now)?;
+    Ok(Ok(false))
+}
+
+/// A stored receiver's bytes.
+fn receiver_bytes(receiver: &[u8]) -> Result<[u8; 43], SqliteClientError> {
+    <[u8; 43]>::try_from(receiver).map_err(|_| corrupt("invalid receiver"))
 }
 
 /// Releases key `key`'s reservation and stops scanning it.
@@ -301,6 +367,7 @@ pub(in crate::wallet::one_time_ivk) fn begin(
     request: &str,
     deadline: i64,
     now: i64,
+    seen: Option<&ProviderSeen<'_>>,
 ) -> Result<Result<(), ReservationPolicy>, SqliteClientError> {
     if request.is_empty() {
         return Err(invalid("empty operation request"));
@@ -308,20 +375,52 @@ pub(in crate::wallet::one_time_ivk) fn begin(
     if deadline <= now {
         return Err(invalid("operation deadline has passed"));
     }
-    let (key, owner, open): (i64, i64, bool) = conn
+    let (key, owner, open, provider_seen, receiver, latest): (
+        i64,
+        i64,
+        bool,
+        bool,
+        Vec<u8>,
+        Option<i64>,
+    ) = conn
         .query_row(
             &format!(
-                "SELECT k.id, k.account_id, {RESERVED} AND k.used = 0 AND NOT {STARTED}
+                "SELECT k.id, k.account_id, {RESERVED} AND k.used = 0 AND NOT {STARTED},
+                    k.provider_seen, k.receiver, {LATEST_DEADLINE}
                  FROM ironwood_one_time_keys k JOIN accounts a ON a.id = k.account_id
                  WHERE a.uuid = ?1 AND k.purpose = 1 AND k.key_index = ?2"
             ),
             params![account.0, index.to_be_bytes()],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
         )
         .optional()?
         .ok_or_else(|| invalid("unknown receive reservation"))?;
     if !open {
         return Ok(Err(ReservationPolicy::Stale));
+    }
+    match latest {
+        // The attempt expired, so the next one prepares another address.
+        Some(latest) if latest <= deadline_clock(conn, now)? => {
+            return Ok(Err(ReservationPolicy::Stale));
+        }
+        Some(_) => {}
+        None => {
+            let receiver = receiver_bytes(&receiver)?;
+            match check_unquoted(conn, key, &receiver, provider_seen, seen, now)? {
+                Ok(true) => {}
+                Ok(false) => return Ok(Err(ReservationPolicy::Stale)),
+                Err(policy) => return Ok(Err(policy)),
+            }
+        }
     }
     if index >= recovery_end(conn, owner)? {
         return Ok(Err(ReservationPolicy::Gap));
@@ -329,11 +428,12 @@ pub(in crate::wallet::one_time_ivk) fn begin(
     if !scanned_empty(conn, key)? {
         return Ok(Err(ReservationPolicy::Coverage));
     }
-    // The provider has the address from here on, so issuance avoids it.
+    // The provider has the address from here on, so issuance avoids it. The request
+    // belongs to the current reservation (see [`LATEST_DEADLINE`]).
     conn.execute(
         "INSERT INTO ironwood_one_time_operations
             (one_time_key_id, request, deadline, begun_at, observed_at)
-         VALUES (?1, ?2, ?3, ?4, ?4)",
+         SELECT ?1, ?2, ?3, MAX(?4, reserved_at), ?4 FROM ironwood_one_time_keys WHERE id = ?1",
         params![key, request, deadline, now],
     )?;
     Ok(Ok(()))
@@ -507,6 +607,7 @@ pub(in crate::wallet::one_time_ivk) fn record_status<P: Parameters>(
 
 /// See `WalletDb::prepare_receive_reservation`: resumes the draft, or reserves the lowest
 /// index never quoted, or else the lowest abandoned one, scanning it from `scan_from`.
+/// `seen`, if given, must already be recorded (see [`record_seen`]).
 pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -520,33 +621,64 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     if !discovery::issuance_ready(conn, params, a)? {
         return Ok(Err(ReservationPolicy::Gap));
     }
-    let coverage = coverage(seen);
     let end = recovery_end(conn, a.0)?;
-    // A received address is permanently excluded, even if later spent or rewound.
-    let draft: Option<(i64, Vec<u8>, bool)> = conn
-        .query_row(
-            &format!(
-                "SELECT k.id, k.key_index, {SEEN} FROM ironwood_one_time_keys k
-                 WHERE k.account_id = :account AND {RESERVED} AND k.used = 0 AND NOT {STARTED}
-                 ORDER BY k.reserved_at, k.id LIMIT 1"
-            ),
-            named_params![":account": a.0, ":since": coverage.0, ":covered": coverage.1],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    match draft {
-        Some((key, index, false)) => {
+    let deadline_now = deadline_clock(conn, now)?;
+    // Open reservations not started, paid or awaiting a payment, oldest first. A received
+    // address is permanently excluded, even if later spent or rewound.
+    let drafts = conn
+        .prepare(&format!(
+            "SELECT k.id, k.key_index, k.receiver, k.provider_seen, {LATEST_DEADLINE}, {GIVEN}
+             FROM ironwood_one_time_keys k
+             WHERE k.account_id = ?1 AND k.purpose = 1 AND {RESERVED} AND k.used = 0
+               AND NOT {STARTED}
+               AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
+                   WHERE p.one_time_key_id = k.id)
+             ORDER BY k.reserved_at, k.id"
+        ))?
+        .query_map([a.0], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, bool>(3)?,
+                r.get::<_, Option<i64>>(4)?,
+                r.get::<_, bool>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (key, index, receiver, provider_seen, latest, given) in drafts {
+        let resume = match latest {
+            None => {
+                let receiver = receiver_bytes(&receiver)?;
+                match check_unquoted(conn, key, &receiver, provider_seen, seen, now)? {
+                    Ok(usable) => usable,
+                    Err(policy) => return Ok(Err(policy)),
+                }
+            }
+            // The attempt is live, so its next quote keeps the address.
+            Some(deadline) if deadline > deadline_now => true,
+            // The provider has the expired draft's address, so the next attempt gets
+            // another. Its funding instructions were never shown, so nothing can pay it
+            // and its key stops scanning.
+            Some(_) if given => {
+                abandon(conn, key, now)?;
+                false
+            }
+            // Only unknown outcomes: it stays reserved until reaped (see [`reusable`]).
+            Some(_) => false,
+        };
+        if resume {
             if decode_index(index)? >= end {
                 return Ok(Err(ReservationPolicy::Gap));
             }
             return key_by_id(conn, params, account, key).map(Ok);
         }
-        // The provider has the draft's address from an earlier review, so the next swap
-        // gets another. Its funding instructions were never shown, so nothing can pay it
-        // and its key stops scanning.
-        Some((key, _, true)) => abandon(conn, key, now)?,
-        None => {}
     }
+    let seen = match fresh_seen(seen, now) {
+        Ok(seen) => seen,
+        Err(policy) => return Ok(Err(policy)),
+    };
+    let coverage = coverage(Some(seen));
     // An address the provider was given without seeing it, such as a request that never
     // reached it, is reissued only when the gap rule leaves no fresh one.
     let mut abandoned = None;
@@ -578,7 +710,7 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
         let Some((blocked, quoted)) = row else {
             let key_id = KeyId::new(Purpose::Receive, index);
             let receiver = key_id.derive(&parent)?.address_at(0u32, Scope::External);
-            if seen.map(|s| s.holds(&receiver)).transpose()? == Some(true) {
+            if seen.holds(&receiver.to_raw_address_bytes())? {
                 let from = restore_start(conn, params, a)?;
                 let (id, _) = register(
                     conn,
@@ -624,8 +756,12 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
         Discovery::Scan,
         now,
     )?;
+    // Earlier reservations' requests stay behind this one (see [`LATEST_DEADLINE`]).
     conn.execute(
-        "UPDATE ironwood_one_time_keys SET reserved_at = ?2, released_at = NULL WHERE id = ?1",
+        "UPDATE ironwood_one_time_keys
+         SET released_at = NULL, reserved_at = MAX(?2, IFNULL((SELECT MAX(begun_at) + 1
+             FROM ironwood_one_time_operations WHERE one_time_key_id = ?1), ?2))
+         WHERE id = ?1",
         params![key, now],
     )?;
     Ok(Ok(registered))
@@ -648,9 +784,7 @@ pub(in crate::wallet::one_time_ivk) fn record_seen(
         .collect::<Result<Vec<_>, _>>()?;
     let receivers = keys
         .iter()
-        .map(|(_, receiver)| {
-            <[u8; 43]>::try_from(receiver.as_slice()).map_err(|_| corrupt("invalid receiver"))
-        })
+        .map(|(_, receiver)| receiver_bytes(receiver))
         .collect::<Result<Vec<_>, _>>()?;
     let hits = (seen.contains)(&receivers);
     if hits.len() != keys.len() {

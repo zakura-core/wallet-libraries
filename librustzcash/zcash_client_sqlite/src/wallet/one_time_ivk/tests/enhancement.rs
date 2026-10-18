@@ -323,14 +323,17 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     };
     let unauthenticated = RefundMemo::new(0).encode();
     replace_memo(&st, memo_bytes.as_slice(), unauthenticated.as_slice());
-    recover_memos(&mut st, restored);
+    // Recovery registers the key even when issuance has no seen set to issue with.
+    let db = st.wallet_mut().db_mut();
+    let unchecked = db.reserve_refund_key(restored, clock_now(), mined, None);
+    assert!(matches!(
+        unchecked,
+        Ok(Err(ReservationPolicy::SeenUnavailable))
+    ));
     assert_eq!(refund_keys(&st), vec![(0, u32::from(mined), true)]);
     assert!(!pending(&st));
     let db = st.wallet_mut().db_mut();
-    let next = db
-        .reserve_refund_key(restored, mined, None)
-        .unwrap()
-        .unwrap();
+    let next = reserve_refund(db, restored, mined).unwrap().unwrap();
     assert_eq!(next.key_id(), KeyId::new(Purpose::Refund, 1));
     replace_memo(&st, unauthenticated.as_slice(), memo_bytes.as_slice());
     exec(st.wallet().conn(), "DELETE FROM ironwood_one_time_keys", []);
@@ -410,7 +413,7 @@ fn refund_funding_refuses_its_memo_on_orchard_change() {
     let deposit = p2pkh(7).encode(st.network());
     let now = clock_now();
     let db = st.wallet_mut().db_mut();
-    let key = db.reserve_refund_key(account, tip, None).unwrap().unwrap();
+    let key = reserve_refund(db, account, tip).unwrap().unwrap();
     let index = key.key_id().index();
     db.record_refund_operation(account, index, &deposit, now + 3_600, now)
         .unwrap();
@@ -449,12 +452,8 @@ fn a_refund_key_starts_scanning_when_its_matching_funding_transaction_is_stored(
     let now = clock_now();
     let [other, funded, stale] = [8, 7, 9].map(|byte| p2pkh(byte).encode(&network));
     let db = st.wallet_mut().db_mut();
-    let [unfunded, key] = [0, 1].map(|_| {
-        db.reserve_refund_key(account, tip, None)
-            .unwrap()
-            .unwrap()
-            .key_id()
-    });
+    let [unfunded, key] =
+        [0, 1].map(|_| reserve_refund(db, account, tip).unwrap().unwrap().key_id());
     assert!(
         db.refund_funding_memo(account, key.index(), &funded)
             .is_err()
@@ -547,16 +546,11 @@ fn a_refund_key_starts_scanning_when_its_matching_funding_transaction_is_stored(
     };
     set_memo(&st, None);
     assert!(matches!(
-        st.wallet_mut()
-            .db_mut()
-            .reserve_refund_key(account, mined, None),
+        reserve_refund(st.wallet_mut().db_mut(), account, mined),
         Ok(Err(ReservationPolicy::Coverage))
     ));
     set_memo(&st, Some(&stored));
-    let next = st
-        .wallet_mut()
-        .db_mut()
-        .reserve_refund_key(account, mined, None);
+    let next = reserve_refund(st.wallet_mut().db_mut(), account, mined);
     assert_eq!(next.unwrap().unwrap().key_id().index(), key.index() + 1);
 }
 
@@ -725,7 +719,7 @@ fn refund_quote_needs_an_open_reserved_refund_key_and_a_canonical_transparent_de
     };
     assert!(record(0, &deposit, now + 60).is_err());
     for _ in 0..2 {
-        db.reserve_refund_key(account, tip, None).unwrap().unwrap();
+        reserve_refund(db, account, tip).unwrap().unwrap();
     }
     let mut record = |index, deposit: &str, deadline| {
         db.record_refund_operation(account, index, deposit, deadline, now)
