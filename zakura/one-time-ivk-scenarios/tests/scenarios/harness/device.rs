@@ -448,20 +448,29 @@ impl Device {
         report
     }
 
-    /// Whether the account's discovery is incomplete or has lookups or late payments left.
+    /// Whether any of the wallet's accounts has discovery incomplete or lookups or late
+    /// payments left.
     pub fn history_pending(&self) -> bool {
-        let status = self
-            .db
-            .one_time_discovery(self.account, i64::MAX)
-            .expect("the discovery status");
-        status.is_some_and(|s| !s.complete || !s.lookups.is_empty() || !s.witnesses.is_empty())
+        self.accounts().into_iter().any(|account| {
+            let status = self
+                .db
+                .one_time_discovery(account, i64::MAX)
+                .expect("the discovery status");
+            status.is_some_and(|s| !s.complete || !s.lookups.is_empty() || !s.witnesses.is_empty())
+        })
+    }
+
+    /// The wallet's accounts: this device's own, then the ones [`Self::add_account`] added.
+    fn accounts(&self) -> Vec<AccountUuid> {
+        std::iter::once(self.account)
+            .chain(self.extra_accounts.iter().copied())
+            .collect()
     }
 
     /// The scanning half of [`Self::sync`]. Returns the blocks it scanned.
     pub fn scan(&mut self, chain: &Chain) -> u64 {
         let mut scanned = 0u64;
         let mut rewound = 0u32;
-        let account = self.account;
         let tip = chain.tip();
         self.db.update_chain_tip(tip).expect("the tip updates");
         loop {
@@ -538,9 +547,11 @@ impl Device {
                 }
             }
         }
-        self.db
-            .close_finished_one_time_keys(account, self.now(chain), tip)
-            .expect("finished keys close");
+        for account in self.accounts() {
+            self.db
+                .close_finished_one_time_keys(account, self.now(chain), tip)
+                .expect("finished keys close");
+        }
         self.scanned_blocks += scanned;
         scanned
     }
@@ -599,11 +610,8 @@ impl Device {
     /// injected fault that stops the app ends discovery there, and the app restarts (see
     /// [`Self::reopen`]).
     pub fn discover(&mut self, chain: &Chain, near: &Near) -> (usize, Vec<String>) {
-        let accounts: Vec<AccountUuid> = std::iter::once(self.account)
-            .chain(self.extra_accounts.iter().copied())
-            .collect();
         let (mut lookups, mut problems) = (0, Vec::new());
-        for account in accounts {
+        for account in self.accounts() {
             let (n, more, stopped) = self.discover_account(chain, near, account);
             lookups += n;
             problems.extend(more);
