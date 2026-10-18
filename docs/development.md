@@ -111,7 +111,7 @@ parameters. Enable `proving-tests` for real proving fixtures; the `proving` and
 `python3 scripts/dev.py verify --only dependency-graph` checks fresh external
 consumers, including fixture availability and the engine's transport-free graph.
 
-The PIR clients temporarily pin the IPIR family to the exact head of
+The PIR clients temporarily pin the IPIR family to the main revision that merged
 [IPIR PR 38](https://github.com/valargroup/ipir-sp/pull/38), which removes CLI-only
 dependencies from the library. Keep IPIR, InspiRING and ReinspiRING on the same
 source when repinning, since their exposed types must share one identity.
