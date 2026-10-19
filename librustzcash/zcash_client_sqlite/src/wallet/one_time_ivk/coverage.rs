@@ -527,6 +527,15 @@ pub(crate) fn record<P: Parameters>(
                     step.history.epoch
                 ],
             )?;
+            // A snapshot tested the whole set, whose receivers every obligation's are among,
+            // so it covers the history each owes through its cutoff.
+            if step.start.is_none() {
+                conn.execute(
+                    "DELETE FROM ironwood_one_time_obligations
+                     WHERE account_id = ?1 AND through_height <= ?2",
+                    params![owner.0, u32::from(step.end.height)],
+                )?;
+            }
         }
         CoverageTarget::Obligation { id, .. } => {
             let Some(found) = account_obligation(conn, owner.0, id)? else {

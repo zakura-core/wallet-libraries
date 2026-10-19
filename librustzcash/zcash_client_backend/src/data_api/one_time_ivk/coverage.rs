@@ -235,7 +235,8 @@ pub trait OneTimeIvkCoverageWrite: OneTimeIvkWrite + OneTimeIvkCoverageRead {
     /// snapshot, which sets the history it follows. Each later one is a bucket starting at
     /// or below the frontier and ending above it, or a pinned snapshot ending above it,
     /// tested against the current, completely derived receiver set. Moving the frontier
-    /// unpins its snapshot. An obligation tests its snapshot, then buckets that continue
+    /// unpins its snapshot, and a snapshot also retires every obligation that owes no
+    /// history past it. An obligation tests its snapshot, then buckets that continue
     /// from it, and completes at its `through`. The step's last block must be on the
     /// wallet's chain, unless it precedes the account's birthday.
     fn record_one_time_coverage(

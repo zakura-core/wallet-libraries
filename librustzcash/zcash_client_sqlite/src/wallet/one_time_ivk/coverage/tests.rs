@@ -836,3 +836,39 @@ fn a_frontier_past_retention_rebootstraps_from_a_newer_snapshot() {
         Recorded
     );
 }
+
+/// A rebootstrap's snapshot tests the whole set, so it retires an obligation it covers,
+/// here one bridged partway whose remaining buckets the directory no longer retains, and
+/// the obligation's hit is looked up through the snapshot.
+#[test]
+fn a_rebootstrap_retires_the_obligations_it_covers() {
+    use CoverageOutcome::*;
+    let (mut st, account) = prepared();
+    let top = tip(&st).height;
+    let (h0, h1) = (top - 6, top - 2);
+    bootstrap(&mut st, account, h0, &[]);
+    let sparse = KeyId::new(Purpose::Refund, 1_000_000);
+    register_sparse(&mut st, account, sparse).unwrap();
+    let id = coverage(&st, account).obligations[0].id;
+    let owed = obligation(&st, account, id);
+    let partial = snapshot(&st, h0 - 3);
+    let db = st.wallet_mut().db_mut();
+    db.pin_one_time_snapshot(account, owed, partial).unwrap();
+    let tested = record(&mut st, account, owed, cumulative(partial), &[]);
+    assert_eq!(tested.unwrap(), Recorded);
+    assert_eq!(coverage(&st, account).obligations[0].bridged, Some(h0 - 3));
+
+    let target = frontier(&st, account);
+    let newer = snapshot(&st, h1);
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(
+        db.pin_one_time_snapshot(account, target, newer).unwrap(),
+        Some(newer)
+    );
+    let rebootstrapped = record(&mut st, account, target, cumulative(newer), &[sparse]);
+    assert_eq!(rebootstrapped.unwrap(), Recorded);
+    assert!(coverage(&st, account).obligations.is_empty());
+    assert_eq!(lookup(&st, sparse), Some((Some(u32::from(h1)), None, 0, 0)));
+    let late = bucket(&st, h0 - 3, h0);
+    assert_eq!(record(&mut st, account, owed, late, &[]).unwrap(), Stale);
+}
