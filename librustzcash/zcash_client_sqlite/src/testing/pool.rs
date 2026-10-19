@@ -318,16 +318,18 @@ pub(crate) fn checkpoint_gaps<T: ShieldedPoolTester>() {
 
 /// Runs the deep-scan retention check at the ZIP 318 interval and at a short configured one, so
 /// that the wallet is shown to retain exactly the grid it was configured with rather than a
-/// hard-coded 144-block one.
+/// hard-coded 144-block one, both before and after NU7.
 pub(crate) fn anchor_checkpoints_retained_across_deep_scan<T: ShieldedPoolTester>() {
     for interval in [
         AnchorRetentionInterval::ZIP_318,
         AnchorRetentionInterval::custom(NonZeroU32::new(12).expect("nonzero")),
     ] {
-        zcash_client_backend::data_api::testing::pool::anchor_checkpoints_retained_across_deep_scan::<
-            T,
-            _,
-        >(TestDbFactory::default(), BlockCache::new(), interval)
+        for nu7_activation in [None, Some(BlockHeight::from_u32(100_000))] {
+            zcash_client_backend::data_api::testing::pool::anchor_checkpoints_retained_across_deep_scan::<
+                T,
+                _,
+            >(TestDbFactory::default(), BlockCache::new(), interval, nu7_activation)
+        }
     }
 }
 
@@ -338,14 +340,16 @@ pub(crate) fn oldest_note_is_selected_first<T: ShieldedPoolTester>() {
     )
 }
 
-/// Runs the empty-boundary retention check at a short interval, so a handful of filler blocks
-/// crosses two boundaries.
+/// Checks canonical crossing fees, padding, and expiry both before and after NU7.
 #[cfg(feature = "orchard")]
 pub(crate) fn ordinary_canonical_crossing_is_unpadded_with_rolling_expiry() {
-    zcash_client_backend::data_api::testing::pool::ordinary_canonical_crossing_is_unpadded_with_rolling_expiry(
-        TestDbFactory::default(),
-        BlockCache::new(),
-    )
+    for nu7_activation in [None, Some(BlockHeight::from_u32(100_000))] {
+        zcash_client_backend::data_api::testing::pool::ordinary_canonical_crossing_is_unpadded_with_rolling_expiry(
+            TestDbFactory::default(),
+            BlockCache::new(),
+            nu7_activation,
+        )
+    }
 }
 
 #[cfg(feature = "orchard")]

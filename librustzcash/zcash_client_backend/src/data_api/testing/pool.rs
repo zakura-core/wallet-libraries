@@ -4358,6 +4358,7 @@ pub fn anchor_checkpoints_retained_across_deep_scan<
     ds_factory: Dsf,
     cache: impl TestCache,
     interval: AnchorRetentionInterval,
+    nu7_activation: Option<BlockHeight>,
 ) {
     let interval_blocks = interval.block_count().get();
 
@@ -4369,6 +4370,7 @@ pub fn anchor_checkpoints_retained_across_deep_scan<
         nu6_1: Some(activation),
         nu6_2: Some(activation),
         nu6_3: Some(activation),
+        nu7: nu7_activation,
         ..TestBuilder::<(), ()>::DEFAULT_NETWORK
     };
 
@@ -4493,6 +4495,7 @@ pub fn anchor_checkpoints_retained_across_deep_scan<
 pub fn ordinary_canonical_crossing_is_unpadded_with_rolling_expiry<Dsf: DataStoreFactory>(
     ds_factory: Dsf,
     cache: impl TestCache,
+    nu7_activation: Option<BlockHeight>,
 ) {
     use crate::{
         data_api::{
@@ -4513,6 +4516,7 @@ pub fn ordinary_canonical_crossing_is_unpadded_with_rolling_expiry<Dsf: DataStor
         nu6_1: Some(activation),
         nu6_2: Some(activation),
         nu6_3: Some(activation),
+        nu7: nu7_activation,
         ..TestBuilder::<(), ()>::DEFAULT_NETWORK
     };
 
