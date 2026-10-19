@@ -5,31 +5,31 @@ use std::pin::Pin;
 use std::task::Poll;
 
 use receiver_directory::{
-    RawRecord,
     filter::{Filters, PAID, RECENT},
-    snapshot::{FilterSet, check_next},
+    snapshot::FilterSet,
 };
 use receiver_pir::{AcceptedCoverage, transport::DirectoryClient};
 use zakura_one_time_ivk::{
     KeyId, Purpose,
     swap::{RESTORE_WATCH_SECS, provider_read_is_current},
 };
-use zakura_receiver_crypto::{
-    Receiver,
-    witness::{Publication, WitnessSnapshot},
-};
+use zakura_receiver_crypto::{Receiver, witness::WitnessSnapshot};
 use zcash_client_backend::data_api::{
     WalletRead,
     one_time_ivk::restore::{
-        DirectoryPayment, DiscoveryWork, EnumerationCursor, FilterCheck, LookupWork,
-        OneTimeIvkRestoreWrite, PublicationEnd,
+        DiscoveryWork, EnumerationCursor, FilterCheck, LookupWork, OneTimeIvkRestoreWrite,
+        PublicationEnd,
     },
     transparent_ledger::ChainPoint,
 };
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
-use crate::{DirectoryError, Transport, checked, seen::seen_sets};
+use crate::{
+    DirectoryError, Transport, checked,
+    history::{Walk, directory_payment, publication, walk_history},
+    seen::seen_sets,
+};
 
 /// A wallet's account identifier.
 pub(crate) type AccountId<W> = <W as WalletRead>::AccountId;
@@ -49,8 +49,6 @@ pub const KEYS_PER_RUN: u64 = 5_000;
 const CHUNK: u64 = 100;
 /// Lookups in flight at once.
 const PARALLEL_LOOKUPS: usize = 8;
-/// Pages one lookup reads in a call; the wallet keeps the cursor for the next.
-const PAGES_PER_LOOKUP: u32 = 64;
 
 /// Why a discovery run, or one key's lookup, stopped. `E` is the wallet's error type.
 #[derive(Debug, thiserror::Error)]
@@ -421,18 +419,6 @@ where
     Ok(())
 }
 
-/// What a walk through one key's history read.
-struct Walk {
-    /// The page the records start at.
-    start: u32,
-    /// Consecutive records from `start`, at or below the cutoff.
-    records: Vec<RawRecord>,
-    /// Whether the walk read every record at or below the cutoff.
-    complete: bool,
-    /// Why the walk stopped early, if it did.
-    error: Option<DirectoryError>,
-}
-
 /// A receiver-directory publication whose coverage the client checked. Its filters are
 /// fetched only once a key needs them, and its PIR session and common witnesses only once a
 /// key needs a lookup or a path.
@@ -599,77 +585,9 @@ impl<'a, T: Transport> Directory<'a, T> {
     /// Reads `lookup`'s history from its cursor over the open session: the record before the
     /// cursor must still be the one the wallet applied, or the walk restarts from page zero.
     /// Stops at the first record above the cutoff, at the last page, or after
-    /// [`PAGES_PER_LOOKUP`] pages.
+    /// [`crate::history::PAGES_PER_LOOKUP`] pages.
     async fn page_through(&self, lookup: &LookupWork) -> Walk {
-        let session = self.session.as_ref().expect("opened for lookups");
-        let cutoff = u32::from(lookup.cutoff);
-        let mut walk = Walk {
-            start: lookup.applied,
-            records: vec![],
-            complete: false,
-            error: None,
-        };
-        let receiver = match Receiver::from_bytes(lookup.work.receiver) {
-            Ok(receiver) => *receiver.as_bytes(),
-            Err(e) => {
-                walk.error = Some(checked(e));
-                return walk;
-            }
-        };
-        let mut previous = None;
-        if walk.start > 0 {
-            match session.page(receiver, walk.start - 1).await {
-                Ok(Some(record))
-                    if Some((record.payment.position, record.payment.action_nullifier))
-                        == lookup.last =>
-                {
-                    // The history ends at the cursor: nothing new.
-                    if record.page + 1 == record.total {
-                        walk.complete = true;
-                        return walk;
-                    }
-                    previous = Some(record);
-                }
-                Ok(_) | Err(DirectoryError::Directory(receiver_directory::Error::MissingPage)) => {
-                    walk.start = 0;
-                }
-                Err(e) => {
-                    walk.error = Some(e);
-                    return walk;
-                }
-            }
-        }
-        for page in walk.start..walk.start.saturating_add(PAGES_PER_LOOKUP) {
-            let record = match session.page(receiver, page).await {
-                Ok(Some(record)) => record,
-                // Absence is allowed only on page zero: an empty history.
-                Ok(None) => {
-                    walk.complete = true;
-                    return walk;
-                }
-                Err(e) => {
-                    walk.error = Some(e);
-                    return walk;
-                }
-            };
-            if let Some(previous) = walk.records.last().or(previous.as_ref()) {
-                if let Err(e) = check_next(previous, &record) {
-                    walk.error = Some(e.into());
-                    return walk;
-                }
-            }
-            if record.payment.height > cutoff {
-                walk.complete = true;
-                return walk;
-            }
-            let last = record.page + 1 == record.total;
-            walk.records.push(record);
-            if last {
-                walk.complete = true;
-                return walk;
-            }
-        }
-        walk
+        walk_history(self.session.as_ref().expect("opened for lookups"), lookup).await
     }
 }
 
@@ -684,54 +602,6 @@ fn covers_restore_watch(set: &FilterSet, now: i64) -> bool {
         }
         _ => false,
     }
-}
-
-/// The fields of the session's validated manifest that its witness file binds to.
-fn publication(manifest: &receiver_pir::Manifest) -> Result<Publication, DirectoryError> {
-    let directory = &manifest.directory;
-    directory.validate()?;
-    Ok(Publication {
-        genesis: directory.genesis,
-        directory_revision: directory.revision()?,
-        end_height: directory.end_height,
-        end_hash: directory.end_hash,
-        start_position: directory.start_position,
-        end_position: directory.end_position,
-        records: directory.records,
-    })
-}
-
-/// A directory record's payment as the wallet takes it, after checking that its note
-/// commitment and Action nullifier are canonical and its ephemeral key valid. The directory
-/// crates parse records structurally only.
-fn directory_payment(record: RawRecord) -> Result<DirectoryPayment, DirectoryError> {
-    let payment = record.payment;
-    zakura_receiver_crypto::Payment {
-        height: payment.height,
-        block_hash: payment.block_hash,
-        txid: payment.txid,
-        tx_index: payment.tx_index,
-        action_index: payment.action_index,
-        position: payment.position,
-        action_nullifier: payment.action_nullifier,
-        cmx: payment.cmx,
-        ephemeral_key: payment.ephemeral_key,
-        ciphertext_prefix: payment.ciphertext_prefix,
-    }
-    .check()
-    .map_err(checked)?;
-    Ok(DirectoryPayment {
-        height: payment.height,
-        block_hash: payment.block_hash,
-        txid: payment.txid,
-        tx_index: payment.tx_index,
-        action_index: payment.action_index,
-        position: payment.position,
-        action_nullifier: payment.action_nullifier,
-        cmx: payment.cmx,
-        ephemeral_key: payment.ephemeral_key,
-        ciphertext_prefix: payment.ciphertext_prefix,
-    })
 }
 
 /// Runs `futures` concurrently and returns their outputs in order, without depending on a

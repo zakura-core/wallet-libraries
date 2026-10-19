@@ -400,3 +400,60 @@ fn seen_reference_binds_coverage_and_network() {
     };
     assert!(invalid.encode().is_err());
 }
+
+/// Shallower filters cannot force an already-covered older match to wait for a newer PIR session.
+#[test]
+fn older_match_can_settle_while_filters_run_ahead_of_pir() {
+    let head = head(100, 505, &Index::default());
+    let target = BlockId {
+        height: 500,
+        hash: hash(500),
+    };
+    let coverage = Coverage {
+        genesis: head.genesis,
+        archive: head.archive,
+        epoch: head.epoch,
+        session: [6; 32],
+        first_height: 100,
+        frontier: BlockId {
+            height: 503,
+            hash: hash(503),
+        },
+    };
+    let chain = ConnectedCoverage {
+        genesis: head.genesis,
+        target,
+        publication: coverage.frontier,
+    };
+    assert!(coverage.check(&head, chain).is_err());
+    coverage.check_through(&head, target, chain).unwrap();
+    assert!(coverage
+        .check_through(
+            &head,
+            BlockId {
+                height: 504,
+                hash: hash(504)
+            },
+            chain
+        )
+        .is_err());
+    assert!(Coverage {
+        epoch: head.epoch - 1,
+        ..coverage.clone()
+    }
+    .check_through(&head, target, chain)
+    .is_err());
+    assert!(coverage
+        .check_through(
+            &head,
+            target,
+            ConnectedCoverage {
+                target: BlockId {
+                    hash: [9; 32],
+                    ..target
+                },
+                ..chain
+            }
+        )
+        .is_err());
+}

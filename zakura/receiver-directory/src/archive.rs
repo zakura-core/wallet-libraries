@@ -462,15 +462,29 @@ impl Coverage {
     /// Fences completion against the captured history and independently accepted chain.
     /// The caller must additionally fence its account/settings/rewind generation after awaits.
     pub fn check(&self, target: &Head, chain: ConnectedCoverage) -> Result<(), Error> {
+        self.check_through(target, target.frontier, chain)
+    }
+
+    /// Checks a captured older obligation without requiring PIR to catch the latest filter head.
+    /// The head's history must already be accepted, and both chain points independently connected.
+    pub fn check_through(
+        &self,
+        head: &Head,
+        target: BlockId,
+        chain: ConnectedCoverage,
+    ) -> Result<(), Error> {
         self.validate()?;
-        target.validate()?;
-        if self.genesis != target.genesis
-            || self.archive != target.archive
-            || self.epoch != target.epoch
-            || self.first_height > target.first_height
-            || self.frontier.height < target.frontier.height
+        head.validate()?;
+        if self.genesis != head.genesis
+            || self.archive != head.archive
+            || self.epoch != head.epoch
+            || self.first_height > head.first_height
+            || target.height < head.first_height
+            || target.height > head.frontier.height
+            || (target.height == head.frontier.height && target.hash != head.frontier.hash)
+            || self.frontier.height < target.height
             || chain.genesis != self.genesis
-            || chain.target != target.frontier
+            || chain.target != target
             || chain.publication != self.frontier
         {
             return Err(Error::Coverage);

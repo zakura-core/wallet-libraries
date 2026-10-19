@@ -1208,3 +1208,106 @@ async fn held_filter_response_does_not_hold_sync_or_survive_a_toggle() {
     assert_eq!(state.next_height, Some(BlockHeight::from(ACTIVATION)));
     assert_eq!(state.pending_matches, 0);
 }
+
+/// Compatible PIR can page an older match while independent filters lead its publication.
+#[tokio::test]
+async fn compatible_history_session_uses_actual_pir_manifest() {
+    use receiver_directory::{
+        archive::{ConnectedCoverage, Coverage, Head},
+        blocks::BlockId,
+    };
+    use zakura_pir_receiver::history::SessionMetadata;
+    use zcash_client_backend::data_api::one_time_ivk::restore::{DiscoveryWork, LookupWork};
+    let mut r = restored(&[0, 0]);
+    let directory_end = r.through;
+    let commitments: Vec<_> = r.records.iter().map(|r| r.payment.cmx).collect();
+    r.st.generate_and_scan_empty_blocks_with_one_time_ivks(3);
+    let filters_end = tip(&r.st);
+    let mut routes = publish(&r.records, &commitments, directory_end, &provider(&[]));
+    let mut head = Head::decode(routes.archive.get("archive/head").unwrap()).unwrap();
+    head.frontier = BlockId {
+        height: filters_end.height.into(),
+        hash: filters_end.hash.0,
+    };
+    let coverage = Coverage {
+        genesis: GENESIS,
+        archive: head.archive,
+        epoch: head.epoch,
+        session: routes.server.id(),
+        first_height: ACTIVATION,
+        frontier: BlockId {
+            height: directory_end.height.into(),
+            hash: directory_end.hash.0,
+        },
+    };
+    routes.archive.insert(
+        format!(
+            "archive/coverage/{}/{}/{}",
+            hex::encode(head.archive),
+            head.epoch,
+            routes.id
+        ),
+        coverage.encode().unwrap(),
+    );
+    let directory = Directory::new(routes);
+    let metadata = SessionMetadata::fetch(ORIGIN, &directory, head.clone())
+        .await
+        .unwrap();
+    let connected = stored_publication(&r.st, directory_end.height);
+    let chain = ConnectedCoverage {
+        genesis: GENESIS,
+        target: BlockId {
+            height: connected.height.into(),
+            hash: connected.hash,
+        },
+        publication: BlockId {
+            height: connected.height.into(),
+            hash: connected.hash,
+        },
+    };
+    let mut session = metadata.connect(ORIGIN, &directory, chain).await.unwrap();
+    assert_eq!(session.coverage(), &coverage);
+    let work = LookupWork {
+        work: DiscoveryWork {
+            key: KeyId::new(Purpose::Receive, 0),
+            receiver: *receiver(&r.st, 0).as_bytes(),
+        },
+        cutoff: directory_end.height,
+        applied: 0,
+        last: None,
+    };
+    let page = session.page(&work).await.unwrap();
+    assert!(page.complete);
+    assert_eq!(page.records.len(), 2);
+    assert_eq!(lookups(&directory), 2);
+    session.witnesses().await.unwrap();
+    assert!(
+        directory
+            .requests()
+            .iter()
+            .all(|r| !r.contains("/filters/"))
+    );
+    // A declaration for a different session cannot authorize even one receiver query.
+    let mut routes = publish(&r.records, &commitments, directory_end, &provider(&[]));
+    let wrong = Coverage {
+        session: [7; 32],
+        ..coverage
+    };
+    routes.archive.insert(
+        format!(
+            "archive/coverage/{}/{}/{}",
+            hex::encode(head.archive),
+            head.epoch,
+            routes.id
+        ),
+        wrong.encode().unwrap(),
+    );
+    let directory = Directory::new(routes);
+    assert!(
+        SessionMetadata::fetch(ORIGIN, &directory, head)
+            .await
+            .is_err()
+    );
+    assert_eq!(lookups(&directory), 0);
+    assert!(!directory.requests().iter().any(|r| r.contains("/public/")));
+}

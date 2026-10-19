@@ -40,6 +40,26 @@ pub struct ReplayBlock {
     pub predecessor: ChainState,
 }
 
+impl crate::data_api::chain::BlockSource for ReplayBlock {
+    type Error = std::convert::Infallible;
+
+    /// Replays only this immutable local block through the ordinary multi-pass scanner.
+    fn with_blocks<F, E>(
+        &self,
+        from: Option<BlockHeight>,
+        limit: Option<usize>,
+        mut visit: F,
+    ) -> Result<(), crate::data_api::chain::error::Error<E, Self::Error>>
+    where
+        F: FnMut(CompactBlock) -> Result<(), crate::data_api::chain::error::Error<E, Self::Error>>,
+    {
+        if limit != Some(0) && from.is_none_or(|from| from == self.block.height()) {
+            visit(self.block.clone())?;
+        }
+        Ok(())
+    }
+}
+
 impl RecentBlocks {
     /// Starts empty, with a caller budget capped at the hard ceiling. A budget smaller
     /// than the cache's fixed bookkeeping makes every insertion a cache miss.

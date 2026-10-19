@@ -43,3 +43,9 @@ The transport and cache are foundations for the production scanner and applicati
 `OneTimeBlockScan` rechecks each account and key's captured discovery generation while committing. Turning discovery off, including off and back on, prevents in-flight work from admitting new receipts or recording complete scan evidence. Ordinary notes, commitments and chain progress still commit. Re-mining a previously known transaction remains allowed while disabled, but this permission cannot admit additional payments to the same key. Exact successful scans settle matching obligations and can close eligible local watches.
 
 This API is opt-in until the application cutover. Cache replay orchestration, compatible PIR settlement, full-transaction discovery gating, the legacy scanner/discovery removal and real publisher integration tests remain required.
+
+## Cached replay and historical transport
+
+`RecentBlocks::get` returns an owned `ReplayBlock` implementing `BlockSource`, including the predecessor frontiers required by the normal scanner. A delayed exact-block match can pass that source and its hint to `scan_cached_blocks_with_recovery`. This performs normal note admission and persists whole-block scan evidence without a receiver query or a disk cache. Eviction and restart still require historical PIR recovery.
+
+The receiver client's `history::SessionMetadata` binds archive coverage to the actual PIR manifest. It may connect for an older matched block while public filters are ahead of that publication. Its bounded history pages and common witnesses are inputs to wallet admission, never authority to credit notes or clear pending matches. The durable session/cursor/admission implementation and application integration remain required before removing the old discovery entry point.

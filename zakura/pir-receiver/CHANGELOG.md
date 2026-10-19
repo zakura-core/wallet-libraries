@@ -4,6 +4,8 @@
 
 ### Added
 
+- Compatible receiver-history sessions bind coverage to the actual PIR manifest and permit covered historical matches while filters are ahead of PIR preparation.
+
 - `discover`, behind the `wallet` feature, which runs one account's discovery of its
   one-time keys for any store implementing the backend's
   `one_time_ivk::restore::OneTimeIvkRestoreWrite`, with `Transport`, `WriteLock`,
