@@ -1,12 +1,26 @@
 # Changelog
 
-The package structure changes without changing database or protocol formats.
+## [Unreleased]
+
+## [0.0.1-rc0] - 2026-10-19
+
+### Added
+
+- Shared Enhance, Status and Transparent records, manifests and native profile
+  identities for the separate client, publisher and query-server packages.
+- Transparent recovery records formerly provided by
+  `zakura-transparent-recovery-types`.
+
+### Compatibility
+
+- Consolidate the package names without changing serialized field order, hashes,
+  native setup identities or query framing.
 
 ## pir-enhance-types history
 
 # Changelog
 
-## [Unreleased]
+## Changes carried into consolidation
 
 ## [0.0.1-rc1] - 2026-10-13
 

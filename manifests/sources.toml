@@ -65,17 +65,17 @@ allow_prerelease = true
 [[crate]]
 path = "pczt"
 package = "zakura-pczt"
-version = "0.1.0-rc6"
+version = "0.1.0-rc7"
 
 [[crate]]
 path = "zcash_client_backend"
 package = "zakura-client-backend"
-version = "0.1.0-rc9"
+version = "0.1.0-rc9.1"
 
 [[crate]]
 path = "zcash_client_sqlite"
 package = "zakura-client-sqlite"
-version = "0.1.0-rc9"
+version = "0.1.0-rc9.1"
 
 # Workspace dependencies pinned together to the Common ZIP 318 protocol port.
 # Tracks https://github.com/zakura-core/common/pull/593 until it is released.

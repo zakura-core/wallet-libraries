@@ -1,12 +1,27 @@
 # Changelog
 
-The package structure changes without changing database or protocol formats.
+## [Unreleased]
+
+## [0.0.1-rc0] - 2026-10-19
+
+### Added
+
+- Consolidated Enhance, Status and Transparent clients with explicit product
+  features and opt-in wallet, SQLite, recovery and HTTP transport capabilities.
+- Native helpers used by receiver PIR without enabling other products.
+
+### Compatibility
+
+- Replace the former product-specific package imports with role-based modules.
+  Engine-store schema 7, recovery companion v3 and Transparent shard v12 are
+  unchanged. Wallet validation is still required before recovery results affect
+  wallet state.
 
 ## pir-enhance history
 
 # Changelog
 
-## [Unreleased]
+## Changes carried into consolidation
 
 ### Added
 
@@ -162,7 +177,7 @@ Initial release candidate for the mainnet Ironwood enhancement client.
 
 # Changelog
 
-## [Unreleased]
+## Changes carried into consolidation
 
 ## [0.0.1-rc2] - 2026-10-16
 
@@ -208,7 +223,7 @@ Initial release candidate for private transaction-status observation.
 
 # Changelog
 
-## [Unreleased]
+## Changes carried into consolidation
 
 ### Added
 
@@ -261,7 +276,7 @@ Initial release candidate for policy-bound transaction status observation.
 
 # Changelog
 
-## [Unreleased]
+## Changes carried into consolidation
 
 ### Fixed
 

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc1] - 2026-10-19
+
+### Changed
+
+- Use `zakura-one-time-ivk 0.0.1-rc1` and the current Common protocol dependency.
+
 ## [0.0.1-rc0] - 2026-10-14
 
 ### Added

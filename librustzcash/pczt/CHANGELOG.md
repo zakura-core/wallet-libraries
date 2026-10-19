@@ -7,6 +7,14 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc7] - 2026-10-19
+
+### Changed
+
+- Update the public cryptography and protocol types to Zakura Common `4.0.0-rc1`.
+- Replace serialization convenience macros with explicit array adapters, retaining
+  the existing serialized layout and removing the macro dependency from wallet builds.
+
 ## [0.1.0-rc6] - 2026-10-14
 
 ### Changed

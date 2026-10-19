@@ -7520,7 +7520,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-backend"
-version = "0.1.0-rc9"
+version = "0.1.0-rc9.1"
 dependencies = [
  "ambassador",
  "arti-client",
@@ -7596,7 +7596,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-sqlite"
-version = "0.1.0-rc9"
+version = "0.1.0-rc9.1"
 dependencies = [
  "ambassador",
  "assert_matches",
@@ -7764,7 +7764,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-near-intents"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "zakura-one-time-ivk",
  "zakura-protocol",
@@ -7785,7 +7785,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-one-time-ivk"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "blake2b_simd",
  "ff 0.14.0",
@@ -7901,7 +7901,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pczt"
-version = "0.1.0-rc6"
+version = "0.1.0-rc7"
 dependencies = [
  "blake2b_simd",
  "document-features",
@@ -8276,7 +8276,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-wallet-lib"
-version = "0.1.0-rc8"
+version = "0.1.0-rc9"
 dependencies = [
  "orchard",
  "pczt",

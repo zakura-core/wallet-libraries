@@ -7,6 +7,8 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9.1] - 2026-10-19
+
 ### Added
 
 - One-time IVK discovery (with `orchard`): `data_api::one_time_ivk::restore` replaces restore

@@ -1,6 +1,6 @@
 [package]
 name = "zakura-near-intents"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 description = "Experimental NEAR Intents 1Click status normalization for one-time IVK swap keys"
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,7 @@ categories.workspace = true
 keywords = ["zcash", "wallet", "near", "swap"]
 
 [dependencies]
-zakura-one-time-ivk = { version = "=0.0.1-rc0", path = "../one-time-ivk" }
+zakura-one-time-ivk = { version = "=0.0.1-rc1", path = "../one-time-ivk" }
 zcash_protocol.workspace = true
 
 [lints]

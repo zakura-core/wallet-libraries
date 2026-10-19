@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc0] - 2026-10-19
+
 ### Added
 
-- The crate, moved from wallet-pir's `receiver-pir` at main 6703f263, over `zakura-pir-native`.
+- The crate, moved from wallet-pir's `receiver-pir` at main 6703f263, using the native helpers in `zakura-pir-client`.
 
 ### Changed
 

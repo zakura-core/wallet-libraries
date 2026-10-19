@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc0] - 2026-10-19
+
 ### Added
 
 - `Receiver`, `Record` and `Payment`: receiver directory row slots, validated

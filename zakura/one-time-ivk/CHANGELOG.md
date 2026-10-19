@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc1] - 2026-10-19
+
 ### Added
 
 - Add `swap::provider_read_is_current`, with `PROVIDER_READ_MAX_AGE_SECS` (15
