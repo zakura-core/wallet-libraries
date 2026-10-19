@@ -1,12 +1,10 @@
-//! Issuance: which one-time addresses a wallet hands NEAR. Privacy rests on two rules:
-//! an address NEAR was given is never issued for another swap, and neither is one that
-//! was paid.
+//! Issuance keeps paid and shown-for-funding addresses out of reuse. Eligible abandoned
+//! requests can reuse an address when the supported window has no fresh index.
 
 use zakura_one_time_ivk::{Purpose, swap::PROVIDER_READ_MAX_AGE_SECS};
 use zakura_one_time_ivk_scenarios::Class;
 use zcash_client_sqlite::wallet::one_time_ivk::swap::{
-    OperationOutcome, RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS, ReceiveDeposit,
-    ReservationPolicy, SEEN_SLACK_SECONDS,
+    OperationOutcome, RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS, ReceiveDeposit, ReservationPolicy,
 };
 
 use super::{ISSUANCE, Scenario, span};
@@ -126,92 +124,31 @@ fn incoming_indices_advance() -> Scenario {
     }
 }
 
-/// Wallet A's quote requests are rejected until they fill the window, each swap attempt
-/// expiring before the next. Their deadlines and the reclaim grace pass, the app
-/// restarts, and NEAR's seen set covers the requests without holding any of them.
-/// Issuance must wait rather than reissue a rejected address.
+/// Rejected requests consume fresh addresses first, then reuse an abandoned index without funding it.
 fn rejected_quotes_hold_addresses_back() -> Scenario {
     Scenario {
         id: "A3-rejected-quote-holds-address-back".into(),
         group: ISSUANCE,
-        title: "Rejected quotes fill the window, and their addresses are never issued again".into(),
-        summary: "A rejected quote request still gave NEAR the address, so the address is never \
-            issued again. Once rejections fill the 30-index window, issuance waits, even after \
-            the deadlines and the reclaim grace pass, the app restarts, and NEAR's seen set \
-            covers the requests without holding them."
-            .into(),
-        params: vec![("rejected quotes".into(), RECEIVE_GAP_LIMIT.to_string())],
+        title: "Rejected quotes use fresh addresses before an eligible abandoned address".into(),
+        summary: "A rejects every request without showing funding instructions. After the supported window has no fresh address, it may reuse the lowest eligible abandoned index. Restart preserves that choice.".into(),
+        params: vec![("rejected quotes".into(),RECEIVE_GAP_LIMIT.to_string())],
         slow: false,
         run: Box::new(|ctx| {
-            let a = wallet(ctx, "A");
-            let mut rejected = Vec::new();
-            let refused = loop {
-                match request_quote(ctx, a, SHORT_QUOTE) {
-                    Ok((index, request)) => {
-                        ctx.finish_incoming(a, &request, &OperationOutcome::Rejected);
-                        rejected.push(index);
-                    }
-                    Err(policy) => break policy,
-                }
-                assert!(
-                    rejected.len() <= 2 * RECEIVE_GAP_LIMIT as usize,
-                    "issuance never waits"
-                );
+            let a=wallet(ctx,"A");
+            for expected in 0..RECEIVE_GAP_LIMIT {
+                let (index,request)=request_quote(ctx,a,SHORT_QUOTE).expect("fresh supported index");
+                ctx.check("fresh addresses precede reuse",index==expected,format!("expected {expected}, got {index}"));
+                ctx.finish_incoming(a,&request,&OperationOutcome::Rejected);
+                ctx.wait(SHORT_QUOTE+1);
                 ctx.mine(1);
                 ctx.sync(a);
-            };
-            let last_request = ctx.chain.now();
-            ctx.log(
-                "A",
-                format!(
-                    "NEAR rejects {} quote requests, and its feed lists none of them; then issuance refuses: {refused:?}",
-                    rejected.len()
-                ),
-            );
-            ctx.check(
-                "each rejection moves the next quote to a fresh address",
-                rejected == (0..RECEIVE_GAP_LIMIT).collect::<Vec<_>>(),
-                format!("rejected {rejected:?}"),
-            );
-            ctx.check(
-                "issuance waits once rejections fill the window",
-                refused == ReservationPolicy::Limit,
-                format!("{refused:?}"),
-            );
-            ctx.wait(HOUR + RECEIVE_RECLAIM_SECONDS + HOUR);
+            }
+            ctx.wait(RECEIVE_RECLAIM_SECONDS+HOUR);
             ctx.restart(a);
             ctx.mine(1);
             ctx.sync(a);
-            let now = ctx.chain.now();
-            let held: Vec<u64> = rejected
-                .iter()
-                .copied()
-                .filter(|&i| {
-                    let receiver = receiver_of(&ctx.get(a).key(Purpose::Receive, i));
-                    ctx.near.seen(&receiver, now)
-                })
-                .collect();
-            let covered = ctx.near.read_until(now) - SEEN_SLACK_SECONDS > last_request;
-            ctx.check(
-                "NEAR's seen set covers the rejected requests and holds none of them",
-                covered && held.is_empty(),
-                format!(
-                    "read until {} s after the last request, slack {SEEN_SLACK_SECONDS} s; holds {held:?}",
-                    ctx.near.read_until(now) - last_request
-                ),
-            );
-            let after = ctx.prepare_incoming(a);
-            ctx.log(
-                "A",
-                format!("after the deadlines, the reclaim grace and a restart: {after:?}"),
-            );
-            ctx.check(
-                "issuance waits rather than reissue a rejected address",
-                after == Err(ReservationPolicy::Limit),
-                format!(
-                    "{after:?}; ProviderSeen: an incoming address counts as seen if the provider rejected a quote for it, since the request still gave it the address"
-                ),
-            );
+            let after=ctx.prepare_incoming(a);
+            ctx.check("only an abandoned unfunded address is reused",after==Ok(0),format!("{after:?}"));
         }),
     }
 }

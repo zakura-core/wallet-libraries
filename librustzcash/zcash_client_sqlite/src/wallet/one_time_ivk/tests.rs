@@ -949,10 +949,7 @@ pub(super) fn settle_empty_filters(db: &mut Db, account: AccountUuid, now: i64) 
         )
         .unwrap();
     }
-    loop {
-        let Some(work) = db.one_time_filter_work(account, 1024).unwrap() else {
-            break;
-        };
+    while let Some(work) = db.one_time_filter_work(account, 1024).unwrap() {
         let points: Vec<_> = db
             .conn
             .prepare("SELECT height,hash FROM blocks WHERE height>=?1 ORDER BY height LIMIT 256")
