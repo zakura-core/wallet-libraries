@@ -101,7 +101,10 @@ def consumer(root, version):
             ("zcash_protocol", "zakura-protocol"),
             ("transparent", "zakura-transparent"),
         ]:
-            common = workspace_version(package) if version == "current" else {"rc9": "3.0.0"}.get(version, "2.0.0")
+            if version == "current":
+                common = workspace_version(package).removeprefix("=")
+            else:
+                common = {"rc9": "3.0.0"}.get(version, "2.0.0")
             manifest += f'{alias} = {{ package = "{package}", version = "={common}" }}\n'
     # Pin the PCZT prerelease used by Vizor: caret prerelease resolution otherwise selects
     # rc4's newer dependency family while testing rc5's published writer.
