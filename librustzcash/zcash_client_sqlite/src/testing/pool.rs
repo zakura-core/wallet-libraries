@@ -23,7 +23,7 @@ use zcash_client_backend::data_api::{
 #[cfg(feature = "transparent-inputs")]
 use rusqlite::named_params;
 use zcash_protocol::{
-    consensus::{NetworkUpgrade, Parameters},
+    consensus::{BlockHeight, NetworkUpgrade, Parameters},
     value::Zatoshis,
 };
 #[cfg(feature = "orchard")]
