@@ -178,8 +178,8 @@ pub fn decrypt_transaction<'a, P: consensus::Parameters, AccountId: Copy>(
 /// Each key is tried after its account's ordinary incoming viewing keys and before its
 /// outgoing viewing key, so an output paid to it is one incoming output carrying its
 /// [`DecryptedOutput::one_time_key_id`], even when the account also funded it. A key whose
-/// account has no Orchard key in `ufvks` is not tried. The result reports
-/// [`DecryptedTransaction::one_time_ivks_applied`].
+/// account has no Orchard key in `ufvks` is not tried. Storage separately checks
+/// captured discovery permissions before accepting a new one-time receipt.
 #[cfg(feature = "orchard")]
 pub fn decrypt_transaction_with_one_time_ivks<
     'a,
@@ -209,7 +209,6 @@ pub fn decrypt_transaction_with_one_time_ivks<
         ufvks,
         &|account| by_account.get(account).map_or(&[], Vec::as_slice),
     )
-    .with_one_time_ivks_applied()
 }
 
 /// The trial decryption shared by [`decrypt_transaction`] and, with `one_time_ivks`
@@ -487,7 +486,6 @@ mod tests {
         ]);
 
         let plain = decrypt_transaction(&MAIN_NETWORK, None, None, &tx, &ufvks);
-        assert!(!plain.one_time_ivks_applied());
         let outputs = plain.ironwood_outputs();
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].note().0.recipient(), address(receive));
@@ -497,7 +495,6 @@ mod tests {
         let keys = [refund, receive].map(|id| OneTimeScanningKey::derive(0u32, id, &fvk).unwrap());
         let decrypted =
             decrypt_transaction_with_one_time_ivks(&MAIN_NETWORK, None, None, &tx, &ufvks, keys);
-        assert!(decrypted.one_time_ivks_applied());
         let outputs = decrypted.ironwood_outputs();
         assert_eq!(outputs.len(), 2);
         for id in [refund, receive] {

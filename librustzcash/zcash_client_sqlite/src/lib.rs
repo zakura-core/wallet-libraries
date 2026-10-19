@@ -169,7 +169,6 @@ use {
             CoinbaseFilter, TransactionsInvolvingAddress, TransparentBalances,
             ll::wallet::generate_transparent_gap_addresses,
         },
-        decrypt_transaction,
         fees::StandardFeeRule,
         wallet::TransparentAddressMetadata,
     },
@@ -2728,21 +2727,6 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
     ) -> Result<Vec<OneTimeScanningKey<AccountUuid>>, Self::Error> {
         wallet::one_time_ivk::scanning_keys_for_range(self.conn.borrow(), &self.params, range)
     }
-
-    fn get_one_time_transaction_keys(
-        &self,
-        txid: TxId,
-        height: Option<BlockHeight>,
-        receivers: &[orchard::Address],
-    ) -> Result<Vec<OneTimeScanningKey<AccountUuid>>, Self::Error> {
-        wallet::one_time_ivk::transaction_keys(
-            self.conn.borrow(),
-            &self.params,
-            txid,
-            height,
-            receivers,
-        )
-    }
 }
 
 #[cfg(feature = "orchard")]
@@ -3836,15 +3820,12 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         &mut self,
         d_tx: DecryptedTransaction<Transaction, <Self as WalletRead>::AccountId>,
     ) -> Result<(), <Self as WalletRead>::Error> {
-        // As with scanned blocks, a transaction decrypted without the open one-time keys
-        // would store their payments as someone else's.
         #[cfg(feature = "orchard")]
-        let one_time_ivks_applied = d_tx.one_time_ivks_applied();
-        #[cfg(not(feature = "orchard"))]
-        let one_time_ivks_applied = false;
-        if !one_time_ivks_applied && wallet::one_time_key_open(self.conn.0)? {
-            return Err(SqliteClientError::OneTimeIvksNotUsed);
-        }
+        let d_tx = {
+            let mut d_tx = d_tx;
+            wallet::one_time_ivk::full_tx::fence(self.conn.0, &self.params, &mut d_tx)?;
+            d_tx
+        };
         let chain_tip = wallet::chain_tip_height(self.conn.borrow())?
             .ok_or(SqliteClientError::ChainHeightUnknown)?;
         store_decrypted_tx(
@@ -5036,34 +5017,34 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             }
             tracing::info!("Attributing the sent outputs of transaction {txid} to its funder");
             let ufvks = wallet::get_unified_full_viewing_keys(self.conn.borrow(), &params)?;
-            let d_tx = decrypt_transaction(&params, mined_height, Some(tip), &tx, &ufvks);
+            #[cfg(not(feature = "orchard"))]
+            let d_tx = zcash_client_backend::decrypt_transaction(
+                &params,
+                mined_height,
+                Some(tip),
+                &tx,
+                &ufvks,
+            );
             #[cfg(feature = "orchard")]
             let d_tx = {
-                let receivers: Vec<_> = d_tx
-                    .ironwood_outputs()
-                    .iter()
-                    .map(|output| output.note().0.recipient())
-                    .collect();
-                let keys = wallet::one_time_ivk::transaction_keys(
+                let scan = wallet::one_time_ivk::full_tx::prepare(
                     self.conn.borrow(),
                     &params,
                     txid,
                     mined_height,
-                    &receivers,
+                    wallet::one_time_ivk::unix_now(&self.clock),
                 )?;
-                // With no keys, a second pass would repeat the first.
-                if keys.is_empty() {
-                    d_tx
-                } else {
-                    zcash_client_backend::decrypt_transaction_with_one_time_ivks(
-                        &params,
-                        mined_height,
-                        Some(tip),
-                        &tx,
-                        &ufvks,
-                        keys,
-                    )
-                }
+                let mut recovered = zcash_client_backend::decrypt_transaction_with_one_time_ivks(
+                    &params,
+                    mined_height,
+                    Some(tip),
+                    &tx,
+                    &ufvks,
+                    scan.keys,
+                )
+                .with_one_time_permits(scan.permits);
+                wallet::one_time_ivk::full_tx::fence(self.conn.borrow(), &params, &mut recovered)?;
+                recovered
             };
             store_decrypted_tx(self, &params, self.gap_limits, tip, d_tx)?;
         }

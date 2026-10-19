@@ -675,6 +675,7 @@ pub(super) fn notes(
 mod block_scan;
 mod cache_replay;
 mod enhancement;
+mod full_tx;
 mod journal;
 mod key_access;
 mod marker;

@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = {
     # Wallet defaults exclude application adapters and the mutually exclusive facade.
     "default": (["--workspace", "--exclude", "zakura-wallet-lib", "--exclude", "zakura-pir-client", "--exclude", "zakura-pir-receiver", "--exclude", "zakura-one-time-ivk-scenarios"], []),
+    "sync": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "test-dependencies", "zakura-client-backend/sync"]),
     "orchard": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "test-dependencies"]),
     "transparent": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "test-dependencies", "unstable"]),
     "transparent-import": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "transparent-key-import", "test-dependencies", "unstable"]),

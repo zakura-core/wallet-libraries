@@ -163,15 +163,21 @@ pub(crate) fn fence<P: Parameters, CL, R>(
                 valid.push((permit.account, permit.key));
             }
         }
-        block.retain_one_time_receipts(|_txid,output| -> Result<bool,SqliteClientError> {
-            let key=output.one_time_key_id().expect("one-time receipt");
-            if valid.contains(&(*output.account_id(),key)) {return Ok(true);}
-            let known:bool=db.conn.0.query_row("SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n
-                JOIN ironwood_one_time_keys k ON k.id=n.one_time_key_id AND k.account_id=n.account_id
-                JOIN accounts a ON a.id=k.account_id
-                WHERE n.nf=?1 AND a.uuid=?2 AND k.purpose=?3 AND k.key_index=?4)",
-                params![output.nf().map(|nf|nf.to_bytes()),output.account_id().0,super::purpose_code(key.purpose())?,key.index().to_be_bytes()],|r|r.get::<_,bool>(0))?;
-            if !known && let Some(nf)=output.nf() {refused_nullifiers.insert((*output.account_id(),nf.to_bytes()));}
+        block.retain_one_time_receipts(|_txid, output| -> Result<bool, SqliteClientError> {
+            let key = output.one_time_key_id().expect("one-time receipt");
+            if valid.contains(&(*output.account_id(), key)) {
+                return Ok(true);
+            }
+            let known = known_receipt(
+                db.conn.0,
+                *output.account_id(),
+                key,
+                output.nf().map(|nf| nf.to_bytes()),
+                &output.note().0,
+            )?;
+            if !known && let Some(nf) = output.nf() {
+                refused_nullifiers.insert((*output.account_id(), nf.to_bytes()));
+            }
             Ok(known)
         })?;
         accepted.push(valid);
@@ -182,4 +188,34 @@ pub(crate) fn fence<P: Parameters, CL, R>(
         });
     }
     Ok(accepted)
+}
+
+/// Matches authenticated note identity, never directory transaction labels. Full-transaction
+/// receipts may lack a nullifier until compact scanning, so compare their plaintext too.
+pub(crate) fn known_receipt(
+    conn: &rusqlite::Connection,
+    account: AccountUuid,
+    key: KeyId,
+    nf: Option<[u8; 32]>,
+    note: &orchard::Note,
+) -> Result<bool, SqliteClientError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n
+        JOIN ironwood_one_time_keys k ON k.id=n.one_time_key_id AND k.account_id=n.account_id
+        JOIN accounts a ON a.id=k.account_id
+        WHERE a.uuid=?2 AND k.purpose=?3 AND k.key_index=?4
+        AND (n.nf=?1 OR (n.nf IS NULL AND n.rho=?5 AND n.rseed=?6 AND n.value=?7
+            AND n.diversifier=?8 AND n.note_version=3)))",
+        params![
+            nf,
+            account.0,
+            super::purpose_code(key.purpose())?,
+            key.index().to_be_bytes(),
+            note.rho().to_bytes(),
+            note.rseed().as_bytes(),
+            note.value().inner(),
+            note.recipient().diversifier().as_array(),
+        ],
+        |r| r.get::<_, bool>(0),
+    )?)
 }

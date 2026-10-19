@@ -21,6 +21,7 @@ python3 scripts/dev.py verify
 | Configuration | Packages and features |
 | --- | --- |
 | `default` | Workspace except the facade, Enhance PIR, the transparent PIR adapter, receiver PIR and the one-time IVK scenarios; default features |
+| `sync` | Backend + SQLite; Orchard configuration plus the public lightwalletd sync entrypoint |
 | `orchard` | Backend + SQLite; `orchard,test-dependencies` |
 | `transparent` | Backend + SQLite; `orchard,transparent-inputs,test-dependencies,unstable` |
 | `transparent-import` | Backend + SQLite; transparent features plus `transparent-key-import` |

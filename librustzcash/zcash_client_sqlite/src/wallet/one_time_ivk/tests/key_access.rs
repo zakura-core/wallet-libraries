@@ -1,6 +1,5 @@
 use super::*;
 use rusqlite::params;
-use zcash_primitives::transaction::TxId;
 
 /// Looking a key up derives and checks only that key, against its stored receiver and
 /// the parent of its own account, and registration never replaces a corrupted receiver.
@@ -78,51 +77,4 @@ fn key_lookups_validate_only_the_requested_key() {
     let found = db.get_one_time_key_for_receiver(account, &wanted.receiver());
     assert!(found.is_err());
     assert!(note_key(&db.conn, id, &parent).is_err());
-}
-
-#[test]
-fn transaction_keys_exclude_unscanned_history_and_preserve_self_payments() {
-    let mut st = wallet(false);
-    let account = st.test_account().unwrap().id();
-    let db = st.wallet_mut().db_mut();
-    let historical = recover(db, account, KeyId::new(Purpose::Refund, 70), start());
-    let active = reserve_key(db, account, Purpose::Refund, start());
-    let txid = TxId::from_bytes([17; 32]);
-    let keys = db
-        .get_one_time_transaction_keys(txid, Some(start()), &[])
-        .unwrap();
-    assert_eq!(keys.len(), 1);
-    assert_eq!(keys[0].key_id(), active.key_id());
-    // An ordinary OVK can identify a self-payment before compact scanning, even
-    // when the one-time key was recovered without being scanned.
-    let keys = db
-        .get_one_time_transaction_keys(txid, None, &[historical.receiver()])
-        .unwrap();
-    assert_eq!(keys.len(), 2);
-    assert!(keys.iter().any(|k| k.key_id() == historical.key_id()));
-    // A closed key stops being tried on unrelated transactions.
-    let sql =
-        "UPDATE ironwood_one_time_keys SET closed_at = 1 WHERE purpose = 0 AND key_index = ?1";
-    exec(&db.conn, sql, [active.key_id().index().to_be_bytes()]);
-    let keys = db.get_one_time_transaction_keys(txid, Some(start()), &[]);
-    assert!(keys.unwrap().is_empty());
-}
-
-#[test]
-fn unscanned_transaction_keys_follow_pending_and_imported_output_identity() {
-    use store::restore::tests::discovery::{key8, late_fixture, send_witness};
-    let (mut st, candidate, publication) = late_fixture();
-    let account = st.test_account().unwrap().id();
-    let db = st.wallet_mut().db_mut();
-    assert!(db.get_one_time_scanning_keys().unwrap().is_empty());
-    let keys_for = |db: &Db, txid| {
-        let keys = db.get_one_time_transaction_keys(txid, Some(publication.height), &[]);
-        keys.unwrap().iter().map(|k| k.key_id()).collect::<Vec<_>>()
-    };
-    assert_eq!(keys_for(db, candidate.txid), [key8()]);
-    assert!(keys_for(db, TxId::from_bytes([45; 32])).is_empty());
-    send_witness(&mut st, key8(), &candidate);
-    let db = st.wallet_mut().db_mut();
-    assert!(pending(db, account, key8()).is_empty());
-    assert_eq!(keys_for(db, candidate.txid), [key8()]);
 }

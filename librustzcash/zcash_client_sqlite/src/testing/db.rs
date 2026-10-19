@@ -68,9 +68,10 @@ use {
                 ambassador_impl_OneTimeIvkWrite,
                 recovery::{
                     BlockScan, FilterJudgment, FilterWork, History, OneTimeBlockScan,
-                    OneTimeRecoveryRead, OneTimeRecoveryWrite, PendingMatch, RecoveryState,
-                    ambassador_impl_OneTimeBlockScan, ambassador_impl_OneTimeRecoveryRead,
-                    ambassador_impl_OneTimeRecoveryWrite,
+                    OneTimeRecoveryRead, OneTimeRecoveryWrite, OneTimeTransactionScan,
+                    PendingMatch, RecoveryState, TransactionScan, ambassador_impl_OneTimeBlockScan,
+                    ambassador_impl_OneTimeRecoveryRead, ambassador_impl_OneTimeRecoveryWrite,
+                    ambassador_impl_OneTimeTransactionScan,
                     settlement::{
                         OneTimePirRecovery, PirScope, PirSnapshot, PirWitness, PirWork,
                         ambassador_impl_OneTimePirRecovery,
@@ -132,7 +133,8 @@ pub(crate) fn test_rng() -> TestRng {
     delegate(OneTimeIvkRestoreWrite, target = "wallet_db"),
     delegate(OneTimeRecoveryRead, target = "wallet_db"),
     delegate(OneTimeRecoveryWrite, target = "wallet_db"),
-    delegate(OneTimeBlockScan, target = "wallet_db")
+    delegate(OneTimeBlockScan, target = "wallet_db"),
+    delegate(OneTimeTransactionScan, target = "wallet_db")
 )]
 pub struct TestDb {
     wallet_db: WalletDb<Connection, LocalNetwork, FixedClock, TestRng>,

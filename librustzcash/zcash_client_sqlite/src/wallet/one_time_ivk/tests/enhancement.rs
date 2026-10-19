@@ -143,11 +143,8 @@ fn one_time_ivk_full_transaction_before_or_after_compact_scan() {
             );
             assert_eq!(outputs[0].memo(), &memo);
         }
-        // Without the one-time keys these payments would be stored as outgoing only.
-        assert!(matches!(
-            decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, None),
-            Err(SqliteClientError::OneTimeIvksNotUsed)
-        ));
+        // Ordinary decryption may store outgoing details but cannot discover one-time receipts.
+        decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, None).unwrap();
         if full_first {
             decrypt_and_store_transaction_with_one_time_ivks(&network, st.wallet_mut(), &tx, None)
                 .unwrap();
@@ -190,7 +187,7 @@ fn one_time_ivk_full_transaction_before_or_after_compact_scan() {
 
 /// A closed key still decrypts the transactions its stored notes came from, so fetching
 /// an externally funded payment after closure stores it instead of discarding the
-/// retrieval as irrelevant. This guards the store's `get_one_time_transaction_keys`.
+/// retrieval as irrelevant. This guards known-receipt selection after watch closure.
 #[test]
 fn closed_key_decrypts_its_externally_funded_transaction_after_reopen() {
     use zakura_one_time_ivk::swap::COMPLETION_LIMIT_SECS;

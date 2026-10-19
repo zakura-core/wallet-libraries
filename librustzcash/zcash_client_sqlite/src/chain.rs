@@ -622,15 +622,9 @@ mod tests {
             None,
         );
         let network = *st.network();
-        assert!(matches!(
-            decrypt_and_store_transaction(
-                &network,
-                st.wallet_mut(),
-                &empty.freeze().unwrap(),
-                None
-            ),
-            Err(SqliteClientError::OneTimeIvksNotUsed)
-        ));
+        // Full transaction storage has its own receipt fence and does not block unrelated data.
+        decrypt_and_store_transaction(&network, st.wallet_mut(), &empty.freeze().unwrap(), None)
+            .unwrap();
         st.wallet()
             .conn()
             .execute_batch("UPDATE ironwood_one_time_keys SET active_from = NULL")

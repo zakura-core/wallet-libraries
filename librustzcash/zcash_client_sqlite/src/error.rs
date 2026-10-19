@@ -86,9 +86,8 @@ pub enum SqliteClientError {
     #[cfg(feature = "transparent-inputs")]
     TransparentActivationBlocked(Vec<RecoveryBlocker>),
 
-    /// Blocks or a transaction were processed without the wallet's open one-time IVKs.
-    /// Scan with `scan_cached_blocks_with_one_time_ivks` and decrypt with
-    /// `decrypt_and_store_transaction_with_one_time_ivks`, which need `orchard`.
+    /// The legacy block-storage path was used without its required one-time key snapshot.
+    /// Production discovery uses `scan_cached_blocks_with_recovery` with `orchard`.
     OneTimeIvksNotUsed,
 
     /// A one-time IVK call's input was invalid, such as a passed deadline, a deposit address
@@ -493,7 +492,7 @@ impl fmt::Display for SqliteClientError {
             ),
             SqliteClientError::OneTimeIvksNotUsed => write!(
                 f,
-                "This wallet has open one-time IVKs; scan and decrypt with the one-time IVK entry points"
+                "Use the block recovery scanner for this wallet's one-time IVKs"
             ),
             #[cfg(feature = "orchard")]
             SqliteClientError::InvalidOneTimeIvkInput(reason) => {

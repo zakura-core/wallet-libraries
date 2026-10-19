@@ -8,7 +8,7 @@ A positive match is an obligation, not ownership evidence. Complete local trial 
 
 Only operations recorded locally before possible payment receive watch provenance. Existing operations receive none during migration. An accepted deadline is immutable. Selection requires the account enabled and wall time before that deadline plus 24 hours. Receipt-based closure requires a complete scan, terminal operations, at least one confirmed receipt and all expected value confirmed. Multiple unresolved receipt amounts keep the watch until its bound. Status corrections and affected reorgs can reopen it without extending the deadline.
 
-This change adds state and local watch selection. It does not switch ordinary scanning, remove the old discovery scheduler, or wire the application toggle. The recovery and app cutovers must enforce the setting again when committing in-flight discoveries, consume pending matches, and retire the old pass and broad watches. Existing payment admission, spending and shipped migrations remain intact.
+Ordinary `sync::run` now uses block-scoped recovery scanning without waiting for filters. The application must still enable eligible accounts and schedule independent filter and PIR work. The legacy discovery scheduler and broad scan API remain pending removal. Existing payment admission, spending and shipped migrations remain intact.
 
 ## Issuance and provider history
 
@@ -20,7 +20,7 @@ Incoming operations use the same exposure rule. Begin before sending the request
 
 Locally begun requests supply watch provenance. The requested deadline applies until the first accepted response fixes the watch deadline. Later responses and status polls cannot extend that accepted bound. Turning recovery off blocks new exposure and watch selection. The key and its historical recovery obligation remain stored.
 
-This PR changes issuance and durable provenance. The scanner selection, transport scheduler, strict-toggle admission fences, application callers and old discovery/watch removal are separate required cutover work. These state APIs alone do not complete the feature.
+The state APIs alone do not complete the feature. Application callers, the transport scheduler and legacy discovery/watch removal remain required cutover work.
 
 ## Independent filter requests
 
@@ -57,3 +57,9 @@ The receiver client's `history::SessionMetadata` binds archive coverage to the a
 Enumeration and admission are separate. Authenticated candidates wait for a candidate-specific witness and ordinary account spend coverage. Only a fully enumerated receiver with no remaining candidates can clear covered matches. False positives may finish with an empty history, but that never exempts the receiver from later filters. Retries persist across handle restarts. Revoking a work generation discards its uncredited responses and cursors, retaining positive match obligations for a fresh lookup. This prevents stale candidates from blocking later issuance indefinitely. Call local admission after ordinary scan progress and cancel network tasks when the feature is paused.
 
 The block-filter queue reuses existing note authentication, canonical inclusion, witness installation and spend-journal admission. Legacy pending state is preserved during this intermediate PR, but has no authority over this queue. The subsequent direct caller cutover must remove legacy orchestration and migrate its remaining obligations before retiring old tables. The app scheduler and full-transaction admission cutover are still outstanding.
+
+## Full transaction storage
+
+`decrypt_and_store_transaction_with_one_time_ivks` uses `OneTimeTransactionScan` to capture current local-watch and exact canonical block-match keys, plus known-receipt repair keys. It carries the account generation into `DecryptedTransaction`. SQLite checks that generation in the same transaction as storage. Pausing, even followed by immediate re-enabling, revokes old discoveries. A raw key without a captured permit can only repair a receipt already known by its authenticated nullifier or stored note plaintext when compact scanning has not supplied that nullifier yet. Ordinary transaction details and known funds remain available while discovery is off.
+
+A full transaction does not prove that every output of its block was tried. It never records whole-block scan evidence, clears a positive match or closes a watch on its own. The former broad `get_one_time_transaction_keys` selector and boolean “keys were tried” storage marker are removed. Callers must use the new capture contract rather than interpreting an open registry row as discovery permission.

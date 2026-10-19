@@ -3058,7 +3058,7 @@ pub struct DecryptedTransaction<'a, Tx: DecryptableTransaction<AccountId>, Accou
     #[cfg(feature = "orchard")]
     ironwood_outputs: Vec<Tx::DecryptedOrchardOutput>,
     #[cfg(feature = "orchard")]
-    one_time_ivks_applied: bool,
+    one_time_permits: Vec<one_time_ivk::recovery::ScanPermit<AccountId>>,
 }
 
 impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<'a, Tx, AccountId> {
@@ -3082,7 +3082,7 @@ impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<
             #[cfg(feature = "orchard")]
             ironwood_outputs,
             #[cfg(feature = "orchard")]
-            one_time_ivks_applied: false,
+            one_time_permits: Vec::new(),
         }
     }
 
@@ -3112,21 +3112,37 @@ impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<
         &self.ironwood_outputs
     }
 
-    /// Whether the wallet's one-time keys were tried, through
-    /// [`decrypt_transaction_with_one_time_ivks`]. While a one-time key is open, a
-    /// store may refuse a transaction decrypted without them.
-    ///
-    /// [`decrypt_transaction_with_one_time_ivks`]: crate::decrypt_transaction_with_one_time_ivks
+    /// Carries the discovery generations captured before full-transaction decryption.
     #[cfg(feature = "orchard")]
-    pub fn one_time_ivks_applied(&self) -> bool {
-        self.one_time_ivks_applied
+    pub fn with_one_time_permits(
+        mut self,
+        permits: Vec<one_time_ivk::recovery::ScanPermit<AccountId>>,
+    ) -> Self {
+        self.one_time_permits = permits;
+        self
     }
 
-    /// Records that the wallet's one-time keys were tried.
+    /// Returns the generations the store must validate before accepting new receipts.
     #[cfg(feature = "orchard")]
-    pub(crate) fn with_one_time_ivks_applied(mut self) -> Self {
-        self.one_time_ivks_applied = true;
-        self
+    pub fn one_time_permits(&self) -> &[one_time_ivk::recovery::ScanPermit<AccountId>] {
+        &self.one_time_permits
+    }
+
+    /// Filters Ironwood outputs before storage, leaving the other pools untouched.
+    #[cfg(feature = "orchard")]
+    pub fn retain_ironwood_outputs<E>(
+        &mut self,
+        mut keep: impl FnMut(&Tx::DecryptedOrchardOutput) -> Result<bool, E>,
+    ) -> Result<(), E> {
+        let mut error = None;
+        self.ironwood_outputs.retain(|output| match keep(output) {
+            Ok(keep) => keep,
+            Err(err) => {
+                error = Some(err);
+                false
+            }
+        });
+        error.map_or(Ok(()), Err)
     }
 
     /// Returns whether the transaction has decrypted outputs

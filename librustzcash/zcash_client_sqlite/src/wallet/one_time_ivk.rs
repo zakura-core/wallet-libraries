@@ -37,6 +37,7 @@
 pub(crate) mod block_pir;
 pub(crate) mod block_recovery;
 pub(crate) mod block_scan;
+pub(crate) mod full_tx;
 pub(crate) mod journal;
 pub(crate) mod restore;
 pub mod swap;
@@ -200,40 +201,6 @@ fn keys_by_account<P: Parameters>(
         }
     }
     Ok(result)
-}
-
-/// Implements `OneTimeIvkRead::get_one_time_transaction_keys`: keys that may own outputs
-/// of `txid`, which are those its stored notes or queued payments name, open keys active
-/// by the next block (by `height` without a chain tip), and keys for `receivers`.
-pub(crate) fn transaction_keys<P: Parameters>(
-    conn: &Connection,
-    params: &P,
-    txid: zcash_primitives::transaction::TxId,
-    height: Option<BlockHeight>,
-    receivers: &[orchard::Address],
-) -> Result<Vec<OneTimeScanningKey<AccountUuid>>, SqliteClientError> {
-    let height = super::chain_tip_height(conn)?
-        .map(|h| BlockHeight::from(u32::from(h).saturating_add(1)))
-        .or(height);
-    let receivers = receivers
-        .iter()
-        .map(|r| format!("X'{}'", hex::encode(r.to_raw_address_bytes())))
-        .collect::<Vec<_>>()
-        .join(",");
-    // Only matching keys are derived, so enhancing a closed key's note does not derive
-    // the historical registry.
-    let predicate = format!(
-        "k.id IN (SELECT one_time_key_id FROM ironwood_received_notes
-                WHERE transaction_id = (SELECT id_tx FROM transactions WHERE txid = ?2)
-            UNION SELECT one_time_key_id FROM ironwood_one_time_payment_recovery
-                WHERE txid = ?2)
-         OR (k.closed_at IS NULL AND k.active_from <= COALESCE(?3, k.active_from))
-         OR k.receiver IN ({receivers})"
-    );
-    keys_by_account(conn, params, |account| {
-        let bindings = rusqlite::params![account.0, txid.as_ref(), height.map(u32::from)];
-        keys_where(conn, params, account, &predicate, bindings)
-    })
 }
 
 /// The key of a registry row selecting purpose, key_index and receiver, checked.

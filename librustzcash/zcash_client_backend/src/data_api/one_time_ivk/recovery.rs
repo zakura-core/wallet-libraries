@@ -189,3 +189,20 @@ pub trait OneTimeBlockScan: OneTimeRecoveryWrite {
         scanned: &[BlockScan<<Self as WalletRead>::AccountId>],
     ) -> Result<(), <Self as WalletRead>::Error>;
 }
+
+/// Captured full-transaction keys. Full transactions never prove a whole block was scanned.
+pub struct TransactionScan<A> {
+    pub keys: Vec<OneTimeScanningKey<A>>,
+    pub permits: Vec<ScanPermit<A>>,
+}
+
+/// Captures full-transaction discovery permissions without holding a network request.
+#[cfg_attr(feature = "test-dependencies", delegatable_trait)]
+pub trait OneTimeTransactionScan: OneTimeRecoveryWrite {
+    /// Selects known receipt repair, current local watches and exact canonical matches.
+    fn prepare_one_time_transaction_scan(
+        &mut self,
+        txid: zcash_protocol::TxId,
+        height: Option<BlockHeight>,
+    ) -> Result<TransactionScan<<Self as WalletRead>::AccountId>, <Self as WalletRead>::Error>;
+}

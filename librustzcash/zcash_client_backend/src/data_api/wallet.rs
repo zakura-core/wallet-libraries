@@ -272,15 +272,8 @@ where
     Ok(())
 }
 
-/// [`decrypt_and_store_transaction`], also decrypting with the wallet's one-time keys
-/// (see [`OneTimeIvkRead::get_one_time_transaction_keys`]). A wallet with open one-time
-/// keys must decrypt with this function rather than [`decrypt_and_store_transaction`].
-///
-/// The keys are read before decryption and not checked again when storing, so the
-/// caller must not open a one-time key between the two, for example by holding its
-/// wallet write lock across this call.
-///
-/// [`OneTimeIvkRead::get_one_time_transaction_keys`]: super::one_time_ivk::OneTimeIvkRead::get_one_time_transaction_keys
+/// Decrypts a full transaction with current discovery permissions and known-note repair
+/// keys. The store rechecks captured generations before admitting new one-time receipts.
 #[cfg(feature = "orchard")]
 pub fn decrypt_and_store_transaction_with_one_time_ivks<ParamsT, DbT>(
     params: &ParamsT,
@@ -290,36 +283,23 @@ pub fn decrypt_and_store_transaction_with_one_time_ivks<ParamsT, DbT>(
 ) -> Result<(), <DbT as WalletRead>::Error>
 where
     ParamsT: consensus::Parameters,
-    DbT: WalletWrite + super::one_time_ivk::OneTimeIvkRead,
+    DbT: super::one_time_ivk::recovery::OneTimeTransactionScan,
 {
     let ufvks = data.get_unified_full_viewing_keys()?;
     let mined_height =
         mined_height.map_or_else(|| data.get_tx_height(tx.txid()), |h| Ok(Some(h)))?;
     let chain_height = data.chain_height()?;
-    // The receivers the account keys recover select the one-time keys to decrypt with.
-    let d_tx = decrypt_transaction(params, mined_height, chain_height, tx, &ufvks);
-    let receivers: Vec<_> = d_tx
-        .ironwood_outputs()
-        .iter()
-        .map(|output| output.note().0.recipient())
-        .collect();
-    let keys = data.get_one_time_transaction_keys(tx.txid(), mined_height, &receivers)?;
-    // With no keys, a second pass would repeat the first.
-    let d_tx = if keys.is_empty() {
-        d_tx.with_one_time_ivks_applied()
-    } else {
-        crate::decrypt_transaction_with_one_time_ivks(
-            params,
-            mined_height,
-            chain_height,
-            tx,
-            &ufvks,
-            keys,
-        )
-    };
-    data.store_decrypted_tx(d_tx)?;
-
-    Ok(())
+    let scan = data.prepare_one_time_transaction_scan(tx.txid(), mined_height)?;
+    let d_tx = crate::decrypt_transaction_with_one_time_ivks(
+        params,
+        mined_height,
+        chain_height,
+        tx,
+        &ufvks,
+        scan.keys,
+    )
+    .with_one_time_permits(scan.permits);
+    data.store_decrypted_tx(d_tx)
 }
 
 /// Errors that may be generated in construction of proposals for shielded->shielded or

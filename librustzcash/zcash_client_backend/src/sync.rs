@@ -38,7 +38,7 @@ use {
 #[cfg(all(feature = "sync", feature = "orchard"))]
 use {
     crate::data_api::{
-        chain::scan_cached_blocks_with_one_time_ivks, one_time_ivk::OneTimeIvkWrite,
+        chain::scan_cached_blocks_with_recovery, one_time_ivk::recovery::OneTimeBlockScan,
     },
     orchard::tree::MerkleHashOrchard,
 };
@@ -61,14 +61,13 @@ use {
 #[cfg(feature = "sync-decryptor")]
 pub mod decryptor;
 
-/// The wallet store [`run`] scans into. With `orchard` it also holds one-time IVKs, and
-/// blocks are scanned with them (see [`scan_cached_blocks_with_one_time_ivks`]), since a
-/// store may refuse blocks scanned without its open one-time keys.
+/// The wallet store [`run`] scans into. Ironwood discovery uses exact block hints and
+/// bounded local watches, with a commit-time setting fence and no filter-service wait.
 #[cfg(all(feature = "sync", feature = "orchard"))]
-pub trait SyncWallet: OneTimeIvkWrite {}
+pub trait SyncWallet: OneTimeBlockScan {}
 
 #[cfg(all(feature = "sync", feature = "orchard"))]
-impl<T: OneTimeIvkWrite> SyncWallet for T {}
+impl<T: OneTimeBlockScan> SyncWallet for T {}
 
 /// The wallet store [`run`] scans into.
 #[cfg(all(feature = "sync", not(feature = "orchard")))]
@@ -461,7 +460,7 @@ where
 {
     info!("Scanning {}", scan_range);
     #[cfg(feature = "orchard")]
-    let scan_cached_blocks = scan_cached_blocks_with_one_time_ivks;
+    let scan_cached_blocks = scan_cached_blocks_with_recovery;
     let scan_result = scan_cached_blocks(
         params,
         db_cache,
@@ -469,6 +468,8 @@ where
         scan_range.block_range().start,
         initial_chain_state,
         scan_range.len(),
+        #[cfg(feature = "orchard")]
+        &[],
     );
 
     match scan_result {
