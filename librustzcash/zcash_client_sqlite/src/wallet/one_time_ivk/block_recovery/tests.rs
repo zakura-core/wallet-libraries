@@ -611,3 +611,57 @@ fn block_recovery_every_allocation_promotion_widens_history() {
         );
     }
 }
+
+/// A corrected unknown receipt amount invalidates an earlier multi-operation settlement.
+#[test]
+fn block_recovery_ambiguous_amount_reopens_settlement() {
+    use zakura_one_time_ivk::swap::{Observation, OperationStatus, ReceiptExpectation};
+    let (mut st, account, work) = ready();
+    let db = st.wallet_mut().db_mut();
+    let (id, _) = db
+        .transactionally(|db| {
+            one_time_ivk::register(
+                db.conn.0,
+                &db.params,
+                account,
+                work.receivers[0].key,
+                work.next_height,
+                false,
+                Discovery::Funding,
+                1,
+            )
+        })
+        .unwrap();
+    db.conn.execute("INSERT INTO ironwood_one_time_operations(one_time_key_id,reference,deadline,begun_at,expectation,expected_value,local_watch_deadline,local_watch_accepted) VALUES (?1,'first',100,1,2,100,100,1),(?1,'second',100,1,2,100,100,1)",[id]).unwrap();
+    db.conn.execute("UPDATE ironwood_one_time_keys SET watch_closed_height=?2,watch_closed_hash=zeroblob(32) WHERE id=?1",params![id,u32::from(work.next_height)]).unwrap();
+    let operation: i64 = db
+        .conn
+        .query_row(
+            "SELECT id FROM ironwood_one_time_operations WHERE reference='first'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    one_time_ivk::swap::lifecycle::record(
+        &db.conn,
+        operation,
+        Observation {
+            status: OperationStatus::Terminal(ReceiptExpectation::Positive(None)),
+            funded: true,
+        },
+        2,
+    )
+    .unwrap();
+    let range = work.next_height..work.next_height + 1;
+    assert_eq!(
+        db.one_time_local_watch_keys(range.clone(), 50)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        db.one_time_local_watch_keys(range, 86500)
+            .unwrap()
+            .is_empty()
+    );
+}

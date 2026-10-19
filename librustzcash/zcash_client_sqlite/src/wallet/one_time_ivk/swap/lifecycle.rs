@@ -167,7 +167,9 @@ pub(in crate::wallet::one_time_ivk) fn record(
     if current > 0
         && (matches!(expectation, 0 | 3 | 4)
             || (expectation == 2
-                && (previous.0 != 2 || amount.unwrap_or(1) > previous.1.unwrap_or(1))))
+                && (previous.0 != 2
+                    || (amount.is_none() && previous.1.is_some())
+                    || amount.unwrap_or(1) > previous.1.unwrap_or(1))))
     {
         conn.execute("UPDATE ironwood_one_time_keys SET watch_closed_height=NULL,watch_closed_hash=NULL WHERE id=(SELECT one_time_key_id FROM ironwood_one_time_operations WHERE id=?1)", [id])?;
     }
