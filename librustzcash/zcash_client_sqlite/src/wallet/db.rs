@@ -554,7 +554,7 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_KEYS: &str = "CREATE TABLE ironwood_one
                 active_from INTEGER CHECK (active_from BETWEEN 0 AND 4294967295),
                 closed_at INTEGER,
                 reservation_floor INTEGER,
-                pass_watch_height INTEGER CHECK (pass_watch_height BETWEEN 0 AND 4294967295),
+                pass_watch_height INTEGER CHECK (pass_watch_height BETWEEN 0 AND 4294967295), authenticated INTEGER NOT NULL DEFAULT 0 CHECK(authenticated IN(0,1)), issuance_blocked INTEGER NOT NULL DEFAULT 0 CHECK(issuance_blocked IN(0,1)), watch_closed_height INTEGER CHECK(watch_closed_height BETWEEN 0 AND 4294967295), watch_closed_hash BLOB CHECK(length(watch_closed_hash)=32),
                 UNIQUE (account_id, purpose, key_index)
             )";
 
@@ -2037,7 +2037,7 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_OPERATIONS: &str = "CREATE TABLE ironwo
                 rejected INTEGER NOT NULL DEFAULT 0 CHECK (rejected IN (0, 1)),
                 observed_at INTEGER NOT NULL DEFAULT 0,
                 expectation INTEGER NOT NULL DEFAULT 0 CHECK (expectation BETWEEN 0 AND 255),
-                expected_value INTEGER CHECK (expected_value > 0),
+                expected_value INTEGER CHECK (expected_value > 0), local_watch_deadline INTEGER CHECK(local_watch_deadline>=0), local_watch_accepted INTEGER NOT NULL DEFAULT 0 CHECK(local_watch_accepted IN(0,1)),
                 CHECK (request IS NOT NULL OR reference IS NOT NULL)
             )";
 
@@ -2253,3 +2253,62 @@ CREATE TABLE transparent_tx_display_outputs (
     CHECK ((address_kind = 3) = (address_hash IS NULL)),
     PRIMARY KEY (transaction_id, output_index)
 )"#;
+
+/// Expected schema for durable block-filter recovery.
+pub(super) const TABLE_IRONWOOD_BLOCK_RECOVERY: &str = "CREATE TABLE ironwood_block_recovery (
+            account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+            enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
+            needs_prepare INTEGER NOT NULL DEFAULT 1 CHECK(needs_prepare IN(0,1)),
+            birthday INTEGER NOT NULL CHECK(birthday BETWEEN 0 AND 4294967295),
+            key_generation INTEGER NOT NULL DEFAULT 0 CHECK(typeof(key_generation)='integer' AND key_generation>=0),
+            work_generation INTEGER NOT NULL DEFAULT 0 CHECK(typeof(work_generation)='integer' AND work_generation>=0),
+            genesis BLOB CHECK(length(genesis)=32), archive BLOB CHECK(length(archive)=32),
+            epoch INTEGER CHECK(epoch IS NULL OR (typeof(epoch)='integer' AND epoch>=0)),
+            CHECK((genesis IS NULL)=(archive IS NULL) AND (archive IS NULL)=(epoch IS NULL)))";
+
+/// Expected schema for durable block-filter recovery.
+pub(super) const TABLE_IRONWOOD_BLOCK_HISTORIES: &str = "CREATE TABLE ironwood_block_histories (
+            account_id INTEGER NOT NULL REFERENCES ironwood_block_recovery(account_id) ON DELETE CASCADE,
+            archive BLOB NOT NULL CHECK(length(archive)=32), epoch INTEGER NOT NULL CHECK(typeof(epoch)='integer' AND epoch>=0),
+            PRIMARY KEY(account_id,archive))";
+
+/// Expected schema for durable block-filter recovery.
+pub(super) const TABLE_IRONWOOD_BLOCK_WINDOWS: &str = "CREATE TABLE ironwood_block_windows (
+            account_id INTEGER NOT NULL REFERENCES ironwood_block_recovery(account_id) ON DELETE CASCADE,
+            purpose INTEGER NOT NULL CHECK(purpose IN(0,1)),
+            end_index BLOB NOT NULL DEFAULT X'00000000000000000000000000000064'
+                CHECK(typeof(end_index)='blob' AND length(end_index)=16 AND end_index BETWEEN X'00000000000000000000000000000064' AND X'00000000000000010000000000000000'),
+            derived BLOB NOT NULL DEFAULT X'00000000000000000000000000000000'
+                CHECK(typeof(derived)='blob' AND length(derived)=16 AND derived<=end_index),
+            PRIMARY KEY(account_id,purpose))";
+
+/// Expected schema for durable block-filter recovery.
+pub(super) const TABLE_IRONWOOD_BLOCK_RECEIVERS: &str = "CREATE TABLE ironwood_block_receivers (
+            account_id INTEGER NOT NULL REFERENCES ironwood_block_recovery(account_id) ON DELETE CASCADE,
+            purpose INTEGER NOT NULL CHECK(purpose IN(0,1)), key_index BLOB NOT NULL CHECK(length(key_index)=8),
+            receiver BLOB NOT NULL CHECK(length(receiver)=43),
+            next_height INTEGER NOT NULL CHECK(next_height BETWEEN 0 AND 4294967296),
+            PRIMARY KEY(account_id,purpose,key_index))";
+
+/// Expected schema for durable block-filter recovery.
+pub(super) const TABLE_IRONWOOD_BLOCK_MATCHES: &str = "CREATE TABLE ironwood_block_matches (
+            account_id INTEGER NOT NULL, purpose INTEGER NOT NULL, key_index BLOB NOT NULL,
+            height INTEGER NOT NULL CHECK(height BETWEEN 0 AND 4294967295), hash BLOB NOT NULL CHECK(length(hash)=32),
+            PRIMARY KEY(account_id,purpose,key_index,height),
+            FOREIGN KEY(account_id,purpose,key_index) REFERENCES ironwood_block_receivers(account_id,purpose,key_index) ON DELETE CASCADE)";
+
+/// Expected schema for durable block-filter recovery.
+pub(super) const TABLE_IRONWOOD_KEY_SCANS: &str = "CREATE TABLE ironwood_key_scans (
+            one_time_key_id INTEGER NOT NULL REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
+            height INTEGER NOT NULL CHECK(height BETWEEN 0 AND 4294967295), hash BLOB NOT NULL CHECK(length(hash)=32),
+            PRIMARY KEY(one_time_key_id,height))";
+
+/// Expected guard for recovery state changes.
+pub(super) const TRIGGER_IRONWOOD_RECOVERY_ALLOCATION: &str = "CREATE TRIGGER ironwood_recovery_allocation AFTER UPDATE OF advances_allocation ON ironwood_one_time_keys
+            WHEN NEW.advances_allocation>OLD.advances_allocation
+            BEGIN UPDATE ironwood_block_recovery SET needs_prepare=1 WHERE account_id=NEW.account_id; END";
+
+/// Expected guard for recovery state changes.
+pub(super) const TRIGGER_IRONWOOD_LOCAL_WATCH_BOUND: &str = "CREATE TRIGGER ironwood_local_watch_bound BEFORE UPDATE OF local_watch_deadline,local_watch_accepted ON ironwood_one_time_operations
+            WHEN OLD.local_watch_accepted=1 AND (NEW.local_watch_deadline IS NOT OLD.local_watch_deadline OR NEW.local_watch_accepted<>1)
+            BEGIN SELECT RAISE(ABORT,'accepted watch deadline is immutable'); END";

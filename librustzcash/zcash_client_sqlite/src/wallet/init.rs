@@ -975,12 +975,18 @@ mod tests {
             db::TABLE_ACCOUNTS,
             db::TABLE_ADDRESSES,
             db::TABLE_BLOCKS,
+            db::TABLE_IRONWOOD_BLOCK_HISTORIES,
+            db::TABLE_IRONWOOD_BLOCK_MATCHES,
+            db::TABLE_IRONWOOD_BLOCK_RECEIVERS,
+            db::TABLE_IRONWOOD_BLOCK_RECOVERY,
+            db::TABLE_IRONWOOD_BLOCK_WINDOWS,
             db::TABLE_IRONWOOD_ENHANCE_DISCOVERY_QUEUE,
             db::TABLE_IRONWOOD_ENHANCE_METADATA_QUEUE,
             db::TABLE_IRONWOOD_ENHANCE_OUTGOING_ACCOUNTS,
             db::TABLE_IRONWOOD_ENHANCE_OUTGOING_QUEUE,
             db::TABLE_IRONWOOD_ENHANCE_ROUTING,
             db::TABLE_IRONWOOD_JOURNAL_COVERAGE,
+            db::TABLE_IRONWOOD_KEY_SCANS,
             db::TABLE_IRONWOOD_MEMO_RETRIEVAL_QUEUE,
             db::TABLE_IRONWOOD_ONE_TIME_DISCOVERY,
             db::TABLE_IRONWOOD_ONE_TIME_FRESH_ACCOUNTS,
@@ -1171,7 +1177,20 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert!(triggers.is_empty(), "unexpected triggers: {triggers:?}");
+        let expected = [
+            db::TRIGGER_IRONWOOD_LOCAL_WATCH_BOUND,
+            db::TRIGGER_IRONWOOD_RECOVERY_ALLOCATION,
+        ];
+        assert_eq!(
+            triggers
+                .iter()
+                .map(|sql| normalize(sql))
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|sql| normalize(sql))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

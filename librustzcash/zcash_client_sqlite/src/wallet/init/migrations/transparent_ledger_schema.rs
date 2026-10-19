@@ -244,6 +244,12 @@ mod tests {
         // journal for a wallet that has scanned nothing since. Discovery replaced the empty
         // restore sweep and retention tables, unless an interrupted upgrade stopped before it.
         for table in [
+            "ironwood_block_histories",
+            "ironwood_block_matches",
+            "ironwood_block_receivers",
+            "ironwood_block_recovery",
+            "ironwood_block_windows",
+            "ironwood_key_scans",
             "ironwood_journal_coverage",
             "ironwood_nullifier_scan_blocks",
             "ironwood_one_time_discovery",
