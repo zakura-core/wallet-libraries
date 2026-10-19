@@ -826,14 +826,20 @@ pub(crate) fn delete_account(
     )?;
     let mut delete_intent =
         conn.prepare_cached("DELETE FROM tx_retrieval_queue WHERE txid = :txid")?;
-    // An entry's nullifier rows cascade from it.
-    let mut delete_journal_entry =
-        conn.prepare_cached("DELETE FROM ironwood_spend_journal WHERE txid = :txid")?;
     for (id, txid) in &exclusive_transactions {
         detach.execute(named_params![":tx": id, ":account_uuid": account_uuid.0])?;
         delete_intent.execute(named_params![":txid": txid])?;
-        delete_journal_entry.execute(named_params![":txid": txid])?;
     }
+    // One statement, since the journal has no txid index. An entry's nullifier rows
+    // cascade from it.
+    let txids: Vec<rusqlite::types::Value> = exclusive_transactions
+        .iter()
+        .map(|(_, txid)| rusqlite::types::Value::Blob(txid.clone()))
+        .collect();
+    conn.execute(
+        "DELETE FROM ironwood_spend_journal WHERE txid IN rarray(:txids)",
+        named_params![":txids": std::rc::Rc::new(txids)],
+    )?;
     let mut delete_tx = conn.prepare_cached("DELETE FROM transactions WHERE id_tx = :tx")?;
     for (id, _) in exclusive_transactions {
         delete_tx.execute(named_params![":tx": id])?;
