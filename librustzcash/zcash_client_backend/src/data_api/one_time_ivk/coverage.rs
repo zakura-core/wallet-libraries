@@ -73,7 +73,7 @@ pub enum CoverageTarget {
     },
     /// A historical obligation, tested against its own receivers.
     Obligation {
-        /// The obligation's ID (see [`Obligation::id`]).
+        /// The obligation's ID (see [`Obligation::id`]). IDs are never reused.
         id: u64,
         /// The account's receiver-set generation when the caller read the obligation
         /// (see [`CoverageState::generation`]), which fences out work a rewind or a

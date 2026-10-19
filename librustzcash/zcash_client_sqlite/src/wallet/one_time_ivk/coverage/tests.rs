@@ -682,6 +682,45 @@ fn lowering_the_birthday_owes_every_receiver_its_history() {
     );
 }
 
+/// A finished obligation's ID is never given to another, so a late answer for it is stale
+/// even when a newer obligation pinned the same snapshot.
+#[test]
+fn a_late_answer_for_a_finished_obligation_is_stale() {
+    let (mut st, account) = prepared();
+    let top = tip(&st).height;
+    let h0 = top - 4;
+    bootstrap(&mut st, account, h0, &[]);
+    let pinned = snapshot(&st, h0 - 2);
+    let first = KeyId::new(Purpose::Refund, 1_000_000);
+    register_sparse(&mut st, account, first).unwrap();
+    let id = coverage(&st, account).obligations[0].id;
+    let target = obligation(&st, account, id);
+    let db = st.wallet_mut().db_mut();
+    db.pin_one_time_snapshot(account, target, pinned).unwrap();
+    let tested = record(&mut st, account, target, cumulative(pinned), &[]);
+    assert_eq!(tested.unwrap(), CoverageOutcome::Recorded);
+    let last = bucket(&st, h0 - 3, h0);
+    assert_eq!(
+        record(&mut st, account, target, last, &[]).unwrap(),
+        CoverageOutcome::Recorded
+    );
+    assert!(coverage(&st, account).obligations.is_empty());
+
+    register_sparse(&mut st, account, KeyId::new(Purpose::Refund, 2_000_000)).unwrap();
+    let newer = coverage(&st, account).obligations[0].id;
+    assert_ne!(newer, id);
+    let current = obligation(&st, account, newer);
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(
+        db.pin_one_time_snapshot(account, current, pinned).unwrap(),
+        Some(pinned)
+    );
+    let late = obligation(&st, account, id);
+    let answer = record(&mut st, account, late, cumulative(pinned), &[first]);
+    assert_eq!(answer.unwrap(), CoverageOutcome::Stale);
+    assert_eq!(coverage(&st, account).obligations[0].bridged, None);
+}
+
 /// A snapshot fetched before a rewind or a history change pins nothing afterwards, for the
 /// frontier or an obligation, so it cannot wedge recovery on a stale snapshot.
 #[test]

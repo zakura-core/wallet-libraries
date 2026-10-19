@@ -192,7 +192,7 @@ impl RusqliteMigration for Migration {
                 PRIMARY KEY (account_id, purpose, key_index)
             );
             CREATE TABLE ironwood_one_time_obligations (
-                id INTEGER PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
                 purpose INTEGER NOT NULL CHECK (purpose BETWEEN 0 AND 255),
                 one_time_key_id INTEGER REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,

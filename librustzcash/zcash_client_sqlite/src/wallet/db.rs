@@ -2157,10 +2157,11 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_RECEIVER_CACHE: &str =
 
 /// History a key or a window range owes from `lower_height` through `through_height`,
 /// with the cumulative snapshot it pinned and how far it has bridged (see
-/// `one_time_ivk::coverage`).
+/// `one_time_ivk::coverage`). IDs are never reused, so a late answer for a finished
+/// obligation cannot apply to another.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_OBLIGATIONS: &str =
     "CREATE TABLE ironwood_one_time_obligations (
-                id INTEGER PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
                 purpose INTEGER NOT NULL CHECK (purpose BETWEEN 0 AND 255),
                 one_time_key_id INTEGER REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
