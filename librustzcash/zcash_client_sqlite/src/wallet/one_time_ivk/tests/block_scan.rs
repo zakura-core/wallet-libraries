@@ -500,3 +500,56 @@ fn disabled_deep_rewind_rebuilds_known_receipt_witnesses() {
     assert!(has_mark(&mut st, position));
     assert_eq!(evidence(&st), 0);
 }
+
+/// A delayed exact-block replay stays spent after ordinary sync prunes its temporary spend map.
+#[test]
+fn delayed_replay_keeps_a_journaled_receipt_spent() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key = KeyId::new(Purpose::Receive, 0);
+    let recipient = IronwoodFvk(derive(&st, key));
+    let amount = Zatoshis::const_from_u64(50_000);
+    let (height, _, nf) = st.generate_next_block(&recipient, AddressType::DefaultExternal, amount);
+    let block = ChainPoint {
+        height,
+        hash: st.latest_cached_block().unwrap().chain_state().block_hash(),
+    };
+    st.scan_cached_blocks_with_recovery(height, 1, &[]);
+    let ordinary = IronwoodFvk(parent(&st));
+    st.generate_next_block_spending(
+        &ordinary,
+        (nf, amount),
+        unified(foreign_receiver()),
+        Zatoshis::const_from_u64(40_000),
+    );
+    let count = crate::PRUNING_DEPTH as usize + 10;
+    for _ in 0..count {
+        st.generate_empty_block();
+    }
+    st.scan_cached_blocks_with_recovery(height + 1, count + 1, &[]);
+    assert_eq!(
+        value::<u32>(
+            st.wallet().conn(),
+            "SELECT COUNT(*) FROM nullifier_map WHERE nf=?1",
+            [nf.to_bytes()]
+        ),
+        0
+    );
+    st.scan_cached_blocks_with_recovery(
+        height,
+        1,
+        &[BlockHints {
+            block,
+            keys: vec![(account, key)],
+        }],
+    );
+    assert_eq!(
+        value::<u32>(
+            st.wallet().conn(),
+            "SELECT COUNT(*) FROM ironwood_received_notes WHERE one_time_key_id IS NOT NULL",
+            []
+        ),
+        1
+    );
+    assert_eq!(unspent_keys(&st, height + count as u32 + 1), vec![None]);
+}
