@@ -376,11 +376,14 @@ pub(crate) fn pin<P: Parameters>(
     }
     let pinned = match target {
         CoverageTarget::Frontier { .. } => {
-            if row.frontier.is_some() {
-                return Ok(None);
-            }
             if row.bootstrap.is_some() {
                 return Ok(row.bootstrap);
+            }
+            if row
+                .frontier
+                .is_some_and(|(frontier, _)| snapshot.cutoff.height <= frontier.height)
+            {
+                return Ok(None);
             }
             conn.execute(
                 "INSERT INTO ironwood_one_time_recovery
@@ -488,7 +491,11 @@ pub(crate) fn record<P: Parameters>(
                 return Ok(CoverageOutcome::Stale);
             }
             let continues = match (step.start, row.frontier) {
-                (None, None) => pinned(row.bootstrap),
+                // A pinned snapshot past the frontier bridges a gap no retained bucket covers.
+                (None, frontier) => {
+                    pinned(row.bootstrap)
+                        && frontier.is_none_or(|(f, _)| f.height < step.end.height)
+                }
                 (Some(from), Some((frontier, _))) => {
                     from.height <= frontier.height
                         && frontier.height < step.end.height

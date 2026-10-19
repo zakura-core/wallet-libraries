@@ -19,8 +19,9 @@ and this library adheres to Rust's notion of
 - `data_api::one_time_ivk::coverage` (with `orchard`): `OneTimeIvkCoverageRead` and
   `OneTimeIvkCoverageWrite` keep an account's continuous recovery from a receiver
   directory: its receiver set and windows, a frontier of consumed buckets tested against a
-  receiver-set generation, historical obligations bridged from a pinned cumulative
-  snapshot, and lookups whose walks complete only their dispatched target and generation.
+  receiver-set generation, which a newer cumulative snapshot can move past expired
+  buckets, historical obligations bridged from a pinned cumulative snapshot, and lookups
+  whose walks complete only their dispatched target and generation.
 - `WalletTx::ironwood_nullifiers` (with `orchard`) gives every Ironwood nullifier a
   transaction a block scan recognized reveals, matched to a wallet note or not.
   `ScannedBlock::scanned_accounts` names the accounts whose ordinary internal keys scanned

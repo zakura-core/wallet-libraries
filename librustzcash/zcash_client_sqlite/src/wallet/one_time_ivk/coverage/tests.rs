@@ -6,7 +6,7 @@ use zcash_client_backend::data_api::one_time_ivk::coverage::{
     Window,
 };
 
-use super::WINDOW_FLOOR;
+use super::{WINDOW_FLOOR, generation};
 use crate::wallet::one_time_ivk::restore::tests::discovery::publication_at;
 use crate::wallet::one_time_ivk::tests::*;
 use crate::wallet::one_time_rewind;
@@ -778,4 +778,61 @@ fn a_delayed_pin_is_fenced_out() {
     let pinned = db.pin_one_time_snapshot(account, before_reset, delayed);
     assert_eq!(pinned.unwrap(), None);
     assert_eq!(coverage(&st, account).bootstrap, None);
+}
+
+/// A frontier older than every retained bucket rebootstraps from a newer cumulative
+/// snapshot of the same history: it pins one past the frontier, tests the whole set against
+/// it, and moves there, keeping the lookups it already finished. Buckets then continue
+/// from the snapshot.
+#[test]
+fn a_frontier_past_retention_rebootstraps_from_a_newer_snapshot() {
+    use CoverageOutcome::*;
+    let (mut st, account) = prepared();
+    let top = tip(&st).height;
+    let (h0, h1) = (top - 8, top - 3);
+    let (done, hit) = (
+        KeyId::new(Purpose::Receive, 3),
+        KeyId::new(Purpose::Receive, 4),
+    );
+    bootstrap(&mut st, account, h0, &[done]);
+    let now = clock_now();
+    let revision = publication_at(&st, h0);
+    let db = st.wallet_mut().db_mut();
+    let ticket = &db.dispatch_one_time_lookups(account, now).unwrap()[0];
+    assert!(
+        db.record_one_time_lookup_page(account, ticket, revision, 0, &[], true, now)
+            .unwrap()
+    );
+    let finished = lookup(&st, done);
+
+    let target = frontier(&st, account);
+    let (behind, newer) = (snapshot(&st, h0), snapshot(&st, h1));
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(
+        db.pin_one_time_snapshot(account, target, behind).unwrap(),
+        None
+    );
+    let stale = CoverageTarget::Frontier {
+        generation: generation(target) - 1,
+    };
+    assert_eq!(
+        db.pin_one_time_snapshot(account, stale, newer).unwrap(),
+        None
+    );
+    assert_eq!(
+        db.pin_one_time_snapshot(account, target, newer).unwrap(),
+        Some(newer)
+    );
+    let rebootstrapped = record(&mut st, account, target, cumulative(newer), &[hit]);
+    assert_eq!(rebootstrapped.unwrap(), Recorded);
+    let state = coverage(&st, account);
+    assert_eq!(state.frontier.map(|f| f.0), Some(newer.cutoff));
+    assert_eq!(state.bootstrap, None);
+    assert_eq!(lookup(&st, done), finished);
+    assert_eq!(lookup(&st, hit), Some((Some(u32::from(h1)), None, 0, 0)));
+    let next = bucket(&st, h1 - 1, top);
+    assert_eq!(
+        record(&mut st, account, target, next, &[]).unwrap(),
+        Recorded
+    );
 }

@@ -7,7 +7,7 @@
 //!
 //! - A frontier: every receiver in the set had no payment through it, apart from the hits
 //!   whose lookups are recorded. It moves by consuming closed buckets tested against the
-//!   whole set.
+//!   whole set, or a newer cumulative snapshot once the buckets adjoining it expired.
 //! - Historical obligations: receivers that joined the set after the frontier passed part
 //!   of their history. Each pins a cumulative snapshot, then bridges through the frontier
 //!   it owes with buckets tested against its own receivers.
@@ -159,7 +159,8 @@ pub struct CoverageState {
     /// The frontier and the receiver-set generation it was last tested against, if
     /// established.
     pub frontier: Option<(ChainPoint, u64)>,
-    /// The cumulative snapshot pinned to establish the frontier, until it is.
+    /// The cumulative snapshot pinned to establish or rebootstrap the frontier, until it
+    /// moves.
     pub bootstrap: Option<Snapshot>,
     /// Both purposes' windows.
     pub windows: [Window; 2],
@@ -215,9 +216,10 @@ pub trait OneTimeIvkCoverageWrite: OneTimeIvkWrite + OneTimeIvkCoverageRead {
     ) -> Result<bool, <Self as WalletRead>::Error>;
 
     /// Pins `snapshot` for `target` unless one is pinned already, and returns the pinned
-    /// snapshot. The frontier takes one only until it is established, and an obligation
-    /// only until its snapshot is tested. Otherwise, or if the target's generation is not
-    /// current, this returns `None` and pins nothing.
+    /// snapshot. The frontier takes one that ends past it, if it has one: a snapshot that
+    /// bridges from a frontier whose adjoining buckets the directory no longer retains. An
+    /// obligation takes one only until its snapshot is tested. Otherwise, or if the
+    /// target's generation is not current, this returns `None` and pins nothing.
     fn pin_one_time_snapshot(
         &mut self,
         account: <Self as WalletRead>::AccountId,
@@ -231,8 +233,9 @@ pub trait OneTimeIvkCoverageWrite: OneTimeIvkWrite + OneTimeIvkCoverageRead {
     /// issued. A cumulative step must be the snapshot pinned for the target, and the
     /// target's generation must be current. A frontier's first step is its pinned
     /// snapshot, which sets the history it follows. Each later one is a bucket starting at
-    /// or below the frontier and ending above it, tested against the current, completely
-    /// derived receiver set. An obligation tests its snapshot, then buckets that continue
+    /// or below the frontier and ending above it, or a pinned snapshot ending above it,
+    /// tested against the current, completely derived receiver set. Moving the frontier
+    /// unpins its snapshot. An obligation tests its snapshot, then buckets that continue
     /// from it, and completes at its `through`. The step's last block must be on the
     /// wallet's chain, unless it precedes the account's birthday.
     fn record_one_time_coverage(
