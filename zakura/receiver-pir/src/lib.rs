@@ -1,6 +1,7 @@
 //! Encrypted row retrieval. Results are candidates for wallet validation, not chain proofs:
 //! records and witness files are returned as untrusted bytes, which the wallet checks
 //! cryptographically before use.
+pub mod archive;
 mod client;
 #[cfg(feature = "server")]
 pub mod server;

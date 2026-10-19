@@ -49,6 +49,44 @@ completeness or ownership. Callers must validate those separately, then verify
 candidate payments with their own keys.
 
 These are the first replacement primitives. The existing `filter` and `snapshot`
-formats remain active until publisher and wallet callers migrate. The archive
-head, bounded range transport and compatible PIR publication binding belong to
-the next format change. No wallet discovery behavior changes here.
+formats remain active until publisher and wallet callers migrate. The `archive` module supplies the head, bounded page index and compatible PIR
+coverage contracts. Publisher and wallet integration are separate changes. No wallet discovery behavior changes here.
+
+
+## Archive contract
+
+A `Head` commits to the network, a nonzero durable archive identity, the correction
+epoch, first supported height, contiguous frontier and its block hash, a Merkle
+index root, and optional complete provider seen data. Missing seen data leaves
+issuance pending but does not stop payment-filter publication. Callers must anchor
+the frontier to their connected chain and persist identity/epoch transitions.
+
+Transport pages cover up to 256 blocks at fixed height boundaries. A page must
+contain the exact intersection of its boundary with the head's supported history.
+It shares the format and network header, followed by start height (`u32`), count
+(`u16`), preceding block hash, then each block hash and a `u32` payload length plus
+GCS bytes. Empty payload length canonically represents an empty filter. Every
+height remains explicit, including empty blocks. Complete empty pages take about
+9.3 KB before their proof, rather than one request per empty block.
+
+The sparse index covers all 2^24 page positions. Its SHA-256 domains distinguish
+missing leaves, position-bound page digests and ordered branches with their level.
+A range response is the page length (`u32`), page bytes, then 24 sibling hashes
+from leaf to root. A head is at most 1 KiB, a page at most 64 MiB, and a response
+adds 772 bytes. Historical page bytes remain reusable when an unrelated page or
+head changes. The index verifies consistency, not honest indexing of every output.
+Publishers durably store each page before publishing a root and advertise no gaps.
+
+`Coverage` binds an immutable PIR session ID to its network, archive identity,
+epoch, first height and frontier. Serve it under the archive identity, epoch and
+session ID together. A correction may legitimately leave PIR row bytes and the
+session ID unchanged, so session ID alone cannot name this declaration. The client
+checks the actual manifest fields and then `Coverage::check` against a captured
+head and independently validated connected-chain evidence. Equality of epochs
+alone never establishes post-reorg compatibility. Account, settings and rewind
+generation checks remain the caller's responsibility after every await.
+
+Ordinary forks replace affected pages without changing the epoch. Corrections of
+already published history change the epoch even if page bytes do not change.
+Lost durable continuity requires a new archive identity. These lifecycle rules
+belong to the publisher and wallet stores, not this transport-free codec.

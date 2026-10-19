@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Add bounded public archive transport for block-filter heads, authenticated pages, complete seen objects and session coverage tied to archive epochs.
+
 ### Added
 
 - The crate, moved from wallet-pir's `receiver-pir` at main 6703f263, over `zakura-pir-native`.

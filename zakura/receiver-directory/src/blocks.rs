@@ -132,12 +132,31 @@ impl BlockFilter {
         if salt != block.salt(&genesis) || p != P || m != M || count > MAX_RECEIVERS {
             return Err(Error::Malformed);
         }
-        // Check the inner count before the shared codec allocates decoded values.
-        let mut inner = payload;
-        if zakura_filters::read_compact_size(&mut inner).map_err(|_| Error::Malformed)?
-            != u64::from(count)
-        {
+        let result = Self::from_payload(genesis, block, payload)?;
+        if result.count() != count {
             return Err(Error::Malformed);
+        }
+        Ok(result)
+    }
+
+    /// The canonical GCS payload for a shared page envelope.
+    pub(crate) fn payload(&self) -> &[u8] {
+        self.filter.bytes()
+    }
+
+    /// Checks the encoded count before allocating decoded values for a page entry.
+    pub(crate) fn from_payload(
+        genesis: Hash,
+        block: BlockId,
+        payload: &[u8],
+    ) -> Result<Self, Error> {
+        if payload.len() > MAX_BLOCK_FILTER_BYTES {
+            return Err(Error::Capacity);
+        }
+        let mut inner = payload;
+        let count = zakura_filters::read_compact_size(&mut inner).map_err(|_| Error::Malformed)?;
+        if count > u64::from(MAX_RECEIVERS) {
+            return Err(Error::Capacity);
         }
         Ok(Self {
             genesis,
