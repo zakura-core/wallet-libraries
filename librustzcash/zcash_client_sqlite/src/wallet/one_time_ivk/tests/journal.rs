@@ -86,6 +86,27 @@ fn unrelated_transactions_are_covered_but_not_journaled() {
     assert_eq!(coverage(&st), [(u32::from(start), u32::from(start) + 1)]);
 }
 
+/// A recognized transaction with no Ironwood nullifiers, such as a Sapling payment, can't
+/// spend a one-time note, so it isn't journaled, but its block is covered.
+#[test]
+fn a_transaction_without_ironwood_nullifiers_is_covered_but_not_journaled() {
+    let mut st = ironwood_wallet();
+    let start = st.sapling_activation_height();
+    let sapling = st
+        .test_account()
+        .unwrap()
+        .usk()
+        .sapling()
+        .to_diversifiable_full_viewing_key();
+    let value = Zatoshis::const_from_u64(50_000);
+    st.generate_next_block(&sapling, AddressType::DefaultExternal, value);
+    st.scan_cached_blocks(start, 1);
+    let account = st.test_account().unwrap().id();
+    assert_eq!(st.get_total_balance(account), value);
+    assert!(entries(&st).is_empty());
+    assert_eq!(coverage(&st), [(u32::from(start), u32::from(start) + 1)]);
+}
+
 /// Batches scanned out of order merge into one covered range once they meet, and a
 /// block scanned twice keeps one entry.
 #[test]
