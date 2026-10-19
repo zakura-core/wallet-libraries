@@ -35,3 +35,11 @@ The application owns one `RecentBlocks` instance per wallet/network, shared acro
 Entries have no disk persistence. Disabling discovery clears the optimization. A chain rewind removes the affected suffix. The caller processes at most one decoded replay at a time and must not put decoded copies into pending queues. Missing or evicted bytes require PIR settlement of the durable match. Replaying a cache entry still requires normal cryptographic note admission and current setting/generation checks.
 
 The transport and cache are foundations for the production scanner and application scheduler. Their unit and SQLite integration tests do not establish real publisher timing, cache-hit rate, or final note-admission behavior. Those integration gates remain required before cutover is complete.
+
+## Exact block scanning
+
+`scan_cached_blocks_with_recovery` performs local scanning without network requests. Before scanning, it captures each block's eligible own-swap keys, queued matches and caller-supplied `BlockHints`. A hint is bound to the downloaded block's height and hash. A verified positive hint can be used before the archive frontier is stored locally, but only the separately anchored filter commit can advance historical coverage. Receiver hints never create forward watches. Ordinary account keys continue scanning every block.
+
+`OneTimeBlockScan` rechecks each account and key's captured discovery generation while committing. Turning discovery off, including off and back on, prevents in-flight work from admitting new receipts or recording complete scan evidence. Ordinary notes, commitments and chain progress still commit. Re-mining a previously known transaction remains allowed while disabled, but this permission cannot admit additional payments to the same key. Exact successful scans settle matching obligations and can close eligible local watches.
+
+This API is opt-in until the application cutover. Cache replay orchestration, compatible PIR settlement, full-transaction discovery gating, the legacy scanner/discovery removal and real publisher integration tests remain required.

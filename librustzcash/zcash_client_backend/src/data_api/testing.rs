@@ -1175,6 +1175,32 @@ where
         )
     }
 
+    /// Scans real compact blocks with exact recovery hints and commit-time permits.
+    pub fn scan_cached_blocks_with_recovery(
+        &mut self,
+        from_height: BlockHeight,
+        limit: usize,
+        hints: &[super::one_time_ivk::recovery::BlockHints<<DbT as WalletRead>::AccountId>],
+    ) -> ScanSummary
+    where
+        DbT: super::one_time_ivk::recovery::OneTimeBlockScan,
+    {
+        let prior = self
+            .latest_cached_block_below_height(from_height)
+            .cloned()
+            .unwrap_or_else(|| CachedBlock::none(from_height - 1));
+        super::chain::scan_cached_blocks_with_recovery(
+            &self.network,
+            self.cache.block_source(),
+            &mut self.wallet_data,
+            from_height,
+            &prior.chain_state,
+            limit,
+            hints,
+        )
+        .expect("recovery block scan succeeds")
+    }
+
     /// [`Self::generate_and_scan_empty_blocks`], scanning with one-time keys.
     pub fn generate_and_scan_empty_blocks_with_one_time_ivks(&mut self, n: usize) -> BlockHeight {
         for _ in 0..n {

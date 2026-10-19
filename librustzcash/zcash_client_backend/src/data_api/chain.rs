@@ -649,6 +649,7 @@ where
         from_height,
         limit,
         &scanning_keys,
+        None,
     )?;
 
     data_db
@@ -704,12 +705,91 @@ where
         from_height,
         limit,
         &scanning_keys,
+        None,
     )?;
 
     data_db
         .put_blocks_with_one_time_ivks(from_state, scanned_blocks, &one_time_key_ids)
         .map_err(Error::Wallet)?;
     Ok(scan_summary)
+}
+
+/// Scans ordinary keys plus exact-block filter hints and eligible own-swap watches.
+/// No network operation runs here. Committing rechecks discovery permits while keeping
+/// ordinary chain progress, even when discovery is disabled during decryption.
+#[cfg(feature = "orchard")]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn scan_cached_blocks_with_recovery<P, D, B>(
+    params: &P,
+    source: &B,
+    wallet: &mut D,
+    from_height: BlockHeight,
+    prior: &ChainState,
+    limit: usize,
+    ready: &[super::one_time_ivk::recovery::BlockHints<<D as WalletRead>::AccountId>],
+) -> Result<ScanSummary, Error<<D as WalletRead>::Error, B::Error>>
+where
+    P: consensus::Parameters + Send + 'static,
+    B: BlockSource,
+    D: super::one_time_ivk::recovery::OneTimeBlockScan,
+    <D as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+{
+    use super::transparent_ledger::ChainPoint;
+    use crate::scanning::one_time_ivk::ReceivingKeyTag;
+    assert_eq!(from_height, prior.block_height() + 1);
+    let mut plan = Vec::new();
+    source.with_blocks::<_, <D as WalletRead>::Error>(Some(from_height), Some(limit), |block| {
+        let point = ChainPoint {
+            height: block.height(),
+            hash: block.hash(),
+        };
+        let hints: Vec<_> = ready
+            .iter()
+            .filter(|h| h.block == point)
+            .flat_map(|h| h.keys.iter().copied())
+            .collect();
+        plan.push(
+            wallet
+                .prepare_one_time_block_scan(point, &hints)
+                .map_err(Error::Wallet)?,
+        );
+        Ok(())
+    })?;
+    let mut selected = std::collections::HashMap::new();
+    let mut per_block = std::collections::HashMap::new();
+    for scan in &plan {
+        let mut keys = std::collections::HashSet::new();
+        for key in &scan.keys {
+            let identity = (*key.account_id(), key.key_id());
+            keys.insert(identity);
+            selected.entry(identity).or_insert_with(|| key.clone());
+        }
+        per_block.insert(scan.block.hash, keys);
+    }
+    let ordinary = wallet
+        .get_unified_full_viewing_keys()
+        .map_err(Error::Wallet)?;
+    let keys =
+        ScanningKeys::from_account_ufvks(ordinary).with_one_time_ivks(selected.into_values());
+    let scope = |block, tag: &ReceivingKeyTag<<D as WalletRead>::AccountId>| match tag {
+        ReceivingKeyTag::Account(..) => true,
+        ReceivingKeyTag::OneTime(account, key) => per_block
+            .get(&block)
+            .is_some_and(|keys| keys.contains(&(*account, *key))),
+    };
+    let (summary, blocks) = scan_blocks(
+        params,
+        source,
+        wallet,
+        from_height,
+        limit,
+        &keys,
+        Some(&scope),
+    )?;
+    wallet
+        .put_blocks_with_recovery(prior, blocks, &plan)
+        .map_err(Error::Wallet)?;
+    Ok(summary)
 }
 
 /// Scans at most `limit` blocks from `from_height` with `scanning_keys`, for
@@ -722,6 +802,7 @@ fn scan_blocks<ParamsT, DbT, BlockSourceT, IvkTag>(
     from_height: BlockHeight,
     limit: usize,
     scanning_keys: &ScanningKeys<<DbT as WalletRead>::AccountId, IvkTag>,
+    scope: Option<&dyn Fn(BlockHash, &IvkTag) -> bool>,
 ) -> Result<
     (
         ScanSummary,
@@ -741,7 +822,15 @@ where
     block_source.with_blocks::<_, <DbT as WalletRead>::Error>(
         Some(from_height),
         Some(limit),
-        |block| runners.add_block(params, block).map_err(|e| e.into()),
+        |block| {
+            #[cfg(feature = "orchard")]
+            if let Some(scope) = scope {
+                runners.scope_ironwood(|tag| scope(block.hash(), tag));
+            }
+            #[cfg(not(feature = "orchard"))]
+            let _ = scope;
+            runners.add_block(params, block).map_err(|e| e.into())
+        },
     )?;
     runners.flush();
 

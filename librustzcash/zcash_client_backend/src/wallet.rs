@@ -392,6 +392,58 @@ impl<AccountId> WalletTx<AccountId> {
         self.ironwood_outputs.as_ref()
     }
 
+    /// Removes newly discovered one-time receipts rejected by a store's current fence,
+    /// returning their positions so the caller can discard only their retention marks.
+    #[cfg(feature = "orchard")]
+    pub(crate) fn retain_one_time_receipts<E>(
+        &mut self,
+        keep: &mut impl FnMut(TxId, &WalletIronwoodOutput<AccountId>) -> Result<bool, E>,
+    ) -> Result<Vec<Position>, E> {
+        let mut removed = Vec::new();
+        let mut failure = None;
+        self.ironwood_outputs.retain(|output| {
+            if output.one_time_key_id().is_none() {
+                return true;
+            }
+            match keep(self.txid, output) {
+                Ok(true) => true,
+                Ok(false) => {
+                    removed.push(output.note_commitment_tree_position());
+                    false
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    true
+                }
+            }
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok(removed)
+    }
+
+    /// Removes spends recognized only through receipts rejected by the discovery fence.
+    #[cfg(feature = "orchard")]
+    pub(crate) fn retain_ironwood_spends(
+        &mut self,
+        keep: &mut impl FnMut(&WalletIronwoodSpend<AccountId>) -> bool,
+    ) {
+        self.ironwood_spends.retain(keep);
+    }
+
+    /// Whether any wallet-owned input or output remains after discovery is fenced out.
+    #[cfg(feature = "orchard")]
+    pub(crate) fn has_wallet_activity(&self) -> bool {
+        !self.transparent_outputs.is_empty()
+            || !self.sapling_spends.is_empty()
+            || !self.sapling_outputs.is_empty()
+            || !self.orchard_spends.is_empty()
+            || !self.orchard_outputs.is_empty()
+            || !self.ironwood_spends.is_empty()
+            || !self.ironwood_outputs.is_empty()
+    }
+
     /// Returns provisional compact-scan eligibility and outgoing recovery candidates.
     #[cfg(feature = "orchard")]
     pub fn ironwood_enhancement_plan(&self) -> &IronwoodEnhancementPlan<AccountId> {

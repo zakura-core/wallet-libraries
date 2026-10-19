@@ -407,6 +407,12 @@ pub(crate) fn scanned(
     Ok(())
 }
 
+/// Shared local-watch eligibility. Parameters are an inclusive block height and wall time.
+pub(crate) const LOCAL_WATCH: &str = "k.scan_from <= ?2 AND k.watch_closed_height IS NULL
+    AND EXISTS(SELECT 1 FROM ironwood_block_recovery r WHERE r.account_id=k.account_id AND r.enabled=1)
+    AND EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id=k.id
+        AND o.local_watch_deadline IS NOT NULL AND o.local_watch_deadline>?3-86400)";
+
 use crate::{WalletDb, util::Clock};
 use rand_core::Rng;
 use std::borrow::{Borrow, BorrowMut};
@@ -438,12 +444,13 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> OneTimeRecoveryRead for Wallet
             return Ok(vec![]);
         }
         super::keys_by_account(self.conn.borrow(), &self.params, |account| {
-            super::keys_where(self.conn.borrow(),&self.params,account,
-                "k.scan_from < ?2 AND k.watch_closed_height IS NULL
-                 AND EXISTS(SELECT 1 FROM ironwood_block_recovery r WHERE r.account_id=k.account_id AND r.enabled=1)
-                 AND EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id=k.id
-                     AND o.local_watch_deadline IS NOT NULL AND o.local_watch_deadline>?3-86400)",
-                 params![account.0,u32::from(range.end),now])
+            super::keys_where(
+                self.conn.borrow(),
+                &self.params,
+                account,
+                LOCAL_WATCH,
+                params![account.0, u32::from(range.end - 1), now],
+            )
         })
     }
     /// Captures bounded work without dispatching while paused.

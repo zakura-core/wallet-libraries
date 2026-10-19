@@ -3432,8 +3432,30 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
         blocks: Vec<ScannedBlock<AccountUuid>>,
         #[cfg(feature = "orchard")] one_time_keys: Option<&[(AccountUuid, KeyId)]>,
     ) -> Result<(), SqliteClientError> {
+        self.store_scanned_blocks_impl(
+            from_state,
+            blocks,
+            #[cfg(feature = "orchard")]
+            one_time_keys,
+            #[cfg(feature = "orchard")]
+            None,
+        )
+    }
+
+    /// Shares ordinary chain persistence while the replacement path fences discovery
+    /// receipts and records evidence per block instead of invoking the legacy scheduler.
+    fn store_scanned_blocks_impl(
+        &mut self,
+        from_state: &ChainState,
+        blocks: Vec<ScannedBlock<AccountUuid>>,
+        #[cfg(feature = "orchard")] one_time_keys: Option<&[(AccountUuid, KeyId)]>,
+        #[cfg(feature = "orchard")] scanned: Option<
+            &[zcash_client_backend::data_api::one_time_ivk::recovery::BlockScan<AccountUuid>],
+        >,
+    ) -> Result<(), SqliteClientError> {
         #[cfg(feature = "orchard")]
-        let refused = one_time_keys.is_none() && wallet::one_time_key_open(self.conn.0)?;
+        let refused =
+            scanned.is_none() && one_time_keys.is_none() && wallet::one_time_key_open(self.conn.0)?;
         #[cfg(not(feature = "orchard"))]
         let refused = wallet::one_time_scan_required(self.conn.0)?;
         if refused {
@@ -3461,6 +3483,12 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             .transpose()?
             .flatten();
 
+        #[cfg(feature = "orchard")]
+        let mut blocks = blocks;
+        #[cfg(feature = "orchard")]
+        let accepted = scanned
+            .map(|plan| wallet::one_time_ivk::block_scan::fence(self, &mut blocks, plan))
+            .transpose()?;
         let scanned_block_identities: Vec<_> = blocks
             .iter()
             .map(|block| (block.height(), block.block_hash()))
@@ -3495,7 +3523,18 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
         wallet::one_time_ivk::journal::record(self.conn.0, &self.transparent_pir_session, journal)?;
         // A key activated after the scanner captured its keys missed this batch.
         #[cfg(feature = "orchard")]
-        if let Some(range) = scanned_range {
+        if let Some(accepted) = accepted {
+            for (keys, block) in accepted.iter().zip(&scanned_block_identities) {
+                wallet::one_time_ivk::block_recovery::scanned(
+                    self.conn.0,
+                    keys,
+                    std::slice::from_ref(block),
+                )?;
+            }
+            if let Some(&last) = scanned_block_identities.last() {
+                wallet::one_time_ivk::block_recovery::close_local_watches(self.conn.0, last)?;
+            }
+        } else if let Some(range) = scanned_range {
             if let Some(keys) = one_time_keys {
                 wallet::one_time_ivk::block_recovery::scanned(
                     self.conn.0,

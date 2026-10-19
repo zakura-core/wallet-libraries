@@ -540,6 +540,19 @@ where
     Dec: Decryptor<D, Output>,
     T: Tasks<Batch<IvkTag, D, Output, Dec>>,
 {
+    /// Changes the eligible immutable key identities for subsequent outputs, flushing
+    /// the previous scope first while retaining all pending transaction results.
+    pub(crate) fn set_keys(&mut self, keys: impl Iterator<Item = (IvkTag, D::IncomingViewingKey)>)
+    where
+        IvkTag: PartialEq,
+    {
+        let (tags, ivks): (Vec<_>, Vec<_>) = keys.unzip();
+        if self.acc.tags != tags {
+            self.flush();
+            self.acc = Batch::new(tags, ivks);
+        }
+    }
+
     /// Batches the given outputs for trial decryption.
     ///
     /// `block_tag` is the hash of the block that triggered this txid being added to the

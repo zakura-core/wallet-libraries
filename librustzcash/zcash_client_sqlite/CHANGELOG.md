@@ -9,7 +9,7 @@ and this library adheres to Rust's notion of
 
 ### Added
 
-- Block-filter recovery state APIs retain per-address historical cursors, pending matches, and exact local scan evidence across restart. Settings and history changes fence stale work. Local swap watches use persisted provenance and deadline bounds. This state layer precedes the scanner and transport cutover.
+- Block-filter recovery state APIs retain per-address historical cursors, pending matches, and exact local scan evidence across restart. Settings and history changes fence stale work. Local swap watches use persisted provenance and deadline bounds. The optional block recovery scanner selects exact-block hints and bounded local watches, fences discoveries at commit, and preserves known-receipt repair while disabled. Application wiring and legacy discovery removal remain pending.
 
 - One-time IVK discovery (with `orchard`): `WalletDb` implements the backend's discovery
   methods and `get_one_time_scanning_keys_for_range`. A restored account's payments appear

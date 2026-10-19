@@ -110,6 +110,8 @@ pub(crate) struct BatchRunners<
     orchard: TaggedOrchardBatchRunner<IvkTag, TO>,
     #[cfg(feature = "orchard")]
     ironwood: TaggedIronwoodBatchRunner<IvkTag, TI>,
+    #[cfg(feature = "orchard")]
+    ironwood_keys: Vec<(IvkTag, orchard::keys::PreparedIncomingViewingKey)>,
     #[cfg(not(feature = "orchard"))]
     orchard: PhantomData<(TO, TI)>,
 }
@@ -125,6 +127,12 @@ where
         batch_size_threshold: usize,
         scanning_keys: &ScanningKeys<AccountId, IvkTag>,
     ) -> Self {
+        #[cfg(feature = "orchard")]
+        let ironwood_keys: Vec<_> = scanning_keys
+            .ironwood()
+            .iter()
+            .map(|(id, key)| (id.clone(), key.prepare()))
+            .collect();
         BatchRunners {
             sapling: BatchRunner::new(
                 batch_size_threshold,
@@ -142,16 +150,26 @@ where
                     .map(|(id, key)| (id.clone(), key.prepare())),
             ),
             #[cfg(feature = "orchard")]
-            ironwood: BatchRunner::new(
-                batch_size_threshold,
-                scanning_keys
-                    .ironwood()
-                    .iter()
-                    .map(|(id, key)| (id.clone(), key.prepare())),
-            ),
+            ironwood: BatchRunner::new(batch_size_threshold, ironwood_keys.iter().cloned()),
+            #[cfg(feature = "orchard")]
+            ironwood_keys,
             #[cfg(not(feature = "orchard"))]
             orchard: PhantomData,
         }
+    }
+
+    /// Applies exact-block key eligibility without changing ordinary Sapling/Orchard batches.
+    #[cfg(feature = "orchard")]
+    pub(crate) fn scope_ironwood(&mut self, include: impl Fn(&IvkTag) -> bool)
+    where
+        IvkTag: PartialEq,
+    {
+        self.ironwood.set_keys(
+            self.ironwood_keys
+                .iter()
+                .filter(|(tag, _)| include(tag))
+                .cloned(),
+        );
     }
 
     pub(crate) fn flush(&mut self) {

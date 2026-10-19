@@ -25,6 +25,7 @@ pub(crate) enum ReceivingKeyTag<AccountId> {
 /// A derived FVK paired with the identity that must survive note detection.
 ///
 /// This key only scans Ironwood. Change from its spends uses ordinary account keys.
+#[derive(Clone)]
 pub struct OneTimeScanningKey<AccountId> {
     account: AccountId,
     key_id: KeyId,

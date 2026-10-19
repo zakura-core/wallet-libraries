@@ -672,6 +672,7 @@ pub(super) fn notes(
         .unwrap()
 }
 
+mod block_scan;
 mod enhancement;
 mod journal;
 mod key_access;

@@ -67,8 +67,9 @@ use {
                 OneTimeIvkRead, OneTimeIvkWrite, ambassador_impl_OneTimeIvkRead,
                 ambassador_impl_OneTimeIvkWrite,
                 recovery::{
-                    FilterJudgment, FilterWork, History, OneTimeRecoveryRead, OneTimeRecoveryWrite,
-                    PendingMatch, RecoveryState, ambassador_impl_OneTimeRecoveryRead,
+                    BlockScan, FilterJudgment, FilterWork, History, OneTimeBlockScan,
+                    OneTimeRecoveryRead, OneTimeRecoveryWrite, PendingMatch, RecoveryState,
+                    ambassador_impl_OneTimeBlockScan, ambassador_impl_OneTimeRecoveryRead,
                     ambassador_impl_OneTimeRecoveryWrite,
                 },
                 restore::{
@@ -122,7 +123,8 @@ pub(crate) fn test_rng() -> TestRng {
     delegate(OneTimeIvkRestoreRead, target = "wallet_db"),
     delegate(OneTimeIvkRestoreWrite, target = "wallet_db"),
     delegate(OneTimeRecoveryRead, target = "wallet_db"),
-    delegate(OneTimeRecoveryWrite, target = "wallet_db")
+    delegate(OneTimeRecoveryWrite, target = "wallet_db"),
+    delegate(OneTimeBlockScan, target = "wallet_db")
 )]
 pub struct TestDb {
     wallet_db: WalletDb<Connection, LocalNetwork, FixedClock, TestRng>,

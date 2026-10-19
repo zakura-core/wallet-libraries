@@ -8,7 +8,7 @@ pub mod cache;
 
 use super::restore::DiscoveryWork;
 use crate::{
-    data_api::{WalletRead, transparent_ledger::ChainPoint},
+    data_api::{ScannedBlock, WalletRead, chain::ChainState, transparent_ledger::ChainPoint},
     scanning::one_time_ivk::OneTimeScanningKey,
 };
 use zakura_one_time_ivk::{KeyId, Purpose};
@@ -140,4 +140,51 @@ pub trait OneTimeRecoveryWrite: OneTimeRecoveryRead + super::OneTimeIvkWrite {
         work: &FilterWork<<Self as WalletRead>::AccountId>,
         judgments: &[FilterJudgment],
     ) -> Result<bool, <Self as WalletRead>::Error>;
+}
+
+/// Ready public-filter hints for one exact downloaded block. Hints authorize trial
+/// decryption only. They do not advance historical cursors or prove ownership.
+#[derive(Clone, Debug)]
+pub struct BlockHints<A> {
+    pub block: ChainPoint,
+    pub keys: Vec<(A, KeyId)>,
+}
+
+/// One account's discovery generation captured before local trial decryption.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScanPermit<A> {
+    pub account: A,
+    pub key: KeyId,
+    pub work: u64,
+}
+
+/// The exact keys and generation permits used to scan one canonical block. Keys with
+/// no permit are for repairing already-known receipts only, including while disabled.
+pub struct BlockScan<A> {
+    pub block: ChainPoint,
+    pub keys: Vec<OneTimeScanningKey<A>>,
+    pub permits: Vec<ScanPermit<A>>,
+}
+
+/// Block-scoped scanning with a commit-time discovery fence. Network requests belong
+/// to the independent recovery scheduler and cannot be part of either operation.
+#[cfg_attr(feature = "test-dependencies", delegatable_trait)]
+pub trait OneTimeBlockScan: OneTimeRecoveryWrite {
+    /// Selects current own-swap watches, exact pending/ready matches and known receipt
+    /// repair keys. A ready key outside the derived registry/window is refused.
+    fn prepare_one_time_block_scan(
+        &mut self,
+        block: ChainPoint,
+        ready: &[(<Self as WalletRead>::AccountId, KeyId)],
+    ) -> Result<BlockScan<<Self as WalletRead>::AccountId>, <Self as WalletRead>::Error>;
+
+    /// Stores normal chain progress even if discovery was paused during trial
+    /// decryption. Stale permits may repair known receipts but cannot add new ones or
+    /// record full scan evidence. Valid permits commit exact key/block evidence.
+    fn put_blocks_with_recovery(
+        &mut self,
+        from_state: &ChainState,
+        blocks: Vec<ScannedBlock<<Self as WalletRead>::AccountId>>,
+        scanned: &[BlockScan<<Self as WalletRead>::AccountId>],
+    ) -> Result<(), <Self as WalletRead>::Error>;
 }

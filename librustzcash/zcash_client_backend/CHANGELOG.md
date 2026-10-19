@@ -9,7 +9,7 @@ and this library adheres to Rust's notion of
 
 ### Added
 
-- Block-filter recovery state APIs retain per-address historical cursors, pending matches, and exact local scan evidence across restart. Settings and history changes fence stale work. Local swap watches use persisted provenance and deadline bounds. An optional application-owned replay cache retains at most three compact blocks and their predecessor trees within 16 MiB. These foundations precede the production scanner cutover.
+- Block-filter recovery state APIs retain per-address historical cursors, pending matches, and exact local scan evidence across restart. Settings and history changes fence stale work. Local swap watches use persisted provenance and deadline bounds. An optional application-owned replay cache retains at most three compact blocks and their predecessor trees within 16 MiB. The optional block recovery scanner selects exact-block hints and bounded local watches, fences discoveries at commit, and preserves known-receipt repair while disabled. Application wiring and legacy discovery removal remain pending.
 
 - One-time IVK discovery (with `orchard`): `data_api::one_time_ivk::restore` replaces restore
   sweeps with discovery. `one_time_discovery` reports the work due, `one_time_receivers`

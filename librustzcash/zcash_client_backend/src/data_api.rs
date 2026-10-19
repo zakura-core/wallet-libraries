@@ -2890,6 +2890,47 @@ impl<AccountId> ScannedBlock<AccountId> {
         }
     }
 
+    /// Applies a store's discovery fence without dropping ordinary notes, spends or
+    /// commitments. A refused receipt loses its mark but keeps any block checkpoint.
+    #[cfg(feature = "orchard")]
+    pub fn retain_one_time_receipts<E>(
+        &mut self,
+        mut keep: impl FnMut(TxId, &crate::wallet::WalletIronwoodOutput<AccountId>) -> Result<bool, E>,
+    ) -> Result<(), E> {
+        let mut removed = std::collections::HashSet::new();
+        for tx in &mut self.transactions {
+            removed.extend(tx.retain_one_time_receipts(&mut keep)?);
+        }
+        self.transactions.retain(WalletTx::has_wallet_activity);
+        let start =
+            u64::from(self.ironwood.final_tree_size) - self.ironwood.commitments.len() as u64;
+        for (index, (_, retention)) in self.ironwood.commitments.iter_mut().enumerate() {
+            if removed.contains(&incrementalmerkletree::Position::from(start + index as u64)) {
+                *retention = match retention {
+                    Retention::Checkpoint { id, .. } => Retention::Checkpoint {
+                        id: *id,
+                        marking: incrementalmerkletree::Marking::None,
+                    },
+                    _ => Retention::Ephemeral,
+                };
+            }
+        }
+        Ok(())
+    }
+
+    /// Drops spend-only relevance that came from a rejected in-batch discovery. All
+    /// compact nullifiers and ordinary commitments remain available for chain storage.
+    #[cfg(feature = "orchard")]
+    pub fn retain_ironwood_spends(
+        &mut self,
+        mut keep: impl FnMut(&crate::wallet::WalletIronwoodSpend<AccountId>) -> bool,
+    ) {
+        for tx in &mut self.transactions {
+            tx.retain_ironwood_spends(&mut keep);
+        }
+        self.transactions.retain(WalletTx::has_wallet_activity);
+    }
+
     /// Returns the accounts whose ordinary Ironwood keys scanned this block. Every
     /// transaction in the block that one of their keys recognizes is among
     /// [`Self::transactions`], with its [`WalletTx::ironwood_nullifiers`]. Both the
