@@ -67,6 +67,9 @@ impl RusqliteMigration for Migration {
             one_time_key_id INTEGER NOT NULL REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
             height INTEGER NOT NULL CHECK(height BETWEEN 0 AND 4294967295), hash BLOB NOT NULL CHECK(length(hash)=32),
             PRIMARY KEY(one_time_key_id,height));
+        CREATE TRIGGER ironwood_recovery_allocation AFTER UPDATE OF advances_allocation ON ironwood_one_time_keys
+            WHEN NEW.advances_allocation>OLD.advances_allocation
+            BEGIN UPDATE ironwood_block_recovery SET needs_prepare=1 WHERE account_id=NEW.account_id; END;
         ALTER TABLE ironwood_one_time_keys ADD COLUMN authenticated INTEGER NOT NULL DEFAULT 0 CHECK(authenticated IN(0,1));
         ALTER TABLE ironwood_one_time_keys ADD COLUMN issuance_blocked INTEGER NOT NULL DEFAULT 0 CHECK(issuance_blocked IN(0,1));
         UPDATE ironwood_one_time_keys SET

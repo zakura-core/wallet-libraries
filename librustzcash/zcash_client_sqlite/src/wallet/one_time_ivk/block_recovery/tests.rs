@@ -560,3 +560,54 @@ fn block_recovery_watch_receipts_confirmations_and_repair() {
             .is_empty()
     );
 }
+
+/// Provider and pre-birthday promotions both invalidate a previously completed derived window.
+#[test]
+fn block_recovery_every_allocation_promotion_widens_history() {
+    for provider in [true, false] {
+        let (mut st, account, work) = ready();
+        let db = st.wallet_mut().db_mut();
+        let key = KeyId::new(Purpose::Refund, 99);
+        let (id, _) = db
+            .transactionally(|db| {
+                one_time_ivk::register(
+                    db.conn.0,
+                    &db.params,
+                    account,
+                    key,
+                    work.next_height,
+                    false,
+                    Discovery::Funding,
+                    1,
+                )
+            })
+            .unwrap();
+        assert!(
+            !db.one_time_recovery_state(account)
+                .unwrap()
+                .unwrap()
+                .needs_prepare
+        );
+        if provider {
+            one_time_ivk::swap::reservations::record_provider_seen(&db.conn, id).unwrap();
+        } else {
+            db.conn.execute("UPDATE ironwood_one_time_keys SET paid_before_birthday=1,advances_allocation=1 WHERE id=?1",[id]).unwrap();
+        }
+        assert!(
+            db.one_time_recovery_state(account)
+                .unwrap()
+                .unwrap()
+                .needs_prepare
+        );
+        assert!(db.one_time_filter_work(account, 1024).unwrap().is_none());
+        db.prepare_one_time_recovery(account, 200, 1).unwrap();
+        assert_eq!(
+            db.one_time_recovery_state(account)
+                .unwrap()
+                .unwrap()
+                .windows[0]
+                .end,
+            130
+        );
+    }
+}
