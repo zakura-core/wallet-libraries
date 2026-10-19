@@ -13,6 +13,7 @@ fn filter_bytes_match_upstream_for_every_application_profile() {
             (784931, 19),
             (1024, 10),
             (1533, 10),
+            (1_569_792, 20),
             (100, 6),
             (1, 0),
             (1, 63),
@@ -155,4 +156,19 @@ fn writer_propagates_output_failure() {
         bitcoin_io::ErrorKind::Other
     );
     assert!(write_compact_size(&mut output, 65536).is_err());
+}
+
+/// Raw delta encoding rejects invalid parameters and descending values atomically.
+#[test]
+fn invalid_rice_inputs_fail_before_writing() {
+    for (values, p) in [(&[1, 0][..], 10), (&[0][..], 64), (&[][..], 255)] {
+        let mut bytes = Vec::new();
+        assert_eq!(
+            zakura_filters::write_rice_deltas(&mut bytes, values, p)
+                .unwrap_err()
+                .kind(),
+            bitcoin_io::ErrorKind::InvalidInput
+        );
+        assert!(bytes.is_empty());
+    }
 }
