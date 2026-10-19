@@ -71,6 +71,10 @@ use {
                     OneTimeRecoveryRead, OneTimeRecoveryWrite, PendingMatch, RecoveryState,
                     ambassador_impl_OneTimeBlockScan, ambassador_impl_OneTimeRecoveryRead,
                     ambassador_impl_OneTimeRecoveryWrite,
+                    settlement::{
+                        OneTimePirRecovery, PirScope, PirSnapshot, PirWitness, PirWork,
+                        ambassador_impl_OneTimePirRecovery,
+                    },
                 },
                 restore::{
                     DirectoryPayment, DiscoveryStatus, DiscoveryWork, EnumerationCursor,
@@ -108,6 +112,10 @@ pub(crate) fn test_rng() -> TestRng {
 /// inner database and owns the temporary file backing it.
 #[allow(clippy::duplicated_attributes, reason = "False positive")]
 #[derive(Delegate)]
+#[cfg_attr(
+    feature = "orchard",
+    delegate(OneTimePirRecovery, target = "wallet_db")
+)]
 #[delegate(InputSource, target = "wallet_db")]
 #[delegate(WalletRead, target = "wallet_db")]
 #[delegate(WalletTest, target = "wallet_db")]

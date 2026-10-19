@@ -34,6 +34,7 @@
 //!
 //! [`OneTimeIvkRestoreWrite`]: zcash_client_backend::data_api::one_time_ivk::restore::OneTimeIvkRestoreWrite
 
+pub(crate) mod block_pir;
 pub(crate) mod block_recovery;
 pub(crate) mod block_scan;
 pub(crate) mod journal;
@@ -259,12 +260,20 @@ fn check_receiver(stored: Vec<u8>, fvk: &FullViewingKey) -> Result<(), SqliteCli
 
 /// The key identity of a registry row selecting purpose and key_index first.
 fn stored_key_id(row: &rusqlite::Row<'_>) -> Result<KeyId, SqliteClientError> {
-    let purpose = match row.get::<_, u8>(0)? {
+    stored_key_id_offset(row, 0)
+}
+
+/// Decodes adjacent purpose and key-index columns at the requested offset.
+fn stored_key_id_offset(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> Result<KeyId, SqliteClientError> {
+    let purpose = match row.get::<_, u8>(offset)? {
         0 => Purpose::Refund,
         1 => Purpose::Receive,
         _ => return Err(corrupt("unsupported one-time key purpose")),
     };
-    Ok(KeyId::new(purpose, decode_index(row.get(1)?)?))
+    Ok(KeyId::new(purpose, decode_index(row.get(offset + 1)?)?))
 }
 
 /// `account`'s database reference and the Orchard FVK its one-time keys derive from.

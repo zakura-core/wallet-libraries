@@ -128,7 +128,8 @@ const SCANNED_EMPTY: &str = "k.used=0
         WHERE r.account_id=k.account_id AND v.purpose=k.purpose AND v.key_index=k.key_index
           AND r.enabled=1 AND r.needs_prepare=0 AND r.archive IS NOT NULL AND v.next_height>:tip)
     AND NOT EXISTS(SELECT 1 FROM ironwood_block_matches m WHERE m.account_id=k.account_id AND m.purpose=k.purpose AND m.key_index=k.key_index)
-    AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id=k.id)";
+    AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id=k.id)
+    AND NOT EXISTS(SELECT 1 FROM ironwood_block_payments p WHERE p.one_time_key_id=k.id)";
 
 /// Reuse requires current historical filters and no known payment or pending candidate.
 pub(in crate::wallet::one_time_ivk) fn scanned_empty(
@@ -671,6 +672,7 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
                AND NOT EXISTS(SELECT 1 FROM ironwood_block_matches m WHERE m.account_id=k.account_id AND m.purpose=k.purpose AND m.key_index=k.key_index)
                AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
                    WHERE p.one_time_key_id = k.id)
+               AND NOT EXISTS(SELECT 1 FROM ironwood_block_payments p WHERE p.one_time_key_id=k.id)
              ORDER BY k.reserved_at, k.id"
         ))?
         .query_map([a.0], |r| {
@@ -764,6 +766,7 @@ pub(in crate::wallet::one_time_ivk) fn next_index<P: Parameters>(
     let exposed = "EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id=k.id AND o.request IS NOT NULL)";
     let available = format!("k.issuance_blocked=0 AND k.used=0
         AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id=k.id)
+        AND NOT EXISTS(SELECT 1 FROM ironwood_block_payments p WHERE p.one_time_key_id=k.id)
         AND NOT ({RESERVED} AND (:purpose=1 OR IFNULL({LATEST_DEADLINE}>:now,0)))");
     let no_match = "NOT EXISTS(SELECT 1 FROM ironwood_block_matches m WHERE m.account_id=r.account_id AND m.purpose=r.purpose AND m.key_index=r.key_index)";
     // Blocked and live keys are skipped by SQL. At most 100 new provider hits can be

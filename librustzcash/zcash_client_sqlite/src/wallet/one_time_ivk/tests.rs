@@ -995,3 +995,5 @@ pub(super) fn cover(st: &mut State, account: AccountUuid, keys: &[KeyId]) -> Pub
         .collect();
     discover(st, account, &checks)
 }
+
+mod pir_settlement;

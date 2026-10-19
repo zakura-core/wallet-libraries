@@ -2319,3 +2319,44 @@ pub(super) const TRIGGER_IRONWOOD_LOCAL_WATCH_BOUND: &str = "CREATE TRIGGER iron
 pub(super) const TABLE_IRONWOOD_BLOCK_SEEN: &str = "CREATE TABLE ironwood_block_seen (
             account_id INTEGER PRIMARY KEY REFERENCES ironwood_block_recovery(account_id) ON DELETE CASCADE,
             digest BLOB NOT NULL CHECK(length(digest)=32), until_unix INTEGER NOT NULL CHECK(until_unix>=0))";
+
+/// Expected durable PIR settlement schema.
+pub(super) const TABLE_IRONWOOD_BLOCK_LOOKUPS: &str = "CREATE TABLE ironwood_block_lookups (
+            one_time_key_id INTEGER PRIMARY KEY REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
+            work_generation INTEGER NOT NULL CHECK(work_generation>=0),
+            session BLOB NOT NULL CHECK(length(session)=32),
+            publication_height INTEGER NOT NULL CHECK(publication_height BETWEEN 0 AND 4294967295),
+            publication_hash BLOB NOT NULL CHECK(length(publication_hash)=32),
+            tree_size INTEGER NOT NULL CHECK(tree_size BETWEEN 0 AND 4294967296),
+            through_height INTEGER NOT NULL CHECK(through_height BETWEEN 0 AND publication_height),
+            through_hash BLOB NOT NULL CHECK(length(through_hash)=32),
+            applied INTEGER NOT NULL DEFAULT 0 CHECK(applied BETWEEN 0 AND 4294967295),
+            last_position INTEGER CHECK(last_position BETWEEN 0 AND 4294967295),
+            last_nullifier BLOB CHECK(length(last_nullifier)=32),
+            last_height INTEGER CHECK(last_height BETWEEN 0 AND through_height),
+            enumerated INTEGER NOT NULL DEFAULT 0 CHECK(enumerated IN(0,1)),
+            attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts BETWEEN 0 AND 30),
+            next_attempt_at INTEGER NOT NULL DEFAULT 0 CHECK(next_attempt_at>=0),
+            CHECK((applied=0)=(last_position IS NULL) AND (last_position IS NULL)=(last_nullifier IS NULL) AND (last_nullifier IS NULL)=(last_height IS NULL)))";
+
+/// Expected durable PIR settlement schema.
+pub(super) const TABLE_IRONWOOD_BLOCK_PAYMENTS: &str = "CREATE TABLE ironwood_block_payments (
+            one_time_key_id INTEGER NOT NULL REFERENCES ironwood_block_lookups(one_time_key_id) ON DELETE CASCADE,
+            txid BLOB NOT NULL CHECK(length(txid)=32),
+            action_index INTEGER NOT NULL CHECK(action_index BETWEEN 0 AND 4294967295),
+            height INTEGER NOT NULL CHECK(height BETWEEN 0 AND 4294967295),
+            block_hash BLOB NOT NULL CHECK(length(block_hash)=32),
+            tx_index INTEGER NOT NULL CHECK(tx_index BETWEEN 0 AND 65535),
+            position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 4294967295),
+            encrypted_note BLOB NOT NULL CHECK(length(encrypted_note)=148),
+            witness BLOB CHECK(length(witness)=1024),
+            witness_height INTEGER CHECK(witness_height BETWEEN 0 AND 4294967295),
+            witness_hash BLOB CHECK(length(witness_hash)=32),
+            PRIMARY KEY(one_time_key_id,position),
+            CHECK((witness IS NULL)=(witness_height IS NULL) AND (witness IS NULL)=(witness_hash IS NULL)))";
+
+/// Revoking work clears uncredited responses while the positive filter obligations remain.
+pub(super) const TRIGGER_IRONWOOD_PIR_GENERATION: &str = "CREATE TRIGGER ironwood_pir_generation AFTER UPDATE OF work_generation ON ironwood_block_recovery
+            WHEN NEW.work_generation<>OLD.work_generation
+            BEGIN DELETE FROM ironwood_block_lookups WHERE one_time_key_id IN
+                (SELECT id FROM ironwood_one_time_keys WHERE account_id=NEW.account_id); END";

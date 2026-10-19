@@ -26,7 +26,7 @@ use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
 use super::{
-    apply::{Admission, Sessions, apply_payment, merkle_path},
+    apply::{Admission, Sessions, apply_payment, merkle_path, rescan_uncovered, scanned_tip},
     payments::{authenticate, directory_candidate, pending_payment, queue_payment},
     recovery::recover_refund_memos,
 };
@@ -926,7 +926,10 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
             None => Admission::StaleWitness,
         };
         match admission {
-            Admission::Admitted | Admission::Waiting => {}
+            Admission::Admitted => {
+                conn.execute("DELETE FROM ironwood_one_time_payment_recovery WHERE one_time_key_id=?1 AND txid=?2 AND action_index=?3", params![id,txid.as_ref(),action])?;
+            }
+            Admission::Waiting => {}
             Admission::Uncovered => rescan_uncovered(conn, owner.0, candidate.height, through)?,
             Admission::StaleWitness => {
                 conn.execute(
@@ -945,75 +948,6 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
                 restart_cursor(conn, "?1", id)?;
                 defer(conn, id, now)?;
             }
-        }
-    }
-    Ok(())
-}
-
-/// The highest block the scan stored that the scan queue no longer requires.
-fn scanned_tip(conn: &Connection) -> Result<Option<ChainPoint>, SqliteClientError> {
-    Ok(conn
-        .query_row(
-            "SELECT b.height, b.hash FROM blocks b WHERE EXISTS(SELECT 1 FROM scan_queue q
-                 WHERE q.priority = ?1 AND b.height >= q.block_range_start
-                   AND b.height < q.block_range_end)
-             ORDER BY b.height DESC LIMIT 1",
-            [priority_code(&ScanPriority::Scanned)],
-            |r| {
-                Ok(ChainPoint {
-                    height: BlockHeight::from(r.get::<_, u32>(0)?),
-                    hash: BlockHash(r.get(1)?),
-                })
-            },
-        )
-        .optional()?)
-}
-
-/// Queues for a rescan each stretch from `from` through `through` that the scan finished
-/// without covering for account `owner`, as blocks scanned before the journal existed are,
-/// so a late payment there is not left waiting for good.
-fn rescan_uncovered(
-    conn: &rusqlite::Transaction<'_>,
-    owner: i64,
-    from: BlockHeight,
-    through: ChainPoint,
-) -> Result<(), SqliteClientError> {
-    let covered: Vec<(u32, u32)> = conn
-        .prepare(
-            "SELECT start_height, end_height FROM ironwood_journal_coverage
-             WHERE account_id = ?1 AND end_height > ?2 AND start_height <= ?3
-             ORDER BY start_height",
-        )?
-        .query_map(
-            params![owner, u32::from(from), u32::from(through.height)],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?
-        .collect::<Result<_, _>>()?;
-    let end = u32::from(through.height) + 1;
-    let mut gaps = vec![];
-    let mut next = u32::from(from);
-    for (start, stop) in covered {
-        if start > next {
-            gaps.push(next..start.min(end));
-        }
-        next = next.max(stop);
-    }
-    if next < end {
-        gaps.push(next..end);
-    }
-    for gap in gaps {
-        // Only a stretch the scan finished; one still queued is covered when it is scanned.
-        let finished: bool = conn.query_row(
-            "SELECT NOT EXISTS(SELECT 1 FROM scan_queue
-             WHERE priority != ?3 AND block_range_start < ?2 AND block_range_end > ?1)",
-            params![gap.start, gap.end, priority_code(&ScanPriority::Scanned)],
-            |r| r.get(0),
-        )?;
-        if finished {
-            crate::wallet::one_time_ivk::queue_rescan(
-                conn,
-                BlockHeight::from(gap.start)..BlockHeight::from(gap.end),
-            )?;
         }
     }
     Ok(())

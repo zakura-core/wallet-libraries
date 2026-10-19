@@ -9,6 +9,8 @@ and this library adheres to Rust's notion of
 
 ### Added
 
+- Durable block-filter PIR settlement binds pages and witnesses to the current account generation, archive history and actual compatible session. Pending matches survive restart and settle only after complete enumeration and verified receipt admission.
+
 - Block-filter recovery state APIs retain per-address historical cursors, pending matches, and exact local scan evidence across restart. Settings and history changes fence stale work. Local swap watches use persisted provenance and deadline bounds. The optional block recovery scanner selects exact-block hints and bounded local watches, fences discoveries at commit, and preserves known-receipt repair while disabled. Application wiring and legacy discovery removal remain pending.
 
 - One-time IVK discovery (with `orchard`): `WalletDb` implements the backend's discovery

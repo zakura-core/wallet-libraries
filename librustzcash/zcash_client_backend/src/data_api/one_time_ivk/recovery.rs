@@ -5,6 +5,7 @@
 //! matches without erasing older work for that receiver. Callers validate archive
 //! proofs and their connected-chain anchor before submitting judgments.
 pub mod cache;
+pub mod settlement;
 
 use super::restore::DiscoveryWork;
 use crate::{

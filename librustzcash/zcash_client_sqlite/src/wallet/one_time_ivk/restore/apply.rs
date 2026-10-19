@@ -4,7 +4,10 @@ use incrementalmerkletree::{Address, Position, Retention};
 use orchard::tree::{MerkleHashOrchard, MerklePath};
 use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::{
-    data_api::transparent_ledger::{ChainPoint, TransparentLedgerMode},
+    data_api::{
+        scanning::ScanPriority,
+        transparent_ledger::{ChainPoint, TransparentLedgerMode},
+    },
     wallet::{WalletOrchardOutput, WalletTx},
 };
 use zcash_protocol::{
@@ -14,7 +17,9 @@ use zcash_protocol::{
 
 use super::{PendingPayment, payments::authenticate};
 use crate::wallet::one_time_ivk::{KeyId, corrupt};
+use crate::wallet::scanning::priority_code;
 use crate::{AccountUuid, error::SqliteClientError, wallet};
+use zcash_primitives::block::BlockHash;
 
 /// The handle state that storing a note's transaction routes its enhancement with.
 pub(crate) struct Sessions<'a> {
@@ -74,13 +79,6 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     (anchor, path): (ChainPoint, &MerklePath),
 ) -> Result<Admission, SqliteClientError> {
     let (key_ref, recovered) = authenticate(conn, params, account, key, candidate)?;
-    let dequeue = || {
-        conn.execute(
-            "DELETE FROM ironwood_one_time_payment_recovery
-             WHERE one_time_key_id = ?1 AND txid = ?2 AND action_index = ?3",
-            params![key_ref, candidate.txid.as_ref(), candidate.action_index],
-        )
-    };
     // Scanning stores a note under the transaction it is found in, which no directory
     // claim overrides (see `adopt_found_note`), so a copy stored under another
     // transaction makes this answer redundant.
@@ -96,7 +94,6 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         |r| r.get(0),
     )?;
     if stored_elsewhere {
-        dequeue()?;
         return Ok(Admission::Admitted);
     }
     let birthday: u32 = conn.query_row(
@@ -168,7 +165,6 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
              SET advances_allocation = 1, used = 1, paid_before_birthday = 1 WHERE id = ?1",
             [key_ref],
         )?;
-        dequeue()?;
         return Ok(Admission::Admitted);
     }
     // An unmined transaction is one a rewind or the mempool left: its note may move to a
@@ -310,7 +306,6 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         tx_ref,
         candidate.txid,
     )?;
-    dequeue()?;
     Ok(Admission::Admitted)
 }
 
@@ -329,4 +324,75 @@ fn covered(
         params![account.0, u32::from(from), u32::from(through)],
         |r| r.get(0),
     )?)
+}
+
+/// The highest block the scan stored that the scan queue no longer requires.
+pub(in crate::wallet::one_time_ivk) fn scanned_tip(
+    conn: &Connection,
+) -> Result<Option<ChainPoint>, SqliteClientError> {
+    Ok(conn
+        .query_row(
+            "SELECT b.height, b.hash FROM blocks b WHERE EXISTS(SELECT 1 FROM scan_queue q
+                 WHERE q.priority = ?1 AND b.height >= q.block_range_start
+                   AND b.height < q.block_range_end)
+             ORDER BY b.height DESC LIMIT 1",
+            [priority_code(&ScanPriority::Scanned)],
+            |r| {
+                Ok(ChainPoint {
+                    height: BlockHeight::from(r.get::<_, u32>(0)?),
+                    hash: BlockHash(r.get(1)?),
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Queues for a rescan each stretch from `from` through `through` that the scan finished
+/// without covering for account `owner`, as blocks scanned before the journal existed are,
+/// so a late payment there is not left waiting for good.
+pub(in crate::wallet::one_time_ivk) fn rescan_uncovered(
+    conn: &rusqlite::Transaction<'_>,
+    owner: i64,
+    from: BlockHeight,
+    through: ChainPoint,
+) -> Result<(), SqliteClientError> {
+    let covered: Vec<(u32, u32)> = conn
+        .prepare(
+            "SELECT start_height, end_height FROM ironwood_journal_coverage
+             WHERE account_id = ?1 AND end_height > ?2 AND start_height <= ?3
+             ORDER BY start_height",
+        )?
+        .query_map(
+            params![owner, u32::from(from), u32::from(through.height)],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?
+        .collect::<Result<_, _>>()?;
+    let end = u32::from(through.height) + 1;
+    let mut gaps = vec![];
+    let mut next = u32::from(from);
+    for (start, stop) in covered {
+        if start > next {
+            gaps.push(next..start.min(end));
+        }
+        next = next.max(stop);
+    }
+    if next < end {
+        gaps.push(next..end);
+    }
+    for gap in gaps {
+        // Only a stretch the scan finished; one still queued is covered when it is scanned.
+        let finished: bool = conn.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM scan_queue
+             WHERE priority != ?3 AND block_range_start < ?2 AND block_range_end > ?1)",
+            params![gap.start, gap.end, priority_code(&ScanPriority::Scanned)],
+            |r| r.get(0),
+        )?;
+        if finished {
+            crate::wallet::one_time_ivk::queue_rescan(
+                conn,
+                BlockHeight::from(gap.start)..BlockHeight::from(gap.end),
+            )?;
+        }
+    }
+    Ok(())
 }

@@ -245,7 +245,9 @@ mod tests {
         // restore sweep and retention tables, unless an interrupted upgrade stopped before it.
         for table in [
             "ironwood_block_histories",
+            "ironwood_block_lookups",
             "ironwood_block_matches",
+            "ironwood_block_payments",
             "ironwood_block_receivers",
             "ironwood_block_recovery",
             "ironwood_block_seen",

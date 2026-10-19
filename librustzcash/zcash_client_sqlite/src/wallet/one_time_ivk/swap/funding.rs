@@ -105,7 +105,8 @@ pub(in crate::wallet::one_time_ivk) fn begin(
                     {RESERVED} AND k.issuance_blocked = 0 AND k.used = 0
                       AND NOT EXISTS(SELECT 1 FROM ironwood_block_matches m WHERE m.account_id=k.account_id AND m.purpose=k.purpose AND m.key_index=k.key_index)
                       AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
-                        WHERE p.one_time_key_id = k.id),
+                        WHERE p.one_time_key_id = k.id)
+                      AND NOT EXISTS(SELECT 1 FROM ironwood_block_payments p WHERE p.one_time_key_id=k.id),
                     k.provider_seen, k.receiver, {LATEST_DEADLINE}
                  FROM ironwood_one_time_keys k JOIN accounts a ON a.id = k.account_id
                  WHERE a.uuid = ?1 AND k.purpose = 0 AND k.key_index = ?2"

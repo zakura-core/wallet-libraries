@@ -40,6 +40,7 @@ mod one_time_ivk;
 mod one_time_ivk_block_recovery;
 mod one_time_ivk_discovery;
 mod one_time_ivk_issuance_recovery;
+mod one_time_ivk_pir_settlement;
 mod orchard_ironwood_migration_anchor_interval;
 mod orchard_ironwood_migration_tables;
 mod orchard_ironwood_migration_unsatisfiability;
@@ -163,6 +164,7 @@ pub mod ids {
         one_time_ivk_block_recovery::MIGRATION_ID as ONE_TIME_IVK_BLOCK_RECOVERY,
         one_time_ivk_discovery::MIGRATION_ID as ONE_TIME_IVK_DISCOVERY,
         one_time_ivk_issuance_recovery::MIGRATION_ID as ONE_TIME_IVK_ISSUANCE_RECOVERY,
+        one_time_ivk_pir_settlement::MIGRATION_ID as ONE_TIME_IVK_PIR_SETTLEMENT,
         orchard_ironwood_migration_anchor_interval::MIGRATION_ID as ORCHARD_IRONWOOD_MIGRATION_ANCHOR_INTERVAL,
         orchard_ironwood_migration_tables::MIGRATION_ID as ORCHARD_IRONWOOD_MIGRATION_TABLES,
         orchard_ironwood_migration_unsatisfiability::MIGRATION_ID as ORCHARD_IRONWOOD_MIGRATION_UNSATISFIABILITY,
@@ -446,6 +448,7 @@ pub(super) fn all_migrations<
         Box::new(one_time_ivk_discovery::Migration),
         Box::new(one_time_ivk_block_recovery::Migration),
         Box::new(one_time_ivk_issuance_recovery::Migration),
+        Box::new(one_time_ivk_pir_settlement::Migration),
     ]
 }
 
@@ -707,7 +710,7 @@ pub(crate) fn forget_txid_enhancement(conn: &rusqlite::Connection) {
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     transparent_detail_content_failures::MIGRATION_ID,
-    one_time_ivk_issuance_recovery::MIGRATION_ID,
+    one_time_ivk_pir_settlement::MIGRATION_ID,
 ];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
@@ -839,6 +842,7 @@ pub(crate) mod tests {
             ids::ONE_TIME_IVK_DISCOVERY,
             ids::ONE_TIME_IVK_BLOCK_RECOVERY,
             ids::ONE_TIME_IVK_ISSUANCE_RECOVERY,
+            ids::ONE_TIME_IVK_PIR_SETTLEMENT,
             ids::ORCHARD_IRONWOOD_MIGRATION_ANCHOR_INTERVAL,
             ids::ORCHARD_IRONWOOD_MIGRATION_TABLES,
             ids::ORCHARD_IRONWOOD_MIGRATION_UNSATISFIABILITY,

@@ -976,7 +976,9 @@ mod tests {
             db::TABLE_ADDRESSES,
             db::TABLE_BLOCKS,
             db::TABLE_IRONWOOD_BLOCK_HISTORIES,
+            db::TABLE_IRONWOOD_BLOCK_LOOKUPS,
             db::TABLE_IRONWOOD_BLOCK_MATCHES,
+            db::TABLE_IRONWOOD_BLOCK_PAYMENTS,
             db::TABLE_IRONWOOD_BLOCK_RECEIVERS,
             db::TABLE_IRONWOOD_BLOCK_RECOVERY,
             db::TABLE_IRONWOOD_BLOCK_SEEN,
@@ -1180,6 +1182,7 @@ mod tests {
             .unwrap();
         let expected = [
             db::TRIGGER_IRONWOOD_LOCAL_WATCH_BOUND,
+            db::TRIGGER_IRONWOOD_PIR_GENERATION,
             db::TRIGGER_IRONWOOD_RECOVERY_ALLOCATION,
         ];
         assert_eq!(
