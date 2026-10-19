@@ -35,10 +35,10 @@ tokio = { version = "1", features = ["rt", "macros", "sync"] }
 zakura-chain = { workspace = true, optional = true }
 sha2 = "0.10"
 zcash_script = "0.6"
-zcash_primitives = { package = "zakura-primitives", version = "=4.0.0-rc1", default-features = false, features = ["std", "backend-halo2"], git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
-zcash_protocol = { package = "zakura-protocol", version = "=4.0.0-rc1", git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
-transparent = { package = "zakura-transparent", version = "=4.0.0-rc1", default-features = false, features = ["std"], git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
-orchard = { package = "zakura-orchard", version = "=4.0.0-rc1", default-features = false, features = ["std", "backend-halo2"], git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+zcash_primitives = { package = "zakura-primitives", version = "=4.0.0-rc2", default-features = false, features = ["std", "backend-halo2"], git = "https://github.com/zakura-core/common.git", rev = "50f287a68dedea08eb92c2673394d92a481397a4" }
+zcash_protocol = { package = "zakura-protocol", version = "=4.0.0-rc2", git = "https://github.com/zakura-core/common.git", rev = "50f287a68dedea08eb92c2673394d92a481397a4" }
+transparent = { package = "zakura-transparent", version = "=4.0.0-rc2", default-features = false, features = ["std"], git = "https://github.com/zakura-core/common.git", rev = "50f287a68dedea08eb92c2673394d92a481397a4" }
+orchard = { package = "zakura-orchard", version = "=4.0.0-rc2", default-features = false, features = ["std", "backend-halo2"], git = "https://github.com/zakura-core/common.git", rev = "50f287a68dedea08eb92c2673394d92a481397a4" }
 zakura-state = { workspace = true, optional = true }
 zakura-receiver-crypto = { path = "../receiver-crypto", optional = true }
 

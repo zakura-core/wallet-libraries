@@ -2742,19 +2742,19 @@ dependencies = [
  "blake2b_simd",
  "bs58",
  "corez",
- "zakura-protocol 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-protocol 4.0.0-rc1",
 ]
 
 [[package]]
 name = "zakura-address"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "bech32",
  "blake2b_simd",
  "bs58",
  "corez",
- "zakura-protocol 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
+ "zakura-protocol 4.0.0-rc2",
 ]
 
 [[package]]
@@ -2794,8 +2794,8 @@ dependencies = [
 
 [[package]]
 name = "zakura-bls12-381"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "ff",
  "group",
@@ -2836,20 +2836,20 @@ dependencies = [
  "tracing",
  "uint",
  "windows-sys 0.61.2",
- "zakura-address 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-equihash 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-address 4.0.0-rc1",
+ "zakura-equihash 4.0.0-rc1",
  "zakura-halo2-proofs",
- "zakura-jubjub 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-jubjub 4.0.0-rc1",
  "zakura-mmr-tree",
- "zakura-note-encryption 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-orchard 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-primitives 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-protocol 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-reddsa 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-redjubjub 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-sapling-crypto 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-sinsemilla 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-transparent 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-note-encryption 4.0.0-rc1",
+ "zakura-orchard 4.0.0-rc1",
+ "zakura-primitives 4.0.0-rc1",
+ "zakura-protocol 4.0.0-rc1",
+ "zakura-reddsa 4.0.0-rc1",
+ "zakura-redjubjub 4.0.0-rc1",
+ "zakura-sapling-crypto 4.0.0-rc1",
+ "zakura-sinsemilla 4.0.0-rc1",
+ "zakura-transparent 4.0.0-rc1",
  "zcash_script",
 ]
 
@@ -2865,8 +2865,8 @@ dependencies = [
 
 [[package]]
 name = "zakura-equihash"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "blake2b_simd",
  "corez",
@@ -2881,10 +2881,10 @@ dependencies = [
  "arrayvec",
  "ff",
  "group",
- "zakura-halo2-poseidon 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-halo2-poseidon 4.0.0-rc1",
  "zakura-halo2-proofs",
- "zakura-pasta-curves 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-sinsemilla 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-pasta-curves 4.0.0-rc1",
+ "zakura-sinsemilla 4.0.0-rc1",
 ]
 
 [[package]]
@@ -2902,18 +2902,18 @@ dependencies = [
  "bitvec",
  "ff",
  "group",
- "zakura-pasta-curves 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-pasta-curves 4.0.0-rc1",
 ]
 
 [[package]]
 name = "zakura-halo2-poseidon"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "bitvec",
  "ff",
  "group",
- "zakura-pasta-curves 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
+ "zakura-pasta-curves 4.0.0-rc2",
 ]
 
 [[package]]
@@ -2930,7 +2930,7 @@ dependencies = [
  "rand_core 0.10.1",
  "tracing",
  "zakura-halo2-legacy-pdqsort",
- "zakura-pasta-curves 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-pasta-curves 4.0.0-rc1",
 ]
 
 [[package]]
@@ -2956,20 +2956,20 @@ dependencies = [
  "group",
  "rand_core 0.10.1",
  "subtle",
- "zakura-bls12-381 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-bls12-381 4.0.0-rc1",
 ]
 
 [[package]]
 name = "zakura-jubjub"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "bitvec",
  "ff",
  "group",
  "rand_core 0.10.1",
  "subtle",
- "zakura-bls12-381 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
+ "zakura-bls12-381 4.0.0-rc2",
 ]
 
 [[package]]
@@ -3008,8 +3008,8 @@ dependencies = [
 
 [[package]]
 name = "zakura-note-encryption"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "chacha20",
  "chacha20poly1305",
@@ -3037,15 +3037,15 @@ dependencies = [
  "serde",
  "subtle",
  "tracing",
- "zakura-note-encryption 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-orchard-legacy 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-note-encryption 4.0.0-rc1",
+ "zakura-orchard-legacy 4.0.0-rc1",
  "zcash_spec",
 ]
 
 [[package]]
 name = "zakura-orchard"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "bitvec",
  "blake2b_simd",
@@ -3059,8 +3059,8 @@ dependencies = [
  "serde",
  "subtle",
  "tracing",
- "zakura-note-encryption 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-orchard-legacy 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
+ "zakura-note-encryption 4.0.0-rc2",
+ "zakura-orchard-legacy 4.0.0-rc2",
  "zcash_spec",
 ]
 
@@ -3073,24 +3073,24 @@ dependencies = [
  "ff",
  "group",
  "zakura-halo2-gadgets",
- "zakura-halo2-poseidon 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-halo2-poseidon 4.0.0-rc1",
  "zakura-halo2-proofs",
- "zakura-pasta-curves 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-reddsa 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-sinsemilla 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-pasta-curves 4.0.0-rc1",
+ "zakura-reddsa 4.0.0-rc1",
+ "zakura-sinsemilla 4.0.0-rc1",
 ]
 
 [[package]]
 name = "zakura-orchard-legacy"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "ff",
  "group",
- "zakura-halo2-poseidon 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-pasta-curves 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-reddsa 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-sinsemilla 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
+ "zakura-halo2-poseidon 4.0.0-rc2",
+ "zakura-pasta-curves 4.0.0-rc2",
+ "zakura-reddsa 4.0.0-rc2",
+ "zakura-sinsemilla 4.0.0-rc2",
 ]
 
 [[package]]
@@ -3121,8 +3121,8 @@ dependencies = [
 
 [[package]]
 name = "zakura-pasta-curves"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "blake2b_simd",
  "ff",
@@ -3147,21 +3147,21 @@ dependencies = [
  "nonempty",
  "rand_core 0.10.1",
  "sha2",
- "zakura-equihash 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-jubjub 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-note-encryption 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-orchard 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-protocol 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-redjubjub 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-sapling-crypto 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-transparent 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-equihash 4.0.0-rc1",
+ "zakura-jubjub 4.0.0-rc1",
+ "zakura-note-encryption 4.0.0-rc1",
+ "zakura-orchard 4.0.0-rc1",
+ "zakura-protocol 4.0.0-rc1",
+ "zakura-redjubjub 4.0.0-rc1",
+ "zakura-sapling-crypto 4.0.0-rc1",
+ "zakura-transparent 4.0.0-rc1",
  "zcash_script",
 ]
 
 [[package]]
 name = "zakura-primitives"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "blake2b_simd",
  "corez",
@@ -3171,14 +3171,14 @@ dependencies = [
  "nonempty",
  "rand_core 0.10.1",
  "sha2",
- "zakura-equihash 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-jubjub 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-note-encryption 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-orchard 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-protocol 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-redjubjub 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-sapling-crypto 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-transparent 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
+ "zakura-equihash 4.0.0-rc2",
+ "zakura-jubjub 4.0.0-rc2",
+ "zakura-note-encryption 4.0.0-rc2",
+ "zakura-orchard 4.0.0-rc2",
+ "zakura-protocol 4.0.0-rc2",
+ "zakura-redjubjub 4.0.0-rc2",
+ "zakura-sapling-crypto 4.0.0-rc2",
+ "zakura-transparent 4.0.0-rc2",
  "zcash_script",
 ]
 
@@ -3195,8 +3195,8 @@ dependencies = [
 
 [[package]]
 name = "zakura-protocol"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "corez",
  "hex",
@@ -3209,10 +3209,10 @@ version = "0.0.1-rc0"
 dependencies = [
  "incrementalmerkletree",
  "thiserror",
- "zakura-address 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-note-encryption 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-orchard 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-protocol 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
+ "zakura-address 4.0.0-rc2",
+ "zakura-note-encryption 4.0.0-rc2",
+ "zakura-orchard 4.0.0-rc2",
+ "zakura-protocol 4.0.0-rc2",
 ]
 
 [[package]]
@@ -3226,22 +3226,22 @@ dependencies = [
  "hex",
  "rand_core 0.10.1",
  "serde",
- "zakura-jubjub 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-pasta-curves 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-jubjub 4.0.0-rc1",
+ "zakura-pasta-curves 4.0.0-rc1",
 ]
 
 [[package]]
 name = "zakura-reddsa"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "blake2b_simd",
  "group",
  "hex",
  "rand_core 0.10.1",
  "serde",
- "zakura-jubjub 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-pasta-curves 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
+ "zakura-jubjub 4.0.0-rc2",
+ "zakura-pasta-curves 4.0.0-rc2",
 ]
 
 [[package]]
@@ -3253,17 +3253,17 @@ dependencies = [
  "rand_core 0.10.1",
  "serde",
  "thiserror",
- "zakura-reddsa 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-reddsa 4.0.0-rc1",
 ]
 
 [[package]]
 name = "zakura-redjubjub"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "rand_core 0.10.1",
  "thiserror",
- "zakura-reddsa 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
+ "zakura-reddsa 4.0.0-rc2",
 ]
 
 [[package]]
@@ -3287,17 +3287,17 @@ dependencies = [
  "subtle",
  "tracing",
  "zakura-bellman",
- "zakura-bls12-381 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-jubjub 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-note-encryption 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-redjubjub 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-bls12-381 4.0.0-rc1",
+ "zakura-jubjub 4.0.0-rc1",
+ "zakura-note-encryption 4.0.0-rc1",
+ "zakura-redjubjub 4.0.0-rc1",
  "zcash_spec",
 ]
 
 [[package]]
 name = "zakura-sapling-crypto"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "bitvec",
  "blake2b_simd",
@@ -3313,10 +3313,10 @@ dependencies = [
  "rand_core 0.10.1",
  "subtle",
  "tracing",
- "zakura-bls12-381 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-jubjub 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-note-encryption 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-redjubjub 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
+ "zakura-bls12-381 4.0.0-rc2",
+ "zakura-jubjub 4.0.0-rc2",
+ "zakura-note-encryption 4.0.0-rc2",
+ "zakura-redjubjub 4.0.0-rc2",
  "zcash_spec",
 ]
 
@@ -3336,13 +3336,13 @@ dependencies = [
  "tokio",
  "tracing",
  "zakura-chain",
- "zakura-orchard 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-primitives 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-protocol 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
+ "zakura-orchard 4.0.0-rc2",
+ "zakura-primitives 4.0.0-rc2",
+ "zakura-protocol 4.0.0-rc2",
  "zakura-receiver-crypto",
  "zakura-state",
  "zakura-test",
- "zakura-transparent 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
+ "zakura-transparent 4.0.0-rc2",
  "zcash_script",
 ]
 
@@ -3355,18 +3355,18 @@ dependencies = [
  "group",
  "once_cell",
  "subtle",
- "zakura-pasta-curves 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-pasta-curves 4.0.0-rc1",
 ]
 
 [[package]]
 name = "zakura-sinsemilla"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "group",
  "once_cell",
  "subtle",
- "zakura-pasta-curves 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
+ "zakura-pasta-curves 4.0.0-rc2",
 ]
 
 [[package]]
@@ -3396,7 +3396,7 @@ dependencies = [
  "zakura-chain",
  "zakura-header-chain",
  "zakura-node-services",
- "zakura-sapling-crypto 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-sapling-crypto 4.0.0-rc1",
 ]
 
 [[package]]
@@ -3437,16 +3437,16 @@ dependencies = [
  "secp256k1",
  "sha2",
  "subtle",
- "zakura-address 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zakura-protocol 4.0.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zakura-address 4.0.0-rc1",
+ "zakura-protocol 4.0.0-rc1",
  "zcash_script",
  "zcash_spec",
 ]
 
 [[package]]
 name = "zakura-transparent"
-version = "4.0.0-rc1"
-source = "git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb#7c6982448b5d52bf16d1c769bbd61551564f55bb"
+version = "4.0.0-rc2"
+source = "git+https://github.com/zakura-core/common.git?rev=50f287a68dedea08eb92c2673394d92a481397a4#50f287a68dedea08eb92c2673394d92a481397a4"
 dependencies = [
  "bs58",
  "corez",
@@ -3457,8 +3457,8 @@ dependencies = [
  "secp256k1",
  "sha2",
  "subtle",
- "zakura-address 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
- "zakura-protocol 4.0.0-rc1 (git+https://github.com/zakura-core/common.git?rev=7c6982448b5d52bf16d1c769bbd61551564f55bb)",
+ "zakura-address 4.0.0-rc2",
+ "zakura-protocol 4.0.0-rc2",
  "zcash_script",
  "zcash_spec",
 ]
