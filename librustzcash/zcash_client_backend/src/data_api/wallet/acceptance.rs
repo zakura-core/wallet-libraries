@@ -3,8 +3,6 @@
 //! The same rules apply to a finished [`Transaction`] and to a PCZT before its proofs and
 //! signatures are finalized, so that a PCZT can be refused before any expensive work.
 
-use std::io::Cursor;
-
 use zcash_primitives::transaction::{Transaction, TxVersion, builder::check_shielded_budget};
 use zcash_protocol::consensus::{self, BlockHeight, BranchId};
 
@@ -127,7 +125,7 @@ pub fn validate_pczt_for_target(
         target_height,
         Candidate {
             declared_branch: *global.consensus_branch_id(),
-            version: TxVersion::read(Cursor::new(encoded)).ok(),
+            version: TxVersion::read(std::io::Cursor::new(encoded)).ok(),
             version_header,
             expiry_height: *global.expiry_height(),
             sapling_spends: pczt.sapling().spends().len(),

@@ -1679,7 +1679,7 @@ mod nu7_expiry_tests {
         let (mut st, proposal, target) = wallet_with_proposal_at_its_default_expiry!();
         let params = st.network().clone();
         let keys = SpendingKeys::from_unified_spending_key(st.get_account().usk().clone());
-        let mut create = |st: &mut _, expiry_height: Option<BlockHeight>| {
+        let create = |st: &mut _, expiry_height: Option<BlockHeight>| {
             create_proposed_transactions::<
                 _,
                 _,
@@ -1746,7 +1746,7 @@ mod nu7_expiry_tests {
         let (mut st, proposal, target) = wallet_with_proposal_at_its_default_expiry!();
         let params = st.network().clone();
         let account = st.get_account().id();
-        let mut create = |st: &mut _, expiry_height: Option<BlockHeight>| {
+        let create = |st: &mut _, expiry_height: Option<BlockHeight>| {
             create_pczt_from_proposal::<
                 _,
                 _,
