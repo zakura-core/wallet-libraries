@@ -31,8 +31,9 @@ and this library adheres to Rust's notion of
   can then recognize the spend with the account's ordinary keys. The change strategies and
   `propose_send_max_transfer` add this output, and `create_proposed_transactions`,
   `create_pczt_from_proposal` and `extract_and_store_transaction_from_pczt` reject a
-  transaction without it. A PCZT created before this change can't be extracted, because its
-  proposal metadata lacks the new flag.
+  transaction without it. A PCZT that spends a one-time-key note says so under the
+  proprietary global key `zcash_client_backend:spends_one_time`, which the signer views
+  redact. Other PCZTs are encoded as before.
 
 ### Removed
 

@@ -7125,6 +7125,26 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
         consensus::BranchId::try_from(*pczt_created.global().consensus_branch_id())
             .expect("the PCZT carries a valid consensus branch ID");
 
+    // An ordinary PCZT has no one-time flag, and its proposal metadata keeps the layout
+    // from before one-time spends existed. Extracting it below therefore also shows that
+    // older PCZTs still extract.
+    #[derive(serde::Serialize)]
+    struct LegacyProposalInfo<AccountId> {
+        from_account: AccountId,
+        target_height: u32,
+    }
+    let legacy_proposal_info = postcard::to_allocvec(&LegacyProposalInfo {
+        from_account: account.id(),
+        target_height: BlockHeight::from(min_target_height).into(),
+    })
+    .unwrap();
+    let global_proprietary = pczt_created.global().proprietary();
+    assert_eq!(
+        global_proprietary.get("zcash_client_backend:proposal_info"),
+        Some(&legacy_proposal_info),
+    );
+    assert!(!global_proprietary.contains_key("zcash_client_backend:spends_one_time"));
+
     // Signability invariant: the test account's derivation is known, so every
     // shielded spend must be signable by SOME party: already signed
     // (IO-finalized protocol dummies), carrying the dummy key that lets the IO
