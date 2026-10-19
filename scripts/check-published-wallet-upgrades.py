@@ -17,12 +17,12 @@ is accepted.
 import argparse
 import fcntl
 import json
-import re
 from pathlib import Path
 import sqlite3
 import subprocess
 import tempfile
 import tarfile
+import tomllib
 import io
 import uuid
 
@@ -66,14 +66,22 @@ def source_tree(root, rev):
     return dest
 
 
-def workspace_version(package):
-    """The version this workspace's root manifest requires of `package`."""
-    for line in (ROOT / "Cargo.toml").read_text().splitlines():
-        if f'package = "{package}"' in line:
-            match = re.search(r'version = "([^"]+)"', line)
-            if match:
-                return match.group(1)
-    raise SystemExit(f"no {package} version in the workspace manifest")
+def workspace_source(package):
+    """Use the wallet's version and source, so probe types belong to the same crate family."""
+    manifest = tomllib.loads((ROOT / "Cargo.toml").read_text())
+    for alias, dependency in manifest["workspace"]["dependencies"].items():
+        if isinstance(dependency, dict) and dependency.get("package", alias) == package:
+            source = {
+                key: dependency[key]
+                for key in ("version", "git", "rev", "branch", "tag", "registry")
+                if key in dependency
+            }
+            if "version" in source:
+                source["version"] = "=" + source["version"].removeprefix("=")
+            return ", ".join(
+                f"{key} = {json.dumps(value)}" for key, value in source.items()
+            )
+    raise SystemExit(f"no {package} dependency in the workspace manifest")
 
 
 def consumer(root, version):
@@ -102,10 +110,11 @@ def consumer(root, version):
             ("transparent", "zakura-transparent"),
         ]:
             if version == "current":
-                common = workspace_version(package).removeprefix("=")
+                source = workspace_source(package)
             else:
                 common = {"rc9": "3.0.0"}.get(version, "2.0.0")
-            manifest += f'{alias} = {{ package = "{package}", version = "={common}" }}\n'
+                source = f'version = "={common}"'
+            manifest += f'{alias} = {{ package = "{package}", {source} }}\n'
     # Pin the PCZT prerelease used by Vizor: caret prerelease resolution otherwise selects
     # rc4's newer dependency family while testing rc5's published writer.
     if version == "rc5":
