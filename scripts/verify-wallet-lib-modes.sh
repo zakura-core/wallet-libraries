@@ -298,7 +298,11 @@ expected = {
 with open(sys.argv[2], "rb") as manifest_file:
     protocol = tomllib.load(manifest_file)["rewire"]["zcash_protocol"]
 required_version = protocol["version"].removeprefix("=")
-required_source = "registry+https://github.com/rust-lang/crates.io-index"
+if "git" in protocol:
+    revision = protocol["rev"]
+    required_source = f"git+{protocol['git']}?rev={revision}#{revision}"
+else:
+    required_source = "registry+https://github.com/rust-lang/crates.io-index"
 problems = []
 for name in sorted(expected):
     matches = [package for package in packages if package["name"] == name]
