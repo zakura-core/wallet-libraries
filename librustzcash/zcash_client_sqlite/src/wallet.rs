@@ -770,7 +770,8 @@ pub(crate) fn delete_account(
     }
 
     // Materialize ownership before cascades change the received-output views. Requests
-    // are keyed by txid, so deleting a transaction does not remove its own intent.
+    // and spend-journal entries are keyed by txid, so deleting a transaction does not
+    // remove them.
     let exclusive_transactions = {
         let mut stmt = conn.prepare(
             r#"
@@ -825,9 +826,13 @@ pub(crate) fn delete_account(
     )?;
     let mut delete_intent =
         conn.prepare_cached("DELETE FROM tx_retrieval_queue WHERE txid = :txid")?;
+    // An entry's nullifier rows cascade from it.
+    let mut delete_journal_entry =
+        conn.prepare_cached("DELETE FROM ironwood_spend_journal WHERE txid = :txid")?;
     for (id, txid) in &exclusive_transactions {
         detach.execute(named_params![":tx": id, ":account_uuid": account_uuid.0])?;
         delete_intent.execute(named_params![":txid": txid])?;
+        delete_journal_entry.execute(named_params![":txid": txid])?;
     }
     let mut delete_tx = conn.prepare_cached("DELETE FROM transactions WHERE id_tx = :tx")?;
     for (id, _) in exclusive_transactions {
