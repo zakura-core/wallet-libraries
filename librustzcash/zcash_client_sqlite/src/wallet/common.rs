@@ -15,7 +15,9 @@ use zcash_client_backend::{
     },
     wallet::ReceivedNote,
 };
-use zcash_primitives::transaction::{TxId, builder::DEFAULT_TX_EXPIRY_DELTA, fees::zip317};
+use zcash_primitives::transaction::{
+    TxId, builder::PRE_NU7_DEFAULT_TX_EXPIRY_DELTA as DEFAULT_TX_EXPIRY_DELTA, fees::zip317,
+};
 use zcash_protocol::{
     PoolType, ShieldedPool,
     consensus::{self, BlockHeight},

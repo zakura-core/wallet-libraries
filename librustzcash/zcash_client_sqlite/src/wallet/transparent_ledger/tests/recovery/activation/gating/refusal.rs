@@ -6,7 +6,8 @@ use transparent::{
     bundle::{Bundle, TxIn, TxOut},
 };
 use zcash_primitives::transaction::{
-    Authorized, Transaction, TransactionData, TxVersion, builder::DEFAULT_TX_EXPIRY_DELTA,
+    Authorized, Transaction, TransactionData, TxVersion,
+    builder::PRE_NU7_DEFAULT_TX_EXPIRY_DELTA as DEFAULT_TX_EXPIRY_DELTA,
 };
 use zcash_protocol::consensus::BranchId;
 

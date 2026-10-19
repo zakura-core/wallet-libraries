@@ -147,7 +147,7 @@ use {
     },
     zcash_keys::keys::{UnifiedAddressRequest, transparent::gap_limits::GapLimits},
     zcash_primitives::transaction::{
-        builder::DEFAULT_TX_EXPIRY_DELTA,
+        builder::PRE_NU7_DEFAULT_TX_EXPIRY_DELTA as DEFAULT_TX_EXPIRY_DELTA,
         fees::{FeeRule, transparent::InputSize, zip317},
     },
     zcash_protocol::{

@@ -11,7 +11,7 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
-- Update the public cryptography and protocol types to Zakura Common `4.0.0-rc1`.
+- Update the public cryptography and protocol types to Zakura Common `4.0.0-rc2`.
 - Replace serialization convenience macros with explicit array adapters, retaining
   the existing serialized layout and removing the macro dependency from wallet builds.
 

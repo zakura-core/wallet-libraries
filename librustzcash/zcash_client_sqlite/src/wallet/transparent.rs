@@ -42,7 +42,7 @@ use zcash_keys::{
     },
 };
 #[cfg(not(feature = "spend-index"))]
-use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
+use zcash_primitives::transaction::builder::PRE_NU7_DEFAULT_TX_EXPIRY_DELTA as DEFAULT_TX_EXPIRY_DELTA;
 use zcash_primitives::transaction::fees::{
     FeeRule,
     transparent::{InputSize, InputView},

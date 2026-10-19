@@ -29,6 +29,8 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- Use the published Zakura Common `4.0.0-rc2` dependency family.
+
 - One-time IVK issuance fails closed without a fresh provider seen set.
   `WalletDb::prepare_receive_reservation`, `WalletDb::reserve_refund_key` (which now
   takes the caller's `now`) and a reservation's first `WalletDb::begin_receive_operation`

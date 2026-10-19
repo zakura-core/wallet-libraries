@@ -36,7 +36,7 @@ and this library adheres to Rust's notion of
   transaction without it. A PCZT that spends a one-time-key note says so under the
   proprietary global key `zcash_client_backend:spends_one_time`, which the signer views
   redact. Other PCZTs are encoded as before.
-- Common dependencies use the protocol-port revision of the version 4 family,
+- Common dependencies use the published `4.0.0-rc2` family,
   with the Halo 2 backend selected explicitly for transaction proving.
 - ZIP 318 anchor retention, canonical crossing fees, and rolling expiry now follow
   the network's NU7 block spacing. `AnchorRetention::new` and `union`, and

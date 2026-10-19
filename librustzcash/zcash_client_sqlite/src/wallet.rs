@@ -132,7 +132,10 @@ use zcash_keys::{
 use zcash_primitives::{
     block::BlockHash,
     merkle_tree::read_commitment_tree,
-    transaction::{Transaction, TransactionData, builder::DEFAULT_TX_EXPIRY_DELTA, fees::zip317},
+    transaction::{
+        Transaction, TransactionData,
+        builder::PRE_NU7_DEFAULT_TX_EXPIRY_DELTA as DEFAULT_TX_EXPIRY_DELTA, fees::zip317,
+    },
 };
 use zcash_protocol::{
     PoolType, ShieldedPool, TxId,

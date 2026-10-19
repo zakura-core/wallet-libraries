@@ -41,10 +41,10 @@ tokio = { version = "1", features = ["rt", "macros", "sync"], optional = true }
 zakura-chain = { workspace = true, optional = true }
 sha2 = "0.10"
 zcash_script = "0.6"
-zcash_primitives = { package = "zakura-primitives", version = "=4.0.0-rc1", default-features = false, features = ["std", "backend-halo2"] }
-zcash_protocol = { package = "zakura-protocol", version = "=4.0.0-rc1" }
-transparent = { package = "zakura-transparent", version = "=4.0.0-rc1", default-features = false, features = ["std"] }
-orchard = { package = "zakura-orchard", version = "=4.0.0-rc1", default-features = false, features = ["std", "backend-halo2"] }
+zcash_primitives = { package = "zakura-primitives", version = "=4.0.0-rc2", default-features = false, features = ["std", "backend-halo2"] }
+zcash_protocol = { package = "zakura-protocol", version = "=4.0.0-rc2" }
+transparent = { package = "zakura-transparent", version = "=4.0.0-rc2", default-features = false, features = ["std"] }
+orchard = { package = "zakura-orchard", version = "=4.0.0-rc2", default-features = false, features = ["std", "backend-halo2"] }
 zakura-state = { workspace = true, optional = true }
 zakura-receiver-crypto = { path = "../receiver-crypto", optional = true }
 
@@ -95,13 +95,13 @@ repository = "https://github.com/zakura-core/wallet-libraries"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-# Common RC1 support from https://github.com/zakura-core/zakura/pull/1542.
+# Common RC2 support from https://github.com/zakura-core/zakura/pull/1543.
 # Changing this revision does not upgrade a
 # deployed node; a direct database reader must match the running node's format.
-zakura-chain = { git = "https://github.com/zakura-core/zakura.git", rev = "dcff84dc42258bb1e4c5d368094e11ea27c7ed4f" }
+zakura-chain = { git = "https://github.com/zakura-core/zakura.git", rev = "9f74b086aff8fa26e896804595432e2d8acae0ca" }
 # Pinned to the same revision as `zakura-chain`, and it must stay that way: the
 # `rocksdb` reader opens the node's database directly, so its format must match
 # the running node's.
-zakura-state = { git = "https://github.com/zakura-core/zakura.git", rev = "dcff84dc42258bb1e4c5d368094e11ea27c7ed4f" }
+zakura-state = { git = "https://github.com/zakura-core/zakura.git", rev = "9f74b086aff8fa26e896804595432e2d8acae0ca" }
 # Test vectors from the same node revision.
-zakura-test = { git = "https://github.com/zakura-core/zakura.git", rev = "dcff84dc42258bb1e4c5d368094e11ea27c7ed4f" }
+zakura-test = { git = "https://github.com/zakura-core/zakura.git", rev = "9f74b086aff8fa26e896804595432e2d8acae0ca" }

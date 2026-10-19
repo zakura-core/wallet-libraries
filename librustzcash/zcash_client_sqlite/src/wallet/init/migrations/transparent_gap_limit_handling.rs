@@ -36,7 +36,7 @@ use {
     ReceiverRequirement::*,
     transparent::keys::TransparentKeyScope,
     zcash_keys::{encoding::AddressCodec as _, keys::ReceiverRequirement},
-    zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA,
+    zcash_primitives::transaction::builder::PRE_NU7_DEFAULT_TX_EXPIRY_DELTA as DEFAULT_TX_EXPIRY_DELTA,
     zip32::DiversifierIndex,
 };
 
