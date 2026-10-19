@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Block decoding and chain interpretation compile without an HTTP client or
+  asynchronous runtime. The opt-in `rpc` feature adds the node client and
+  asynchronous product readers. `testing` keeps synthetic fixtures only;
+  `testing-node` adds the HTTP JSON-RPC test server. Dependency-graph checks
+  enforce this boundary for decoding-only consumers.
+
 - `transparent::state::StateError` no longer exposes the node's
   `zakura_state::StateInitError`: `Open` carries the node's message as a `String`.
   A database that is not an archive database is refused with the new

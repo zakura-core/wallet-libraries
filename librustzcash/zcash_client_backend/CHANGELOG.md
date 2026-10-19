@@ -58,6 +58,12 @@ and this library adheres to Rust's notion of
   the ordinary recovery schedule without a randomized first-query delay.
   Consumers must remove waiting-state handling.
 
+### Fixed
+
+- Extract partially signed transactions created by older wallet releases without
+  changing their saved proposal metadata. One-time-key spends use a separate
+  marker, which is removed from the views sent to signers.
+
 ## [0.1.0-rc9] - 2026-10-14
 
 ### Added
