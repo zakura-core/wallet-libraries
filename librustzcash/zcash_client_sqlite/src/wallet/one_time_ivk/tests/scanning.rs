@@ -167,6 +167,9 @@ fn pczt_signs_and_proves_a_one_time_spend() {
             None,
         )
         .unwrap();
+    // Extraction requires the marker output because of this flag.
+    let flag = "zcash_client_backend:spends_one_time";
+    assert!(pczt.global().proprietary().contains_key(flag));
     let one_time_fvk = refund.full_viewing_key().to_bytes();
     let mut spends_with_key = 0;
     pczt::roles::verifier::Verifier::new(pczt.clone())

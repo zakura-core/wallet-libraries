@@ -9,7 +9,7 @@ uses the Common 4 protocol-port revision pinned in its manifest; its Orchard
 proof implementation uses the explicit Halo 2 backend. Common 4 no longer
 exposes the `unstable-voting-circuits` feature that the upstream backend enables. Applications that use Enhance PIR
 depend directly on `zakura-client-backend`/`zakura-client-sqlite` with Orchard
-storage enabled and on the `zakura-pir-enhance` client; this facade does not
+storage enabled and on `zakura-pir-client` with its `enhance` and `wallet` features; this facade does not
 expose the client.
 Keeping the two dependency
 graphs explicit avoids weak cross-family references, so Cargo does not retain

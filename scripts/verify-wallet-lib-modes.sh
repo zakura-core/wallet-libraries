@@ -268,10 +268,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-packages = {
-    package["name"]: package
-    for package in json.loads(Path(sys.argv[1]).read_text())["packages"]
-}
+packages = json.loads(Path(sys.argv[1]).read_text())["packages"]
 expected = {
     "zakura-proofs",
     "zakura-zip321",
@@ -301,15 +298,21 @@ expected = {
 with open(sys.argv[2], "rb") as manifest_file:
     protocol = tomllib.load(manifest_file)["rewire"]["zcash_protocol"]
 required_version = protocol["version"].removeprefix("=")
-required_source = f"git+{protocol['git']}?rev={protocol['rev']}#{protocol['rev']}"
-problems = [
-    f"{name}: expected {required_version} from {required_source}, found {packages.get(name, 'missing')}"
-    for name in sorted(expected)
-    if packages.get(name, {}).get("version") != required_version
-    or packages.get(name, {}).get("source") != required_source
-]
+required_source = "registry+https://github.com/rust-lang/crates.io-index"
+problems = []
+for name in sorted(expected):
+    matches = [package for package in packages if package["name"] == name]
+    if (
+        len(matches) != 1
+        or matches[0]["version"] != required_version
+        or matches[0]["source"] != required_source
+    ):
+        problems.append(
+            f"{name}: expected exactly one {required_version} from {required_source}, "
+            f"found {matches or 'missing'}"
+        )
 if problems:
-    print("fresh consumer did not stay on the pinned Common revision:", file=sys.stderr)
+    print("fresh consumer did not stay on the pinned Common release:", file=sys.stderr)
     for problem in problems:
         print(f"  {problem}", file=sys.stderr)
     raise SystemExit(1)
@@ -318,5 +321,5 @@ PY
 cargo +1.97 check --manifest-path "$consumer/Cargo.toml" --locked
 
 echo "verified: Zakura is the clean default, each explicit backend resolves"
-echo "to exactly one stack, a fresh Rust 1.97 consumer stays on the pinned Common revision, and"
+echo "to exactly one stack, a fresh Rust 1.97 consumer stays on the pinned Common release, and"
 echo "neither no-backend nor both-backends compiles"

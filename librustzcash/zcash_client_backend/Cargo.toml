@@ -25,14 +25,13 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-zakura-transparent-recovery-types = { path = "../../zakura/transparent-recovery-types", version = "=0.0.1-rc0" }
-zakura-pir-enhance-types = { version = "=0.0.1-rc1", path = "../../zakura/pir-enhance-types" }
+zakura-pir-protocol = { path = "../../zakura/pir-protocol", version = "=0.0.1-rc0", features = ["enhance", "recovery"] }
 zakura-one-time-ivk = { version = "=0.0.1-rc0", path = "../../zakura/one-time-ivk", optional = true }
 zcash_address.workspace = true
 zcash_encoding.workspace = true
 zcash_keys = { workspace = true, features = ["std", "sapling", "zip32-addresses"] }
 zcash_note_encryption.workspace = true
-zcash_primitives = { workspace = true, features = ["std", "circuits"] }
+zcash_primitives = { workspace = true, features = ["std", "circuits", "wallet"] }
 zcash_protocol.workspace = true
 zcash_script.workspace = true
 zip32.workspace = true
@@ -178,7 +177,7 @@ lightwalletd-tonic-transport = ["lightwalletd-tonic", "tonic?/transport"]
 
 ## Enables receiving transparent funds and shielding them.
 transparent-inputs = [
-    "zakura-transparent-recovery-types/transparent-inputs",
+    "zakura-pir-protocol/transparent-inputs",
     "dep:bip32",
     "dep:secp256k1",
     "transparent/transparent-inputs",

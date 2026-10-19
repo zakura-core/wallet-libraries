@@ -1,7 +1,7 @@
 # zakura-receiver-pir
 
 Encrypted row retrieval from a receiver directory publication over the shared
-`zakura-pir-native` two-mask profile, one row per 2,048-coefficient packing
+`zakura-pir-protocol` two-mask profile, one row per 2,048-coefficient packing
 block.
 
 - Session manifests (`Manifest`), their ID, and the geometry and size limits.

@@ -38,40 +38,40 @@ lrz-primitives = { package = "zcash_primitives", version = "0.31.0-pre.1", defau
 # -- Zakura: the default stack, under the upstream names consumers expect ----
 zcash-client-backend = { package = "zakura-client-backend", path = "../librustzcash/zcash_client_backend", version = "0.1.0-rc9", default-features = false, optional = true }
 zcash-client-sqlite = { package = "zakura-client-sqlite", path = "../librustzcash/zcash_client_sqlite", version = "0.1.0-rc9", default-features = false, optional = true }
-zcash-keys = { package = "zakura-keys", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
-orchard = { package = "zakura-orchard", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", optional = true }
+zcash-keys = { package = "zakura-keys", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+orchard = { package = "zakura-orchard", version = "=4.0.0-rc1", optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
 pczt = { package = "zakura-pczt", path = "../librustzcash/pczt", version = "0.1.0-rc6", optional = true }
-zcash-primitives = { package = "zakura-primitives", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
+zcash-primitives = { package = "zakura-primitives", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
 
-# Keep every Common crate on the protocol-port revision, including fresh
-# consumer lockfiles. Repin this family together when the port is released.
-zakura-bellman-pin = { package = "zakura-bellman", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
-zakura-bls12-381-pin = { package = "zakura-bls12-381", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
-zakura-halo2-gadgets-pin = { package = "zakura-halo2-gadgets", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
-zakura-halo2-legacy-pdqsort-pin = { package = "zakura-halo2-legacy-pdqsort", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
-zakura-halo2-poseidon-pin = { package = "zakura-halo2-poseidon", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
-zakura-halo2-proofs-pin = { package = "zakura-halo2-proofs", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
-zakura-jubjub-pin = { package = "zakura-jubjub", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
-zakura-note-encryption-pin = { package = "zakura-note-encryption", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
-zakura-orchard-legacy-pin = { package = "zakura-orchard-legacy", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
-zakura-pairing-pin = { package = "zakura-pairing", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
-zakura-pasta-curves-pin = { package = "zakura-pasta-curves", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
-zakura-reddsa-pin = { package = "zakura-reddsa", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
-zakura-redjubjub-pin = { package = "zakura-redjubjub", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
-zakura-sapling-crypto-pin = { package = "zakura-sapling-crypto", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
-zakura-sinsemilla-pin = { package = "zakura-sinsemilla", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
+# Keep every Common crate on the same published release, including fresh
+# consumer lockfiles. Repin this family together.
+zakura-bellman-pin = { package = "zakura-bellman", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+zakura-bls12-381-pin = { package = "zakura-bls12-381", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+zakura-halo2-gadgets-pin = { package = "zakura-halo2-gadgets", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+zakura-halo2-legacy-pdqsort-pin = { package = "zakura-halo2-legacy-pdqsort", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+zakura-halo2-poseidon-pin = { package = "zakura-halo2-poseidon", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+zakura-halo2-proofs-pin = { package = "zakura-halo2-proofs", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+zakura-jubjub-pin = { package = "zakura-jubjub", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+zakura-note-encryption-pin = { package = "zakura-note-encryption", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+zakura-orchard-legacy-pin = { package = "zakura-orchard-legacy", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+zakura-pairing-pin = { package = "zakura-pairing", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+zakura-pasta-curves-pin = { package = "zakura-pasta-curves", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+zakura-reddsa-pin = { package = "zakura-reddsa", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+zakura-redjubjub-pin = { package = "zakura-redjubjub", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+zakura-sapling-crypto-pin = { package = "zakura-sapling-crypto", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
+zakura-sinsemilla-pin = { package = "zakura-sinsemilla", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
 
-zakura-address-pin = { package = "zakura-address", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
+zakura-address-pin = { package = "zakura-address", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
 
-zakura-protocol-pin = { package = "zakura-protocol", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
+zakura-protocol-pin = { package = "zakura-protocol", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
 
-zakura-transparent-pin = { package = "zakura-transparent", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
+zakura-transparent-pin = { package = "zakura-transparent", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
 
-zakura-equihash-pin = { package = "zakura-equihash", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
+zakura-equihash-pin = { package = "zakura-equihash", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
 
-zakura-zip321-pin = { package = "zakura-zip321", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
+zakura-zip321-pin = { package = "zakura-zip321", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
 
-zakura-proofs-pin = { package = "zakura-proofs", version = "=4.0.0", git = "https://github.com/zakura-core/common.git", rev = "effcbc87487060436ad90e05968126409d513424", default-features = false, optional = true }
+zakura-proofs-pin = { package = "zakura-proofs", version = "=4.0.0-rc1", default-features = false, optional = true, git = "https://github.com/zakura-core/common.git", rev = "7c6982448b5d52bf16d1c769bbd61551564f55bb" }
 
 [features]
 default = ["zakura"]

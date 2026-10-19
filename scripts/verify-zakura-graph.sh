@@ -40,7 +40,7 @@ cargo check --manifest-path "$repo_root/Cargo.toml" \
 # client without `wallet`: their tests serve shards or directories in process,
 # so the `default` lane leaves them out.
 cargo check --manifest-path "$repo_root/Cargo.toml" \
-  -p zakura-pir-transparent -p zakura-pir-receiver --lib --locked
+  -p zakura-pir-client -p zakura-pir-receiver --lib --locked
 
 cargo metadata --locked --manifest-path "$repo_root/Cargo.toml" \
   --format-version 1 --all-features \

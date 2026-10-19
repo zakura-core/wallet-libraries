@@ -1,0 +1,29 @@
+[package]
+name = "zakura-pir-query-server"
+version = "0.0.1-rc0"
+edition = "2024"
+description = "PIR query evaluation without publication construction"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Product and capability features are explicit; no product is enabled by default.
+default = []
+enhance = ["zakura-pir-protocol/enhance"]
+status = ["zakura-pir-protocol/status"]
+transparent = ["zakura-pir-protocol/transparent", "zakura-pir-server-core/transparent"]
+testing = []
+
+[dependencies]
+zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc0", features = ["native"] }
+reinspiring = { version = "=0.1.3-rc.1", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
+rayon = { workspace = true }
+zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc0" }
+
+[dev-dependencies]
+hex = { workspace = true }
+sha2 = { workspace = true }
+rand = "0.8"
+rand_chacha = { workspace = true }
+bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }

@@ -130,6 +130,11 @@ use input_selection::{
 const PROPRIETARY_PROPOSAL_INFO: &str = "zcash_client_backend:proposal_info";
 #[cfg(feature = "pczt")]
 const PROPRIETARY_OUTPUT_INFO: &str = "zcash_client_backend:output_info";
+/// Present, with an empty value, when the PCZT spends a one-time-key note, so extraction
+/// must find the marker output (see [`crate::fees::orchard::InputView::is_one_time`]).
+/// Kept apart from [`ProposalInfo`] so that ordinary PCZTs keep their original encoding.
+#[cfg(feature = "pczt")]
+const PROPRIETARY_SPENDS_ONE_TIME: &str = "zcash_client_backend:spends_one_time";
 
 #[cfg(feature = "orchard")]
 fn ironwood_active_at<ParamsT: consensus::Parameters, H: Into<BlockHeight>>(
@@ -162,7 +167,8 @@ where
 
 /// Information about the proposal from which a PCZT was created.
 ///
-/// Stored under the proprietary field `PROPRIETARY_PROPOSAL_INFO`.
+/// Stored under the proprietary field `PROPRIETARY_PROPOSAL_INFO`. Extraction decodes PCZTs
+/// that earlier versions created, so its fields must not change.
 #[cfg(feature = "pczt")]
 #[derive(Serialize, Deserialize)]
 struct ProposalInfo<AccountId> {
@@ -172,9 +178,6 @@ struct ProposalInfo<AccountId> {
         deserialize_with = "deserialize_target_height"
     )]
     target_height: TargetHeight,
-    /// Whether the transaction spends a one-time-key note, so extraction must find the
-    /// marker output (see [`crate::fees::orchard::InputView::is_one_time`]).
-    spends_one_time: bool,
 }
 
 /// Reduced version of [`Recipient`] stored inside a PCZT.
@@ -2908,13 +2911,13 @@ where
                 postcard::to_allocvec(&ProposalInfo::<<DbT as WalletRead>::AccountId> {
                     from_account: account_id,
                     target_height: proposal.min_target_height(),
-                    #[cfg(feature = "orchard")]
-                    spends_one_time: build_state.spends_one_time,
-                    #[cfg(not(feature = "orchard"))]
-                    spends_one_time: false,
                 })
                 .expect("postcard encoding of PCZT proposal metadata should not fail"),
-            )
+            );
+            #[cfg(feature = "orchard")]
+            if build_state.spends_one_time {
+                updater.set_proprietary(PROPRIETARY_SPENDS_ONE_TIME.into(), vec![]);
+            }
         })
         .update_orchard_with(|mut updater| {
             // An action still needs a spend authorization signature if and only if its spend
@@ -3240,6 +3243,7 @@ fn full_signer_view(pczt: &pczt::Pczt) -> pczt::Pczt {
     Redactor::new(pczt.clone())
         .redact_global_with(|mut redactor| {
             redactor.redact_proprietary(PROPRIETARY_PROPOSAL_INFO);
+            redactor.redact_proprietary(PROPRIETARY_SPENDS_ONE_TIME);
         })
         .redact_transparent_with(|mut redactor| {
             redactor.redact_outputs(|mut output| {
@@ -3286,6 +3290,7 @@ fn compact_signer_view(pczt: &pczt::Pczt) -> pczt::Pczt {
     Redactor::new(pczt.clone())
         .redact_global_with(|mut redactor| {
             redactor.redact_proprietary(PROPRIETARY_PROPOSAL_INFO);
+            redactor.redact_proprietary(PROPRIETARY_SPENDS_ONE_TIME);
         })
         .redact_transparent_with(|mut redactor| {
             redactor.redact_outputs(|mut output| {
@@ -3498,6 +3503,11 @@ where
                 ))
             })
         })?;
+    #[cfg(feature = "orchard")]
+    let spends_one_time = finalized
+        .global()
+        .proprietary()
+        .contains_key(PROPRIETARY_SPENDS_ONE_TIME);
 
     // The per-action sent-output recovery shared by the Orchard and Ironwood bundles, which
     // differ only in the note plaintext version their notes carry (`V2` for Orchard, `V3` —
@@ -3675,7 +3685,7 @@ where
     let txid = transaction.txid();
 
     #[cfg(feature = "orchard")]
-    if proposal_info.spends_one_time {
+    if spends_one_time {
         let account = wallet_db
             .get_account(proposal_info.from_account)
             .map_err(Error::DataSource)?

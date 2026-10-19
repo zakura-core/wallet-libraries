@@ -31,21 +31,20 @@ pub(crate) struct Batch {
     coverage: Vec<(AccountUuid, Range<BlockHeight>)>,
 }
 
-/// Collects the journal entries and coverage of `blocks`, a contiguous batch.
+/// Collects the journal entries and coverage of `blocks`, a contiguous batch. A
+/// transaction without Ironwood nullifiers can't spend a one-time note, so it gets no
+/// entry, though its block is still covered.
 pub(crate) fn collect(blocks: &[ScannedBlock<AccountUuid>]) -> Batch {
     let entries = blocks
         .iter()
         .flat_map(|block| {
             block.transactions().iter().filter_map(move |tx| {
+                let nullifiers = tx.ironwood_nullifiers().filter(|nfs| !nfs.is_empty())?;
                 Some(Entry {
                     height: block.height(),
                     tx_index: tx.block_index().into(),
                     txid: *tx.txid().as_ref(),
-                    nullifiers: tx
-                        .ironwood_nullifiers()?
-                        .iter()
-                        .map(|nf| nf.to_bytes())
-                        .collect(),
+                    nullifiers: nullifiers.iter().map(|nf| nf.to_bytes()).collect(),
                 })
             })
         })

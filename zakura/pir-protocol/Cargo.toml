@@ -1,0 +1,51 @@
+[package]
+name = "zakura-pir-protocol"
+version = "0.0.1-rc0"
+edition = "2024"
+description = "Shared formats and identities for independently compiled PIR roles"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Product and capability features are explicit; no product is enabled by default.
+filter-matching = ["transparent"]
+default = []
+native = ["dep:rand", "dep:rand_chacha", "dep:sha2", "dep:reinspiring"]
+enhance = ["dep:serde", "dep:serde_json", "dep:sha2", "dep:hex"]
+status = ["dep:serde", "dep:serde_json", "dep:sha2", "dep:hex", "dep:thiserror"]
+transparent = [
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:hex",
+    "dep:base64",
+    "dep:thiserror",
+    "dep:zakura-filters",
+    "dep:bitcoin_hashes",
+]
+recovery = ["transparent", "dep:zcash_protocol"]
+transparent-inputs = ["recovery", "dep:transparent", "transparent/transparent-inputs"]
+http-endpoint = ["dep:http"]
+
+[dependencies]
+rand = { version = "0.8", optional = true }
+rand_chacha = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+serde = { workspace = true, optional = true, features = ["derive", "std"] }
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+zcash_protocol = { workspace = true, optional = true }
+transparent = { workspace = true, optional = true }
+base64 = { version = "0.22", optional = true }
+thiserror = { version = "2", optional = true }
+http = { version = "1", optional = true }
+zakura-filters = { path = "../filters", version = "=0.0.1-rc0", optional = true }
+bitcoin_hashes = { version = "=0.14.101", default-features = false, features = ["std"], optional = true }
+reinspiring = { version = "=0.1.3-rc.1", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2", optional = true }
+
+[dev-dependencies]
+ipir-native-client = { version = "=0.1.0-rc.1", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
+ipir-sp = { version = "=0.1.0-rc.7", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
+bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
+url = "2"

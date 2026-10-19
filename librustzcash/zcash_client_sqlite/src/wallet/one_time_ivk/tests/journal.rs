@@ -86,6 +86,27 @@ fn unrelated_transactions_are_covered_but_not_journaled() {
     assert_eq!(coverage(&st), [(u32::from(start), u32::from(start) + 1)]);
 }
 
+/// A recognized transaction with no Ironwood nullifiers, such as a Sapling payment, can't
+/// spend a one-time note, so it isn't journaled, but its block is covered.
+#[test]
+fn a_transaction_without_ironwood_nullifiers_is_covered_but_not_journaled() {
+    let mut st = ironwood_wallet();
+    let start = st.sapling_activation_height();
+    let sapling = st
+        .test_account()
+        .unwrap()
+        .usk()
+        .sapling()
+        .to_diversifiable_full_viewing_key();
+    let value = Zatoshis::const_from_u64(50_000);
+    st.generate_next_block(&sapling, AddressType::DefaultExternal, value);
+    st.scan_cached_blocks(start, 1);
+    let account = st.test_account().unwrap().id();
+    assert_eq!(st.get_total_balance(account), value);
+    assert!(entries(&st).is_empty());
+    assert_eq!(coverage(&st), [(u32::from(start), u32::from(start) + 1)]);
+}
+
 /// Batches scanned out of order merge into one covered range once they meet, and a
 /// block scanned twice keeps one entry.
 #[test]
@@ -156,6 +177,43 @@ fn coverage_is_per_account() {
         [],
     );
     assert_eq!(left, 1);
+}
+
+/// Deleting an account drops the journal entries of the transactions only it took part
+/// in, with their nullifiers, and keeps those another account shares.
+#[test]
+fn deleting_an_account_drops_its_exclusive_journal_entries() {
+    let mut st = ironwood_wallet();
+    let start = st.sapling_activation_height();
+    st.generate_empty_block();
+    st.scan_cached_blocks(start, 1);
+
+    let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
+    let prior = st.latest_cached_block().unwrap().chain_state().clone();
+    let birthday = zcash_client_backend::data_api::AccountBirthday::from_parts(prior, None);
+    let (added, usk) = st
+        .wallet_mut()
+        .db_mut()
+        .create_account("added", &seed, &birthday, None)
+        .unwrap();
+    // A payment only the added account receives, then its spend with change to the test
+    // account, which both accounts take part in.
+    let value = Zatoshis::const_from_u64(50_000);
+    let receiver = IronwoodFvk(FullViewingKey::from(usk.orchard()));
+    let (exclusive, _, nf) = st.generate_next_block(&receiver, AddressType::DefaultExternal, value);
+    st.scan_cached_blocks(exclusive, 1);
+    let ordinary = IronwoodFvk(parent(&st));
+    let to = unified(foreign_receiver());
+    let paid = Zatoshis::const_from_u64(20_000);
+    let (shared, _) = st.generate_next_block_spending(&ordinary, (nf, value), to, paid);
+    st.scan_cached_blocks(shared, 1);
+    let heights = |st: &State| entries(st).into_iter().map(|e| e.0).collect::<Vec<_>>();
+    assert_eq!(heights(&st), [u32::from(exclusive), u32::from(shared)]);
+
+    st.wallet_mut().db_mut().delete_account(added).unwrap();
+    assert_eq!(heights(&st), [u32::from(shared)]);
+    assert!(journaled_nullifiers(&st, exclusive).is_empty());
+    assert!(!journaled_nullifiers(&st, shared).is_empty());
 }
 
 /// A late payment admitted while a batch that spends it is scanning, after the scanner

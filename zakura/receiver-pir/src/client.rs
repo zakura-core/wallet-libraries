@@ -2,10 +2,10 @@ use crate::{
     profile, public_bytes, response_bytes, AcceptedCoverage, Error, Manifest, Profile, COLS,
     HEADER_BYTES, MAGIC,
 };
-use pir_native::NativeSecret;
 use rand::{rngs::OsRng, Rng};
 use receiver_directory::{snapshot, Hash, RawRecord, ReceiverBytes};
 use sha2::{Digest, Sha256};
+use zakura_pir_client::native::NativeSecret;
 
 /// A PIR session for one manifest, accepted against the caller's chain anchor.
 pub struct Client {
@@ -60,7 +60,7 @@ impl Client {
     /// Receiver and page influence only the encrypted row selection, never a public header.
     pub fn prepare(&self, receiver: ReceiverBytes, page: u32) -> Result<Query, Error> {
         let row = snapshot::row_for(&self.manifest.directory, &receiver, page)?;
-        let (secret, request) = pir_native::prepare_with(
+        let (secret, request) = zakura_pir_client::native::prepare_with(
             &self.profile.setup,
             &self.profile.masks,
             self.profile.rows,
@@ -91,9 +91,13 @@ impl Client {
         {
             return Err(Error::Malformed);
         }
-        let row =
-            pir_native::decode_cols(&query.secret, &self.public, &response[HEADER_BYTES..], COLS)
-                .map_err(|_| Error::Pir)?;
+        let row = zakura_pir_client::native::decode_cols(
+            &query.secret,
+            &self.public,
+            &response[HEADER_BYTES..],
+            COLS,
+        )
+        .map_err(|_| Error::Pir)?;
         Ok(snapshot::lookup_row(
             &self.manifest.directory,
             &query.receiver,

@@ -9,7 +9,7 @@ instructions still apply; do not duplicate them here.
 - `librustzcash/zcash_client_backend`: package `zakura-client-backend`.
 - `librustzcash/zcash_client_sqlite`: package `zakura-client-sqlite`.
 - `librustzcash/pczt`: package `zakura-pczt`.
-- `zakura/`: PIR clients/primitives/types, transaction status, one-time IVK
+- `zakura/`: PIR role packages ([package map](docs/pir-packages.md)), one-time IVK
   keys (`zakura-one-time-ivk`) and their provider adapter (`zakura-near-intents`).
 - `zakura/pir-chain/`: server-only chain readers in a separate Cargo workspace
   with their own lockfile; never add them to the wallet dependency graph.
@@ -58,3 +58,5 @@ Do not promise automatic wake unless the runtime provides it.
 ## Dependency and release boundary
 
 - Keep release dependencies one-way: wallet-pir may consume wallet-libraries, but wallet-libraries must not depend on packages owned or released by wallet-pir, including normal, optional, build, target-specific and development dependencies.
+
+Keep PIR client, publisher and query-server production dependencies separate; name the serving package `query-server`.

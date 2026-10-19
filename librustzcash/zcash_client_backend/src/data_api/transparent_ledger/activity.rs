@@ -1,7 +1,7 @@
 //! Transaction facts recovered with owned-script activity; these grant no financial authority.
 use zcash_protocol::value::Zatoshis;
 
-pub use zakura_transparent_recovery_types::{TransactionMetadata, WholeTransactionFee};
+pub use zakura_pir_protocol::transparent::recovery::{TransactionMetadata, WholeTransactionFee};
 
 /// A source-bound observation; the application still chooses and qualifies its source.
 #[derive(Clone, Debug, PartialEq, Eq)]

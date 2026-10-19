@@ -1,0 +1,51 @@
+[package]
+name = "zakura-pir-publisher"
+version = "0.0.1-rc0"
+edition = "2024"
+description = "PIR publication construction without request evaluation"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Product and capability features are explicit; no product is enabled by default.
+default = []
+enhance = ["zakura-pir-protocol/enhance"]
+status = ["zakura-pir-protocol/status"]
+transparent = [
+    "dep:base64",
+    "dep:hex",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:thiserror",
+    "dep:zakura-filters",
+    "dep:bitcoin_hashes",
+    "zakura-pir-protocol/transparent",
+    "zakura-pir-server-core/transparent",
+]
+
+[dependencies]
+zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc0", features = ["native"] }
+zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc0" }
+base64 = { version = "0.22", optional = true }
+hex = { version = "0.4", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+sha2 = { version = "0.10", optional = true }
+thiserror = { version = "2", optional = true }
+zakura-filters = { path = "../filters", version = "=0.0.1-rc0", optional = true }
+bitcoin_hashes = { version = "=0.14.101", default-features = false, features = ["std"], optional = true }
+
+[dev-dependencies]
+zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc0", features = ["filter-matching"] }
+hex = { workspace = true }
+sha2 = { workspace = true }
+rand = "0.8"
+rand_chacha = { workspace = true }
+bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
+
+[[example]]
+name = "transparent_shard_layout_census"
+path = "examples/transparent_shard/layout_census.rs"
+required-features = ["transparent"]

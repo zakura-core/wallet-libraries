@@ -18,28 +18,21 @@ import server_graph  # noqa: E402
 # Include optional and development dependencies in the order, since Cargo
 # resolves them when it prepares the package for the registry.
 ORDER = (
-    "zakura/transparent-recovery-types",
     "zakura/filters",
-    "zakura/pir-enhance-types",
-    "zakura/pir-native",
-    "zakura/transparent-native",
-    "zakura/transparent-events",
-    "zakura/transparent-filter",
-    "zakura/transparent-shard",
-    "zakura/transparent-txid-client",
+    "zakura/pir-protocol",
+    "zakura/pir-server-core",
+    "zakura/pir-publisher",
+    "zakura/pir-query-server",
     "zakura/receiver-crypto",
     "zakura/receiver-directory",
-    "zakura/receiver-pir",
     "zakura/one-time-ivk",
     "zakura/near-intents",
     "librustzcash/pczt",
     "librustzcash/zcash_client_backend",
     "librustzcash/zcash_client_sqlite",
-    "zakura/pir-status",
-    "zakura/pir-enhance",
-    "zakura/transaction-status",
     "wallet-lib",
-    "zakura/pir-transparent",
+    "zakura/pir-client",
+    "zakura/receiver-pir",
 )
 
 

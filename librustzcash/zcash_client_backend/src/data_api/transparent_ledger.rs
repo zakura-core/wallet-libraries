@@ -26,7 +26,7 @@ mod recovery;
 #[cfg(feature = "transparent-inputs")]
 pub use recovery::*;
 
-pub type ChainPoint = zakura_transparent_recovery_types::ChainPoint<BlockHash>;
+pub type ChainPoint = zakura_pir_protocol::transparent::recovery::ChainPoint<BlockHash>;
 
 /// Source authorization for transparent discovery and financial authority.
 ///
@@ -142,7 +142,7 @@ pub enum RecoveryCompletion {
     Blocked,
 }
 
-pub use zakura_transparent_recovery_types::CandidateBlocker;
+pub use zakura_pir_protocol::transparent::recovery::CandidateBlocker;
 
 /// A reason transparent financial authority is unavailable, or an account cannot be activated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
