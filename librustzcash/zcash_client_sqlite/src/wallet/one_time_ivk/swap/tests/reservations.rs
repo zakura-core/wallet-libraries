@@ -1061,6 +1061,48 @@ fn refund_issuance_bounds_seen_set_probes() {
     assert_eq!(next.unwrap().unwrap().key_id().index(), held);
 }
 
+/// A large supported window cannot turn one reservation into unbounded key derivation.
+#[test]
+fn widened_refund_window_resumes_after_one_hundred_provider_hits() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let through = tip(&st).height;
+    let high = KeyId::new(Purpose::Refund, 500);
+    tx(st.wallet_mut().db_mut(), |c, p| {
+        let (id, _) = register(c, p, account, high, through, false, Discovery::Filter, NOW)?;
+        store::swap::reservations::record_provider_seen(c, id)
+    })
+    .unwrap();
+    see_at(st.wallet_mut().db_mut(), account, &[], NOW);
+    let probes = std::cell::Cell::new(0usize);
+    let contains = |receivers: &[[u8; 43]]| {
+        probes.set(probes.get() + receivers.len());
+        vec![true; receivers.len()]
+    };
+    let seen = ProviderSeen {
+        since: 0,
+        until: NOW,
+        contains: &contains,
+    };
+    let db = st.wallet_mut().db_mut();
+    for expected in [101, 201] {
+        db.prepare_one_time_recovery(account, 1024, NOW).unwrap();
+        probes.set(0);
+        assert!(matches!(
+            db.reserve_refund_key(account, NOW, through, Some(&seen))
+                .unwrap(),
+            Err(Gap)
+        ));
+        assert_eq!(probes.get(), 100);
+        let registered: i64 = value(
+            &db.conn,
+            "SELECT COUNT(*) FROM ironwood_one_time_keys WHERE purpose=0 AND provider_seen=1",
+            [],
+        );
+        assert_eq!(registered, expected);
+    }
+}
+
 /// Abandoned requests with unknown outcomes fill the bound without moving it, since a
 /// restore walks past only receipts, seen addresses and accepted quotes, so issuance
 /// reuses the lowest of them. An accepted quote moves the bound.

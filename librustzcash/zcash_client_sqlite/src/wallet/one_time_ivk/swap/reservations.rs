@@ -122,19 +122,26 @@ pub(in crate::wallet::one_time_ivk) const STARTED: &str =
     "EXISTS(SELECT 1 FROM ironwood_one_time_operations o
     WHERE o.one_time_key_id = k.id AND o.started = 1)";
 
+/// Complete current-chain evidence needed before an exposed address can be reused.
+const SCANNED_EMPTY: &str = "k.used=0
+    AND EXISTS(SELECT 1 FROM ironwood_block_recovery r
+        JOIN ironwood_block_receivers v ON v.account_id=r.account_id
+        WHERE r.account_id=k.account_id AND v.purpose=k.purpose AND v.key_index=k.key_index
+          AND r.enabled=1 AND r.needs_prepare=0 AND r.archive IS NOT NULL AND v.next_height>:tip)
+    AND NOT EXISTS(SELECT 1 FROM ironwood_block_matches m WHERE m.account_id=k.account_id AND m.purpose=k.purpose AND m.key_index=k.key_index)
+    AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id=k.id)";
+
 /// Reuse requires current historical filters and no known payment or pending candidate.
 pub(in crate::wallet::one_time_ivk) fn scanned_empty(
     conn: &Connection,
     key: i64,
 ) -> Result<bool, SqliteClientError> {
     let tip = wallet::chain_tip_height(conn)?.map(u32::from);
-    Ok(conn.query_row("SELECT k.used=0 AND r.enabled=1 AND r.needs_prepare=0 AND r.archive IS NOT NULL
-        AND v.next_height>?2
-        AND NOT EXISTS(SELECT 1 FROM ironwood_block_matches m WHERE m.account_id=k.account_id AND m.purpose=k.purpose AND m.key_index=k.key_index)
-        AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id=k.id)
-        FROM ironwood_one_time_keys k JOIN ironwood_block_recovery r ON r.account_id=k.account_id
-        JOIN ironwood_block_receivers v ON v.account_id=k.account_id AND v.purpose=k.purpose AND v.key_index=k.key_index WHERE k.id=?1",
-        params![key,tip], |r|r.get::<_,Option<bool>>(0))?.unwrap_or(false))
+    Ok(conn.query_row(
+        &format!("SELECT {SCANNED_EMPTY} FROM ironwood_one_time_keys k WHERE k.id=:key"),
+        named_params![":key":key, ":tip":tip],
+        |r| r.get::<_, bool>(0),
+    )?)
 }
 
 /// The issuance bound of `account`'s keys of purpose code `purpose`, the first index
@@ -727,7 +734,7 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
 /// and already recorded (see [`record_seen`]), is checked for it. One the set holds is
 /// registered for filter history and recorded seen. That moves
 /// the bound, so if nothing fresh is left this returns [`ReservationPolicy::Gap`] and the
-/// next call sees the wider bound.
+/// next call sees the wider bound. New provider hits are limited to 100 per call.
 pub(in crate::wallet::one_time_ivk) fn next_index<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -736,85 +743,78 @@ pub(in crate::wallet::one_time_ivk) fn next_index<P: Parameters>(
     seen: &ProviderSeen<'_>,
     now: i64,
 ) -> Result<Result<u64, ReservationPolicy>, SqliteClientError> {
-    let (a, parent) = account_key(conn, params, account)?;
+    let (a, _) = account_key(conn, params, account)?;
     let code = purpose_code(purpose)?;
     let end = issuance_end(conn, a.0, code)?;
     let deadline_now = deadline_clock(conn, now)?;
-    // Abandoned indices the provider's set lacks, then those it holds, whose quotes were
-    // more likely accepted, so reusing them is more likely to link two quotes.
-    let mut abandoned = [None, None];
-    let mut fresh = None;
-    let mut widened = false;
-    let mut uncovered = false;
-    for index in 0..end {
-        if conn.query_row("SELECT EXISTS(SELECT 1 FROM ironwood_block_matches WHERE account_id=?1 AND purpose=?2 AND key_index=?3)",params![a.0,code,index.to_be_bytes()],|r|r.get::<_,bool>(0))? {continue;}
-
-        let row: Option<(bool, bool, Option<i64>, bool, bool)> = conn
-            .query_row(
-                &format!(
-                    "SELECT k.issuance_blocked = 1 OR k.used = 1
-                          OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
-                            WHERE p.one_time_key_id = k.id),
-                        {RESERVED}, {LATEST_DEADLINE},
-                        EXISTS(SELECT 1 FROM ironwood_one_time_operations o
-                            WHERE o.one_time_key_id = k.id AND o.request IS NOT NULL),
-                        k.provider_seen
-                     FROM ironwood_one_time_keys k
-                     WHERE k.account_id = ?1 AND k.purpose = ?2 AND k.key_index = ?3"
-                ),
-                params![a.0, code, index.to_be_bytes()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .optional()?;
-        // `record_seen` checked every registered key, so check an unregistered one here.
-        let Some((blocked, reserved, latest, exposed, held)) = row else {
-            let key_id = KeyId::new(purpose, index);
-            let receiver = key_id.derive(&parent)?.address_at(0u32, Scope::External);
-            if seen.holds(&receiver.to_raw_address_bytes())? {
-                let from = restore_start(conn, params, a)?;
-                let (id, _) = register(
-                    conn,
-                    params,
-                    account,
-                    key_id,
-                    from,
-                    false,
-                    Discovery::Filter,
-                    now,
-                )?;
-                record_provider_seen(conn, id)?;
-                widened = true;
-                continue;
-            }
-            fresh = Some(index);
-            break;
-        };
-        if blocked {
-            continue;
-        }
-        // A refund reservation's one request holds its key until the request's deadline.
-        let in_use = match purpose {
-            Purpose::Receive => reserved,
-            _ => reserved && latest.is_some_and(|deadline| deadline > deadline_now),
-        };
-        if in_use {
-            continue;
-        }
-        let draft = reserved && latest.is_none();
-        if draft || !exposed {
-            fresh = Some(index);
-            break;
-        }
-        if !scanned_empty(conn, key_ref(conn, account, KeyId::new(purpose, index))?)? {
-            uncovered = true;
-            continue;
-        }
-        abandoned[usize::from(held)].get_or_insert(index);
-    }
-    if fresh.is_none() && widened {
+    // Derived receivers come from the bounded preparation step. A new capture can
+    // enlarge the bound, but issuance must not derive that enlarged window inline.
+    let derived: Vec<u8> = conn.query_row(
+        "SELECT derived FROM ironwood_block_windows WHERE account_id=?1 AND purpose=?2",
+        params![a.0, code],
+        |r| r.get(0),
+    )?;
+    if u128::from_be_bytes(
+        derived
+            .try_into()
+            .map_err(|_| corrupt("invalid derived bound"))?,
+    ) < u128::from(end)
+    {
         return Ok(Err(ReservationPolicy::Gap));
     }
-    Ok(fresh.or(abandoned[0]).or(abandoned[1]).ok_or(if uncovered {
+    let exposed = "EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id=k.id AND o.request IS NOT NULL)";
+    let available = format!("k.issuance_blocked=0 AND k.used=0
+        AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id=k.id)
+        AND NOT ({RESERVED} AND (:purpose=1 OR IFNULL({LATEST_DEADLINE}>:now,0)))");
+    let no_match = "NOT EXISTS(SELECT 1 FROM ironwood_block_matches m WHERE m.account_id=r.account_id AND m.purpose=r.purpose AND m.key_index=r.key_index)";
+    // Blocked and live keys are skipped by SQL. At most 100 new provider hits can be
+    // registered per call. Those persisted exclusions make the next call resume.
+    let fresh = conn.prepare(&format!("SELECT r.key_index,r.receiver,k.id
+        FROM ironwood_block_receivers r LEFT JOIN ironwood_one_time_keys k
+        ON k.account_id=r.account_id AND k.purpose=r.purpose AND k.key_index=r.key_index
+        WHERE r.account_id=:account AND r.purpose=:purpose AND r.key_index<:end
+          AND {no_match} AND (k.id IS NULL OR ({available} AND NOT {exposed}))
+        ORDER BY r.key_index LIMIT 100"))?.query_map(named_params![":account":a.0,":purpose":code,":end":end.to_be_bytes(),":now":deadline_now],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,[u8;43]>(1)?,r.get::<_,Option<i64>>(2)?)))?.collect::<Result<Vec<_>,_>>()?;
+    let mut widened = false;
+    for (index, receiver, registered) in fresh {
+        let index = decode_index(index)?;
+        if registered.is_none() && seen.holds(&receiver)? {
+            let from = restore_start(conn, params, a)?;
+            let (id, _) = register(
+                conn,
+                params,
+                account,
+                KeyId::new(purpose, index),
+                from,
+                false,
+                Discovery::Filter,
+                now,
+            )?;
+            record_provider_seen(conn, id)?;
+            widened = true;
+        } else {
+            return Ok(Ok(index));
+        }
+    }
+    if widened {
+        return Ok(Err(ReservationPolicy::Gap));
+    }
+    let tip = wallet::chain_tip_height(conn)?.map(u32::from);
+    let abandoned = format!("FROM ironwood_one_time_keys k
+        WHERE k.account_id=:account AND k.purpose=:purpose AND k.key_index<:end
+          AND {available} AND {exposed}
+          AND NOT EXISTS(SELECT 1 FROM ironwood_block_matches m WHERE m.account_id=k.account_id AND m.purpose=k.purpose AND m.key_index=k.key_index)");
+    let reusable: Option<Vec<u8>> = conn.query_row(&format!("SELECT k.key_index {abandoned} AND {SCANNED_EMPTY} ORDER BY k.provider_seen,k.key_index LIMIT 1"),
+        named_params![":account":a.0,":purpose":code,":end":end.to_be_bytes(),":now":deadline_now,":tip":tip],|r|r.get(0)).optional()?;
+    if let Some(index) = reusable {
+        return Ok(Ok(decode_index(index)?));
+    }
+    let uncovered: bool = conn.query_row(
+        &format!("SELECT EXISTS(SELECT 1 {abandoned})"),
+        named_params![":account":a.0,":purpose":code,":end":end.to_be_bytes(),":now":deadline_now],
+        |r| r.get(0),
+    )?;
+    Ok(Err(if uncovered {
         ReservationPolicy::Coverage
     } else {
         ReservationPolicy::Limit

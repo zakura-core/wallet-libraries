@@ -6,7 +6,7 @@
 //! Incoming addresses and refund keys are issued under one rule. The bound is
 //! [`RECEIVE_GAP_LIMIT`] past the highest index with evidence another device of the seed
 //! can reproduce: a seen hit (see [`ProviderSeen`]), an accepted quote, a payment with the
-//! untrusted confirmations, or an authenticated payment before the birthday. Issuance
+//! untrusted confirmations, an authenticated funding memo, or an authenticated payment before the birthday. Issuance
 //! never passes it, so it stays within every device's receiver window. Below it,
 //! issuance takes the lowest fresh index, one this wallet never exposed and that nobody
 //! paid or gave the provider. A refund key reserved but never exposed is fresh, so it is
