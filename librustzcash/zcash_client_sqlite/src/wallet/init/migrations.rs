@@ -838,6 +838,7 @@ pub(crate) mod tests {
             ids::ONE_TIME_IVK,
             ids::ONE_TIME_IVK_DISCOVERY,
             ids::ONE_TIME_IVK_BLOCK_RECOVERY,
+            ids::ONE_TIME_IVK_ISSUANCE_RECOVERY,
             ids::ORCHARD_IRONWOOD_MIGRATION_ANCHOR_INTERVAL,
             ids::ORCHARD_IRONWOOD_MIGRATION_TABLES,
             ids::ORCHARD_IRONWOOD_MIGRATION_UNSATISFIABILITY,
