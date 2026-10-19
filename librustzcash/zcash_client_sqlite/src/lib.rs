@@ -2886,6 +2886,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIvkCoverageRead
     for WalletDb<C, P, CL, R>
 {
+    /// See [`OneTimeIvkCoverageRead::one_time_coverage`]: `None` for an account without an
+    /// Orchard viewing key or before Ironwood.
     fn one_time_coverage(
         &self,
         account: AccountUuid,
@@ -2893,6 +2895,8 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
         wallet::one_time_ivk::coverage::state(self.conn.borrow(), &self.params, account)
     }
 
+    /// See [`OneTimeIvkCoverageRead::one_time_receiver_set`]: registered keys, closed ones
+    /// included, and derived window receivers.
     fn one_time_receiver_set(&self, account: AccountUuid) -> Result<ReceiverSet, Self::Error> {
         wallet::one_time_ivk::coverage::receiver_set(self.conn.borrow(), &self.params, account)
     }
@@ -2902,6 +2906,8 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
 impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
     OneTimeIvkCoverageWrite for WalletDb<C, P, CL, R>
 {
+    /// See [`OneTimeIvkCoverageWrite::prepare_one_time_coverage`]: recovers stored funding
+    /// memos, grows the windows and derives up to `budget` receivers, in one transaction.
     fn prepare_one_time_coverage(
         &mut self,
         account: AccountUuid,
@@ -2913,6 +2919,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         })
     }
 
+    /// See [`OneTimeIvkCoverageWrite::pin_one_time_snapshot`]: pins nothing for a stale
+    /// generation.
     fn pin_one_time_snapshot(
         &mut self,
         account: AccountUuid,
@@ -2924,6 +2932,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         })
     }
 
+    /// See [`OneTimeIvkCoverageWrite::record_one_time_coverage`]: the step, its hits'
+    /// registrations and their lookups commit together, or nothing does.
     fn record_one_time_coverage(
         &mut self,
         account: AccountUuid,
@@ -2939,6 +2949,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         })
     }
 
+    /// See [`OneTimeIvkCoverageWrite::reset_one_time_history`].
     fn reset_one_time_history(
         &mut self,
         account: AccountUuid,
@@ -2949,6 +2960,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         })
     }
 
+    /// See [`OneTimeIvkCoverageWrite::dispatch_one_time_lookups`]: the due lookups and
+    /// their dispatch records, in one transaction.
     fn dispatch_one_time_lookups(
         &mut self,
         account: AccountUuid,
@@ -2959,6 +2972,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         })
     }
 
+    /// See [`OneTimeIvkCoverageWrite::record_one_time_lookup_page`]: refused unless the
+    /// ticket is the lookup's latest at its current generation.
     fn record_one_time_lookup_page(
         &mut self,
         account: AccountUuid,
