@@ -1,6 +1,5 @@
 //! Incoming reservations, which live on their key's row, and their quote operations, and
 //! the issuance rules both purposes share.
-use orchard::keys::Scope;
 use rusqlite::{Connection, OptionalExtension, named_params, params};
 use zakura_one_time_ivk::swap::{Observation, provider_read_is_current};
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
