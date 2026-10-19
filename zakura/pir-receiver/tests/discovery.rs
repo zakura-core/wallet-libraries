@@ -814,6 +814,18 @@ async fn issuance_skips_a_refund_address_in_the_fetched_seen_sets() {
         contains: &contains,
     };
     let db = r.st.wallet_mut().db_mut();
+    use zcash_client_backend::data_api::one_time_ivk::recovery::OneTimeRecoveryWrite;
+    db.set_one_time_recovery_enabled(r.account, true).unwrap();
+    loop {
+        db.prepare_one_time_recovery(r.account, 1024, NOW).unwrap();
+        // This isolated fixture has one provider capture. The archive client supplies its digest after cutover.
+        if db
+            .record_one_time_provider_seen(r.account, [1; 32], &seen, NOW, 1024)
+            .unwrap()
+        {
+            break;
+        }
+    }
     let key = db.reserve_refund_key(r.account, NOW, r.through.height, Some(&seen));
     // Discovery registered the seen refund index, so issuance takes the next one.
     assert_eq!(
@@ -865,46 +877,51 @@ async fn an_unfinished_search_starts_over_on_a_newer_publication() {
     assert_eq!(balance(&r.st), VALUE);
 }
 
-/// A key issuance registers for a lookup after the pass finished, from a provider's seen
-/// set, waits without a lookup request for a publication that reaches the blocks the
-/// wallet scanned without it. That publication's lookup finds its payment without starting
-/// a new pass.
+/// Provider membership after an old pass creates filter history without triggering a receiver query.
 #[tokio::test]
-async fn a_key_registered_after_the_pass_waits_for_a_newer_publication() {
+async fn a_provider_seen_key_after_the_pass_waits_for_payment_filters() {
+    use zcash_client_backend::data_api::one_time_ivk::recovery::{
+        OneTimeRecoveryRead, OneTimeRecoveryWrite,
+    };
     let mut r = restored(&[]);
     let first = serve(&[], r.through);
     assert!(run_clean(&mut r.st, &first).await.complete);
-    let record = pay_restored_key(&mut r.st, 0, 0);
+    pay_restored_key(&mut r.st, 0, 0);
     r.st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     let through = tip(&r.st);
     let sets = provider(&[receiver(&r.st, 0)]);
-    let seen = Directory::new(publish(&[], &[], through, &sets));
-    let seen = fetch_seen(ORIGIN, &seen, GENESIS).await.unwrap();
-    let contains = |receivers: &[[u8; 43]]| seen.contains(receivers);
+    let directory = Directory::new(publish(&[], &[], through, &sets));
+    let fetched = fetch_seen(ORIGIN, &directory, GENESIS).await.unwrap();
+    let contains = |receivers: &[[u8; 43]]| fetched.contains(receivers);
     let seen = ProviderSeen {
-        since: seen.since(),
-        until: seen.until(),
+        since: fetched.since(),
+        until: fetched.until(),
         contains: &contains,
     };
     let db = r.st.wallet_mut().db_mut();
-    let issued = db.prepare_receive_reservation(r.account, NOW, through.height, Some(&seen));
-    assert_eq!(issued.unwrap().unwrap().key_id().index(), 1);
-
-    let requests = first.requests().len();
+    db.set_one_time_recovery_enabled(r.account, true).unwrap();
+    loop {
+        db.prepare_one_time_recovery(r.account, 1024, NOW).unwrap();
+        if db
+            .record_one_time_provider_seen(r.account, [1; 32], &seen, NOW, 1024)
+            .unwrap()
+        {
+            break;
+        }
+    }
+    let issued = db
+        .prepare_receive_reservation(r.account, NOW, through.height, Some(&seen))
+        .unwrap()
+        .unwrap();
+    assert_eq!(issued.key_id().index(), 1);
+    let state = db.one_time_recovery_state(r.account).unwrap().unwrap();
+    assert!(state.next_height.unwrap() <= through.height);
+    assert_eq!(state.pending_matches, 0);
+    let before = first.requests().len();
     let found = run_clean(&mut r.st, &first).await;
-    assert!(!found.complete);
     assert_eq!(found.lookups, 0);
-    assert_eq!(first.requests().len(), requests + 1, "only the manifest");
-
-    let newer = serve(&[record], through);
-    let found = run_clean(&mut r.st, &newer).await;
-    assert!(found.complete);
-    assert_eq!(balance(&r.st), VALUE);
-    let requests = newer.requests();
-    assert!(
-        !requests.iter().any(|r| r.contains("/filters/")),
-        "{requests:?}"
-    );
+    assert_eq!(first.requests().len(), before);
+    assert_eq!(balance(&r.st), 0);
 }
 
 /// A lookup resumed from its cursor starts over from page zero when the record before the
