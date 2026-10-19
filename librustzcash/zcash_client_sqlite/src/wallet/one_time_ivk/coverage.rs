@@ -559,8 +559,6 @@ pub(crate) fn record<P: Parameters>(
             }
         }
     }
-    // A key scanned since before the step finds its payments there itself.
-    let scanned_from = step.start.map_or(start, |from| from.height + 1);
     for hit in hits {
         let id = match registered(conn, owner.0, *hit)? {
             Some(id) => id,
@@ -578,15 +576,16 @@ pub(crate) fn record<P: Parameters>(
                 .0
             }
         };
+        // Even a key scanned from before the step is looked up: a scan that started
+        // without it may still owe a rescan, and the key may close before that runs.
         conn.execute(
             "INSERT INTO ironwood_one_time_lookups (one_time_key_id, cutoff_height)
-             SELECT ?1, ?2 WHERE NOT EXISTS(SELECT 1 FROM ironwood_one_time_keys
-                 WHERE id = ?1 AND closed_at IS NULL AND active_from <= ?3)
+             VALUES (?1, ?2)
              ON CONFLICT (one_time_key_id) DO UPDATE SET
                  cutoff_height = MAX(COALESCE(cutoff_height, 0), excluded.cutoff_height)
              WHERE cutoff_height IS NOT NULL OR done_height IS NULL
                 OR done_height < excluded.cutoff_height",
-            params![id, u32::from(step.end.height), u32::from(scanned_from)],
+            params![id, u32::from(step.end.height)],
         )?;
     }
     Ok(CoverageOutcome::Recorded)

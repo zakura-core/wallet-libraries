@@ -721,6 +721,26 @@ fn a_late_answer_for_a_finished_obligation_is_stale() {
     assert_eq!(coverage(&st, account).obligations[0].bridged, None);
 }
 
+/// A hit on a key scanned from before the step is still looked up: the scan may still owe
+/// a rescan with the key, and the key may close before that rescan runs.
+#[test]
+fn a_hit_on_a_scanned_key_is_looked_up_even_if_it_closes() {
+    let (mut st, account) = prepared();
+    let top = tip(&st).height;
+    let key = reserve_key(st.wallet_mut().db_mut(), account, Purpose::Receive, start());
+    let sql = "SELECT EXISTS(SELECT 1 FROM scan_queue WHERE priority != ?1)";
+    let scanned = crate::wallet::scanning::priority_code(
+        &zcash_client_backend::data_api::scanning::ScanPriority::Scanned,
+    );
+    assert!(value::<bool>(st.wallet().conn(), sql, [scanned]));
+    bootstrap(&mut st, account, top - 6, &[key.key_id()]);
+    let due = Some((Some(u32::from(top - 6)), None, 0, 0));
+    assert_eq!(lookup(&st, key.key_id()), due);
+    let sql = "UPDATE ironwood_one_time_keys SET closed_at = 1";
+    exec(st.wallet().conn(), sql, []);
+    assert_eq!(lookup(&st, key.key_id()), due);
+}
+
 /// A snapshot fetched before a rewind or a history change pins nothing afterwards, for the
 /// frontier or an obligation, so it cannot wedge recovery on a stale snapshot.
 #[test]

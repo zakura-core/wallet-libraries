@@ -226,11 +226,10 @@ pub trait OneTimeIvkCoverageWrite: OneTimeIvkWrite + OneTimeIvkCoverageRead {
     ) -> Result<Option<Snapshot>, <Self as WalletRead>::Error>;
 
     /// Records that `step` was tested against `target`'s receivers, which matched only
-    /// `hits`, and makes each hit's lookup due through the step's end, unless the key is
-    /// open and scanned from before the step. A hit outside the target's receivers is an
-    /// error, and a hit's index never becomes allocated or issued. A cumulative step must
-    /// be the snapshot pinned for the target, and the target's generation must be
-    /// current. A frontier's first step is its pinned
+    /// `hits`, and makes each hit's lookup due through the step's end. A hit outside the
+    /// target's receivers is an error, and a hit's index never becomes allocated or
+    /// issued. A cumulative step must be the snapshot pinned for the target, and the
+    /// target's generation must be current. A frontier's first step is its pinned
     /// snapshot, which sets the history it follows. Each later one is a bucket starting at
     /// or below the frontier and ending above it, tested against the current, completely
     /// derived receiver set. An obligation tests its snapshot, then buckets that continue
