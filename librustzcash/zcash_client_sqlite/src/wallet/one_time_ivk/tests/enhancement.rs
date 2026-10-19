@@ -254,6 +254,7 @@ fn zewif_import_decrypts_with_open_one_time_keys() {
     );
 }
 
+/// Seed recovery authenticates a zero-change funding memo and advances refund issuance.
 #[test]
 fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     let (mut st, first) = ironwood_funded_wallet();
@@ -366,6 +367,13 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     assert_eq!(refund_keys(&st), registered);
     assert!(!pending(&st));
     assert!(scanning_keys(&st).is_empty());
+    // Provider history can predate the funding transaction. Its authenticated memo is
+    // independently sufficient to advance issuance, including after a later reorg.
+    let (owner, _) = store::account_key(st.wallet().conn(), st.network(), restored).unwrap();
+    assert_eq!(
+        store::swap::reservations::issuance_end(st.wallet().conn(), owner.0, 0).unwrap(),
+        38
+    );
     let db = st.wallet().db();
     assert!(lookup_pending(db, restored));
 

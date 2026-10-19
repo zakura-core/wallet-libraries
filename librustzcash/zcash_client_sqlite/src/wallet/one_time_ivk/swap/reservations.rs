@@ -140,7 +140,7 @@ pub(in crate::wallet::one_time_ivk) fn scanned_empty(
 /// The issuance bound of `account`'s keys of purpose code `purpose`, the first index
 /// issuance may not reach (see the [issuance rules](super#issuance)): [`RECEIVE_GAP_LIMIT`]
 /// past the highest index a restore walks past, one the provider saw (in a seen set, or by
-/// accepting a quote) or paid with a receipt that has the untrusted confirmations, so a
+/// accepting a quote), an authenticated funding memo, or paid with a receipt that has the untrusted confirmations, so a
 /// reorg cannot lower the bound below keys already issued.
 pub(in crate::wallet::one_time_ivk) fn issuance_end(
     conn: &Connection,
@@ -155,7 +155,7 @@ pub(in crate::wallet::one_time_ivk) fn issuance_end(
     let paid: Option<Vec<u8>> = conn.query_row(
         "SELECT MAX(k.key_index) FROM ironwood_one_time_keys k
          WHERE k.account_id = :account AND k.purpose = :purpose AND (k.paid_before_birthday = 1
-             OR k.provider_seen = 1
+             OR k.provider_seen = 1 OR k.funding_authenticated = 1
              OR EXISTS(SELECT 1 FROM ironwood_one_time_operations o
                  WHERE o.one_time_key_id = k.id AND o.reference IS NOT NULL)
              OR EXISTS(SELECT 1 FROM ironwood_received_notes n

@@ -25,7 +25,8 @@ impl RusqliteMigration for Migration {
     type Error = WalletMigrationError;
     /// Keeps prior keys and exposure facts while initially requiring a provider check.
     fn up(&self, conn: &rusqlite::Transaction) -> Result<(), Self::Error> {
-        conn.execute_batch("UPDATE ironwood_one_time_keys SET issuance_blocked=1
+        conn.execute_batch("ALTER TABLE ironwood_one_time_keys ADD COLUMN funding_authenticated INTEGER NOT NULL DEFAULT 0 CHECK(funding_authenticated IN(0,1));
+            UPDATE ironwood_one_time_keys SET issuance_blocked=1
             WHERE used=1 OR paid_before_birthday=1
                OR (provider_seen=1 AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id=ironwood_one_time_keys.id AND o.request IS NOT NULL))
                OR EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id=ironwood_one_time_keys.id AND (o.started=1 OR (purpose=0 AND o.reference IS NOT NULL)));

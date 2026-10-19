@@ -155,6 +155,7 @@ pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
         let id = super::super::key_ref(conn, account, key_id)?;
         super::super::block_issuance(conn, id)?;
         if authenticated {
+            conn.execute("UPDATE ironwood_one_time_keys SET funding_authenticated=1 WHERE id=?1 AND funding_authenticated=0", [id])?;
             super::super::authenticate_key(conn, id)?;
         }
     }

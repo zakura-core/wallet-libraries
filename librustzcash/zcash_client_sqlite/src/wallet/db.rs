@@ -554,7 +554,7 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_KEYS: &str = "CREATE TABLE ironwood_one
                 active_from INTEGER CHECK (active_from BETWEEN 0 AND 4294967295),
                 closed_at INTEGER,
                 reservation_floor INTEGER,
-                pass_watch_height INTEGER CHECK (pass_watch_height BETWEEN 0 AND 4294967295), authenticated INTEGER NOT NULL DEFAULT 0 CHECK(authenticated IN(0,1)), issuance_blocked INTEGER NOT NULL DEFAULT 0 CHECK(issuance_blocked IN(0,1)), watch_closed_height INTEGER CHECK(watch_closed_height BETWEEN 0 AND 4294967295), watch_closed_hash BLOB CHECK(length(watch_closed_hash)=32),
+                pass_watch_height INTEGER CHECK (pass_watch_height BETWEEN 0 AND 4294967295), authenticated INTEGER NOT NULL DEFAULT 0 CHECK(authenticated IN(0,1)), issuance_blocked INTEGER NOT NULL DEFAULT 0 CHECK(issuance_blocked IN(0,1)), watch_closed_height INTEGER CHECK(watch_closed_height BETWEEN 0 AND 4294967295), watch_closed_hash BLOB CHECK(length(watch_closed_hash)=32), funding_authenticated INTEGER NOT NULL DEFAULT 0 CHECK(funding_authenticated IN(0,1)),
                 UNIQUE (account_id, purpose, key_index)
             )";
 
