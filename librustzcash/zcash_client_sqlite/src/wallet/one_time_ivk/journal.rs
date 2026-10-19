@@ -10,7 +10,7 @@
 
 use std::ops::Range;
 
-use rusqlite::{Connection, named_params};
+use rusqlite::{Connection, OptionalExtension, named_params};
 use zcash_client_backend::data_api::ScannedBlock;
 use zcash_protocol::consensus::BlockHeight;
 
@@ -29,6 +29,7 @@ pub(crate) struct Entry {
 pub(crate) struct Batch {
     entries: Vec<Entry>,
     coverage: Vec<(AccountUuid, Range<BlockHeight>)>,
+    receipts: Vec<orchard::note::Nullifier>,
 }
 
 /// Collects the journal entries and coverage of `blocks`, a contiguous batch. A
@@ -64,7 +65,18 @@ pub(crate) fn collect(blocks: &[ScannedBlock<AccountUuid>]) -> Batch {
             }
         }
     }
-    Batch { entries, coverage }
+    let receipts = blocks
+        .iter()
+        .flat_map(|b| b.transactions())
+        .flat_map(|t| t.ironwood_outputs())
+        .filter(|o| o.one_time_key_id().is_some())
+        .filter_map(|o| o.nf().copied())
+        .collect();
+    Batch {
+        entries,
+        coverage,
+        receipts,
+    }
 }
 
 /// Records `batch` after its blocks are stored, in the same database transaction, and links
@@ -108,6 +120,13 @@ pub(crate) fn record(
             })?;
         }
     }
+    // A delayed replay may outlive the temporary nullifier map while the durable journal advances.
+    for nf in batch.receipts {
+        let spending = conn.query_row("SELECT t.id_tx FROM ironwood_spend_journal_nullifiers n JOIN ironwood_spend_journal j USING(block_height,tx_index) JOIN transactions t ON t.txid=j.txid AND t.mined_height=j.block_height AND t.tx_index=j.tx_index WHERE n.nf=?1 LIMIT 1", [nf.to_bytes()], |r| r.get(0).map(crate::TxRef)).optional()?;
+        if let Some(tx_ref) = spending {
+            link_note(conn, tpir_session, tx_ref, &nf)?;
+        }
+    }
     for (account, range) in batch.coverage {
         cover(conn, account, range)?;
     }
@@ -140,15 +159,26 @@ fn link_spends(
         |r| r.get(0).map(crate::TxRef),
     )?;
     for nf in spends {
-        let inserted = crate::wallet::orchard::mark_ironwood_note_spent(conn, tx_ref, &nf)?;
-        crate::wallet::ironwood_hooks::put_received_note_spend(
-            conn,
-            tpir_session,
-            zcash_protocol::ShieldedPool::Ironwood,
-            tx_ref,
-            usize::from(inserted),
-        )?;
+        link_note(conn, tpir_session, tx_ref, &nf)?;
     }
+    Ok(())
+}
+
+/// Links a canonical journaled spend through the same bookkeeping as ordinary scanning.
+fn link_note(
+    conn: &rusqlite::Transaction<'_>,
+    tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
+    tx_ref: crate::TxRef,
+    nf: &orchard::note::Nullifier,
+) -> Result<(), SqliteClientError> {
+    let inserted = crate::wallet::orchard::mark_ironwood_note_spent(conn, tx_ref, nf)?;
+    crate::wallet::ironwood_hooks::put_received_note_spend(
+        conn,
+        tpir_session,
+        zcash_protocol::ShieldedPool::Ironwood,
+        tx_ref,
+        usize::from(inserted),
+    )?;
     Ok(())
 }
 
