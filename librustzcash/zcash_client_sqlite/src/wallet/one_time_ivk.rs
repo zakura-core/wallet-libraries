@@ -321,6 +321,8 @@ fn restore_start<P: Parameters>(
 /// How a newly registered key's history is covered.
 #[derive(Clone, Copy)]
 enum Discovery {
+    /// Retain history for block filters without starting a watch or a PIR lookup.
+    Filter,
     /// Trial-decrypt from `scan_from` until the key closes.
     Scan,
     /// Look its history up in the receiver directory, unless the key is already scanned.
@@ -404,7 +406,7 @@ fn register<P: Parameters>(
                 rusqlite::params![id, account_ref.0],
             )?;
         }
-        Discovery::Lookup | Discovery::Funding => {}
+        Discovery::Lookup | Discovery::Funding | Discovery::Filter => {}
     }
     Ok((id, OneTimeKey { scanning_key }))
 }
@@ -714,3 +716,26 @@ fn invalid(message: &'static str) -> SqliteClientError {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+/// Promotes a key only from locally authenticated evidence and schedules window growth.
+fn authenticate_key(conn: &rusqlite::Transaction<'_>, id: i64) -> Result<(), SqliteClientError> {
+    let promoted = conn.execute(
+        "UPDATE ironwood_one_time_keys SET authenticated = 1, advances_allocation = 1
+         WHERE id = ?1 AND (authenticated = 0 OR advances_allocation = 0)",
+        [id],
+    )?;
+    if promoted > 0 {
+        block_recovery::advanced(conn, id)?;
+    }
+    Ok(())
+}
+
+/// Records that key `id`'s index was given out or used, so it is never issued again.
+fn block_issuance(conn: &Connection, id: i64) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE ironwood_one_time_keys SET issuance_blocked = 1
+         WHERE id = ?1 AND issuance_blocked = 0",
+        [id],
+    )?;
+    Ok(())
+}

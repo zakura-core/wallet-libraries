@@ -789,7 +789,8 @@ impl Device {
     pub fn finish_incoming(&mut self, request: &str, outcome: &OperationOutcome) {
         self.db
             .finish_receive_operation(self.account, request, outcome)
-            .expect("the outcome records");
+            .expect("the outcome records")
+            .expect("the request was not retired");
     }
 
     /// Starts the accepted quote `request` at the device's own clock, returning the
@@ -938,9 +939,14 @@ impl Device {
         let index = key.key_id().index();
         let deposit = near.zec_deposit_address();
         let deadline = now + deadline_in;
+        let request = near.with_seen(self.feed_now(chain), |seen| {
+            self.db
+                .begin_refund_operation(self.account, index, deadline, now, Some(seen))
+                .expect("the refund request records")
+        })?;
         self.db
-            .record_refund_operation(self.account, index, &deposit, deadline, now)
-            .expect("the refund operation records");
+            .record_refund_operation(self.account, &request, &deposit, deadline, now)
+            .expect("the refund operation records")?;
         let fvk = self.key(Purpose::Refund, index);
         near.give(receiver_of(&fvk), self.feed_now(chain), Role::Refund);
         Ok(RefundSwap {

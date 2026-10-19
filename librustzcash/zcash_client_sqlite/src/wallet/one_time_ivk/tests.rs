@@ -80,6 +80,7 @@ pub(super) fn scanned_wallet() -> State {
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
     db.mark_one_time_account_fresh(account).unwrap();
+    check_seen(db, account);
     st
 }
 
@@ -129,16 +130,13 @@ pub(super) fn reserve_in(
     from: BlockHeight,
     now: i64,
 ) -> Result<OneTimeKey, SqliteClientError> {
-    let index = if purpose == Purpose::Refund {
-        let seen = Some(&empty_seen(now));
-        store::swap::funding::next_refund_index(c, p, account, seen, now)?.unwrap()
-    } else {
-        let sql = "SELECT MAX(k.key_index) FROM ironwood_one_time_keys k
-                   JOIN accounts a ON a.id = k.account_id
-                   WHERE a.uuid = ?1 AND k.purpose = 1 AND k.advances_allocation = 1";
-        let last: Option<Vec<u8>> = c.query_row(sql, [account.0], |r| r.get(0))?;
-        last.map_or(Ok(0), |bytes| index_after(decode_index(bytes)?, 1))?
-    };
+    let sql = "SELECT MAX(k.key_index) FROM ironwood_one_time_keys k
+               JOIN accounts a ON a.id = k.account_id
+               WHERE a.uuid = ?1 AND k.purpose = ?2 AND k.advances_allocation = 1";
+    let code = purpose_code(purpose)?;
+    let last: Option<Vec<u8>> =
+        c.query_row(sql, rusqlite::params![account.0, code], |r| r.get(0))?;
+    let index = last.map_or(Ok(0), |bytes| index_after(decode_index(bytes)?, 1))?;
     let key = KeyId::new(purpose, index);
     register(c, p, account, key, from, true, Discovery::Scan, now).map(|(_, key)| key)
 }
@@ -209,7 +207,9 @@ pub(super) fn reserve_refund(
     account: AccountUuid,
     tip: BlockHeight,
 ) -> Policy<OneTimeKey> {
+    use zcash_client_backend::data_api::one_time_ivk::recovery::OneTimeRecoveryWrite;
     let now = clock_now();
+    db.prepare_one_time_recovery(account, 1024, now)?;
     db.reserve_refund_key(account, now, tip, Some(&empty_seen(now)))
 }
 
@@ -222,10 +222,12 @@ pub(super) fn prepare_from(
     from: BlockHeight,
     seen: Option<&ProviderSeen<'_>>,
 ) -> Policy<OneTimeKey> {
+    use zcash_client_backend::data_api::one_time_ivk::recovery::OneTimeRecoveryWrite;
+    db.prepare_one_time_recovery(account, 1024, now)?;
     tx(db, |c, p| {
         if let Some(seen) = seen {
             let (owner, _) = account_key(c, p, account)?;
-            store::swap::reservations::record_seen(c, owner.0, seen)?;
+            store::swap::reservations::record_seen(c, owner.0, 1, seen)?;
         }
         store::swap::reservations::prepare(c, p, account, now, from, seen)
     })
@@ -857,4 +859,140 @@ fn a_key_with_notes_is_deleted_only_with_its_account() {
     st.wallet_mut().delete_account(account).unwrap();
     assert_eq!(count(&st, "ironwood_one_time_keys"), 0);
     assert_eq!(count(&st, "ironwood_received_notes"), 0);
+}
+
+/// Records exposure and acceptance of a refund request before funding instructions are shown.
+pub(super) fn quote_refund(
+    db: &mut Db,
+    account: AccountUuid,
+    index: u64,
+    (deposit, deadline): (&str, i64),
+    now: i64,
+) -> String {
+    let seen = empty_seen(now);
+    let request = db.begin_refund_operation(account, index, deadline, now, Some(&seen));
+    let request = request.unwrap().unwrap();
+    let recorded = db.record_refund_operation(account, &request, deposit, deadline, now);
+    recorded.unwrap().unwrap();
+    request
+}
+
+/// Checks both derived windows with the real bounded provider-membership API.
+pub(super) fn check_seen(db: &mut Db, account: AccountUuid) {
+    see(db, account, &[]);
+}
+
+/// Applies a deterministic capture until its supported window stops growing.
+pub(super) fn see(db: &mut Db, account: AccountUuid, held: &[KeyId]) {
+    see_at(db, account, held, clock_now());
+}
+
+/// Applies a provider capture at the scenario's clock, including its exact membership identity.
+pub(super) fn see_at(db: &mut Db, account: AccountUuid, held: &[KeyId], now: i64) {
+    use zcash_client_backend::data_api::one_time_ivk::recovery::OneTimeRecoveryWrite;
+    db.set_one_time_recovery_enabled(account, true).unwrap();
+    let (_, parent) = account_key(&db.conn, &db.params, account).unwrap();
+    let held: Vec<_> = held
+        .iter()
+        .map(|k| {
+            k.derive(&parent)
+                .unwrap()
+                .address_at(0u32, Scope::External)
+                .to_raw_address_bytes()
+        })
+        .collect();
+    let mut bytes = now.to_be_bytes().to_vec();
+    for receiver in &held {
+        bytes.extend_from_slice(receiver);
+    }
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let digest: [u8; 32] = hasher.finish().to_be_bytes().repeat(4).try_into().unwrap();
+    let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
+    let seen = ProviderSeen {
+        since: 0,
+        until: now,
+        contains: &contains,
+    };
+    for _ in 0..100 {
+        db.prepare_one_time_recovery(account, 1000, now).unwrap();
+        if db
+            .record_one_time_provider_seen(account, digest, &seen, now, 1000)
+            .unwrap()
+        {
+            return;
+        }
+    }
+    panic!("test provider capture did not reach its window");
+}
+
+/// Supplies negative payment-filter judgments for the stored blocks of issuance fixtures.
+/// These fixtures contain ordinary notes or already-known payments. Pending matches remain pending.
+pub(super) fn settle_empty_filters(db: &mut Db, account: AccountUuid, now: i64) {
+    use zcash_client_backend::data_api::one_time_ivk::recovery::{
+        FilterJudgment, History, OneTimeRecoveryRead, OneTimeRecoveryWrite,
+    };
+    db.prepare_one_time_recovery(account, 1024, now).unwrap();
+    let state = db.one_time_recovery_state(account).unwrap().unwrap();
+    if !state.enabled {
+        return;
+    }
+    if state.history.is_none() {
+        db.accept_one_time_history(
+            account,
+            History {
+                genesis: [1; 32],
+                archive: [2; 32],
+                epoch: 0,
+            },
+        )
+        .unwrap();
+    }
+    loop {
+        let Some(work) = db.one_time_filter_work(account, 1024).unwrap() else {
+            break;
+        };
+        let points: Vec<_> = db
+            .conn
+            .prepare("SELECT height,hash FROM blocks WHERE height>=?1 ORDER BY height LIMIT 256")
+            .unwrap()
+            .query_map([u32::from(work.next_height)], |r| {
+                Ok(ChainPoint {
+                    height: BlockHeight::from(r.get::<_, u32>(0)?),
+                    hash: BlockHash(r.get(1)?),
+                })
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        if points.first().is_none_or(|p| p.height != work.next_height) {
+            break;
+        }
+        let judgments: Vec<_> = points
+            .into_iter()
+            .map(|block| FilterJudgment {
+                block,
+                hits: vec![],
+            })
+            .collect();
+        assert!(
+            db.record_one_time_filters(account, &work, &judgments)
+                .unwrap()
+        );
+    }
+}
+
+/// Supplies paid hints to the existing admission fixtures until the scheduler cutover.
+pub(super) fn cover(st: &mut State, account: AccountUuid, keys: &[KeyId]) -> PublicationEnd {
+    let checks: Vec<_> = keys
+        .iter()
+        .map(|key| FilterCheck {
+            key: *key,
+            seen: false,
+            paid: true,
+            recent: false,
+        })
+        .collect();
+    discover(st, account, &checks)
 }

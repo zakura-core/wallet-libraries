@@ -2280,6 +2280,8 @@ pub(super) const TABLE_IRONWOOD_BLOCK_WINDOWS: &str = "CREATE TABLE ironwood_blo
                 CHECK(typeof(end_index)='blob' AND length(end_index)=16 AND end_index BETWEEN X'00000000000000000000000000000064' AND X'00000000000000010000000000000000'),
             derived BLOB NOT NULL DEFAULT X'00000000000000000000000000000000'
                 CHECK(typeof(derived)='blob' AND length(derived)=16 AND derived<=end_index),
+            seen_index BLOB NOT NULL DEFAULT X'00000000000000000000000000000000'
+                CHECK(typeof(seen_index)='blob' AND length(seen_index)=16 AND seen_index<=end_index),
             PRIMARY KEY(account_id,purpose))";
 
 /// Expected schema for durable block-filter recovery.
@@ -2312,3 +2314,8 @@ pub(super) const TRIGGER_IRONWOOD_RECOVERY_ALLOCATION: &str = "CREATE TRIGGER ir
 pub(super) const TRIGGER_IRONWOOD_LOCAL_WATCH_BOUND: &str = "CREATE TRIGGER ironwood_local_watch_bound BEFORE UPDATE OF local_watch_deadline,local_watch_accepted ON ironwood_one_time_operations
             WHEN OLD.local_watch_accepted=1 AND (NEW.local_watch_deadline IS NOT OLD.local_watch_deadline OR NEW.local_watch_accepted<>1)
             BEGIN SELECT RAISE(ABORT,'accepted watch deadline is immutable'); END";
+
+/// Expected provider membership capture used to gate issuance.
+pub(super) const TABLE_IRONWOOD_BLOCK_SEEN: &str = "CREATE TABLE ironwood_block_seen (
+            account_id INTEGER PRIMARY KEY REFERENCES ironwood_block_recovery(account_id) ON DELETE CASCADE,
+            digest BLOB NOT NULL CHECK(length(digest)=32), until_unix INTEGER NOT NULL CHECK(until_unix>=0))";

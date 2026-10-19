@@ -1000,40 +1000,25 @@ fn a_late_payment_the_scan_stored_elsewhere_is_dequeued() {
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
-/// Issuance waits until the pass checked both purposes against a publication that matched
-/// the wallet's chain: not while the scan has yet to judge it, nor before the refund keys
-/// are checked.
+/// A completed legacy pass cannot bypass the replacement provider-history check.
 #[test]
-fn issuance_waits_for_both_purposes_against_a_judged_publication() {
+fn issuance_waits_for_both_provider_windows() {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
-    let unjudged = unscanned_publication(&mut st);
-    let gap = |db: &mut Db, tip| {
-        matches!(
-            reserve_refund(db, account, tip),
-            Ok(Err(ReservationPolicy::Gap))
-        )
-    };
+    let through = tip(&st).height;
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, unjudged, &[]));
-    assert!(gap(db, unjudged.height));
-    st.scan_cached_blocks_with_one_time_ivks(unjudged.height, 1);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let newer = publication_at(&st, tip(&st).height);
-    let done = EnumerationCursor {
-        next: 100,
-        reach: 100,
-    };
-    let db = st.wallet_mut().db_mut();
-    let check = |db: &mut Db, purpose| {
-        db.record_one_time_filter_checks(account, newer, purpose, &[], done, true, clock_now())
+    assert!(matches!(
+        reserve_refund(db, account, through),
+        Ok(Err(ReservationPolicy::Gap))
+    ));
+    check_seen(db, account);
+    assert_eq!(
+        reserve_refund(db, account, through)
             .unwrap()
-    };
-    assert!(check(db, Purpose::Receive));
-    assert!(gap(db, newer.height));
-    assert!(check(db, Purpose::Refund));
-    let key = reserve_refund(db, account, newer.height).unwrap();
-    assert_eq!(key.unwrap().key_id(), KeyId::new(Purpose::Refund, 0));
+            .unwrap()
+            .key_id(),
+        KeyId::new(Purpose::Refund, 0)
+    );
 }
 
 /// A payment from before the account's birthday is never a scan hint, since the scan never

@@ -518,7 +518,7 @@ pub(crate) fn close_local_watches(
         WHERE k.watch_closed_height IS NULL
         AND EXISTS(SELECT 1 FROM ironwood_block_recovery r WHERE r.account_id=k.account_id AND r.enabled=1)
         AND EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id=k.id AND o.local_watch_deadline IS NOT NULL)
-        AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id=k.id AND o.expectation NOT IN(1,2))
+        AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id=k.id AND (o.expectation NOT IN(1,2) OR (o.request IS NOT NULL AND o.reference IS NULL AND o.rejected=0)))
         AND EXISTS(SELECT 1 FROM ironwood_key_scans s WHERE s.one_time_key_id=k.id AND s.height=?1 AND s.hash=?2)
         AND EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t ON t.id_tx=n.transaction_id WHERE n.one_time_key_id=k.id AND t.mined_height<=?3)
         AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t ON t.id_tx=n.transaction_id
@@ -550,3 +550,80 @@ pub(crate) fn close_local_watches(
 
 #[cfg(test)]
 mod tests;
+
+/// Records bound-advancing evidence and schedules resumable window derivation.
+pub(super) fn advanced(conn: &Transaction<'_>, key: i64) -> Result<(), SqliteClientError> {
+    conn.execute("UPDATE ironwood_block_recovery SET needs_prepare=1 WHERE account_id=(SELECT account_id FROM ironwood_one_time_keys WHERE id=?1)",[key])?;
+    Ok(())
+}
+
+/// Returns an exclusive window bound, with no u64 bound when the last index is included.
+pub(super) fn window_end(
+    conn: &Connection,
+    account: i64,
+    purpose: u8,
+) -> Result<Option<u64>, SqliteClientError> {
+    let bytes = conn.query_row(
+        "SELECT end_index FROM ironwood_block_windows WHERE account_id=?1 AND purpose=?2",
+        params![account, purpose],
+        |r| r.get(0),
+    )?;
+    Ok(u64::try_from(bound(bytes)?).ok())
+}
+
+/// Issuance needs an enabled, fully derived window checked against provider history.
+pub(super) fn seen_ready(conn: &Connection, account: i64) -> Result<bool, SqliteClientError> {
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM ironwood_block_recovery r JOIN ironwood_block_seen s ON s.account_id=r.account_id WHERE r.account_id=?1 AND r.enabled=1 AND r.needs_prepare=0
+        AND NOT EXISTS(SELECT 1 FROM ironwood_block_windows w WHERE w.account_id=r.account_id AND (w.derived<w.end_index OR w.seen_index<w.end_index)))",[account],|r|r.get(0))?)
+}
+
+impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, CL, R> {
+    /// Applies at most 1024 receivers from a validated monotone provider capture. Bind `digest`
+    /// to those exact bytes before calling. Repeat preparation and this method until ready.
+    /// Membership never creates a payment lookup or a local-operation watch.
+    pub fn record_one_time_provider_seen(
+        &mut self,
+        account: AccountUuid,
+        digest: [u8; 32],
+        seen: &super::swap::ProviderSeen<'_>,
+        now: i64,
+        budget: u32,
+    ) -> Result<bool, SqliteClientError> {
+        self.transactionally(|db| {
+            let conn=db.conn.0;
+            let owner=ensure(conn,&db.params,account)?;
+            if !state(conn,&db.params,account)?.expect("ensured state").enabled
+                || !zakura_one_time_ivk::swap::provider_read_is_current(seen.until,now) {return Ok(false);}
+            let previous:Option<(Vec<u8>,i64)>=conn.query_row("SELECT digest,until_unix FROM ironwood_block_seen WHERE account_id=?1",[owner],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+            if previous.as_ref().is_some_and(|(_,until)|*until>seen.until){return Ok(false);}
+            if previous.as_ref().is_none_or(|(bytes,_)|bytes.as_slice()!=digest) {
+                conn.execute("UPDATE ironwood_block_windows SET seen_index=zeroblob(16) WHERE account_id=?1",[owner])?;
+            }
+            conn.execute("INSERT INTO ironwood_block_seen VALUES(?1,?2,?3) ON CONFLICT(account_id) DO UPDATE SET digest=excluded.digest,until_unix=excluded.until_unix",params![owner,digest,seen.until])?;
+            let mut remaining=u128::from(budget.min(MAX_KEYS));
+            for purpose in PURPOSES {
+                let code=purpose_code(purpose)?;
+                let (cursor,derived):(Vec<u8>,Vec<u8>)=conn.query_row("SELECT seen_index,derived FROM ironwood_block_windows WHERE account_id=?1 AND purpose=?2",params![owner,code],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                let start=bound(cursor)?;
+                let through=bound(derived)?.min(start+remaining);
+                if start==through {continue;}
+                let receivers=conn.prepare("SELECT key_index,receiver FROM ironwood_block_receivers WHERE account_id=?1 AND purpose=?2 AND key_index>=?3 ORDER BY key_index LIMIT ?4")?
+                    .query_map(params![owner,code,(start as u64).to_be_bytes(),(through-start) as u32],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,[u8;43]>(1)?)))?.collect::<Result<Vec<_>,_>>()?;
+                if receivers.len() as u128!=through-start{return Err(corrupt("missing derived provider receiver"));}
+                let hits=(seen.contains)(&receivers.iter().map(|r|r.1).collect::<Vec<_>>());
+                if hits.len()!=receivers.len(){return Err(invalid("seen set answered for the wrong number of receivers"));}
+                let birthday=BlockHeight::from(conn.query_row("SELECT birthday FROM ironwood_block_recovery WHERE account_id=?1",[owner],|r|r.get::<_,u32>(0))?);
+                for ((index,_),hit) in receivers.into_iter().zip(hits) {
+                    if hit {
+                        let key=KeyId::new(purpose,decode_index(index)?);
+                        let (id,_)=super::register(conn,&db.params,account,key,birthday,false,super::Discovery::Filter,now)?;
+                        super::swap::reservations::record_provider_seen(conn,id)?;
+                    }
+                }
+                conn.execute("UPDATE ironwood_block_windows SET seen_index=?3 WHERE account_id=?1 AND purpose=?2",params![owner,code,through.to_be_bytes()])?;
+                remaining-=through-start;
+            }
+            seen_ready(conn,owner)
+        })
+    }
+}

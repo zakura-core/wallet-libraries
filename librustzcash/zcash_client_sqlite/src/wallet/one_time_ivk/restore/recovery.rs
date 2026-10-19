@@ -152,6 +152,11 @@ pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
                 now,
             )?;
         }
+        let id = super::super::key_ref(conn, account, key_id)?;
+        super::super::block_issuance(conn, id)?;
+        if authenticated {
+            super::super::authenticate_key(conn, id)?;
+        }
     }
     Ok(())
 }

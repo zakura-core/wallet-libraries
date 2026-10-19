@@ -144,26 +144,6 @@ pub(in crate::wallet::one_time_ivk) fn complete<P: Parameters>(
     Ok(judged && pass.receive.1 && pass.refund.1 && settled(conn)?)
 }
 
-/// Whether `account` may be issued new swap addresses: it was declared fresh, or its pass
-/// checked both purposes against a publication that matched the wallet's chain (or ended
-/// before the birthday). Every index the filters mark used is then registered, so none is
-/// issued again; a pending lookup can only find payments to an index already registered.
-pub(in crate::wallet::one_time_ivk) fn issuance_ready<P: Parameters>(
-    conn: &Connection,
-    params: &P,
-    owner: crate::AccountRef,
-) -> Result<bool, SqliteClientError> {
-    if fresh(conn, owner.0)? {
-        return Ok(true);
-    }
-    let Some(pass) = pass(conn, owner.0)? else {
-        return Ok(false);
-    };
-    let before_birthday = pass.publication.height < restore_start(conn, params, owner)?;
-    let judged = pass.state == ACCEPTED || (pass.state == PROVISIONAL && before_birthday);
-    Ok(judged && pass.receive.1 && pass.refund.1)
-}
-
 /// Implements `OneTimeIvkRestoreRead::one_time_discovery`.
 pub(crate) fn status<P: Parameters>(
     conn: &Connection,

@@ -425,23 +425,21 @@ fn block_recovery_watch_receipts_confirmations_and_repair() {
     let key = work.receivers[0].key;
     let from = st.wallet().chain_height().unwrap().unwrap() + 1;
     let db = st.wallet_mut().db_mut();
-    let (_, registered) = db
+    let registered = db
         .transactionally(|db| {
-            one_time_ivk::register(
+            one_time_ivk::swap::reservations::reserve_index(
                 db.conn.0,
                 &db.params,
                 account,
                 key,
                 from,
-                true,
                 Discovery::Scan,
                 1,
             )
         })
         .unwrap();
     let deposit = p2pkh(5).encode(&db.params);
-    db.record_refund_operation(account, key.index(), &deposit, 100, 1)
-        .unwrap();
+    crate::wallet::one_time_ivk::tests::quote_refund(db, account, key.index(), (&deposit, 100), 1);
     let status = Observation {
         status: OperationStatus::Terminal(ReceiptExpectation::Positive(Some(
             Zatoshis::const_from_u64(15000),
@@ -589,7 +587,10 @@ fn block_recovery_every_allocation_promotion_widens_history() {
                 .needs_prepare
         );
         if provider {
-            one_time_ivk::swap::reservations::record_provider_seen(&db.conn, id).unwrap();
+            db.transactionally(|db| {
+                one_time_ivk::swap::reservations::record_provider_seen(db.conn.0, id)
+            })
+            .unwrap();
         } else {
             db.conn.execute("UPDATE ironwood_one_time_keys SET paid_before_birthday=1,advances_allocation=1 WHERE id=?1",[id]).unwrap();
         }
@@ -663,5 +664,149 @@ fn block_recovery_ambiguous_amount_reopens_settlement() {
         db.one_time_local_watch_keys(range, 86500)
             .unwrap()
             .is_empty()
+    );
+}
+
+/// An incomplete or stale provider capture cannot authorize issuance, including on a fresh account.
+#[test]
+fn provider_windows_are_bounded_and_required_before_first_issuance() {
+    use one_time_ivk::swap::ReservationPolicy;
+    use one_time_ivk::tests::{clock_now, empty_seen, restored_wallet, tip};
+    let mut st = restored_wallet();
+    let account = st.test_account().unwrap().id();
+    let through = tip(&st).height;
+    let now = clock_now();
+    let db = st.wallet_mut().db_mut();
+    db.set_one_time_recovery_enabled(account, true).unwrap();
+    db.prepare_one_time_recovery(account, 1024, now).unwrap();
+    let seen = empty_seen(now);
+    assert!(
+        !db.record_one_time_provider_seen(account, [8; 32], &seen, now, 100)
+            .unwrap()
+    );
+    assert!(matches!(
+        db.reserve_refund_key(account, now, through, Some(&seen))
+            .unwrap(),
+        Err(ReservationPolicy::Gap)
+    ));
+    assert!(
+        !db.record_one_time_provider_seen(account, [8; 32], &seen, now + 901, 100)
+            .unwrap()
+    );
+    assert!(
+        db.record_one_time_provider_seen(account, [8; 32], &seen, now, 100)
+            .unwrap()
+    );
+    // A changed capture restarts both purposes, even if its timestamp is unchanged.
+    assert!(
+        !db.record_one_time_provider_seen(account, [9; 32], &seen, now, 100)
+            .unwrap()
+    );
+    assert!(
+        db.record_one_time_provider_seen(account, [9; 32], &seen, now, 100)
+            .unwrap()
+    );
+    assert!(
+        db.reserve_refund_key(account, now, through, Some(&seen))
+            .unwrap()
+            .is_ok()
+    );
+}
+
+/// A positive payment hint blocks a cached receiver before registration creates a key row.
+#[test]
+fn pending_filter_match_blocks_unregistered_refund_issuance() {
+    use one_time_ivk::tests::{clock_now, empty_seen, tip};
+    let (mut st, account, work) = ready();
+    let through = tip(&st).height;
+    let now = clock_now();
+    let key = KeyId::new(Purpose::Refund, 0);
+    let db = st.wallet_mut().db_mut();
+    let hit = FilterJudgment {
+        block: judgment(&work, false).block,
+        hits: vec![key],
+    };
+    assert!(db.record_one_time_filters(account, &work, &[hit]).unwrap());
+    assert!(
+        one_time_ivk::tests::get_key(db, account, key)
+            .unwrap()
+            .is_none()
+    );
+    let reserved = db
+        .reserve_refund_key(account, now, through, Some(&empty_seen(now)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(reserved.key_id(), KeyId::new(Purpose::Refund, 1));
+    assert_eq!(db.one_time_pending_matches(account, 100).unwrap().len(), 1);
+    assert!(
+        db.one_time_local_watch_keys(through..through + 1, now)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Real request APIs record provenance before exposure and preserve the first accepted watch bound.
+#[test]
+fn local_refund_request_watch_respects_toggle_and_original_deadline() {
+    use one_time_ivk::swap::ReservationPolicy;
+    use one_time_ivk::tests::{clock_now, empty_seen, p2pkh, tip};
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let through = tip(&st).height;
+    let deposit = p2pkh(7).encode(st.network());
+    let now = clock_now();
+    let db = st.wallet_mut().db_mut();
+    let seen = empty_seen(now);
+    let key = db
+        .reserve_refund_key(account, now, through, Some(&seen))
+        .unwrap()
+        .unwrap();
+    db.set_one_time_recovery_enabled(account, false).unwrap();
+    assert!(matches!(
+        db.begin_refund_operation(account, 0, now + 60, now, Some(&seen))
+            .unwrap(),
+        Err(ReservationPolicy::Gap)
+    ));
+    db.set_one_time_recovery_enabled(account, true).unwrap();
+    let request = db
+        .begin_refund_operation(account, 0, now + 60, now, Some(&seen))
+        .unwrap()
+        .unwrap();
+    let range = through + 1..through + 2;
+    assert_eq!(
+        db.one_time_local_watch_keys(range.clone(), now)
+            .unwrap()
+            .len(),
+        1
+    );
+    db.record_refund_operation(account, &request, &deposit, now + 120, now)
+        .unwrap()
+        .unwrap();
+    db.record_refund_operation(account, &request, &deposit, now + 300, now)
+        .unwrap()
+        .unwrap();
+    let deadline = now + 120 + 86400;
+    assert_eq!(
+        db.one_time_local_watch_keys(range.clone(), deadline - 1)
+            .unwrap()
+            .len(),
+        1
+    );
+    db.set_one_time_recovery_enabled(account, false).unwrap();
+    assert!(
+        db.one_time_local_watch_keys(range.clone(), deadline - 1)
+            .unwrap()
+            .is_empty()
+    );
+    db.set_one_time_recovery_enabled(account, true).unwrap();
+    assert!(
+        db.one_time_local_watch_keys(range, deadline)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        one_time_ivk::tests::get_key(db, account, key.key_id())
+            .unwrap()
+            .is_some()
     );
 }

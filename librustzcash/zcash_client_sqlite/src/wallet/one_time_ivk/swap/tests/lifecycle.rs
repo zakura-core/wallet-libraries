@@ -138,11 +138,9 @@ fn equal_time_observations_never_lower_the_expected_receipt() {
     }
 }
 
-/// A refund key whose deposit this wallet did not fund starts once the provider reports
-/// a refund owed or an inconclusive end, unless a newer status, answered first, reports
-/// none.
+/// Provider status alone cannot invent local provenance or a watch for an unfunded key.
 #[test]
-fn a_refund_owed_starts_an_unfunded_refund_key() {
+fn a_refund_status_does_not_start_an_unfunded_refund_key() {
     for (owed, settled_first) in [
         (Terminal(Positive(None)), false),
         (Terminal(Positive(None)), true),
@@ -167,16 +165,13 @@ fn a_refund_owed_starts_an_unfunded_refund_key() {
             assert!(record(db, Terminal(NoReceipt), 300));
         }
         assert!(record(db, owed, 200));
-        let expected = if settled_first { vec![] } else { vec![key] };
-        assert_eq!(scanning_keys(&st), expected, "{owed:?} {settled_first}");
+        assert!(scanning_keys(&st).is_empty(), "{owed:?} {settled_first}");
     }
 }
 
-/// A refund owed while the key's history lookup is pending starts the key at once, even
-/// when the provider no longer lists its address as recent: the lookup still covers the
-/// history before it.
+/// Provider membership and a refund status leave filter history pending without a local watch.
 #[test]
-fn a_refund_owed_during_a_pending_lookup_starts_the_key() {
+fn a_refund_status_does_not_watch_a_provider_seen_key() {
     for owed in [Positive(None), Unknown] {
         let mut st = scanned_wallet();
         let account = st.test_account().unwrap().id();
@@ -200,7 +195,7 @@ fn a_refund_owed_during_a_pending_lookup_starts_the_key() {
         let recorded =
             db.record_operation_status(account, "deposit", None, status(Terminal(owed)), 200);
         assert!(recorded.unwrap());
-        assert_eq!(scanning_keys(&st), vec![key], "{owed:?}");
+        assert!(scanning_keys(&st).is_empty(), "{owed:?}");
     }
 }
 
@@ -417,6 +412,7 @@ fn incoming_key_closes_only_once_paid_and_released() {
         .unwrap()
         .unwrap();
     let index = reserved.key_id().index();
+    settle_empty_filters(db, account, now);
     tx(db, |c, _| {
         store::swap::reservations::begin(
             c,
@@ -457,6 +453,7 @@ fn underpaid_reservation(st: &mut State) -> (OneTimeKey, i64) {
         .unwrap()
         .unwrap();
     let index = key.key_id().index();
+    settle_empty_filters(db, account, now);
     tx(db, |c, _| {
         store::swap::reservations::begin(
             c,
@@ -471,6 +468,7 @@ fn underpaid_reservation(st: &mut State) -> (OneTimeKey, i64) {
     .unwrap()
     .unwrap();
     db.finish_receive_operation(account, "swap", &accepted("swap", None, deadline))
+        .unwrap()
         .unwrap();
     db.start_receive_operation(account, "swap", now)
         .unwrap()
@@ -639,6 +637,7 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
         .unwrap()
         .unwrap();
     let index = reservation.key_id().index();
+    settle_empty_filters(db, account, now);
     for request in ["edit", "accepted"] {
         tx(db, |c, _| {
             store::swap::reservations::begin(
@@ -654,6 +653,7 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
         .unwrap()
         .unwrap();
         db.finish_receive_operation(account, request, &accepted(request, None, deadline))
+            .unwrap()
             .unwrap();
     }
     db.start_receive_operation(account, "accepted", now)

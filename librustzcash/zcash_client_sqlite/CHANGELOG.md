@@ -14,8 +14,8 @@ and this library adheres to Rust's notion of
 - One-time IVK discovery (with `orchard`): `WalletDb` implements the backend's discovery
   methods and `get_one_time_scanning_keys_for_range`. A restored account's payments appear
   as its restore scan covers them, and one found after the scan passed it once the scan
-  covers every later block. Issuance waits until a restored account's discovery has
-  registered every index its publication marks used, and a fresh account waits for none.
+  covers every later block. Issuance readiness now comes from the bounded provider-history
+  checks described below, including for a fresh account.
 - `wallet::init::migrations::ids::ONE_TIME_IVK_DISCOVERY`, the migration for discovery and
   the spend journal.
 - A spend journal (with `orchard`): every block scan keeps every Ironwood nullifier each
@@ -28,6 +28,8 @@ and this library adheres to Rust's notion of
   `EnhancePirSession`. It is kept in memory only, with no new table or migration.
 
 ### Changed
+
+- Private address issuance now requires bounded provider-history checks on both key windows, including fresh accounts. Refund quote requests are persisted before exposure and accepted by request identity. Retired requests cannot return funding instructions, pending payment matches block reuse, and local request watches retain their first accepted deadline.
 
 - One-time IVK issuance fails closed without a fresh provider seen set.
   `WalletDb::prepare_receive_reservation`, `WalletDb::reserve_refund_key` (which now

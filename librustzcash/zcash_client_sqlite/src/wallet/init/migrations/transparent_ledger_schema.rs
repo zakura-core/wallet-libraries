@@ -248,6 +248,7 @@ mod tests {
             "ironwood_block_matches",
             "ironwood_block_receivers",
             "ironwood_block_recovery",
+            "ironwood_block_seen",
             "ironwood_block_windows",
             "ironwood_key_scans",
             "ironwood_journal_coverage",
