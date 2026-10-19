@@ -9,8 +9,8 @@
   `one_time_ivk::restore::OneTimeIvkRestoreWrite`, with `Transport`, `WriteLock`,
   `Discovered`, `Error`, `FIRST_WINDOW`, `GAP`, `KEYS_PER_RUN` and `MAINNET_GENESIS`.
   `wallet` enables the backend's `orchard` feature.
-- `fetch_seen` and `Seen`: a publication's swap provider seen sets, which a wallet
-  checks before issuing a swap address. They need no `wallet` feature.
+- `fetch_seen` and `Seen` read permanent provider membership through the public archive, independently of PIR preparation. The exact object digest supports resumable issuance checks. They need no `wallet` feature.
+- Bounded block-filter requests own captured wallet fences across network waits and verify complete archive pages before committing membership judgments.
 
 ### Changed
 

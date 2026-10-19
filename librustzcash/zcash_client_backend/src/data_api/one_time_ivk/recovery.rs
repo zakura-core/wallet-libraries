@@ -4,6 +4,8 @@
 //! matches in the same transaction. Exact local scan evidence can settle individual
 //! matches without erasing older work for that receiver. Callers validate archive
 //! proofs and their connected-chain anchor before submitting judgments.
+pub mod cache;
+
 use super::restore::DiscoveryWork;
 use crate::{
     data_api::{WalletRead, transparent_ledger::ChainPoint},

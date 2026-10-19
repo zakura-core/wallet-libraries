@@ -325,7 +325,55 @@ fn publish(
             .unwrap()
             .encode()
     });
-    Routes::new(Server::new(snapshot).unwrap(), witnesses)
+    let mut routes = Routes::new(Server::new(snapshot).unwrap(), witnesses);
+    let names: std::collections::BTreeSet<_> = provider
+        .iter()
+        .filter_map(|p| p.label.split_once('/').map(|v| v.0))
+        .collect();
+    let seen: Option<Vec<_>> = (!names.is_empty())
+        .then(|| {
+            names
+                .iter()
+                .map(|name| provider.iter().find(|p| p.label == format!("{name}/seen")))
+                .collect()
+        })
+        .flatten();
+    let set = seen.map(|sets| {
+        let since = sets.iter().map(|s| s.since_unix).max().unwrap();
+        let until = sets.iter().map(|s| s.until_unix).min().unwrap();
+        let mut set = receiver_directory::seen::SeenSet::new(GENESIS, since);
+        for provider in sets {
+            set = set.union(provider.receivers.iter());
+        }
+        set.until_unix = until;
+        set
+    });
+    let head = receiver_directory::archive::Head {
+        genesis: GENESIS,
+        archive: [2; 32],
+        epoch: 0,
+        first_height: ACTIVATION,
+        frontier: receiver_directory::blocks::BlockId {
+            height: end.height.into(),
+            hash: end.hash.0,
+        },
+        index_root: [0; 32],
+        seen: set.as_ref().map(|s| receiver_directory::archive::SeenRef {
+            digest: s.digest().unwrap(),
+            since_unix: s.since_unix,
+            until_unix: s.until_unix,
+        }),
+    };
+    routes
+        .archive
+        .insert("archive/head".into(), head.encode().unwrap());
+    if let Some(set) = set {
+        routes.archive.insert(
+            format!("archive/seen/{}", hex::encode(set.digest().unwrap())),
+            set.encode().unwrap(),
+        );
+    }
+    routes
 }
 
 /// The fields of `manifest` its witness file binds to.
@@ -348,20 +396,28 @@ struct Routes {
     server: Server,
     id: String,
     witnesses: Option<Vec<u8>>,
+    archive: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 impl Routes {
+    /// Builds fixture routes without changing the production server.
     fn new(server: Server, witnesses: Option<Vec<u8>>) -> Self {
         Self {
             id: hex::encode(server.id()),
             server,
             witnesses,
+            archive: Default::default(),
         }
     }
 
     /// The status and body for `method` on `path`.
     fn answer(&self, method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
         let route = path.strip_prefix("/v1/receiver/").unwrap_or(path);
+        if method == "GET" {
+            if let Some(bytes) = self.archive.get(route) {
+                return (200, bytes.clone());
+            }
+        }
         if (method, route) == ("POST", "query") {
             return match self.server.respond(body) {
                 Ok(response) => (200, response),
@@ -777,7 +833,7 @@ async fn seen_sets_need_this_network_and_every_provider() {
     for sets in [sets(false), Vec::new()] {
         let directory = Directory::new(publish(&[], &[], r.through, &sets));
         let refused = fetch_seen(ORIGIN, &directory, GENESIS).await;
-        assert!(matches!(refused, Err(DirectoryError::Malformed)));
+        assert!(matches!(refused, Err(DirectoryError::Revision)));
     }
 
     let directory = Directory::new(publish(&[], &[], r.through, &sets(true)));
@@ -807,6 +863,7 @@ async fn issuance_skips_a_refund_address_in_the_fetched_seen_sets() {
     // Issuance waits for the restored account's discovery.
     run_clean(&mut r.st, &directory).await;
     let seen = fetch_seen(ORIGIN, &directory, GENESIS).await.unwrap();
+    let digest = seen.digest();
     let contains = |receivers: &[[u8; 43]]| seen.contains(receivers);
     let seen = ProviderSeen {
         since: seen.since(),
@@ -818,9 +875,8 @@ async fn issuance_skips_a_refund_address_in_the_fetched_seen_sets() {
     db.set_one_time_recovery_enabled(r.account, true).unwrap();
     loop {
         db.prepare_one_time_recovery(r.account, 1024, NOW).unwrap();
-        // This isolated fixture has one provider capture. The archive client supplies its digest after cutover.
         if db
-            .record_one_time_provider_seen(r.account, [1; 32], &seen, NOW, 1024)
+            .record_one_time_provider_seen(r.account, digest, &seen, NOW, 1024)
             .unwrap()
         {
             break;
@@ -903,7 +959,7 @@ async fn a_provider_seen_key_after_the_pass_waits_for_payment_filters() {
     loop {
         db.prepare_one_time_recovery(r.account, 1024, NOW).unwrap();
         if db
-            .record_one_time_provider_seen(r.account, [1; 32], &seen, NOW, 1024)
+            .record_one_time_provider_seen(r.account, fetched.digest(), &seen, NOW, 1024)
             .unwrap()
         {
             break;
@@ -943,4 +999,212 @@ async fn a_lookup_whose_cursor_record_changed_starts_over() {
     let found = run_clean(&mut r.st, &directory).await;
     assert!(found.complete);
     assert_eq!(balance(&r.st), 2 * VALUE);
+}
+
+/// A complete public archive page built from this fixture's actual blocks and recipients.
+struct FilterArchive {
+    head: receiver_directory::archive::Head,
+    page: Vec<u8>,
+    requests: Mutex<Vec<String>>,
+}
+
+impl FilterArchive {
+    /// Encodes real GCS membership and its authenticated archive proof, including empty blocks.
+    fn new(r: &Restored) -> Self {
+        use receiver_directory::{
+            archive::{Head, Index, Page},
+            blocks::{BlockFilter, BlockId},
+        };
+        let filters = (ACTIVATION..=u32::from(r.through.height))
+            .map(|height| {
+                let block = cached(&r.st, BlockHeight::from(height));
+                let receivers: Vec<_> = r
+                    .records
+                    .iter()
+                    .filter(|r| r.payment.height == height)
+                    .map(|r| r.receiver.as_bytes())
+                    .collect();
+                BlockFilter::build(
+                    GENESIS,
+                    BlockId {
+                        height,
+                        hash: block.hash().0,
+                    },
+                    receivers,
+                )
+                .unwrap()
+            })
+            .collect();
+        let first = cached(&r.st, BlockHeight::from(ACTIVATION));
+        let page = Page::new(first.prev_hash().0, filters).unwrap();
+        let mut index = Index::default();
+        index
+            .update(page.number(), Some(page.digest().unwrap()))
+            .unwrap();
+        let head = Head {
+            genesis: GENESIS,
+            archive: [4; 32],
+            epoch: 0,
+            first_height: ACTIVATION,
+            frontier: BlockId {
+                height: r.through.height.into(),
+                hash: r.through.hash.0,
+            },
+            index_root: index.root(),
+            seen: None,
+        };
+        let page = index.proof(page.number()).unwrap().encode(&page).unwrap();
+        Self {
+            head,
+            page,
+            requests: Mutex::new(vec![]),
+        }
+    }
+}
+impl Transport for FilterArchive {
+    /// Serves only the expected shared page with the caller's enforced response bound.
+    async fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>, DirectoryError> {
+        self.requests.lock().unwrap().push(url.to_owned());
+        assert_eq!(
+            url,
+            format!(
+                "{ORIGIN}/v1/receiver/archive/range/{}/{}",
+                hex::encode(self.head.digest().unwrap()),
+                ACTIVATION / receiver_directory::archive::PAGE_BLOCKS
+            )
+        );
+        assert!(self.page.len() <= limit);
+        Ok(self.page.clone())
+    }
+    /// Public filter checks must not issue private queries or setup requests.
+    async fn post(&self, _: &str, _: Vec<u8>, _: usize) -> Result<Vec<u8>, DirectoryError> {
+        panic!("filter work requested PIR")
+    }
+}
+
+/// Real filter membership advances only checked receiver cursors and retains the matching payment.
+#[tokio::test]
+async fn block_filter_page_commits_positive_and_empty_blocks_without_pir() {
+    use zakura_pir_receiver::filters::{FilterRequest, accept_filter_head};
+    use zcash_client_backend::data_api::one_time_ivk::recovery::{
+        OneTimeRecoveryRead, OneTimeRecoveryWrite,
+    };
+    let mut r = restored(&[3]);
+    let archive = FilterArchive::new(&r);
+    let db = r.st.wallet_mut().db_mut();
+    assert!(
+        !accept_filter_head(
+            db,
+            r.account,
+            &archive.head,
+            GENESIS,
+            BlockHeight::from(ACTIVATION)
+        )
+        .unwrap()
+    );
+    db.set_one_time_recovery_enabled(r.account, true).unwrap();
+    assert!(db.prepare_one_time_recovery(r.account, 1024, NOW).unwrap());
+    assert!(
+        accept_filter_head(
+            db,
+            r.account,
+            &archive.head,
+            GENESIS,
+            BlockHeight::from(ACTIVATION)
+        )
+        .unwrap()
+    );
+    let work = db.one_time_filter_work(r.account, 1024).unwrap().unwrap();
+    let response = FilterRequest::new(archive.head.clone(), work)
+        .unwrap()
+        .unwrap()
+        .fetch(ORIGIN, &archive)
+        .await
+        .unwrap();
+    assert_eq!(
+        response
+            .judgments()
+            .iter()
+            .map(|b| b.hits.len())
+            .sum::<usize>(),
+        1
+    );
+    assert!(response.commit(db).unwrap());
+    let pending = db.one_time_pending_matches(r.account, 1024).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].receiver.key, KeyId::new(Purpose::Receive, 3));
+    assert_eq!(
+        pending[0].block.height,
+        BlockHeight::from(r.records[0].payment.height)
+    );
+    let work = db.one_time_filter_work(r.account, 1024).unwrap().unwrap();
+    assert!(
+        FilterRequest::new(archive.head.clone(), work)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(archive.requests.lock().unwrap().len(), 1);
+    assert_eq!(balance(&r.st), 0);
+}
+
+/// Work carries no wallet borrow across transport waits, and an off/on cycle fences its reply.
+#[tokio::test]
+async fn held_filter_response_does_not_hold_sync_or_survive_a_toggle() {
+    use std::sync::Arc;
+    use zakura_pir_receiver::filters::{FilterRequest, accept_filter_head};
+    use zcash_client_backend::data_api::one_time_ivk::recovery::{
+        OneTimeRecoveryRead, OneTimeRecoveryWrite,
+    };
+    struct Held {
+        archive: FilterArchive,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    impl Transport for Held {
+        /// Pauses a real page response until ordinary sync has committed another block.
+        async fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>, DirectoryError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.archive.get(url, limit).await
+        }
+        /// This test never allows an encrypted lookup.
+        async fn post(&self, _: &str, _: Vec<u8>, _: usize) -> Result<Vec<u8>, DirectoryError> {
+            panic!("unexpected PIR")
+        }
+    }
+    let mut r = restored(&[3]);
+    let held = Arc::new(Held {
+        archive: FilterArchive::new(&r),
+        entered: Default::default(),
+        release: Default::default(),
+    });
+    let db = r.st.wallet_mut().db_mut();
+    db.set_one_time_recovery_enabled(r.account, true).unwrap();
+    db.prepare_one_time_recovery(r.account, 1024, NOW).unwrap();
+    accept_filter_head(
+        db,
+        r.account,
+        &held.archive.head,
+        GENESIS,
+        BlockHeight::from(ACTIVATION),
+    )
+    .unwrap();
+    let work = db.one_time_filter_work(r.account, 1024).unwrap().unwrap();
+    let request = FilterRequest::new(held.archive.head.clone(), work)
+        .unwrap()
+        .unwrap();
+    let http = held.clone();
+    let task = tokio::spawn(async move { request.fetch(ORIGIN, http.as_ref()).await });
+    held.entered.notified().await;
+    r.st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    assert!(tip(&r.st).height > r.through.height);
+    let db = r.st.wallet_mut().db_mut();
+    db.set_one_time_recovery_enabled(r.account, false).unwrap();
+    db.set_one_time_recovery_enabled(r.account, true).unwrap();
+    db.prepare_one_time_recovery(r.account, 1024, NOW).unwrap();
+    held.release.notify_one();
+    assert!(!task.await.unwrap().unwrap().commit(db).unwrap());
+    let state = db.one_time_recovery_state(r.account).unwrap().unwrap();
+    assert_eq!(state.next_height, Some(BlockHeight::from(ACTIVATION)));
+    assert_eq!(state.pending_matches, 0);
 }

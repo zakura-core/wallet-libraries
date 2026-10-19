@@ -33,7 +33,7 @@ receiver-pir = { package = "zakura-receiver-pir", path = "../receiver-pir", feat
 rusqlite = { workspace = true, features = ["hooks"] }
 secrecy.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 zcash_client_sqlite = { path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "test-dependencies"] }
 zcash_primitives.workspace = true

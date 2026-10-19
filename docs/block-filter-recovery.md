@@ -21,3 +21,17 @@ Incoming operations use the same exposure rule. Begin before sending the request
 Locally begun requests supply watch provenance. The requested deadline applies until the first accepted response fixes the watch deadline. Later responses and status polls cannot extend that accepted bound. Turning recovery off blocks new exposure and watch selection. The key and its historical recovery obligation remain stored.
 
 This PR changes issuance and durable provenance. The scanner selection, transport scheduler, strict-toggle admission fences, application callers and old discovery/watch removal are separate required cutover work. These state APIs alone do not complete the feature.
+
+## Independent filter requests
+
+`zakura_pir_receiver::filters::accept_filter_head` verifies the archive against the wallet's connected frontier and accepts its correction identity. A missing anchor leaves work pending. `FilterRequest` owns a captured receiver group and its generation fence, so its network future borrows no wallet or scan lock. A complete immutable archive page is verified before membership is checked. `FilterResponse::commit` rechecks anchoring and atomically submits those judgments. Serialize only this short commit with wallet writers. Neither a negative result nor a positive match sends a receiver PIR request.
+
+`fetch_seen` now reads the permanent provider-membership object advertised by the archive head, independently of PIR preparation. Pass `Seen::digest` when applying that capture to issuance state. Missing provider history fails closed, and malformed receivers are conservatively reported as held.
+
+## Recent replay storage
+
+The application owns one `RecentBlocks` instance per wallet/network, shared across accounts. Insert only successfully scanned compact blocks with their predecessor `ChainState`. The cache keeps at most the newest three heights, with a hard 16 MiB ceiling covering serialized compact data, all three predecessor commitment-tree frontiers and fixed bookkeeping. A smaller byte budget may evict sooner. An oversized block still advances the retention window. A cache entry is returned only for its exact height and hash.
+
+Entries have no disk persistence. Disabling discovery clears the optimization. A chain rewind removes the affected suffix. The caller processes at most one decoded replay at a time and must not put decoded copies into pending queues. Missing or evicted bytes require PIR settlement of the durable match. Replaying a cache entry still requires normal cryptographic note admission and current setting/generation checks.
+
+The transport and cache are foundations for the production scanner and application scheduler. Their unit and SQLite integration tests do not establish real publisher timing, cache-hit rate, or final note-admission behavior. Those integration gates remain required before cutover is complete.

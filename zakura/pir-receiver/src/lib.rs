@@ -24,6 +24,8 @@
 
 #[cfg(feature = "wallet")]
 mod discovery;
+#[cfg(feature = "wallet")]
+pub mod filters;
 mod seen;
 #[cfg(feature = "wallet")]
 pub use discovery::{Discovered, Error, FIRST_WINDOW, GAP, KEYS_PER_RUN, WriteLock, discover};

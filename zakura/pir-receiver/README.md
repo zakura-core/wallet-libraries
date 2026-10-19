@@ -2,8 +2,7 @@
 
 A restored wallet finds payments to its one-time keys by checking candidate receivers
 against a receiver directory's public filters and looking the paid ones up over PIR.
-`fetch_seen` downloads the swap provider seen sets that a wallet checks before issuing a
-swap address. With the `wallet` feature, `discover` runs one account's discovery for any
+`fetch_seen` downloads the permanent provider-membership object advertised by the archive head. `Seen::digest` identifies its exact bytes for bounded issuance checks. With the `wallet` feature, `discover` runs one account's discovery for any
 wallet store that implements the backend's restore traits
 (`zcash_client_backend::data_api::one_time_ivk::restore`, from its `orchard` feature),
 such as `zakura-client-sqlite`. Its rustdoc states when a run starts a new pass, which
@@ -30,3 +29,9 @@ From the workspace root:
 ```sh
 python3 scripts/dev.py test --config pir-receiver
 ```
+
+## Block filters
+
+`filters::FilterRequest` owns captured wallet work and fetches one authenticated public page without borrowing a wallet connection or write lock. Accept a connected archive head first, then commit the response under the caller's short write lock. Settings, corrections and rewinds fence stale responses. Public membership checks do not make receiver PIR requests.
+
+The production scanner and application scheduler cutover is still separate work. See [the recovery contract](../../docs/block-filter-recovery.md) for cache ownership and pending integration requirements.

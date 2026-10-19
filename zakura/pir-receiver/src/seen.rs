@@ -2,52 +2,46 @@
 use std::collections::BTreeMap;
 
 use receiver_directory::{
-    filter::{Filter, RECENT, SEEN},
+    filter::{RECENT, SEEN},
+    seen::SeenSet,
     snapshot::FilterSet,
 };
-use receiver_pir::transport::DirectoryClient;
+use receiver_pir::archive::ArchiveClient;
 use zakura_receiver_crypto::Receiver;
 
 use crate::{DirectoryError, Transport};
 
-/// The swap provider seen sets of one receiver directory publication: every receiver
-/// each provider was given while its feed ran. Every wallet downloads them alike.
+/// The permanent provider-membership object advertised by a validated archive head.
+/// Everyone downloads the same object. Membership never authorizes a payment lookup.
 pub struct Seen {
-    salt: receiver_directory::Hash,
-    sets: Vec<Filter>,
-    since: i64,
-    until: i64,
+    set: SeenSet,
+    digest: receiver_directory::Hash,
 }
 
 impl Seen {
-    /// When the latest-starting provider feed started, in Unix seconds. Receivers given
-    /// earlier may be missing.
+    /// The supported provider-history start, in Unix seconds.
     pub fn since(&self) -> i64 {
-        self.since
+        self.set.since_unix
     }
 
-    /// When the earliest of the feeds' last complete reads began, in Unix seconds.
-    /// Receivers given later may be missing.
+    /// The last complete provider read's start, in Unix seconds.
     pub fn until(&self) -> i64 {
-        self.until
+        self.set.until_unix
     }
 
-    /// Whether any provider's set holds each of `receivers`, in order. A set may hold a
-    /// receiver it was never given, at its filter's false positive rate. A receiver
-    /// that is not a valid Orchard-format receiver is reported as held.
+    /// Identifies the exact validated bytes for resumable wallet membership checks.
+    pub fn digest(&self) -> receiver_directory::Hash {
+        self.digest
+    }
+
+    /// Tests the permanent fixed hash universe in input order. Invalid receivers fail closed.
     pub fn contains(&self, receivers: &[[u8; 43]]) -> Vec<bool> {
         let parsed: Vec<_> = receivers
             .iter()
             .map(|r| Receiver::from_bytes(*r).ok().map(|r| *r.as_bytes()))
             .collect();
         let valid: Vec<_> = parsed.iter().flatten().copied().collect();
-        let mut held = vec![false; valid.len()];
-        for set in &self.sets {
-            for (held, hit) in held.iter_mut().zip(set.matches(&self.salt, &valid)) {
-                *held |= hit;
-            }
-        }
-        let mut held = held.into_iter();
+        let mut held = self.set.matches(&valid).into_iter();
         parsed
             .iter()
             .map(|r| r.is_none() || held.next().unwrap_or(true))
@@ -55,37 +49,20 @@ impl Seen {
     }
 }
 
-/// Downloads the seen sets of the publication `origin` serves, which must commit to
-/// the network's `genesis` ([`MAINNET_GENESIS`](crate::MAINNET_GENESIS) on mainnet), as
-/// for `discover`, since another network's sets say nothing of this one's quotes. Fails if
-/// it declares no seen sets, or unless every provider with a recent or seen set has a
-/// seen set dated with its feed's read times, since receivers a provider without one had
-/// would look unseen.
+/// Downloads complete provider membership independently of PIR session preparation.
+/// Missing history, another network, or inconsistent bytes are errors. The wallet checks freshness.
 pub async fn fetch_seen<T: Transport>(
     origin: &str,
     transport: &T,
     genesis: [u8; 32],
 ) -> Result<Seen, DirectoryError> {
-    let manifest = DirectoryClient::fetch_manifest(origin, transport).await?;
-    // The error `discover`'s coverage check gives for another genesis.
-    if manifest.directory.genesis != genesis {
+    let head = ArchiveClient::head(origin, transport).await?;
+    if head.genesis != genesis {
         return Err(receiver_directory::Error::Coverage.into());
     }
-    let filters = DirectoryClient::fetch_filters(origin, transport, &manifest).await?;
-    let mut seen = Seen {
-        salt: manifest.directory.salt,
-        sets: Vec::new(),
-        since: i64::MIN,
-        until: i64::MAX,
-    };
-    for (label, since, until) in seen_sets(&manifest.directory.filters)? {
-        seen.since = seen.since.max(since);
-        seen.until = seen.until.min(until);
-        // Fetching the filters checked them against the manifest's sets.
-        seen.sets
-            .push(filters.get(label).ok_or(DirectoryError::Malformed)?.clone());
-    }
-    Ok(seen)
+    let set = ArchiveClient::seen(origin, transport, &head).await?;
+    let digest = set.digest()?;
+    Ok(Seen { set, digest })
 }
 
 /// The labels and feed read times of the seen sets among a publication's filter `sets`,
@@ -113,4 +90,137 @@ pub(crate) fn seen_sets(sets: &[FilterSet]) -> Result<Vec<(&str, i64, i64)>, Dir
         .into_values()
         .map(|seen| seen.ok_or(DirectoryError::Malformed))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orchard::keys::{FullViewingKey, Scope, SpendingKey};
+    use receiver_directory::{
+        archive::{Head, SeenRef},
+        blocks::BlockId,
+    };
+    use std::{collections::BTreeMap, sync::Mutex};
+
+    /// Serves only the public archive routes, recording every request.
+    struct PublicArchive {
+        bodies: BTreeMap<String, Vec<u8>>,
+        requests: Mutex<Vec<String>>,
+    }
+    impl Transport for PublicArchive {
+        /// Enforces the caller's public-response limit before handing over bytes.
+        async fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>, DirectoryError> {
+            self.requests.lock().unwrap().push(url.to_owned());
+            let bytes = self.bodies.get(url).ok_or(DirectoryError::Revision)?;
+            if bytes.len() > limit {
+                return Err(DirectoryError::Malformed);
+            }
+            Ok(bytes.clone())
+        }
+        /// Provider checks must never send an encrypted receiver query or session setup.
+        async fn post(&self, _: &str, _: Vec<u8>, _: usize) -> Result<Vec<u8>, DirectoryError> {
+            panic!("provider membership requested PIR")
+        }
+    }
+    /// Builds a fixed-universe capture and the immutable object its head declares.
+    fn fixture() -> (PublicArchive, SeenSet, [[u8; 43]; 2]) {
+        let sk = SpendingKey::from_bytes([7; 32]).unwrap();
+        let fvk = FullViewingKey::from(&sk);
+        let receivers =
+            [0u32, 1].map(|i| fvk.address_at(i, Scope::External).to_raw_address_bytes());
+        let mut set = SeenSet::new([1; 32], 100).union([&receivers[0]]);
+        set.until_unix = 200;
+        let digest = set.digest().unwrap();
+        let head = Head {
+            genesis: [1; 32],
+            archive: [2; 32],
+            epoch: 0,
+            first_height: 1,
+            frontier: BlockId {
+                height: 10,
+                hash: [3; 32],
+            },
+            index_root: [4; 32],
+            seen: Some(SeenRef {
+                digest,
+                since_unix: 100,
+                until_unix: 200,
+            }),
+        };
+        let bodies = BTreeMap::from([
+            (
+                "https://receiver.test/v1/receiver/archive/head".into(),
+                head.encode().unwrap(),
+            ),
+            (
+                format!(
+                    "https://receiver.test/v1/receiver/archive/seen/{}",
+                    hex::encode(digest)
+                ),
+                set.encode().unwrap(),
+            ),
+        ]);
+        (
+            PublicArchive {
+                bodies,
+                requests: Mutex::new(vec![]),
+            },
+            set,
+            receivers,
+        )
+    }
+    /// The caller gets the exact object digest, dates and conservative receiver membership without PIR.
+    #[tokio::test]
+    async fn provider_capture_uses_only_public_archive_routes() {
+        let (http, set, receivers) = fixture();
+        let fetched = fetch_seen("https://receiver.test/", &http, [1; 32])
+            .await
+            .unwrap();
+        assert_eq!(fetched.digest(), set.digest().unwrap());
+        assert_eq!((fetched.since(), fetched.until()), (100, 200));
+        assert_eq!(fetched.contains(&receivers), [true, false]);
+        assert!(fetched.contains(&[[255; 43]])[0]);
+        let paths = http.requests.lock().unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().all(|p| p.contains("/archive/")));
+    }
+    /// Another network and an unavailable or inconsistent object cannot be mistaken for an empty set.
+    #[tokio::test]
+    async fn provider_capture_refuses_incomplete_or_mismatched_history() {
+        let (http, _, _) = fixture();
+        assert!(
+            fetch_seen("https://receiver.test", &http, [8; 32])
+                .await
+                .is_err()
+        );
+        assert_eq!(http.requests.lock().unwrap().len(), 1);
+        for mode in ["missing", "absent", "changed"] {
+            let (mut http, _, _) = fixture();
+            let key = "https://receiver.test/v1/receiver/archive/head";
+            let mut head = Head::decode(&http.bodies[key]).unwrap();
+            let object = format!(
+                "https://receiver.test/v1/receiver/archive/seen/{}",
+                hex::encode(head.seen.as_ref().unwrap().digest)
+            );
+            match mode {
+                "missing" => {
+                    head.seen = None;
+                    http.bodies.insert(key.into(), head.encode().unwrap());
+                }
+                "absent" => {
+                    http.bodies.remove(&object);
+                }
+                _ => {
+                    http.bodies
+                        .insert(object, SeenSet::new([1; 32], 100).encode().unwrap());
+                }
+            }
+            assert!(
+                fetch_seen("https://receiver.test", &http, [1; 32])
+                    .await
+                    .is_err(),
+                "{mode}"
+            );
+        }
+    }
 }
