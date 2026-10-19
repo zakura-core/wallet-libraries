@@ -173,25 +173,32 @@ fn disabled_before_scan_does_not_discover() {
 /// Repair while disabled can re-mine a known receipt but cannot admit another payment to its key.
 #[test]
 fn disabled_reorg_repair_keeps_only_known_receipts() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let key = KeyId::new(Purpose::Receive, 0);
-    let known = payment_hint(&mut st, key);
-    st.scan_cached_blocks_with_recovery(known.block.height, 1, std::slice::from_ref(&known));
-    let later = payment_hint(&mut st, key);
-    st.truncate_to_height_retaining_cache(known.block.height - 1);
-    st.wallet_mut()
-        .set_one_time_recovery_enabled(account, false)
-        .unwrap();
-    st.scan_cached_blocks_with_recovery(known.block.height, 2, &[]);
-    assert_eq!(unspent_keys(&st, later.block.height), vec![Some(key)]);
-    assert_eq!(evidence(&st), 0);
-    let mined: u32 = value(
-        st.wallet().conn(),
-        "SELECT mined_height FROM transactions WHERE id_tx=(SELECT transaction_id FROM ironwood_received_notes LIMIT 1)",
-        [],
-    );
-    assert_eq!(mined, u32::from(known.block.height));
+    for corrected_labels in [false, true] {
+        let mut st = scanned_wallet();
+        let account = st.test_account().unwrap().id();
+        let key = KeyId::new(Purpose::Receive, 0);
+        let known = payment_hint(&mut st, key);
+        st.scan_cached_blocks_with_recovery(known.block.height, 1, std::slice::from_ref(&known));
+        if corrected_labels {
+            // A PIR-admitted note can have a valid note identity but untrusted transaction labels.
+            st.wallet().conn().execute("UPDATE transactions SET txid=?1 WHERE id_tx=(SELECT transaction_id FROM ironwood_received_notes LIMIT 1)",[[8u8;32]]).unwrap();
+            st.wallet().conn().execute("UPDATE ironwood_received_notes SET action_index=9 WHERE one_time_key_id IS NOT NULL",[]).unwrap();
+        }
+        let later = payment_hint(&mut st, key);
+        st.truncate_to_height_retaining_cache(known.block.height - 1);
+        st.wallet_mut()
+            .set_one_time_recovery_enabled(account, false)
+            .unwrap();
+        st.scan_cached_blocks_with_recovery(known.block.height, 2, &[]);
+        assert_eq!(unspent_keys(&st, later.block.height), vec![Some(key)]);
+        assert_eq!(evidence(&st), 0);
+        let mined: u32 = value(
+            st.wallet().conn(),
+            "SELECT mined_height FROM transactions WHERE id_tx=(SELECT transaction_id FROM ironwood_received_notes LIMIT 1)",
+            [],
+        );
+        assert_eq!(mined, u32::from(known.block.height));
+    }
 }
 
 /// Whole-block evidence covers both notes and settles a delayed filter after a database restart.

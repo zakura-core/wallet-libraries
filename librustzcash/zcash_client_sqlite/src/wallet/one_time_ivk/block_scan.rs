@@ -133,7 +133,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: Parameters, CL: Clock, R: Rng> OneTi
     }
 }
 
-/// Applies current per-key permits and preserves only exact known receipts when they are stale.
+/// Applies current per-key permits and preserves known authenticated notes when they are stale.
 pub(crate) fn fence<P: Parameters, CL, R>(
     db: &WalletDb<SqlTransaction<'_>, P, CL, R>,
     blocks: &mut [ScannedBlock<AccountUuid>],
@@ -163,10 +163,14 @@ pub(crate) fn fence<P: Parameters, CL, R>(
                 valid.push((permit.account, permit.key));
             }
         }
-        block.retain_one_time_receipts(|txid,output| -> Result<bool,SqliteClientError> {
+        block.retain_one_time_receipts(|_txid,output| -> Result<bool,SqliteClientError> {
             let key=output.one_time_key_id().expect("one-time receipt");
             if valid.contains(&(*output.account_id(),key)) {return Ok(true);}
-            let known:bool=db.conn.0.query_row("SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t ON t.id_tx=n.transaction_id JOIN ironwood_one_time_keys k ON k.id=n.one_time_key_id JOIN accounts a ON a.id=k.account_id WHERE t.txid=?1 AND n.action_index=?2 AND a.uuid=?3 AND k.purpose=?4 AND k.key_index=?5)",params![txid.as_ref(),output.index(),output.account_id().0,super::purpose_code(key.purpose())?,key.index().to_be_bytes()],|r|r.get::<_,bool>(0))?;
+            let known:bool=db.conn.0.query_row("SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n
+                JOIN ironwood_one_time_keys k ON k.id=n.one_time_key_id AND k.account_id=n.account_id
+                JOIN accounts a ON a.id=k.account_id
+                WHERE n.nf=?1 AND a.uuid=?2 AND k.purpose=?3 AND k.key_index=?4)",
+                params![output.nf().map(|nf|nf.to_bytes()),output.account_id().0,super::purpose_code(key.purpose())?,key.index().to_be_bytes()],|r|r.get::<_,bool>(0))?;
             if !known && let Some(nf)=output.nf() {refused_nullifiers.insert((*output.account_id(),nf.to_bytes()));}
             Ok(known)
         })?;
