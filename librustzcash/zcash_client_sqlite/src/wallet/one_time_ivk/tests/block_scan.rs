@@ -345,61 +345,92 @@ fn account_toggle_does_not_cancel_other_accounts() {
 /// A refused receipt must not leave a later in-batch spend visible as a wallet transaction.
 #[test]
 fn stale_receipt_does_not_leave_a_phantom_spend() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    check_seen(st.wallet_mut().db_mut(), account);
-    let key = KeyId::new(Purpose::Receive, 0);
-    let recipient = IronwoodFvk(derive(&st, key));
-    let amount = Zatoshis::const_from_u64(50_000);
-    let (height, _, nf) = st.generate_next_block(&recipient, AddressType::DefaultExternal, amount);
-    let block = ChainPoint {
-        height,
-        hash: st.latest_cached_block().unwrap().chain_state().block_hash(),
-    };
-    st.generate_next_block_spending(
-        &recipient,
-        (nf, amount),
-        unified(foreign_receiver()),
-        amount,
-    );
-    let network = *st.network();
-    let path = st.wallet().data_file_path();
-    let mut scanning = WalletDb::for_path(path, network, test_clock(), test_rng()).unwrap();
-    let source = super::scanning::DuringScan {
-        inner: st.cache(),
-        at: 2,
-        reads: Cell::new(0),
-        run: || {
-            WalletDb::for_path(path, network, test_clock(), test_rng())
+    for ordinary_change in [false, true] {
+        let mut st = ironwood_wallet();
+        let account = st.test_account().unwrap().id();
+        check_seen(st.wallet_mut().db_mut(), account);
+        let key = KeyId::new(Purpose::Receive, 0);
+        let recipient = IronwoodFvk(derive(&st, key));
+        let amount = Zatoshis::const_from_u64(50_000);
+        let (height, _, nf) =
+            st.generate_next_block(&recipient, AddressType::DefaultExternal, amount);
+        let block = ChainPoint {
+            height,
+            hash: st.latest_cached_block().unwrap().chain_state().block_hash(),
+        };
+        let ordinary = IronwoodFvk(parent(&st));
+        st.generate_next_block_spending(
+            if ordinary_change {
+                &ordinary
+            } else {
+                &recipient
+            },
+            (nf, amount),
+            unified(foreign_receiver()),
+            Zatoshis::const_from_u64(if ordinary_change { 40_000 } else { 50_000 }),
+        );
+        let network = *st.network();
+        let path = st.wallet().data_file_path();
+        let mut scanning = WalletDb::for_path(path, network, test_clock(), test_rng()).unwrap();
+        let source = super::scanning::DuringScan {
+            inner: st.cache(),
+            at: 2,
+            reads: Cell::new(0),
+            run: || {
+                WalletDb::for_path(path, network, test_clock(), test_rng())
+                    .unwrap()
+                    .set_one_time_recovery_enabled(account, false)
+                    .unwrap();
+            },
+        };
+        scan_cached_blocks_with_recovery(
+            &network,
+            &source,
+            &mut scanning,
+            height,
+            &ChainState::empty(height - 1, BlockHash([0; 32])),
+            2,
+            &[BlockHints {
+                block,
+                keys: vec![(account, key)],
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            value::<u32>(st.wallet().conn(), "SELECT COUNT(*) FROM transactions", []),
+            u32::from(ordinary_change)
+        );
+        assert_eq!(evidence(&st), 0);
+        assert_eq!(
+            st.wallet()
+                .block_fully_scanned()
                 .unwrap()
-                .set_one_time_recovery_enabled(account, false)
-                .unwrap();
-        },
-    };
-    scan_cached_blocks_with_recovery(
-        &network,
-        &source,
-        &mut scanning,
-        height,
-        &ChainState::empty(height - 1, BlockHash([0; 32])),
-        2,
-        &[BlockHints {
-            block,
-            keys: vec![(account, key)],
-        }],
-    )
-    .unwrap();
-    assert_eq!(
-        value::<u32>(st.wallet().conn(), "SELECT COUNT(*) FROM transactions", []),
-        0
-    );
-    assert_eq!(evidence(&st), 0);
-    assert_eq!(
-        st.wallet()
-            .block_fully_scanned()
-            .unwrap()
-            .unwrap()
-            .block_height(),
-        height + 1
-    );
+                .unwrap()
+                .block_height(),
+            height + 1
+        );
+        st.wallet_mut()
+            .set_one_time_recovery_enabled(account, true)
+            .unwrap();
+        st.scan_cached_blocks_with_recovery(
+            height,
+            1,
+            &[BlockHints {
+                block,
+                keys: vec![(account, key)],
+            }],
+        );
+        assert_eq!(
+            value::<u32>(
+                st.wallet().conn(),
+                "SELECT COUNT(*) FROM ironwood_received_notes WHERE one_time_key_id IS NOT NULL",
+                []
+            ),
+            1
+        );
+        assert_eq!(
+            unspent_keys(&st, height + 1),
+            if ordinary_change { vec![None] } else { vec![] }
+        );
+    }
 }

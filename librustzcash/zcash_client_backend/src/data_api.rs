@@ -2926,7 +2926,29 @@ impl<AccountId> ScannedBlock<AccountId> {
         mut keep: impl FnMut(&crate::wallet::WalletIronwoodSpend<AccountId>) -> bool,
     ) {
         for tx in &mut self.transactions {
-            tx.retain_ironwood_spends(&mut keep);
+            let mut unlinked = Vec::new();
+            tx.retain_ironwood_spends(&mut |spend| {
+                let retained = keep(spend);
+                if !retained {
+                    unlinked.push(*spend.nf());
+                }
+                retained
+            });
+            // A later receipt replay must still link these now-unowned spends.
+            if !unlinked.is_empty() {
+                if let Some((_, _, nullifiers)) = self
+                    .ironwood
+                    .nullifier_map
+                    .iter_mut()
+                    .find(|(_, txid, _)| *txid == tx.txid())
+                {
+                    nullifiers.extend(unlinked);
+                } else {
+                    self.ironwood
+                        .nullifier_map
+                        .push((tx.block_index(), tx.txid(), unlinked));
+                }
+            }
         }
         self.transactions.retain(WalletTx::has_wallet_activity);
     }
