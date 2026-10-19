@@ -26,7 +26,9 @@ pub mod restore;
 /// One-time IVK reads: the keys to scan and decrypt with.
 #[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait OneTimeIvkRead: WalletRead {
-    /// Returns the one-time keys to trial-decrypt in every scan batch.
+    /// Returns every open one-time key, across all accounts. Scanning uses
+    /// [`Self::get_one_time_scanning_keys_for_range`] instead, so this suits checking
+    /// whether a key is still scanned.
     fn get_one_time_scanning_keys(
         &self,
     ) -> Result<Vec<OneTimeScanningKey<Self::AccountId>>, Self::Error>;

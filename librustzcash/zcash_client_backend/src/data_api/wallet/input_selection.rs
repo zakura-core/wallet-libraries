@@ -2781,10 +2781,8 @@ where
     }
 }
 
-/// Helper that performs the dust-input retry pattern used by `propose_shielding`.
-///
-/// `note` as fee and change calculation sees an Ironwood input: its ID, its value, and
-/// whether it is a one-time-key note (see `orchard_fees::InputView::is_one_time`).
+/// Returns `note` as fee and change calculation sees an Ironwood input: its ID, its value,
+/// and whether it is a one-time-key note (see `orchard_fees::InputView::is_one_time`).
 #[cfg(feature = "orchard")]
 fn ironwood_input<NoteRef: Copy>(
     note: &crate::wallet::ReceivedNote<NoteRef, ::orchard::Note>,
@@ -2796,6 +2794,8 @@ fn ironwood_input<NoteRef: Copy>(
     )
 }
 
+/// Helper that performs the dust-input retry pattern used by `propose_shielding`.
+///
 /// On the first call to [`ChangeStrategy::compute_balance`], if the strategy
 /// reports [`ChangeError::DustInputs`], those inputs are removed from
 /// `transparent_inputs` and the balance is recomputed. The resulting proposal
