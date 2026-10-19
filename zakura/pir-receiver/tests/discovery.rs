@@ -413,10 +413,10 @@ impl Routes {
     /// The status and body for `method` on `path`.
     fn answer(&self, method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
         let route = path.strip_prefix("/v1/receiver/").unwrap_or(path);
-        if method == "GET" {
-            if let Some(bytes) = self.archive.get(route) {
-                return (200, bytes.clone());
-            }
+        if method == "GET"
+            && let Some(bytes) = self.archive.get(route)
+        {
+            return (200, bytes.clone());
         }
         if (method, route) == ("POST", "query") {
             return match self.server.respond(body) {
