@@ -41,6 +41,7 @@ fn cumulative_span(start: u32) -> Span {
     }
 }
 
+/// The 32 bytes a vector field holds in hex.
 fn hex32(value: &Value) -> Hash {
     hex::decode(value.as_str().unwrap())
         .unwrap()
@@ -138,6 +139,8 @@ fn objects_reproduce_their_pinned_vectors() {
     assert_eq!(CatalogHead::decode(&head.encode().unwrap()).unwrap(), head);
 }
 
+/// A bucket and a cumulative set decode to themselves, count repeat recipients once,
+/// match every member and rarely match anything else.
 #[test]
 fn paid_sets_round_trip_and_never_miss_a_member() {
     let members = receivers(500, 1);
@@ -161,6 +164,7 @@ fn paid_sets_round_trip_and_never_miss_a_member() {
     assert!(cumulative.matches(&members).iter().all(|m| *m));
 }
 
+/// A bucket without payments builds, round-trips and matches nothing.
 #[test]
 fn empty_buckets_are_valid() {
     let empty = PaidSet::build(GENESIS, 0, bucket_span(48), []).unwrap();
@@ -169,6 +173,8 @@ fn empty_buckets_are_valid() {
     assert_eq!(empty.matches(&receivers(10, 1)), [false; 10]);
 }
 
+/// Only aligned 48-block spans are buckets, and every height above zero lies in the
+/// bucket that `bucket_start` names.
 #[test]
 fn buckets_are_aligned() {
     assert!(bucket_span(0).is_bucket());
@@ -224,6 +230,8 @@ fn the_salt_depends_only_on_network_and_boundaries() {
     assert_ne!(one.digest(), two.digest());
 }
 
+/// Empty spans fail to build, and truncated, extended, corrupted or oversized
+/// encodings fail to decode.
 #[test]
 fn paid_decoding_is_strict() {
     assert!(matches!(
@@ -281,6 +289,8 @@ fn buckets_have_a_size_bound() {
     assert_eq!(PaidSet::decode(&cumulative.encode()).unwrap(), cumulative);
 }
 
+/// A seen set of 30,000 values stays near 70 KB, decodes to itself, matches every
+/// member and falsely matches about `K / U` of others.
 #[test]
 fn seen_sets_round_trip_and_never_miss_a_member() {
     let members = receivers(30_000, 1);
@@ -345,6 +355,8 @@ fn seen_membership_is_monotone() {
     assert!(!other_network.is_superset(&first));
 }
 
+/// Unsupported parameters, reversed feed times, truncation, extension, corrupted
+/// header fields and oversized encodings are refused.
 #[test]
 fn seen_decoding_is_strict() {
     assert!(SeenSet::new(GENESIS, 0).with_p(0).is_err());
@@ -420,6 +432,8 @@ fn catalog(buckets: u32) -> (CatalogHead, BucketIndex, Vec<PaidSet>, PaidSet, Se
     (head, index, sets, paid, seen)
 }
 
+/// A head accepts exactly the index, buckets, cumulative set and seen set it names,
+/// built under its epoch on its network.
 #[test]
 fn catalogs_check_every_object_they_name() {
     let (head, index, buckets, paid, seen) = catalog(3);
@@ -451,13 +465,15 @@ fn catalogs_check_every_object_they_name() {
     let foreign = PaidSet::build([2; 32], 7, bucket_span(4992), []).unwrap();
     assert!(head.check_bucket(&index, &foreign).is_err());
 
-    // A cumulative set must be the named one and end within the retained buckets.
+    // A cumulative set must be the named one and end at or after the oldest retained
+    // bucket's start. Its cutoff may lie at that start, inside the open bucket
+    // `(5136, 5184]` or past it, since the wallet bridges with the buckets after it.
     assert!(head.check_paid(&buckets[0]).is_err());
     let (_, _, _, older, _) = catalog(2);
     assert!(head.check_paid(&older).is_err());
-    for end in [4991, 5137] {
+    for (end, accepted) in [(4991, false), (4992, true), (5150, true), (6000, true)] {
         let mut moved = head.clone();
-        let outside = PaidSet::build(
+        let cutoff = PaidSet::build(
             GENESIS,
             7,
             Span {
@@ -467,8 +483,8 @@ fn catalogs_check_every_object_they_name() {
             [],
         )
         .unwrap();
-        moved.paid = outside.digest();
-        assert!(moved.check_paid(&outside).is_err());
+        moved.paid = cutoff.digest();
+        assert_eq!(moved.check_paid(&cutoff).is_ok(), accepted, "{end}");
     }
     let mut epoch = head.clone();
     epoch.epoch = 8;
@@ -478,6 +494,8 @@ fn catalogs_check_every_object_they_name() {
     assert!(head.check_seen(&grown).is_err());
 }
 
+/// Indexes are contiguous, aligned and bounded, and a head accepts only the index
+/// listing exactly its retained buckets.
 #[test]
 fn bucket_indexes_are_contiguous_and_match_their_head() {
     let (head, index, buckets, _, _) = catalog(3);
@@ -529,6 +547,8 @@ fn bucket_indexes_are_contiguous_and_match_their_head() {
     assert!(BucketIndex::decode(&trailing).is_err());
 }
 
+/// Heads with unaligned, reversed or too many retained buckets fail to encode and
+/// decode, as do truncated and extended encodings.
 #[test]
 fn catalog_heads_are_validated() {
     let (head, ..) = catalog(1);

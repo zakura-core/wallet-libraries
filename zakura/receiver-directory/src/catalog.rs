@@ -144,15 +144,15 @@ impl CatalogHead {
     }
 
     /// Checks that `paid` is the cumulative set this head names, built under its epoch
-    /// on the same network, and ending within the retained buckets so a wallet can
-    /// bridge from its end with them.
+    /// on the same network, and ending at or after the oldest retained bucket's start,
+    /// so a wallet can bridge from its cutoff with every closed bucket that intersects
+    /// the heights after it. The cutoff may lie inside the open bucket or past the
+    /// latest closed end. The wallet then waits for the buckets that cover it.
     pub fn check_paid(&self, paid: &PaidSet) -> Result<(), Error> {
-        let end = paid.span().end;
         if paid.genesis() != self.genesis
             || paid.epoch() != self.epoch
             || paid.digest() != self.paid
-            || end < self.oldest_start
-            || end > self.latest_end
+            || paid.span().end < self.oldest_start
         {
             return Err(Error::Malformed);
         }

@@ -24,6 +24,7 @@ const ORIGIN: &str = "https://directory.example/";
 struct Objects(HashMap<String, Vec<u8>>);
 
 impl Transport for Objects {
+    /// The object at `url`, or a transport error if there is none or it exceeds `limit`.
     async fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>, Error> {
         match self.0.get(url) {
             Some(body) if body.len() <= limit => Ok(body.clone()),
@@ -32,6 +33,7 @@ impl Transport for Objects {
         }
     }
 
+    /// Never called: objects are only fetched.
     async fn post(&self, _: &str, _: Vec<u8>, _: usize) -> Result<Vec<u8>, Error> {
         unreachable!("objects are only fetched")
     }
@@ -119,6 +121,8 @@ fn publication() -> (Manifest, CatalogHead, Objects) {
     (manifest, head, Objects(objects))
 }
 
+/// The catalog, index, every bucket, the cumulative set and the seen set are fetched
+/// from their routes and pass their checks.
 #[test]
 fn every_object_is_fetched_by_digest_and_checked() {
     let (manifest, head, objects) = publication();
@@ -140,6 +144,8 @@ fn every_object_is_fetched_by_digest_and_checked() {
     assert_eq!(seen.matches(&[[4; 43]]), [true]);
 }
 
+/// An unlisted start, bytes that are not the named object and a catalog for another
+/// network are refused.
 #[test]
 fn objects_that_do_not_match_their_digest_or_network_are_refused() {
     let (manifest, head, mut objects) = publication();
@@ -168,5 +174,40 @@ fn objects_that_do_not_match_their_digest_or_network_are_refused() {
     assert!(matches!(
         ready(DirectoryClient::fetch_catalog(ORIGIN, &objects, &foreign)),
         Err(Error::Directory(receiver_directory::Error::Coverage))
+    ));
+}
+
+/// An index listing one digest at two starts cannot make a bucket fetched for the
+/// second start return the first start's interval.
+#[test]
+fn an_aliased_index_cannot_return_another_interval() {
+    let (_, head, mut objects) = publication();
+    let index = ready(DirectoryClient::fetch_bucket_index(ORIGIN, &objects, &head)).unwrap();
+    let (first, digest) = index.iter().next().unwrap();
+    let aliased =
+        BucketIndex::new(head.genesis, vec![(first, digest), (first + 48, digest)]).unwrap();
+    let head = CatalogHead {
+        index: aliased.digest(),
+        ..head
+    };
+    head.check_index(&aliased).unwrap();
+    let bytes = objects.0[&url(&format!("bucket/{first}"), &digest)].clone();
+    objects
+        .0
+        .insert(url(&format!("bucket/{}", first + 48), &digest), bytes);
+    let fetched = ready(DirectoryClient::fetch_bucket(
+        ORIGIN, &objects, &head, &aliased, first,
+    ))
+    .unwrap();
+    assert_eq!(fetched.span().start, first);
+    assert!(matches!(
+        ready(DirectoryClient::fetch_bucket(
+            ORIGIN,
+            &objects,
+            &head,
+            &aliased,
+            first + 48
+        )),
+        Err(Error::Malformed)
     ));
 }

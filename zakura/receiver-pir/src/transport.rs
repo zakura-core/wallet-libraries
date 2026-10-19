@@ -143,9 +143,10 @@ impl<T: Transport> DirectoryClient<T> {
     }
 
     /// Downloads the bucket starting at `start` from `/v1/receiver/bucket/<start>/<digest>`,
-    /// with the digest `index` lists, and checks it with [`CatalogHead::check_bucket`]. A
-    /// start `index` does not list fails with [`receiver_directory::Error::Coverage`].
-    /// The caller checks the boundary hashes against its own chain.
+    /// with the digest `index` lists, and checks that it starts at `start` and passes
+    /// [`CatalogHead::check_bucket`]. A start `index` does not list fails with
+    /// [`receiver_directory::Error::Coverage`]. The caller checks the boundary hashes
+    /// against its own chain.
     pub async fn fetch_bucket(
         origin: &str,
         http: &T,
@@ -159,6 +160,11 @@ impl<T: Transport> DirectoryClient<T> {
         let route = format!("bucket/{start}");
         let bytes = fetch_object(origin, http, &route, MAX_BUCKET_BYTES, &digest).await?;
         let bucket = PaidSet::decode(&bytes)?;
+        // An index listing one digest at two starts would otherwise return another
+        // interval's bucket.
+        if bucket.span().start != start {
+            return Err(Error::Malformed);
+        }
         head.check_bucket(index, &bucket)?;
         Ok(bucket)
     }

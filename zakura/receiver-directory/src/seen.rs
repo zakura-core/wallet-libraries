@@ -33,7 +33,12 @@ pub const U: u64 = 1 << 32;
 pub const DEFAULT_P: u8 = 17;
 /// The Golomb-Rice parameters a set may carry.
 const P_RANGE: RangeInclusive<u8> = 1..=32;
-/// Largest encoded seen set, about seven million values at [`DEFAULT_P`].
+/// Most values a seen set holds, whatever its parameter. About 140 times the 30,000
+/// receivers the feeds hold today, where a nonmember's false match rate reaches about
+/// 0.1%. Decoding checks it before allocating.
+pub const MAX_SEEN_VALUES: u32 = 1 << 22;
+/// Largest encoded seen set. [`MAX_SEEN_VALUES`] values take about 9.5 MB at
+/// [`DEFAULT_P`].
 pub const MAX_SEEN_BYTES: usize = 16 << 20;
 const MAGIC: &[u8; 8] = b"IWSEEN\0\0";
 
@@ -140,11 +145,14 @@ impl SeenSet {
     /// times, the parameter, the value count, then the payload's `u32` length and the
     /// payload, the Golomb-Rice coded differences between consecutive values (the
     /// first from zero) padded with zero bits to a byte. Feed times out of order are
-    /// [`Error::Malformed`], and an encoding over [`MAX_SEEN_BYTES`] is
-    /// [`Error::Capacity`].
+    /// [`Error::Malformed`], and more than [`MAX_SEEN_VALUES`] values or an encoding
+    /// over [`MAX_SEEN_BYTES`] is [`Error::Capacity`].
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         if self.since_unix > self.until_unix {
             return Err(Error::Malformed);
+        }
+        if self.values.len() > MAX_SEEN_VALUES as usize {
+            return Err(Error::Capacity);
         }
         let mut out = object::header(MAGIC, &self.genesis);
         out.extend(self.since_unix.to_le_bytes());
@@ -174,8 +182,8 @@ impl SeenSet {
     }
 
     /// Strictly decodes a set [`Self::encode`] wrote, of at most [`MAX_SEEN_BYTES`]:
-    /// ordered feed times, a supported parameter, ascending unique values below [`U`]
-    /// matching the count, zero padding and nothing after it.
+    /// ordered feed times, a supported parameter, at most [`MAX_SEEN_VALUES`] ascending
+    /// unique values below [`U`] matching the count, zero padding and nothing after it.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         if bytes.len() > MAX_SEEN_BYTES {
             return Err(Error::Malformed);
@@ -185,16 +193,13 @@ impl SeenSet {
         let (p, count) = (r.u8()?, r.u32()?);
         let payload = r.payload()?;
         r.finish()?;
-        if since_unix > until_unix || !P_RANGE.contains(&p) {
+        if since_unix > until_unix || !P_RANGE.contains(&p) || count > MAX_SEEN_VALUES {
             return Err(Error::Malformed);
         }
-        let values: Vec<u32> = read_rice_deltas(payload, count.into(), p, U)?
+        let values = read_rice_deltas(payload, count.into(), p, U, true)?
             .into_iter()
             .map(|v| v as u32)
             .collect();
-        if values.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(Error::Malformed);
-        }
         Ok(Self {
             genesis,
             since_unix,
@@ -209,7 +214,7 @@ impl SeenSet {
 mod tests {
     use super::*;
 
-    /// A repeated value is refused, though its coding is well formed.
+    /// A repeated value is refused while decoding, though its coding is well formed.
     #[test]
     fn values_must_be_unique() {
         let set = |values| SeenSet {
@@ -218,5 +223,49 @@ mod tests {
         };
         assert!(SeenSet::decode(&set(vec![5, 6]).encode().unwrap()).is_ok());
         assert!(SeenSet::decode(&set(vec![5, 5]).encode().unwrap()).is_err());
+    }
+
+    /// The encoding of `count` values with parameter `p` and an all-zero payload of
+    /// `payload` bytes, whatever its values would be.
+    fn forged(p: u8, count: u32, payload: u32) -> Vec<u8> {
+        let mut out = object::header(MAGIC, &[1; 32]);
+        out.extend(0i64.to_le_bytes());
+        out.extend(0i64.to_le_bytes());
+        out.push(p);
+        out.extend(count.to_le_bytes());
+        out.extend(payload.to_le_bytes());
+        out.resize(out.len() + payload as usize, 0);
+        out
+    }
+
+    /// A small parameter cannot make a bounded object claim more values than the
+    /// count bound, and zero deltas fail at the first repeat.
+    #[test]
+    fn low_parameters_cannot_inflate_the_count() {
+        // At one bit per remainder, 16 MiB would otherwise hold about 67 million values.
+        let header = forged(1, 0, 0).len() as u32;
+        let payload = MAX_SEEN_BYTES as u32 - header;
+        let many = forged(1, payload * 4, payload);
+        assert_eq!(many.len(), MAX_SEEN_BYTES);
+        assert!(SeenSet::decode(&many).is_err());
+        assert!(SeenSet::decode(&forged(1, MAX_SEEN_VALUES + 1, payload)).is_err());
+        // Within the bound, an all-zero payload codes repeats of zero.
+        let bytes = (MAX_SEEN_VALUES * 2).div_ceil(8);
+        assert!(SeenSet::decode(&forged(1, MAX_SEEN_VALUES, bytes)).is_err());
+        assert!(SeenSet::decode(&forged(1, 1, 1)).is_ok());
+    }
+
+    /// More values than the bound fail to encode.
+    #[test]
+    fn encoding_applies_the_count_bound() {
+        let set = |count: u32| SeenSet {
+            values: (0..count).collect(),
+            ..SeenSet::new([1; 32], 0)
+        };
+        assert!(set(MAX_SEEN_VALUES).encode().is_ok());
+        assert!(matches!(
+            set(MAX_SEEN_VALUES + 1).encode(),
+            Err(Error::Capacity)
+        ));
     }
 }

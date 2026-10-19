@@ -147,7 +147,7 @@ impl Filter {
         let range = count.checked_mul(params.m).ok_or(Error::Malformed)?;
         Ok(Self {
             bytes: bytes.to_vec(),
-            values: read_rice_deltas(rest, count, params.p, range)?,
+            values: read_rice_deltas(rest, count, params.p, range, false)?,
             params,
         })
     }
@@ -155,12 +155,14 @@ impl Filter {
 
 /// Strictly reads `count` ascending values from their Golomb-Rice coded deltas with
 /// parameter `p`, as `zakura_filters::write_rice_deltas` writes them: every value below
-/// `range`, zero padding and nothing after it.
+/// `range`, each above the last if `distinct`, zero padding and nothing after it. The
+/// caller bounds `count` before calling, since this allocates for every value.
 pub(crate) fn read_rice_deltas(
     mut bytes: &[u8],
     count: u64,
     p: u8,
     range: u64,
+    distinct: bool,
 ) -> Result<Vec<u64>, Error> {
     // Each value takes at least `p + 1` bits; bound the count before allocating.
     if count * (u64::from(p) + 1) > bytes.len() as u64 * 8 {
@@ -179,8 +181,12 @@ pub(crate) fn read_rice_deltas(
         }
         let remainder = read(p)?;
         used += quotient + 1 + u64::from(p);
+        let delta = (quotient << p) + remainder;
+        if distinct && delta == 0 && !values.is_empty() {
+            return Err(Error::Malformed);
+        }
         value = value
-            .checked_add((quotient << p) + remainder)
+            .checked_add(delta)
             .filter(|v| *v < range)
             .ok_or(Error::Malformed)?;
         values.push(value);
