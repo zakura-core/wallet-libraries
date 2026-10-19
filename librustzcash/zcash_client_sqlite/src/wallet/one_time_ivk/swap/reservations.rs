@@ -451,8 +451,8 @@ pub(in crate::wallet::one_time_ivk) fn begin(
     // The provider has the address from here on, so issuance avoids it.
     conn.execute(
         "INSERT INTO ironwood_one_time_operations
-            (one_time_key_id, request, deadline, begun_at, observed_at)
-         VALUES (?1, ?2, ?3, ?4, ?4)",
+            (one_time_key_id, request, deadline, begun_at, observed_at,local_watch_deadline)
+         VALUES (?1, ?2, ?3, ?4, ?4,?3)",
         params![key, request, deadline, now],
     )?;
     Ok(Ok(()))
@@ -516,7 +516,9 @@ pub(in crate::wallet::one_time_ivk) fn finish(
             }
             let changed = conn.execute(
                 "UPDATE ironwood_one_time_operations
-                 SET reference = ?2, memo = ?3, deadline = MIN(deadline, ?4)
+                 SET reference = ?2, memo = ?3, deadline = MIN(deadline, ?4),
+                     local_watch_deadline=CASE WHEN local_watch_deadline IS NOT NULL AND local_watch_accepted=0 THEN ?4 ELSE local_watch_deadline END,
+                     local_watch_accepted=CASE WHEN local_watch_deadline IS NOT NULL THEN 1 ELSE local_watch_accepted END
                  WHERE id = ?1 AND rejected = 0
                      AND (reference IS NULL OR (reference = ?2 AND memo IS ?3))",
                 params![id, deposit.address, deposit.memo, deposit.deadline],

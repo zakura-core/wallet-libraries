@@ -3497,6 +3497,14 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
         #[cfg(feature = "orchard")]
         if let Some(range) = scanned_range {
             if let Some(keys) = one_time_keys {
+                wallet::one_time_ivk::block_recovery::scanned(
+                    self.conn.0,
+                    keys,
+                    &scanned_block_identities,
+                )?;
+                if let Some(&block) = scanned_block_identities.last() {
+                    wallet::one_time_ivk::block_recovery::close_local_watches(self.conn.0, block)?;
+                }
                 wallet::one_time_ivk::rescan_missed_keys(self.conn.0, keys, range.clone())?;
             }
             let sessions = self.one_time_sessions();

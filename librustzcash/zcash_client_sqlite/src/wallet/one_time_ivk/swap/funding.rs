@@ -184,8 +184,8 @@ pub(in crate::wallet::one_time_ivk) fn record_operation<P: Parameters>(
     if !recorded {
         conn.execute(
             "INSERT INTO ironwood_one_time_operations
-                (one_time_key_id, reference, deadline, begun_at, expectation)
-             VALUES (?1, ?2, ?3, ?4, 1)",
+                (one_time_key_id, reference, deadline, begun_at, expectation,local_watch_deadline,local_watch_accepted)
+             VALUES (?1, ?2, ?3, ?4, 1,?3,1)",
             params![key, deposit, deadline, now],
         )?;
     }

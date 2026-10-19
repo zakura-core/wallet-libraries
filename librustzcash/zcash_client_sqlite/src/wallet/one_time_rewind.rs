@@ -32,6 +32,18 @@ pub(crate) fn truncate(
     conn: &rusqlite::Transaction<'_>,
     height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
+    let keep = u32::from(height);
+    conn.execute(
+        "UPDATE ironwood_block_recovery SET work_generation=work_generation+1",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE ironwood_block_receivers SET next_height=MIN(next_height,MAX(?1+1,(SELECT birthday FROM ironwood_block_recovery r WHERE r.account_id=ironwood_block_receivers.account_id)))",
+        [keep],
+    )?;
+    conn.execute("DELETE FROM ironwood_block_matches WHERE height>?1", [keep])?;
+    conn.execute("DELETE FROM ironwood_key_scans WHERE height>?1", [keep])?;
+    conn.execute("UPDATE ironwood_one_time_keys SET watch_closed_height=NULL,watch_closed_hash=NULL WHERE watch_closed_height>?1",[keep])?;
     let confirmed_below = u32::from(height)
         .saturating_add(1)
         .saturating_sub(ConfirmationsPolicy::default().untrusted().get());
@@ -102,6 +114,7 @@ pub(crate) fn reopen_discovery(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
 ) -> Result<(), SqliteClientError> {
+    conn.execute("UPDATE ironwood_block_recovery SET needs_prepare=1,work_generation=work_generation+1 WHERE account_id=(SELECT id FROM accounts WHERE uuid=?1)",[account.0])?;
     let owner = "(SELECT id FROM accounts WHERE uuid = ?1)";
     conn.execute(
         &format!("DELETE FROM ironwood_one_time_discovery WHERE account_id = {owner}"),

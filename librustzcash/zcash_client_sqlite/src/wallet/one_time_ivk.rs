@@ -34,6 +34,7 @@
 //!
 //! [`OneTimeIvkRestoreWrite`]: zcash_client_backend::data_api::one_time_ivk::restore::OneTimeIvkRestoreWrite
 
+pub(crate) mod block_recovery;
 pub(crate) mod journal;
 pub(crate) mod restore;
 pub mod swap;
@@ -374,6 +375,13 @@ fn register<P: Parameters>(
         )
         .optional()?
         .ok_or_else(|| corrupt("stored one-time key receiver does not match its key"))?;
+    block_recovery::join(conn, params, account, key_id, &receiver)?;
+    if advances_allocation {
+        conn.execute(
+            "UPDATE ironwood_block_recovery SET needs_prepare=1 WHERE account_id=?1",
+            [account_ref.0],
+        )?;
+    }
     match discovery {
         Discovery::Scan => {
             activate(conn, id, scan_from)?;
@@ -594,9 +602,10 @@ pub(super) fn bind_received_note(
         rusqlite::params![key, note],
     )?;
     conn.execute(
-        "UPDATE ironwood_one_time_keys SET advances_allocation = 1, used = 1 WHERE id = ?1",
+        "UPDATE ironwood_one_time_keys SET advances_allocation = 1, used = 1, authenticated=1,issuance_blocked=1 WHERE id = ?1",
         [key],
     )?;
+    conn.execute("UPDATE ironwood_block_recovery SET needs_prepare=1 WHERE account_id=(SELECT account_id FROM ironwood_one_time_keys WHERE id=?1)",[key])?;
     Ok(())
 }
 

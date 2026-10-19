@@ -21,6 +21,7 @@ use ambassador::delegatable_trait;
 use super::{ScannedBlock, WalletRead, WalletWrite, chain::ChainState};
 use crate::scanning::one_time_ivk::OneTimeScanningKey;
 
+pub mod recovery;
 pub mod restore;
 
 /// One-time IVK reads: the keys to scan and decrypt with.
