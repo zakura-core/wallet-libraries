@@ -147,7 +147,7 @@ use {
     },
     zcash_keys::keys::{UnifiedAddressRequest, transparent::gap_limits::GapLimits},
     zcash_primitives::transaction::{
-        builder::DEFAULT_TX_EXPIRY_DELTA,
+        builder::PRE_NU7_DEFAULT_TX_EXPIRY_DELTA,
         fees::{FeeRule, transparent::InputSize, zip317},
     },
     zcash_protocol::{
@@ -4108,7 +4108,7 @@ where
     // Now advance the chain by 40 blocks; even though a record for the transaction that created
     // `spent_outpoint` exists in the wallet database, the transaction can't be enhanced because
     // the outpoint was fake. Advancing the chain will cause the request for enhancement to expire.
-    for _ in 0..DEFAULT_TX_EXPIRY_DELTA {
+    for _ in 0..PRE_NU7_DEFAULT_TX_EXPIRY_DELTA {
         st.generate_next_block(
             &dfvk,
             AddressType::DefaultExternal,
@@ -4117,7 +4117,7 @@ where
     }
     st.scan_cached_blocks(
         scan_result.scanned_range().end,
-        usize::try_from(DEFAULT_TX_EXPIRY_DELTA).unwrap(),
+        usize::try_from(PRE_NU7_DEFAULT_TX_EXPIRY_DELTA).unwrap(),
     );
 
     // An explicit payload-not-found response completes ordinary enhancement.

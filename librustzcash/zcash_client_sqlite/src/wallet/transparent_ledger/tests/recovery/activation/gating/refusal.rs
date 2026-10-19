@@ -6,7 +6,7 @@ use transparent::{
     bundle::{Bundle, TxIn, TxOut},
 };
 use zcash_primitives::transaction::{
-    Authorized, Transaction, TransactionData, TxVersion, builder::DEFAULT_TX_EXPIRY_DELTA,
+    Authorized, Transaction, TransactionData, TxVersion, builder::PRE_NU7_DEFAULT_TX_EXPIRY_DELTA,
 };
 use zcash_protocol::consensus::BranchId;
 
@@ -537,7 +537,7 @@ fn a_rewound_receive_waits_past_the_default_expiry() {
     st.truncate_to_height(floor);
     scan_new_blocks(&mut st, 45);
     let target = next_target(&st);
-    assert!(BlockHeight::from(target) > unspent.mined_height + DEFAULT_TX_EXPIRY_DELTA);
+    assert!(BlockHeight::from(target) > unspent.mined_height + PRE_NU7_DEFAULT_TX_EXPIRY_DELTA);
     assert_eq!(check(&st, &input, target), pending(account));
     let lookup = st
         .wallet()
@@ -661,7 +661,7 @@ fn a_rewound_spend_keeps_its_output_out_until_recovery_settles_it() {
     );
     // Past the default expiry guess the spender no longer counts, but recovery has yet to cover
     // the replacement chain: the output waits rather than becoming spendable.
-    scan_new_blocks(&mut st, DEFAULT_TX_EXPIRY_DELTA as usize);
+    scan_new_blocks(&mut st, PRE_NU7_DEFAULT_TX_EXPIRY_DELTA as usize);
     assert_eq!(check(&st, &input, next_target(&st)), pending(account));
 
     // Recovery places the spend again on the replacement chain.
