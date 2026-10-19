@@ -32,8 +32,8 @@ pub(crate) fn prepare<P: Parameters>(
         }
         let (owner, _) = account_key(conn, params, account)?;
         let state = block_recovery::state(conn, params, account)?;
-        // Re-mining an already known transaction remains ordinary wallet maintenance.
-        let known=conn.prepare("SELECT DISTINCT k.purpose,k.key_index FROM ironwood_one_time_keys k JOIN ironwood_received_notes n ON n.one_time_key_id=k.id JOIN transactions t ON t.id_tx=n.transaction_id WHERE k.account_id=?1 AND t.mined_height IS NULL")?.query_and_then([owner.0],stored_key_id)?.collect::<Result<Vec<_>,_>>()?;
+        // Re-mining and restoring retained witnesses remain ordinary wallet maintenance.
+        let known=conn.prepare("SELECT DISTINCT k.purpose,k.key_index FROM ironwood_one_time_keys k JOIN ironwood_received_notes n ON n.one_time_key_id=k.id JOIN transactions t ON t.id_tx=n.transaction_id WHERE k.account_id=?1 AND (t.mined_height IS NULL OR t.mined_height=?2)")?.query_and_then(params![owner.0,u32::from(block.height)],stored_key_id)?.collect::<Result<Vec<_>,_>>()?;
         for key in known {
             selected.insert((account, key), false);
         }

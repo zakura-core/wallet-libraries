@@ -441,3 +441,62 @@ fn stale_receipt_does_not_leave_a_phantom_spend() {
         );
     }
 }
+
+/// Checks whether this known receipt still has its retained commitment-tree leaf.
+fn has_mark(st: &mut State, position: incrementalmerkletree::Position) -> bool {
+    tx(st.wallet_mut().db_mut(), |conn, _| {
+        Ok(crate::ironwood_tree(conn)?
+            .get_marked_leaf(position)?
+            .is_some())
+    })
+    .unwrap()
+}
+
+/// A deep rewind can clear tree marks while retaining mined rows that still need local repair.
+#[test]
+fn disabled_deep_rewind_rebuilds_known_receipt_witnesses() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let prior = st.latest_cached_block().unwrap().chain_state().clone();
+    let key = KeyId::new(Purpose::Receive, 0);
+    let known = payment_hint(&mut st, key);
+    st.scan_cached_blocks_with_recovery(known.block.height, 1, std::slice::from_ref(&known));
+    let position = incrementalmerkletree::Position::from(0);
+    assert!(has_mark(&mut st, position));
+    let count = crate::PRUNING_DEPTH as usize + 10;
+    let ordinary = IronwoodFvk(parent(&st));
+    for _ in 0..count {
+        st.generate_next_block(
+            &ordinary,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(1_000),
+        );
+    }
+    st.scan_cached_blocks_with_recovery(known.block.height + 1, count, &[]);
+    // A migrated tree can retain only tip-priority checkpoints while other pools retain older ones.
+    st.wallet()
+        .conn()
+        .execute(
+            "DELETE FROM ironwood_tree_checkpoints WHERE checkpoint_id < ?",
+            [u32::from(known.block.height) + count as u32],
+        )
+        .unwrap();
+    st.wallet_mut()
+        .rewind_to_chain_state(prior, std::collections::HashSet::new())
+        .unwrap();
+    assert_eq!(
+        value::<u32>(
+            st.wallet().conn(),
+            "SELECT mined_height FROM transactions WHERE id_tx=(SELECT transaction_id FROM ironwood_received_notes LIMIT 1)",
+            []
+        ),
+        u32::from(known.block.height)
+    );
+    assert!(!has_mark(&mut st, position));
+    st.wallet_mut()
+        .set_one_time_recovery_enabled(account, false)
+        .unwrap();
+    st.scan_cached_blocks_with_recovery(known.block.height, count + 1, &[]);
+    assert!(has_mark(&mut st, position));
+    assert_eq!(evidence(&st), 0);
+}
