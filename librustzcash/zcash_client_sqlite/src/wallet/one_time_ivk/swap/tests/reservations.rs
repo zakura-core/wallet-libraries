@@ -1492,6 +1492,18 @@ fn record_refund(
     db.record_refund_operation(account, request, deposit, begun + 60, now)
 }
 
+/// Reopens the wallet as after a crash, with an RNG seeded apart from every earlier one,
+/// since a reopened test RNG would repeat earlier request identities.
+fn crash(st: &mut State) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CRASHES: AtomicU64 = AtomicU64::new(1);
+    let seed = CRASHES.fetch_add(1, Ordering::Relaxed);
+    let path = st.wallet().data_file_path().to_owned();
+    let rng = zcash_client_backend::data_api::testing::TestRng::seed_from_u64(seed);
+    let reopened = WalletDb::for_path(path, *st.network(), test_clock(), rng).unwrap();
+    *st.wallet_mut().db_mut() = reopened;
+}
+
 /// Reserves and quotes `count` refund keys at `now`, expecting `indices`, whose requests
 /// stay unanswered until their deadline a minute later.
 fn expose_refunds(st: &mut State, indices: std::ops::Range<u64>, now: i64) {
@@ -1592,30 +1604,42 @@ fn a_refund_request_survives_a_crash_at_each_step() {
     let db = st.wallet_mut().db_mut();
     let unchecked = db.begin_refund_operation(account, 0, NOW + 60, NOW, None);
     assert_eq!(refusal(unchecked), Some(SeenUnavailable));
-    reopen(&mut st);
+    crash(&mut st);
     let again = reserve_refund_at(&mut st, NOW).unwrap().unwrap();
     assert_eq!(again.key_id(), draft.key_id());
-    // Key 0's response never arrives, and key 1's arrives only after the crash.
+    // Key 0's response never arrives, and key 1's arrives only after a crash.
     let unanswered = begin_refund_at(&mut st, 0, NOW).unwrap().unwrap();
+    crash(&mut st);
     let next = reserve_refund_at(&mut st, NOW).unwrap().unwrap();
     assert_eq!(next.key_id().index(), 1);
     let answered = begin_refund_at(&mut st, 1, NOW).unwrap().unwrap();
-    let second = begin_refund_at(&mut st, 1, NOW);
-    assert_eq!(refusal(second), Some(Stale));
+    crash(&mut st);
+    assert_eq!(refusal(begin_refund_at(&mut st, 1, NOW)), Some(Stale));
     record_refund(&mut st, &answered, &deposit, (NOW, NOW))
         .unwrap()
         .unwrap();
+    crash(&mut st);
+    let db = st.wallet_mut().db_mut();
+    assert!(db.refund_funding_memo(account, 1, &deposit).is_ok());
     // The recorded quote moved the bound past index 31.
     expose_refunds(&mut st, 2..RECEIVE_GAP_LIMIT + 2, NOW);
     assert_eq!(
         refusal(reserve_refund_at(&mut st, NOW)),
         Some(ReservationPolicy::Limit)
     );
+    crash(&mut st);
     let reused = reserve_refund_at(&mut st, NOW + 60).unwrap().unwrap();
     assert_eq!(reused.key_id().index(), 0);
-    let other = deposit_address(&st, 8);
-    let late = record_refund(&mut st, &unanswered, &other, (NOW, NOW + 60));
+    crash(&mut st);
+    let late = record_refund(&mut st, &unanswered, &deposit, (NOW, NOW + 60));
     assert_eq!(refusal(late), Some(Stale));
+    // The shown quote's key stays blocked, and the reissued key takes a new request.
+    assert_eq!(refusal(begin_refund_at(&mut st, 1, NOW + 60)), Some(Stale));
+    let other = deposit_address(&st, 8);
+    let new = begin_refund_at(&mut st, 0, NOW + 60).unwrap().unwrap();
+    record_refund(&mut st, &new, &other, (NOW + 60, NOW + 60))
+        .unwrap()
+        .unwrap();
 }
 
 /// A seen hit on a sparse refund key, one an unauthenticated funding memo named far past
