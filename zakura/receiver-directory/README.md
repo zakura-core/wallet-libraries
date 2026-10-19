@@ -6,8 +6,8 @@ ownership or spendability.
 
 - `record`: the 285-byte payment record, re-exported from
   `zakura-receiver-crypto::wire` with cryptography disabled.
-- `filter`: the labeled receiver filters a publication commits to, which the
-  current discovery pass reads.
+- `filter`: the labeled receiver filters a publication commits to. No wallet reads
+  them any more, so a publisher can drop the session-bound route that serves them.
 - `paid`: paid sets, the receivers paid in a closed interval `(start, end]`. One
   type serves fixed 48-block buckets and cumulative sets over any interval. Each
   binds the network, its boundary block hashes and the payment-history epoch, with

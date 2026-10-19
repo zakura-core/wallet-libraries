@@ -646,8 +646,8 @@ mod tests {
             Zatoshis::const_from_u64(5),
         );
         st.scan_cached_blocks(h3, 1);
-        // Without `orchard`, which cannot settle discovery, a pass or a lookup that read a
-        // publication the scan has yet to judge refuses them too, and so does a late
+        // Without `orchard`, which cannot settle lookups, a lookup that read a publication
+        // the scan has yet to judge refuses them too, and so does a late
         // candidate, which waits for the scan to cover its blocks.
         #[cfg(not(feature = "orchard"))]
         {
@@ -667,12 +667,6 @@ mod tests {
                 Zatoshis::const_from_u64(5),
             );
             for (table, waiting) in [
-                (
-                    "ironwood_one_time_discovery",
-                    "INSERT INTO ironwood_one_time_discovery
-                        (account_id, publication_height, publication_hash)
-                     SELECT id, ?1, zeroblob(32) FROM accounts",
-                ),
                 (
                     "ironwood_one_time_lookup_reads",
                     "INSERT INTO ironwood_one_time_lookup_reads

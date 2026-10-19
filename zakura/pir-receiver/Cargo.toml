@@ -2,7 +2,7 @@
 name = "zakura-pir-receiver"
 version = "0.0.1-rc0"
 publish = false
-description = "Discovery of a restored seed's one-time IVKs through a receiver directory over PIR"
+description = "Recovery of a seed's one-time IVKs through a receiver directory over PIR"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,7 +11,7 @@ readme = "README.md"
 
 [features]
 default = []
-## Discovery, over a wallet store's one-time IVK traits.
+## Recovery, over a wallet store's one-time IVK traits.
 wallet = ["dep:thiserror", "dep:zakura-one-time-ivk", "dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol"]
 
 [dependencies]
@@ -22,7 +22,7 @@ zcash_primitives = { workspace = true, optional = true }
 zcash_protocol = { workspace = true, optional = true }
 receiver-directory = { package = "zakura-receiver-directory", path = "../receiver-directory" }
 receiver-pir = { package = "zakura-receiver-pir", path = "../receiver-pir" }
-# Receiver validation and the common witness file discovery checks payments against.
+# Receiver validation and the common witness file recovery checks payments against.
 zakura-receiver-crypto = { path = "../receiver-crypto" }
 
 [dev-dependencies]
@@ -37,10 +37,6 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 zcash_client_sqlite = { path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "test-dependencies"] }
 zcash_primitives.workspace = true
-
-[[test]]
-name = "discovery"
-required-features = ["wallet"]
 
 [[test]]
 name = "recovery"

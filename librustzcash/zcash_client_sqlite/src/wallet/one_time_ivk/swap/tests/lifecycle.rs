@@ -20,9 +20,15 @@ fn next_height(st: &State) -> BlockHeight {
 
 /// Issues the next refund key, trial-decrypted from [`next_height`].
 fn refund_key(st: &mut State) -> OneTimeKey {
+    issued_key(st, Purpose::Refund)
+}
+
+/// Issues the next `purpose` key, trial-decrypted from [`next_height`], without a
+/// reservation.
+fn issued_key(st: &mut State, purpose: Purpose) -> OneTimeKey {
     let account = st.test_account().unwrap().id();
     let from = next_height(st);
-    reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, from)
+    reserve_key(st.wallet_mut().db_mut(), account, purpose, from)
 }
 
 /// Mines blocks until the latest receipt has the untrusted confirmations closing needs.
@@ -252,15 +258,19 @@ fn expected_receipts_keep_a_key_open_until_received_and_confirmed() {
     }
 }
 
-/// A rewind that un-mines a receipt keeps its key open, or reopens it if it closed, so
-/// scanning again from the rewind mines the receipt again; past its limit, the key waits
-/// for the unmined receipt, which can be mined until it expires. Once the receipt is
-/// confirmed again, the key closes.
+/// A rewind that un-mines a receipt keeps its key open, or reopens an incoming key if it
+/// closed, so scanning again from the rewind mines the receipt again; past its limit, the
+/// key waits for the unmined receipt, which can be mined until it expires. Once the receipt
+/// is confirmed again, the key closes.
 #[test]
 fn a_rewind_that_unmines_a_receipt_keeps_or_reopens_its_key() {
-    for closed_first in [false, true] {
+    for (purpose, closed_first) in [
+        (Purpose::Refund, false),
+        (Purpose::Receive, false),
+        (Purpose::Receive, true),
+    ] {
         let mut st = scanned_wallet();
-        let key = refund_key(&mut st);
+        let key = issued_key(&mut st, purpose);
         let terminal = registered_at() + HOUR;
         observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
         let height = pay(&mut st, key.full_viewing_key(), 10_000);
@@ -278,13 +288,13 @@ fn a_rewind_that_unmines_a_receipt_keeps_or_reopens_its_key() {
     }
 }
 
-/// A rewind that keeps a closed key's receipt but leaves it short of the untrusted
+/// A rewind that keeps a closed incoming key's receipt but leaves it short of the untrusted
 /// confirmations reopens the key, which then scans the replacement blocks; one that
 /// leaves the receipt confirmed does not.
 #[test]
 fn a_rewind_reopens_a_closed_key_whose_receipt_it_leaves_unconfirmed() {
     let mut st = scanned_wallet();
-    let key = refund_key(&mut st);
+    let key = issued_key(&mut st, Purpose::Receive);
     let terminal = registered_at() + HOUR;
     observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
     let height = pay(&mut st, key.full_viewing_key(), 10_000);
@@ -299,13 +309,13 @@ fn a_rewind_reopens_a_closed_key_whose_receipt_it_leaves_unconfirmed() {
     assert_eq!(unspent_keys(&st, replacement), [Some(key.key_id()); 2]);
 }
 
-/// A closed key a rewind below its start reopens scans from the first rescanned block, so
-/// a replacement payment below its old start is found.
+/// A closed incoming key a rewind below its start reopens scans from the first rescanned
+/// block, so a replacement payment below its old start is found.
 #[test]
 fn a_key_reopened_below_its_start_scans_from_the_rewind() {
     let mut st = scanned_wallet();
     st.generate_and_scan_empty_blocks_with_one_time_ivks(2);
-    let key = refund_key(&mut st);
+    let key = issued_key(&mut st, Purpose::Receive);
     let terminal = registered_at() + HOUR;
     observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
     let height = pay(&mut st, key.full_viewing_key(), 10_000);
@@ -319,6 +329,21 @@ fn a_key_reopened_below_its_start_scans_from_the_rewind() {
         st.generate_next_block(&recipient, AddressType::DefaultExternal, value);
     st.scan_cached_blocks_with_one_time_ivks(replacement, 1);
     assert_eq!(unspent_keys(&st, replacement), [Some(key.key_id())]);
+}
+
+/// A rewind that un-mines a closed refund key's receipt leaves the key closed: recovery
+/// finds the replaced refund again from the receiver directory.
+#[test]
+fn a_rewind_leaves_a_closed_refund_key_closed() {
+    let mut st = scanned_wallet();
+    let key = refund_key(&mut st);
+    let terminal = registered_at() + HOUR;
+    observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
+    let height = pay(&mut st, key.full_viewing_key(), 10_000);
+    confirm(&mut st);
+    assert_eq!(close(&mut st, terminal), 1);
+    st.truncate_to_height_retaining_cache(height - 1);
+    assert!(scanning_keys(&st).is_empty());
 }
 
 #[test]

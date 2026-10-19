@@ -43,13 +43,13 @@ pub struct Meta {
 pub enum Class {
     /// Credited by scanning while its key was open.
     FoundLive,
-    /// Credited through discovery: a key a restore found in the receiver directory's
-    /// filters or recovered from a funding memo, whose payment the scan found from a hint or
-    /// the late path admitted.
+    /// Credited through recovery: a key whose receiver the receiver directory's paid sets
+    /// matched, or one recovered from a funding memo, whose payment the scan found from a
+    /// hint or the late path admitted.
     FoundByDiscovery,
     /// Credited only after the user's "Check swap history".
     FoundAfterRecheck,
-    /// As an expectation only: credited automatically, live or through discovery.
+    /// As an expectation only: credited automatically, live or through recovery.
     FoundAutomatically,
     /// Not credited, which the library documents.
     MissedDocumented,

@@ -99,7 +99,7 @@ fn payout_reorged_and_remined() -> Scenario {
             // nothing; its record must have moved to the new branch.
             ctx.check_receipt(a, "the payout", &again);
             let b = ctx.device("B", SEED, birthday);
-            ctx.sync(b);
+            ctx.recover_through(b, again.height);
             ctx.check_receipt(b, "the payout", &again);
             ctx.expect(
                 a,
@@ -342,7 +342,7 @@ fn funding_reorged_and_remined() -> Scenario {
                 &key,
                 &refund,
                 Class::FoundAutomatically,
-                "A restore recovers the refund key from the funding memo on the surviving branch, then finds the refund through discovery, from a scan hint or the late path.",
+                "A restore recovers the refund key from the funding memo on the surviving branch, then finds the refund through recovery, from a scan hint or the late path.",
             );
             ctx.check_same_balance(a, b);
         }),
@@ -353,13 +353,13 @@ fn restored_key_near_rewind() -> Scenario {
     Scenario {
         id: "F4-restored-key-near-a-rewind".into(),
         group: REORGS,
-        title: "A reorg rewinds a restored wallet just after its discovery looked up a paid key"
+        title: "A reorg rewinds a restored wallet just after its recovery looked up a paid key"
             .into(),
-        summary: "A restored key that is not recent closes at its lookup without ever scanning. A \
-            rewind that reopens keys with receipts near the truncation, while keeping the finished \
-            lookup, can leave such a key neither scanning nor closed, so a later payment is never \
-            rechecked. This scenario checks whether that happens."
-            .into(),
+        summary:
+            "A key a restore's recovery looked up never scans, and stays in the receiver set. \
+            A rewind just after the lookup moves the frontier back and makes the lookup due again, \
+            so the first payment is kept and a later one is found from its bucket."
+                .into(),
         params: vec![(
             "rewind".into(),
             "10 blocks below a conflict 12 blocks above the payment".into(),
@@ -383,37 +383,27 @@ fn restored_key_near_rewind() -> Scenario {
             ctx.reorg(h + 11);
             ctx.mine(6);
             ctx.sync(b);
-            let state = ctx.get(b).keys().into_iter().find(|k| k.label() == key);
-            let limbo = state
-                .as_ref()
-                .is_some_and(|k| k.active_from.is_none() && k.closed_at.is_none());
-            ctx.check(
-                format!("B's {key} is scanning or closed after the rewind"),
-                !limbo,
-                format!("{state:?}"),
-            );
             ctx.wait(DAY);
             let second = ctx.pay("second payment", &key, &swap.fvk, ZEC / 2, Payer::Near);
             ctx.mine(1);
             ctx.sync(b);
             ctx.wait(HOUR);
             ctx.sync(b);
-            ctx.check_swap_history(b);
             ctx.expect(
                 b,
                 "late payout",
                 &key,
                 &first,
                 Class::FoundByDiscovery,
-                "A restore's discovery looks the incoming lookahead's paid keys up in the receiver directory.",
+                "A restore tests its receiver window against the directory's paid sets and looks the paid keys up.",
             );
             ctx.expect(
                 b,
                 "second payment",
                 &key,
                 &second,
-                Class::FoundAfterRecheck,
-                "A later payment to a closed key that was already paid is found by Check swap history.",
+                Class::FoundByDiscovery,
+                "The key stays registered, so recovery tests it against the bucket holding the second payment.",
             );
             ctx.spend_one_time_notes(b);
         }),

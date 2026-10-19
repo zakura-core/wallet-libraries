@@ -16,12 +16,12 @@ use tempfile::NamedTempFile;
 use zakura_near_intents::{NearStatus, near_observation};
 use zakura_one_time_ivk::{KeyId, Purpose};
 use zakura_one_time_ivk_scenarios::Class;
-use zakura_pir_receiver::discover;
+use zakura_pir_receiver::{check_history, recover};
 use zcash_client_backend::data_api::{
     AccountBirthday, TransactionStatus, WalletCommitmentTrees, WalletRead as _, WalletWrite as _,
     chain::{error::Error as ChainError, scan_cached_blocks_with_one_time_ivks},
     enhance_pir::{EnhancePirRead as _, EnhancementMode, TransactionEnhancementWork},
-    one_time_ivk::{OneTimeIvkRead as _, restore::OneTimeIvkRestoreRead as _},
+    one_time_ivk::{OneTimeIvkRead as _, coverage::OneTimeIvkCoverageRead as _},
     scanning::ScanPriority,
     status::{TransactionStatusMode, TransactionStatusRead as _},
     testing::TestRng,
@@ -168,9 +168,9 @@ pub struct SyncReport {
     pub open_keys: usize,
     /// Blocks scanned, rescans included.
     pub scanned_blocks: u64,
-    /// Whether discovery is incomplete or has lookups or late payments left after the sync.
+    /// Whether recovery is incomplete after the sync (see [`Device::history_pending`]).
     pub pending: bool,
-    /// Why discovery failed keys or stopped, as the library reported it.
+    /// Why recovery failed keys, was delayed or stopped, as the library reported it.
     pub problems: Vec<String>,
     /// Every directory request the sync made, as method and path, in order.
     pub requests: Vec<String>,
@@ -209,7 +209,7 @@ pub struct Device {
     /// shares it (see [`Self::add_account`]).
     _file: Option<NamedTempFile>,
     pub account: AccountUuid,
-    /// The wallet's other accounts, whose discovery each sync runs too.
+    /// The wallet's other accounts, whose recovery each sync runs too.
     pub extra_accounts: Vec<AccountUuid>,
     /// Whether the directory's NEAR feed and seen sets are dated by the chain's clock,
     /// as a real directory's are, rather than by this device's.
@@ -227,16 +227,16 @@ pub struct Device {
     derived: RefCell<BTreeSet<[u8; 43]>>,
     found: BTreeMap<([u8; 32], u32), Found>,
     phase: Phase,
-    /// Outputs a directory lookup listed as payments, seen after each discovery run.
+    /// Outputs a directory lookup listed as payments, seen after each recovery run.
     candidates: BTreeSet<([u8; 32], u32)>,
     pub syncs: u32,
-    /// Encrypted directory lookups across every discovery run.
+    /// Encrypted directory lookups across every recovery run.
     pub lookups: usize,
     /// Blocks scanned across every sync and scan.
     pub scanned_blocks: u64,
     /// Reorgs the wallet rewound for, as (conflict height, height rewound to).
     pub rewinds: Vec<(u32, u32)>,
-    /// Directory request and response bytes across every discovery run.
+    /// Directory request and response bytes across every recovery run.
     pub bytes_sent: u64,
     pub bytes_received: u64,
     pub reach: Reach,
@@ -316,7 +316,7 @@ impl Device {
 
     /// Adds the seed's next account to this wallet, with its birthday at `birthday`, and
     /// returns a handle to it named `name`. The handle shares this wallet's database; this
-    /// device's syncs run its discovery, so the handle need not sync.
+    /// device's syncs run its recovery, so the handle need not sync.
     pub fn add_account(
         &mut self,
         name: &str,
@@ -359,28 +359,19 @@ impl Device {
         }
     }
 
-    /// Declares this account's seed fresh, as an app does for a seed it just generated
-    /// (see `mark_one_time_account_fresh`).
-    pub fn mark_fresh(&mut self) {
-        self.db
-            .mark_one_time_account_fresh(self.account)
-            .expect("the account is marked fresh");
-    }
-
     /// A read-only connection to the wallet file, for oracles.
     pub fn conn(&self) -> Connection {
         read_only(&self.path)
     }
 
-    /// The account's discovery status at the device's time.
-    pub fn discovery(
+    /// The account's recovery status.
+    pub fn recovery(
         &self,
-        chain: &Chain,
         account: AccountUuid,
-    ) -> Option<zcash_client_backend::data_api::one_time_ivk::restore::DiscoveryStatus> {
+    ) -> Option<zcash_client_backend::data_api::one_time_ivk::coverage::RecoveryStatus> {
         self.db
-            .one_time_discovery(account, self.now(chain))
-            .expect("the discovery status")
+            .one_time_recovery_status(account)
+            .expect("the recovery status")
     }
 
     /// The time the directory's feed is read at (see [`Self::feed_clock`]).
@@ -422,8 +413,8 @@ impl Device {
         self.derived.borrow().clone()
     }
 
-    /// Syncs as Vizor does: discovery before the scan, so its lookups become scan hints,
-    /// every suggested range, closing finished keys at the verified tip, then discovery
+    /// Syncs as Vizor does: recovery before the scan, so its lookups become scan hints,
+    /// every suggested range, closing finished keys at the verified tip, then recovery
     /// again for the late path.
     pub fn sync(&mut self, chain: &Chain, near: &Near) -> SyncReport {
         self.syncs += 1;
@@ -432,9 +423,9 @@ impl Device {
         self.db
             .update_chain_tip(chain.tip())
             .expect("the tip updates");
-        let (before, mut problems) = self.discover(chain, near);
+        let (before, mut problems) = self.recover(chain, near, false);
         report.scanned_blocks = self.scan(chain);
-        let (after, late) = self.discover(chain, near);
+        let (after, late) = self.recover(chain, near, false);
         problems.extend(late);
         report.lookups = before + after;
         report.problems = problems;
@@ -447,15 +438,20 @@ impl Device {
         report
     }
 
-    /// Whether any of the wallet's accounts has discovery incomplete or lookups or late
-    /// payments left.
+    /// Whether any of the wallet's accounts has recovery incomplete: lookups, obligations
+    /// or late payments left, or a frontier not yet established.
     pub fn history_pending(&self) -> bool {
-        self.accounts().into_iter().any(|account| {
-            let status = self
-                .db
-                .one_time_discovery(account, i64::MAX)
-                .expect("the discovery status");
-            status.is_some_and(|s| !s.complete || !s.lookups.is_empty() || !s.witnesses.is_empty())
+        self.accounts()
+            .into_iter()
+            .any(|account| self.recovery(account).is_some_and(|s| !s.complete))
+    }
+
+    /// Whether recovery's frontier reached `height` for every account of the wallet, so
+    /// every payment through it was tested against the directory's paid sets.
+    pub fn covered_through(&self, height: BlockHeight) -> bool {
+        self.accounts().into_iter().all(|account| {
+            self.recovery(account)
+                .is_none_or(|s| s.frontier.is_some_and(|f| f >= height))
         })
     }
 
@@ -604,14 +600,15 @@ impl Device {
         }
     }
 
-    /// Runs discovery once against a fresh publication, and returns the lookups made and why
-    /// any key failed or the run stopped. A recheck's first run starts a new pass. An
-    /// injected fault that stops the app ends discovery there, and the app restarts (see
-    /// [`Self::reopen`]).
-    pub fn discover(&mut self, chain: &Chain, near: &Near) -> (usize, Vec<String>) {
+    /// Runs recovery once against a fresh publication, or "Check swap history" for the
+    /// device's own account if `check`, and returns the lookups made and why any key failed
+    /// or the run stopped. An injected fault that stops the app ends recovery there, and the
+    /// app restarts (see [`Self::reopen`]).
+    pub fn recover(&mut self, chain: &Chain, near: &Near, check: bool) -> (usize, Vec<String>) {
         let (mut lookups, mut problems) = (0, Vec::new());
         for account in self.accounts() {
-            let (n, more, stopped) = self.discover_account(chain, near, account);
+            let check = check && account == self.account;
+            let (n, more, stopped) = self.recover_account(chain, near, account, check);
             lookups += n;
             problems.extend(more);
             if stopped {
@@ -621,18 +618,19 @@ impl Device {
         (lookups, problems)
     }
 
-    /// Runs discovery once for `account` (see [`Self::discover`]), returning the lookups
+    /// Runs recovery once for `account` (see [`Self::recover`]), returning the lookups
     /// made, problems, and whether the app stopped.
-    fn discover_account(
+    fn recover_account(
         &mut self,
         chain: &Chain,
         near: &Near,
         account: AccountUuid,
+        check: bool,
     ) -> (usize, Vec<String>, bool) {
         let now = self.now(chain);
         let feed_now = self.feed_now(chain);
         let reach = self.reach.clone();
-        // Injected failures hit one discovery run only.
+        // Injected failures hit one recovery run only.
         self.reach.directory_faults.clear();
         self.reach.endpoint_faults.clear();
         let directory = Served::new(reach.directory, move || {
@@ -648,16 +646,36 @@ impl Device {
         let mut problems = Vec::new();
         let mut stopped = false;
         let run = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            runtime.block_on(discover(
-                &mut self.db,
-                &network(),
-                account,
-                GENESIS,
-                ORIGIN,
-                &directory,
-                &NoLock,
-                now,
-            ))
+            let db = &mut self.db;
+            runtime.block_on(async {
+                if check {
+                    let deeper = 0;
+                    check_history(
+                        db,
+                        &network(),
+                        account,
+                        GENESIS,
+                        ORIGIN,
+                        &directory,
+                        &NoLock,
+                        deeper,
+                        now,
+                    )
+                    .await
+                } else {
+                    recover(
+                        db,
+                        &network(),
+                        account,
+                        GENESIS,
+                        ORIGIN,
+                        &directory,
+                        &NoLock,
+                        now,
+                    )
+                    .await
+                }
+            })
         }));
         match run {
             Ok(Ok(found)) => {
@@ -667,8 +685,11 @@ impl Device {
                         checkpoints(&self.path)
                     ));
                 }
+                if let Some(delay) = &found.delay {
+                    problems.push(format!("recovery delayed: {delay:?}"));
+                }
             }
-            Ok(Err(error)) => problems.push(format!("discovery stopped: {error}")),
+            Ok(Err(error)) => problems.push(format!("recovery stopped: {error}")),
             Err(payload) if stops_the_app(payload.as_ref()) => {
                 problems.push(format!("{APP_STOPS}; it restarts"));
                 stopped = true;
@@ -691,24 +712,23 @@ impl Device {
         (lookups, problems, stopped)
     }
 
-    /// "Check swap history": ends the account's discovery pass, so the next starts a new
-    /// one against a newer publication, then syncs, crediting what it finds to the recheck.
+    /// "Check swap history": reads every key's and window receiver's history again, then
+    /// syncs, crediting what it finds to the recheck.
     pub fn check_swap_history(&mut self, chain: &Chain, near: &Near) -> SyncReport {
-        self.db
-            .recheck_one_time_key_history(self.account)
-            .expect("the recheck ends the pass");
         self.phase = Phase::Recheck;
-        let report = self.sync(chain, near);
+        let (lookups, mut problems) = self.recover(chain, near, true);
+        let mut report = self.sync(chain, near);
+        problems.append(&mut report.problems);
+        report.problems = problems;
+        report.lookups += lookups;
         self.phase = Phase::Scan;
         report
     }
 
-    /// Starts "Check swap history" without syncing: ends the account's discovery pass, so
-    /// the next sync starts a new one.
-    pub fn begin_recheck(&mut self) {
-        self.db
-            .recheck_one_time_key_history(self.account)
-            .expect("the recheck ends the pass");
+    /// Starts "Check swap history" without syncing on: one recovery run that reads every
+    /// key's history again.
+    pub fn begin_recheck(&mut self, chain: &Chain, near: &Near) {
+        self.recover(chain, near, true);
     }
 
     /// Continues a "Check swap history" begun by [`Self::check_swap_history`]: one more
@@ -721,7 +741,7 @@ impl Device {
     }
 
     /// Tags payments credited since the last tag: during a recheck as found after it,
-    /// otherwise as found through discovery if a directory lookup listed it, whether the
+    /// otherwise as found through recovery if a directory lookup listed it, whether the
     /// scan then found it from a hint or the late path admitted it, or as found live.
     /// Returns how many were found live and how many otherwise.
     fn tag(&mut self) -> (usize, usize) {
@@ -1464,7 +1484,7 @@ fn stops_the_app(payload: &(dyn std::any::Any + Send)) -> bool {
     message == Some(APP_STOPS)
 }
 
-/// Discovery's write lock. Nothing else writes to a scenario's wallet concurrently.
+/// Recovery's write lock. Nothing else writes to a scenario's wallet concurrently.
 struct NoLock;
 
 impl zakura_pir_receiver::WriteLock for NoLock {

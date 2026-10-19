@@ -15,8 +15,7 @@ use zcash_client_backend::data_api::{
     one_time_ivk::{
         coverage::{
             CoverageOutcome, CoverageState, CoverageStep, CoverageTarget, DirectoryHistory,
-            LookupTicket, ObligationReceivers, OneTimeIvkCoverageWrite, ReceiverSet,
-            RecoveryStatus, Snapshot,
+            ObligationReceivers, OneTimeIvkCoverageWrite, ReceiverSet, RecoveryStatus, Snapshot,
         },
         restore::{DiscoveryWork, OneTimeIvkRestoreWrite},
     },
@@ -26,10 +25,10 @@ use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
 use crate::{
-    DirectoryError, Transport,
+    DirectoryError, Transport, checked,
     session::{
-        AccountError, AccountId, Error, PARALLEL_LOOKUPS, Session, WriteLock, join_all, look_up,
-        record_witnesses,
+        AccountError, AccountId, Error, PARALLEL_LOOKUPS, Session, WriteLock, directory_payment,
+        join_all,
     },
 };
 
@@ -106,8 +105,9 @@ pub struct Recovered<E> {
 ///    pinned snapshot the directory no longer serves gives way to the current one. At
 ///    most [`OBJECTS_PER_RUN`] buckets and snapshots download, and a bucket or snapshot
 ///    ending at a block the wallet has not stored waits for its scan.
-/// 5. Looks up each hit's history over PIR, through the paging, exact-payment hints and
-///    late admission discovery uses. A walk completes only the target it was handed.
+/// 5. Looks up each hit's history over PIR, turning payments ahead of the scan into exact
+///    scan hints and others into late candidates. A walk completes only the target it was
+///    handed.
 /// 6. Fetches due inclusion paths from the publication's common witnesses.
 ///
 /// An admitted payment can grow a window, so steps 4 to 6 repeat, a few times at most,
@@ -731,7 +731,11 @@ where
     }
 
     /// Looks up the lookups due now that `session`'s publication reaches, as [`recover`]
-    /// describes.
+    /// describes, [`PARALLEL_LOOKUPS`] at a time, recording each walk against its ticket. A
+    /// failed read, or a page the wallet refused, backs its lookup off and is listed in
+    /// `failed`; a page the wallet skipped for another reason is listed without a backoff.
+    /// Lookups go on after one fails unless the directory's connection failed or it revoked
+    /// the session.
     async fn look_up<T: Transport>(
         &mut self,
         session: &mut Session<'_, T>,
@@ -744,10 +748,10 @@ where
             })
             .map_err(Error::Wallet)?;
         // A lookup whose target the publication has not reached waits for a newer one.
-        let reach = session.publication_end().height;
+        let revision = session.publication_end();
         let tickets: Vec<_> = tickets
             .into_iter()
-            .filter(|t| t.work.cutoff <= reach)
+            .filter(|t| t.work.cutoff <= revision.height)
             .collect();
         if tickets.is_empty() {
             return Ok(());
@@ -756,28 +760,68 @@ where
             self.delay(Delay::Unavailable(e));
             return Ok(());
         }
-        let mut record =
-            |wallet: &mut W, ticket: &LookupTicket, revision, page, payments: &[_], complete| {
-                wallet.record_one_time_lookup_page(
-                    account, ticket, revision, page, payments, complete, now,
-                )
-            };
-        self.more |= look_up(
-            self.wallet,
-            session,
-            account,
-            &tickets,
-            |ticket| &ticket.work,
-            &mut record,
-            (self.lock, "one_time_recovery.lookup"),
-            now,
-            &mut self.failed,
-        )
-        .await?;
+        for batch in tickets.chunks(PARALLEL_LOOKUPS) {
+            let walks = join_all(batch.iter().map(|t| session.page_through(&t.work))).await;
+            let mut stop = false;
+            for (ticket, walk) in batch.iter().zip(walks) {
+                let key = ticket.work.work.key;
+                let mut defer = false;
+                self.more |= !walk.complete && walk.error.is_none();
+                if !walk.records.is_empty() || walk.complete {
+                    let payments = walk.records.into_iter().map(directory_payment);
+                    match payments.collect::<Result<Vec<_>, _>>() {
+                        Ok(payments) => {
+                            let wallet = &mut *self.wallet;
+                            let recorded = self
+                                .lock
+                                .write("one_time_recovery.lookup", || {
+                                    wallet.record_one_time_lookup_page(
+                                        account,
+                                        ticket,
+                                        revision,
+                                        walk.start,
+                                        &payments,
+                                        walk.complete,
+                                        now,
+                                    )
+                                })
+                                .map_err(Error::Wallet)?;
+                            // The wallet backs off a lookup whose page it refused, but not
+                            // one whose ticket went stale.
+                            if !recorded {
+                                let skipped = "the wallet did not record the page";
+                                self.failed.push((key, Error::Unavailable(skipped)));
+                            }
+                        }
+                        Err(e) => {
+                            self.failed.push((key, e.into()));
+                            defer = true;
+                        }
+                    }
+                }
+                if let Some(e) = walk.error {
+                    stop |= matches!(e, DirectoryError::Revision | DirectoryError::Transport(_));
+                    self.failed.push((key, e.into()));
+                    defer = true;
+                }
+                if defer {
+                    let wallet = &mut *self.wallet;
+                    self.lock
+                        .write("one_time_recovery.defer", || {
+                            wallet.defer_one_time_lookup(account, key, now)
+                        })
+                        .map_err(Error::Wallet)?;
+                }
+            }
+            if stop {
+                break;
+            }
+        }
         Ok(())
     }
 
-    /// Fetches the due inclusion paths from `session`'s common witnesses.
+    /// Fetches the due inclusion paths from `session`'s common witnesses. A path the
+    /// witnesses cannot give is listed in `failed` and requested again later.
     async fn witnesses<T: Transport>(
         &mut self,
         session: &mut Session<'_, T>,
@@ -785,29 +829,49 @@ where
         let Some(status) = self.status()? else {
             return Ok(());
         };
+        let publication = session.publication_end();
         // A path to a root the wallet would refuse as too old is not worth the download.
-        if status.witnesses.is_empty()
-            || session.publication_end().height < status.witness_anchor_floor
-        {
+        if status.witnesses.is_empty() || publication.height < status.witness_anchor_floor {
             return Ok(());
         }
-        let requests = status
-            .witnesses
-            .iter()
-            .map(|request| (request.key, request.position, request.cmx));
-        let recorded = record_witnesses(
-            self.wallet,
-            session,
-            self.account,
-            requests,
-            (self.lock, "one_time_recovery.witness"),
-            self.now,
-            &mut self.failed,
-        )
-        .await;
-        match recorded {
-            Err(Error::Directory(e)) => self.delay(Delay::Unavailable(e)),
-            other => other?,
+        let anchor = ChainPoint {
+            height: publication.height,
+            hash: BlockHash(publication.hash),
+        };
+        let fetched = match session.connect().await {
+            Ok(()) => session.witnesses().await,
+            Err(e) => Err(e),
+        };
+        let witnesses = match fetched {
+            Ok(witnesses) => witnesses,
+            Err(e) => {
+                self.delay(Delay::Unavailable(e));
+                return Ok(());
+            }
+        };
+        let (account, now) = (self.account, self.now);
+        for request in status.witnesses {
+            // The common witnesses hold every record's position in this publication.
+            match witnesses.path(request.position, request.cmx) {
+                Ok(siblings) => {
+                    let wallet = &mut *self.wallet;
+                    self.lock
+                        .write("one_time_recovery.witness", || {
+                            wallet.record_one_time_witness(
+                                account,
+                                request.key,
+                                request.position,
+                                anchor,
+                                siblings,
+                                now,
+                            )
+                        })
+                        .map_err(Error::Wallet)?;
+                }
+                Err(e) => self
+                    .failed
+                    .push((request.key, Error::Directory(checked(e)))),
+            }
         }
         Ok(())
     }

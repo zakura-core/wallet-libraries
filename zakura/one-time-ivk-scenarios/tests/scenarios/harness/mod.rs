@@ -181,6 +181,25 @@ impl Ctx {
         );
     }
 
+    /// Starts "Check swap history" on `dev` without syncing on (see
+    /// [`Device::begin_recheck`]).
+    pub fn begin_recheck(&mut self, dev: Dev) {
+        self.devices[dev.0].begin_recheck(&self.chain, &self.near);
+    }
+
+    /// Syncs `dev` a block at a time, as Vizor's polling would, until its recovery covered
+    /// `height`, so the bucket holding a payment there was tested, at most two buckets'
+    /// worth of blocks.
+    pub fn recover_through(&mut self, dev: Dev, height: BlockHeight) {
+        for _ in 0..2 * receiver_directory::paid::BUCKET_BLOCKS {
+            self.sync(dev);
+            if self.devices[dev.0].covered_through(height) {
+                return;
+            }
+            self.chain.mine(1);
+        }
+    }
+
     /// Runs "Check swap history" on `dev`, then keeps syncing a block at a time, as
     /// Vizor's polling would, until a sync scans nothing new, defers nothing and leaves
     /// nothing pending, at most six more syncs. Logs each.
@@ -205,13 +224,17 @@ impl Ctx {
     }
 
     /// Keeps every wallet syncing a block at a time, as Vizor's polling would, until each
-    /// is quiet: nothing pending, deferred or left to scan. A wallet that goes 40 syncs
+    /// is quiet: nothing pending, deferred or left to scan, and recovery's frontier past
+    /// every block the chain had when settling began, so the paid bucket of every earlier
+    /// payment was tested. A wallet that goes 64 syncs, more than a bucket's blocks,
     /// without finding a payment or making a lookup, or 1,000 syncs in all, fails the
     /// scenario. Runs after every scenario so a find that needs another sync (a late
-    /// payment waiting for the scan, a rescan of blocks the journal did not cover) counts.
+    /// payment waiting for the scan, a rescan of blocks the journal did not cover, a bucket
+    /// that has yet to close) counts.
     pub fn settle(&mut self) {
-        const STALLED: usize = 40;
+        const STALLED: usize = 64;
         const ROUNDS: usize = 1_000;
+        let through = self.chain.tip();
         // Let the directory, which publishes two blocks behind the tip, catch up.
         self.chain.mine(3);
         for i in 0..self.devices.len() {
@@ -220,8 +243,10 @@ impl Ctx {
             let stuck = loop {
                 let report = self.devices[i].sync(&self.chain, &self.near);
                 syncs += 1;
-                let quiet =
-                    !report.pending && report.problems.is_empty() && report.scanned_blocks <= 1;
+                let quiet = !report.pending
+                    && report.problems.is_empty()
+                    && report.scanned_blocks <= 1
+                    && self.devices[i].covered_through(through);
                 let found = report.found_live + report.found_by_discovery;
                 if found > 0
                     || !report.problems.is_empty()
@@ -254,11 +279,11 @@ impl Ctx {
         }
     }
 
-    /// Logs a sync's outcome and any discovery problems.
+    /// Logs a sync's outcome and any recovery problems.
     fn log_sync(&mut self, dev: Dev, report: &SyncReport) {
         let balance = self.devices[dev.0].balance();
         let text = format!(
-            "syncs: scanned {} blocks, {} found live, {} through discovery, {} lookups, {} keys open, balance {}{}",
+            "syncs: scanned {} blocks, {} found live, {} through recovery, {} lookups, {} keys open, balance {}{}",
             report.scanned_blocks,
             report.found_live,
             report.found_by_discovery,
@@ -280,7 +305,7 @@ impl Ctx {
 
     /// Quotes an incoming swap on `dev` with a deposit deadline `deadline_in` seconds out.
     /// Like the app, it answers a `Gap` or `Coverage` refusal by syncing, which runs the
-    /// discovery `Gap` waits for, and trying again, at most three times.
+    /// recovery `Gap` waits for, and trying again, at most three times.
     pub fn quote_incoming(
         &mut self,
         dev: Dev,

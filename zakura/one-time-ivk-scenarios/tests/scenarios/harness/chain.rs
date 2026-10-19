@@ -539,6 +539,13 @@ impl Chain {
         self.states[&u32::from(height)].block_hash()
     }
 
+    /// The hash of block `height`, if the chain has it.
+    pub fn known_hash(&self, height: BlockHeight) -> Option<BlockHash> {
+        self.states
+            .get(&u32::from(height))
+            .map(|state| state.block_hash())
+    }
+
     /// The Ironwood note commitment tree size at the end of block `height`.
     pub fn tree_size_at(&self, height: BlockHeight) -> u64 {
         self.states[&u32::from(height)]

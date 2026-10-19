@@ -1,21 +1,19 @@
 //! Durable one-time IVKs (see [`zakura_one_time_ivk`]), each trial-decrypted while open.
 //!
 //! This module holds the key registry, scanning, spending and the storage guards.
-//! [`swap`] issues keys for swaps and closes them from provider status, `restore` discovers
-//! the keys a restored seed used through a receiver directory, `coverage` keeps the state of
-//! continuous recovery from that directory, and `journal` keeps the Ironwood nullifiers of
-//! the wallet's own transactions. A registered key stays registered, closed or not.
+//! [`swap`] issues keys for swaps and closes them from provider status, `coverage` keeps
+//! the state of continuous recovery from a receiver directory, `restore` looks up the keys
+//! it finds paid and admits their late payments, and `journal` keeps the Ironwood
+//! nullifiers of the wallet's own transactions. A registered key stays registered, closed
+//! or not.
 //!
 //! Issued keys scan from issuance, refund keys from their stored funding transaction,
-//! until they close. Keys a restore discovers have their history looked up, then are
-//! scanned for a restore watch only while a swap may still pay them (see
-//! [`WalletDb::close_finished_one_time_keys`]). A closed key keeps its notes.
+//! until they close. Keys recovery finds paid have their history looked up instead. A
+//! closed key keeps its notes.
 //! One-time-key notes carry no memo the wallet reads; only internal change carries the
 //! refund marker. So neither a directory nor private Enhance retrieval stores or fetches
 //! one. A wallet drives one-time IVKs with these calls:
 //!
-//! - [`WalletDb::mark_one_time_account_fresh`] when it creates an account from a newly
-//!   generated seed.
 //! - `scan_cached_blocks_with_one_time_ivks` and
 //!   `decrypt_and_store_transaction_with_one_time_ivks` in place of the ordinary
 //!   scanning and decryption; while a key is open, the others are refused.
@@ -29,14 +27,14 @@
 //!   [`WalletDb::begin_receive_operation`], [`WalletDb::finish_receive_operation`] and
 //!   [`WalletDb::start_receive_operation`].
 //! - [`WalletDb::record_operation_status`] for each provider status of either.
-//! - `zakura_pir_receiver::discover`, over the [`OneTimeIvkRestoreWrite`] steps, for a
-//!   restored account's discovery, and [`WalletDb::recheck_one_time_key_history`] when the
-//!   user asks to recheck swaps.
+//! - `zakura_pir_receiver::recover`, over the [`OneTimeIvkCoverageWrite`] steps, on every
+//!   sync and on a timer, for every account, restored or new, and
+//!   `zakura_pir_receiver::check_history` when the user asks to check swap history.
 //!
 //! Storing blocks, a full transaction or a memo retrieved over Enhance PIR, and admitting a
 //! late payment, recovers the refund keys of every account's stored funding memos.
 //!
-//! [`OneTimeIvkRestoreWrite`]: zcash_client_backend::data_api::one_time_ivk::restore::OneTimeIvkRestoreWrite
+//! [`OneTimeIvkCoverageWrite`]: zcash_client_backend::data_api::one_time_ivk::coverage::OneTimeIvkCoverageWrite
 
 pub(crate) mod coverage;
 pub(crate) mod journal;
@@ -423,21 +421,16 @@ fn register<P: Parameters>(
             activate(conn, id, scan_from)?;
         }
         // Only a key scanned from its earliest possible payment needs no directory history.
-        // The lookup reads through the account's current pass and every block the scan
-        // stored without the key, so it may wait for a newer publication. With neither, it
-        // waits for the next pass.
+        // The lookup reads through every block the scan stored without the key, so it may
+        // wait for a newer publication.
         Discovery::Lookup if active_from.is_none_or(|start| start > stored_from) => {
             conn.execute(
                 "INSERT INTO ironwood_one_time_lookups (one_time_key_id, cutoff_height)
-                 SELECT ?1, MAX(height) FROM (
-                     SELECT publication_height AS height FROM ironwood_one_time_discovery
-                     WHERE account_id = ?2
-                     UNION ALL SELECT MAX(height) FROM blocks)
-                 WHERE true
+                 SELECT ?1, MAX(height) FROM blocks WHERE true
                  ON CONFLICT (one_time_key_id) DO UPDATE SET
                      cutoff_height = COALESCE(MAX(cutoff_height, excluded.cutoff_height),
                          cutoff_height, excluded.cutoff_height)",
-                rusqlite::params![id, account_ref.0],
+                rusqlite::params![id],
             )?;
         }
         Discovery::Lookup | Discovery::Funding => {}

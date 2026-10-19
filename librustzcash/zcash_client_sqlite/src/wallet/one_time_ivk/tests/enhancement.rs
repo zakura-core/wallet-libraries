@@ -13,7 +13,7 @@ fn ironwood_funded_wallet() -> (State, BlockHeight) {
     let first = pay(&mut st, &fvk, 1_000_000);
     st.generate_and_scan_empty_blocks_with_one_time_ivks(5);
     let account = st.test_account().unwrap().id();
-    discover(&mut st, account, &[]);
+    check_seen(st.wallet_mut().db_mut(), account);
     (st, first)
 }
 
@@ -282,7 +282,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     st.wallet_mut().update_chain_tip(mined).unwrap();
     let blocks = u32::from(mined) - u32::from(first) + 1;
     st.scan_cached_blocks_with_one_time_ivks(first, blocks as usize);
-    discover(&mut st, restored, &[]);
+    check_seen(st.wallet_mut().db_mut(), restored);
     let pending = |st: &State| {
         store::restore::recovery::refund_memos_pending(st.wallet().conn(), restored).unwrap()
     };
@@ -411,7 +411,7 @@ fn refund_funding_refuses_its_memo_on_orchard_change() {
     st.scan_cached_blocks_with_one_time_ivks(funded, 1);
     st.generate_and_scan_empty_blocks_with_one_time_ivks(5);
     let account = st.test_account().unwrap().id();
-    discover(&mut st, account, &[]);
+    check_seen(st.wallet_mut().db_mut(), account);
     let tip = st.wallet().chain_height().unwrap().unwrap();
     let deposit = p2pkh(7).encode(st.network());
     let now = clock_now();
@@ -849,21 +849,16 @@ fn an_unauthenticated_memo_key_stays_sparse_until_promoted() {
     assert_eq!(refund_window_end(&st, restored), index + 31);
 }
 
-/// A fresh account, which has no discovery to run, still recovers a funding memo another
-/// device of its seed wrote as soon as the scan stores the funding block.
+/// An account that never ran recovery still recovers a funding memo another device of its
+/// seed wrote as soon as the scan stores the funding block.
 #[test]
-fn a_fresh_account_recovers_a_funding_memo_once_its_block_is_stored() {
+fn an_account_recovers_a_funding_memo_once_its_block_is_stored() {
     let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    let db = st.wallet_mut().db_mut();
-    db.mark_one_time_account_fresh(account).unwrap();
     let fvk = parent(&st);
     pay(&mut st, &fvk, 1_000_000);
     st.generate_and_scan_empty_blocks_with_one_time_ivks(5);
     let pays = vec![payment(&p2pkh(7), 100_000, None)];
     let (_, _, mined) = send(&mut st, pays, &refund_memo(4));
-    let sql = "SELECT COUNT(*) FROM ironwood_one_time_discovery";
-    assert_eq!(value::<u32>(st.wallet().conn(), sql, []), 0);
     assert_eq!(refund_keys(&st), [(4, u32::from(mined), true)]);
     assert_eq!(refund_facts(&st, 4), (true, true, true));
 }

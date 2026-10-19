@@ -1,67 +1,13 @@
-//! Recovery from authenticated wallet data, independent of the discovery transport.
+//! Recovery from authenticated wallet data, independent of the directory transport.
 use rusqlite::{Connection, OptionalExtension, params};
 use zakura_one_time_ivk::swap::{REFUND_MEMO_MAGIC, RefundMemo};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use crate::wallet::one_time_ivk::{
-    Discovery, KeyId, Purpose, account_key, authenticate_key, block_issuance, invalid,
-    recovering_accounts, register,
+    Discovery, KeyId, Purpose, account_key, authenticate_key, block_issuance, recovering_accounts,
+    register,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
-
-/// Implements `WalletDb::recheck_one_time_key_history`.
-pub(in crate::wallet::one_time_ivk) fn recheck<P: Parameters>(
-    conn: &rusqlite::Transaction<'_>,
-    params: &P,
-    account: AccountUuid,
-) -> Result<(), SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
-    conn.execute(
-        "DELETE FROM ironwood_one_time_discovery WHERE account_id = ?1",
-        [owner.0],
-    )?;
-    // A fresh account asked to recheck runs the pass as a restored one does.
-    conn.execute(
-        "DELETE FROM ironwood_one_time_fresh_accounts WHERE account_id = ?1",
-        [owner.0],
-    )?;
-    // The next pass makes the finished lookup of every key with a known payment due again;
-    // the cursor keeps what was applied. A key without one is looked up again only if the
-    // newer filters mark it paid.
-    conn.execute(
-        "UPDATE ironwood_one_time_lookups SET cutoff_height = NULL, done_height = NULL
-         WHERE done_height IS NOT NULL AND one_time_key_id IN (
-             SELECT k.id FROM ironwood_one_time_keys k
-             WHERE k.account_id = ?1 AND (k.paid_before_birthday = 1
-                 OR EXISTS(SELECT 1 FROM ironwood_received_notes n
-                     WHERE n.one_time_key_id = k.id)))",
-        [owner.0],
-    )?;
-    Ok(())
-}
-
-/// See `WalletDb::mark_one_time_account_fresh`.
-pub(in crate::wallet::one_time_ivk) fn mark_fresh<P: Parameters>(
-    conn: &rusqlite::Transaction<'_>,
-    params: &P,
-    account: AccountUuid,
-) -> Result<(), SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
-    let (fresh, keyed): (bool, bool) = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_fresh_accounts WHERE account_id = ?1),
-            EXISTS(SELECT 1 FROM ironwood_one_time_keys WHERE account_id = ?1)",
-        [owner.0],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    if !fresh && keyed {
-        return Err(invalid("account already has one-time keys"));
-    }
-    conn.execute(
-        "INSERT OR IGNORE INTO ironwood_one_time_fresh_accounts (account_id) VALUES (?1)",
-        [owner.0],
-    )?;
-    Ok(())
-}
 
 /// Whether an internal funding record may still hold an unregistered refund index after
 /// [`recover_refund_memos`]: its memo is not retrieved yet, or it lacks own-send evidence

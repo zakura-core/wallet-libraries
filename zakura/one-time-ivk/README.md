@@ -24,7 +24,7 @@ The wallet owns reservation, persistence, coverage, lifecycle, and note selectio
 There is no alternate balance store in this crate.
 
 The SQLite backend implements this contract with its `orchard` feature: durable
-key registration, scanning, completion, and the discovery that
+key registration, scanning, completion, and the recovery that
 `zakura-pir-receiver` runs. Its rustdoc, starting at
 `zcash_client_sqlite::wallet::one_time_ivk`, documents the calls a wallet makes.
 

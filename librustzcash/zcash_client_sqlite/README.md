@@ -29,13 +29,13 @@ operations and closing are in `wallet::one_time_ivk::swap`. The
 [`zakura-one-time-ivk` README](../../zakura/one-time-ivk/README.md) describes the
 key derivation and refund memo.
 
-Discovery turns each payment a directory reports into a scan hint, so the scan finds
+Recovery turns each payment a directory lookup reports into a scan hint, so the scan finds
 the note itself, or, if the scan already passed its block, into a late candidate. The
 wallet admits a late candidate only after it authenticates the ciphertext, verifies the
 note's inclusion and position against its own chain, and its scan has covered every
 block from the payment on for the account. The spend journal, which keeps every
 Ironwood nullifier of the wallet's own transactions, then says whether it was spent.
-Until then the payment adds nothing to balance. `zakura-pir-receiver` runs discovery
+Until then the payment adds nothing to balance. `zakura-pir-receiver` runs recovery
 against a receiver directory.
 
 `WalletDb` also implements `OneTimeIvkCoverageRead` and `OneTimeIvkCoverageWrite`, the

@@ -7,7 +7,10 @@ mod common;
 use common::*;
 use orchard::keys::FullViewingKey;
 use receiver_directory::paid::BUCKET_BLOCKS;
-use zakura_pir_receiver::{Delay, DirectoryError, Recovered, Transport, check_history, recover};
+use zakura_pir_receiver::{
+    Delay, DirectoryError, Recovered, Transport, check_history, fetch_seen, receiver_directory,
+    recover,
+};
 use zakura_receiver_crypto::Record;
 use zcash_client_backend::{
     data_api::{
@@ -20,7 +23,7 @@ use zcash_client_sqlite::{
     AccountUuid,
     error::SqliteClientError,
     testing::db::TestDbFactory,
-    wallet::one_time_ivk::{KeyId, Purpose},
+    wallet::one_time_ivk::{KeyId, Purpose, swap::ProviderSeen},
 };
 use zcash_protocol::consensus::BlockHeight;
 
@@ -53,7 +56,7 @@ impl World {
     fn pay(&mut self, key: KeyId) -> u32 {
         let parent = parent(&self.st);
         let position = self.records.len() as u64;
-        let record = pay_key_unscanned(&mut self.st, &parent, key, position);
+        let record = pay_unscanned(&mut self.st, &parent, key, position);
         let height = record.payment.height;
         self.st
             .scan_cached_blocks_with_one_time_ivks(BlockHeight::from(height), 1);
@@ -258,13 +261,7 @@ async fn a_pinned_snapshot_gives_way_once_it_is_no_longer_served() {
                     .filter(|(route, _)| route.starts_with("paid/")),
             );
         }
-        let routes = publish_with(
-            &records,
-            &commitments,
-            end,
-            &provider(&[]),
-            (catalog, objects),
-        );
+        let routes = publish(&records, &commitments, end, (catalog, objects));
         let directory = Directory::new(routes);
         let found = w.recover(&directory).await;
         let status = found.status.unwrap();
@@ -526,7 +523,7 @@ async fn a_directory_behind_the_wallet_delays_recovery() {
 async fn a_hint_a_stale_scanner_skipped_is_admitted_late() {
     let mut w = World::new();
     let parent = parent(&w.st);
-    let record = pay_key_unscanned(&mut w.st, &parent, incoming(3), 0);
+    let record = pay_unscanned(&mut w.st, &parent, incoming(3), 0);
     let height = BlockHeight::from(record.payment.height);
     w.records.push(record);
     w.st.wallet_mut().update_chain_tip(height).unwrap();
@@ -572,7 +569,7 @@ async fn check_history_bypasses_the_filters() {
         &History::default(),
     );
     let end = tip(&w.st);
-    let routes = publish_with(&records, &commitments, end, &provider(&[]), objects);
+    let routes = publish(&records, &commitments, end, objects);
     let directory = Directory::new(routes);
     let found = w.recover(&directory).await;
     assert!(found.status.unwrap().complete);
@@ -600,7 +597,7 @@ async fn lowering_the_birthday_credits_a_newly_eligible_payment() {
     let usk = UnifiedSpendingKey::from_seed(&network, &[3; 32], 0u32.try_into().unwrap()).unwrap();
     let other = FullViewingKey::from(usk.orchard());
     let position = w.records.len() as u64;
-    let record = pay_key_unscanned(&mut w.st, &other, incoming(2), position);
+    let record = pay_unscanned(&mut w.st, &other, incoming(2), position);
     let paid = BlockHeight::from(record.payment.height);
     w.st.scan_cached_blocks_with_one_time_ivks(paid, 1);
     w.records.push(record);
@@ -625,4 +622,123 @@ async fn lowering_the_birthday_credits_a_newly_eligible_payment() {
     let found = w.recover(&w.directory(&History::default())).await;
     assert!(found.status.unwrap().complete);
     assert_eq!(w.st.get_total_balance(account).into_u64(), VALUE);
+}
+
+/// A payment the key cannot decrypt is the directory's error: the wallet refuses the
+/// answer, imports nothing, and backs the lookup off, so an immediate rerun looks nothing
+/// up.
+#[tokio::test]
+async fn a_forged_payment_is_refused() {
+    let mut w = World::new();
+    let paid = w.pay(incoming(4));
+    w.advance(bucket_end(paid) + 1);
+    w.records[0].payment.ciphertext_prefix[0] ^= 1;
+    let directory = w.directory(&History::default());
+    let network = *w.st.network();
+    let db = w.st.wallet_mut().db_mut();
+    let run = recover(
+        db, &network, w.account, GENESIS, ORIGIN, &directory, &NoLock, NOW,
+    );
+    let found = run.await.unwrap();
+    assert_eq!(found.failed.len(), 1);
+    assert!(!found.status.unwrap().complete);
+    assert_eq!(balance(&w.st), 0);
+    let before = lookups(&directory);
+    let db = w.st.wallet_mut().db_mut();
+    let run = recover(
+        db, &network, w.account, GENESIS, ORIGIN, &directory, &NoLock, NOW,
+    );
+    run.await.unwrap();
+    assert_eq!(lookups(&directory), before);
+}
+
+/// A run that left only an inclusion path to fetch, here because the witness file failed
+/// to download, fetches it in the next run and completes.
+#[tokio::test]
+async fn a_run_with_only_a_path_due_fetches_it() {
+    let mut w = World::new();
+    let paid = w.pay(incoming(3));
+    w.advance(bucket_end(paid) + 1);
+    let directory = w.directory(&History::default());
+    let delayed = w.recover(WithoutWitnesses(&directory)).await;
+    assert!(matches!(delayed.delay, Some(Delay::Unavailable(_))));
+    let status = delayed.status.unwrap();
+    assert_eq!((status.lookups, status.witnesses.len()), (0, 1));
+    let found = w.recover(&directory).await;
+    assert!(found.status.unwrap().complete);
+    assert_eq!(balance(&w.st), VALUE);
+}
+
+/// A lookup resumed from its cursor starts over from page zero when the record before the
+/// cursor changed, here because an earlier revision omitted a payment, so Check swap
+/// history finds that payment.
+#[tokio::test]
+async fn a_lookup_whose_cursor_record_changed_starts_over() {
+    let mut w = World::new();
+    w.pay(incoming(3));
+    let last = w.pay(incoming(3));
+    w.advance(bucket_end(last) + 1);
+    let omitting = w.directory_of(&w.records[1..], &History::default());
+    assert!(w.recover(&omitting).await.status.unwrap().complete);
+    assert_eq!(balance(&w.st), VALUE);
+    let found = w.check_history(w.directory(&History::default()), 0).await;
+    assert!(found.status.unwrap().complete);
+    assert_eq!(balance(&w.st), 2 * VALUE);
+}
+
+/// Two accounts of one wallet recover independently.
+#[tokio::test]
+async fn two_accounts_recover_independently() {
+    let mut w = World::new();
+    let seed = secrecy::SecretVec::new(vec![3; 32]);
+    let birthday = w.st.test_account().unwrap().birthday().clone();
+    let db = w.st.wallet_mut().db_mut();
+    let (other, usk) = db.create_account("other", &seed, &birthday, None).unwrap();
+    let other_parent = FullViewingKey::from(usk.orchard());
+    let record = pay_unscanned(&mut w.st, &other_parent, incoming(1), 0);
+    w.records.push(record);
+    // The new account sends the scan back to its birthday, at Ironwood activation.
+    let blocks = w.records[0].payment.height - ACTIVATION + 1;
+    w.st.scan_cached_blocks_with_one_time_ivks(BlockHeight::from(ACTIVATION), blocks as usize);
+    w.advance(bucket_end(w.records[0].payment.height) + 1);
+    let directory = w.directory(&History::default());
+    assert!(w.recover(&directory).await.status.unwrap().complete);
+    w.account = other;
+    assert!(w.recover(&directory).await.status.unwrap().complete);
+    assert_eq!(w.st.get_total_balance(other).into_u64(), VALUE);
+    assert_eq!(balance(&w.st), 0);
+}
+
+/// The seen set issuance reads must commit to the wallet's genesis, since another
+/// network's set says nothing about this network's quotes. It holds what the feeds
+/// reported, dated with their reads, and issuance never issues a refund address it holds.
+#[tokio::test]
+async fn issuance_skips_a_refund_address_in_the_fetched_seen_set() {
+    let mut w = World::new();
+    let refund_receiver = key_receiver(&parent(&w.st), refund(0));
+    let held = History {
+        seen: vec![refund_receiver, receiver(&w.st, 1)],
+        ..History::default()
+    };
+    let directory = w.directory(&held);
+    let refused = fetch_seen(ORIGIN, &directory, [8; 32]).await;
+    let coverage = |e: &receiver_directory::Error| matches!(e, receiver_directory::Error::Coverage);
+    assert!(matches!(&refused, Err(DirectoryError::Directory(e)) if coverage(e)));
+    let seen = fetch_seen(ORIGIN, &directory, GENESIS).await.unwrap();
+    assert_eq!((seen.since(), seen.until()), (NOW - DAY, NOW - DAY));
+    let probe = [0, 1, 2].map(|index| *receiver(&w.st, index).as_bytes());
+    assert_eq!(seen.contains(&probe), [false, true, false]);
+
+    // Issuance waits for recovery's seen check.
+    w.recover(&directory).await;
+    let contains = |receivers: &[[u8; 43]]| seen.contains(receivers);
+    let provider = ProviderSeen {
+        since: 0,
+        until: NOW,
+        contains: &contains,
+    };
+    let through = tip(&w.st).height;
+    let db = w.st.wallet_mut().db_mut();
+    let key = db.reserve_refund_key(w.account, NOW, through, Some(&provider));
+    assert_eq!(key.unwrap().unwrap().key_id(), refund(1));
 }

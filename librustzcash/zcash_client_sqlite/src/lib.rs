@@ -130,8 +130,8 @@ use {
                     RecoveryStatus, Snapshot,
                 },
                 restore::{
-                    DirectoryPayment, DiscoveryStatus, DiscoveryWork, EnumerationCursor,
-                    FilterCheck, OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite, PublicationEnd,
+                    DirectoryPayment, DiscoveryWork, OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite,
+                    PublicationEnd,
                 },
             },
             transparent_ledger::ChainPoint,
@@ -2760,19 +2760,6 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIvkRestoreRead
     for WalletDb<C, P, CL, R>
 {
-    fn one_time_discovery(
-        &self,
-        account: AccountUuid,
-        now: i64,
-    ) -> Result<Option<DiscoveryStatus>, Self::Error> {
-        wallet::one_time_ivk::restore::discovery::status(
-            self.conn.borrow(),
-            &self.params,
-            account,
-            now,
-        )
-    }
-
     fn one_time_receivers(
         &self,
         account: AccountUuid,
@@ -2809,50 +2796,6 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
 impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
     OneTimeIvkRestoreWrite for WalletDb<C, P, CL, R>
 {
-    fn record_one_time_filter_checks(
-        &mut self,
-        account: AccountUuid,
-        publication: PublicationEnd,
-        purpose: zakura_one_time_ivk::Purpose,
-        checked: &[FilterCheck],
-        cursor: EnumerationCursor,
-        finished: bool,
-        now: i64,
-    ) -> Result<bool, SqliteClientError> {
-        self.transactionally(|wdb| {
-            wallet::one_time_ivk::restore::discovery::record_filter_checks(
-                wdb.conn.0,
-                wdb.params,
-                account,
-                publication,
-                purpose,
-                checked,
-                cursor,
-                finished,
-                now,
-            )
-        })
-    }
-
-    fn record_one_time_lookup(
-        &mut self,
-        account: AccountUuid,
-        key: KeyId,
-        revision: PublicationEnd,
-        page: u32,
-        records: &[DirectoryPayment],
-        complete: bool,
-        now: i64,
-    ) -> Result<bool, SqliteClientError> {
-        self.transactionally(|wdb| {
-            let sessions = wdb.one_time_sessions();
-            wallet::one_time_ivk::restore::discovery::record_lookup(
-                wdb.conn.0, wdb.params, &sessions, account, key, revision, page, records, complete,
-                now,
-            )
-        })
-    }
-
     fn defer_one_time_lookup(
         &mut self,
         account: AccountUuid,

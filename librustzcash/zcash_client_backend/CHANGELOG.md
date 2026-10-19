@@ -9,11 +9,11 @@ and this library adheres to Rust's notion of
 
 ### Added
 
-- One-time IVK discovery (with `orchard`): `data_api::one_time_ivk::restore` replaces restore
-  sweeps with discovery. `one_time_discovery` reports the work due, `one_time_receivers`
-  derives an account's receivers without registering them, and
-  `record_one_time_filter_checks`, `record_one_time_lookup`, `defer_one_time_lookup` and
-  `record_one_time_witness` record it. Payments ahead of the scan become scan hints.
+- One-time IVK lookups (with `orchard`): `data_api::one_time_ivk::restore` replaces restore
+  sweeps with directory lookups. `one_time_receivers` derives an account's receivers
+  without registering them, and `defer_one_time_lookup` and `record_one_time_witness`
+  record lookup failures and late payments' inclusion paths. Payments ahead of the scan
+  become scan hints.
   `OneTimeIvkRead::get_one_time_scanning_keys_for_range` gives one batch's keys, hints
   included, and `chain::scan_cached_blocks_with_one_time_ivks` uses it.
 - `data_api::one_time_ivk::coverage` (with `orchard`): `OneTimeIvkCoverageRead` and

@@ -190,9 +190,8 @@ fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
                 "two days earlier"
             }
         ),
-        summary: "A restore's discovery looks every paid key up in the receiver directory, one \
-            PIR lookup per payment page. Keys NEAR was given in the last day then scan for 24 \
-            hours. Every payment must be credited to its key, and after a restart the next quote \
+        summary: "A restore's recovery looks every paid key up in the receiver directory, one \
+            PIR lookup per payment page. Every payment must be credited to its key, and after a restart the next quote \
             must take an address past every paid one and find its payout live."
             .into(),
         params: vec![
@@ -263,7 +262,7 @@ fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
                 .collect();
             ctx.check(
                 format!(
-                    "B's discovery credits every one of the {swaps} payouts to its key, with its value"
+                    "B's recovery credits every one of the {swaps} payouts to its key, with its value"
                 ),
                 wrong.is_empty(),
                 format!(
@@ -282,7 +281,7 @@ fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
                         &format!("I{i}"),
                         m,
                         Class::FoundByDiscovery,
-                        "A restore's discovery looks paid keys up in the directory.",
+                        "A restore's recovery looks paid keys up in the directory.",
                     );
                 }
             }
@@ -428,8 +427,8 @@ fn recheck_late_find(age: i64, every: u32, parity: Parity) -> Scenario {
                 "late payment",
                 &swap.label(),
                 &late,
-                Class::FoundAfterRecheck,
-                "A later payment to a closed key that was already paid is found only by Check swap history.",
+                Class::FoundByDiscovery,
+                "The key stays registered, so recovery tests it against the bucket holding the late payment before Check swap history runs.",
             );
             ctx.spend_one_time_notes(a);
         }),

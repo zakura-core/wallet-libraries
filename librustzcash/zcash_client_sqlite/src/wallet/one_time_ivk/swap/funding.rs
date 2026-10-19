@@ -18,9 +18,7 @@ use super::{
 };
 use crate::wallet::one_time_ivk::{
     Discovery, KeyId, OneTimeKey, Purpose, account_key, activate, authenticate_key, block_issuance,
-    decode_index, index_after, invalid, register,
-    restore::{discovery, recovery},
-    restore_start,
+    coverage, decode_index, index_after, invalid, register, restore::recovery, restore_start,
 };
 use crate::{AccountUuid, error::SqliteClientError};
 
@@ -41,9 +39,10 @@ pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
     if recovery::refund_memos_pending(conn, account)? {
         return Ok(Err(ReservationPolicy::Coverage));
     }
-    // A restored account's discovery may still reveal used refund indices.
+    // Until the windows were checked against a seen set, another device may have given
+    // out any refund index.
     let (owner, _) = account_key(conn, params, account)?;
-    if !discovery::issuance_ready(conn, params, owner)? {
+    if !coverage::seen_ready(conn, owner.0)? {
         return Ok(Err(ReservationPolicy::Gap));
     }
     let index = match next_refund_index(conn, params, account, seen, now)? {

@@ -1,20 +1,14 @@
 use super::*;
 use zakura_one_time_ivk::Purpose;
-use zcash_client_backend::data_api::one_time_ivk::restore::{DiscoveryStatus, LookupWork};
+use zcash_client_backend::data_api::one_time_ivk::coverage::{
+    CoverageOutcome, CoverageStep, CoverageTarget, DirectoryHistory, LookupTicket,
+    OneTimeIvkCoverageRead as _, OneTimeIvkCoverageWrite as _, RecoveryStatus, Snapshot,
+};
+use zcash_client_backend::data_api::one_time_ivk::restore::LookupWork;
 
 /// Receive key 8, which the fixtures pay before registering it.
 pub(in crate::wallet::one_time_ivk) fn key8() -> KeyId {
     KeyId::new(Purpose::Receive, 8)
-}
-
-/// A filter check that marks `key` seen and paid.
-pub(in crate::wallet::one_time_ivk) fn paid(key: KeyId) -> FilterCheck {
-    FilterCheck {
-        key,
-        seen: true,
-        paid: true,
-        recent: false,
-    }
 }
 
 /// The publication ending at cached block `height`, as the directory declares it, whether
@@ -40,40 +34,88 @@ pub(in crate::wallet::one_time_ivk) fn publication_at(
     }
 }
 
-/// Runs a whole discovery pass of `account` against `publication`: incoming `checks`, and
-/// no refund key used. Returns whether the store took the publication.
-pub(in crate::wallet::one_time_ivk) fn run_pass(
+/// Covers `account`'s whole receiver set through the block `publication` ends at with a
+/// cumulative snapshot that holds only `hits`, as recovery does: it bootstraps the
+/// frontier there, or moves an established one up to it. Returns whether the store
+/// recorded it; a step it refuses leaves nothing pinned.
+pub(in crate::wallet::one_time_ivk) fn cover_at(
     db: &mut Db,
     account: AccountUuid,
     publication: PublicationEnd,
-    checks: &[FilterCheck],
+    hits: &[KeyId],
 ) -> bool {
-    let done = EnumerationCursor {
-        next: 100,
-        reach: 100,
-    };
     let now = clock_now();
-    let took = db
-        .record_one_time_filter_checks(
-            account,
-            publication,
-            Purpose::Receive,
-            checks,
-            done,
-            true,
-            now,
-        )
+    let history = DirectoryHistory {
+        catalog: [1; 32],
+        epoch: 1,
+    };
+    assert!(db.prepare_one_time_coverage(account, 1_000, now).unwrap());
+    db.reset_one_time_history(account, history).unwrap();
+    let generation = db.one_time_receiver_set(account).unwrap().generation;
+    let target = CoverageTarget::Frontier { generation };
+    let snapshot = Snapshot {
+        cutoff: ChainPoint {
+            height: publication.height,
+            hash: BlockHash(publication.hash),
+        },
+        digest: [3; 32],
+    };
+    if db.pin_one_time_snapshot(account, target, snapshot).unwrap() != Some(snapshot) {
+        return false;
+    }
+    let step = CoverageStep {
+        start: None,
+        end: snapshot.cutoff,
+        digest: snapshot.digest,
+        history,
+    };
+    let recorded = db.record_one_time_coverage(account, target, step, hits, now);
+    if recorded.unwrap() == CoverageOutcome::Recorded {
+        return true;
+    }
+    db.unpin_one_time_snapshot(account, target, snapshot)
         .unwrap();
-    took && db
-        .record_one_time_filter_checks(account, publication, Purpose::Refund, &[], done, true, now)
-        .unwrap()
+    false
 }
 
-/// `account`'s discovery status.
-pub(in crate::wallet::one_time_ivk) fn status(db: &Db, account: AccountUuid) -> DiscoveryStatus {
-    db.one_time_discovery(account, clock_now())
-        .unwrap()
-        .unwrap()
+/// `account`'s recovery status.
+pub(in crate::wallet::one_time_ivk) fn status(db: &Db, account: AccountUuid) -> RecoveryStatus {
+    db.one_time_recovery_status(account).unwrap().unwrap()
+}
+
+/// `account`'s lookups due now, handed out as tickets.
+pub(in crate::wallet::one_time_ivk) fn due(db: &mut Db, account: AccountUuid) -> Vec<LookupTicket> {
+    db.dispatch_one_time_lookups(account, clock_now()).unwrap()
+}
+
+/// Records `records`, a page of `key`'s history read from `revision` from `page`, against
+/// a fresh ticket for its lookup, or returns false if none is due.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::wallet::one_time_ivk) fn record_page(
+    db: &mut Db,
+    account: AccountUuid,
+    key: KeyId,
+    revision: PublicationEnd,
+    page: u32,
+    records: &[DirectoryPayment],
+    complete: bool,
+) -> bool {
+    let Some(ticket) = due(db, account)
+        .into_iter()
+        .find(|t| t.work.work.key == key)
+    else {
+        return false;
+    };
+    db.record_one_time_lookup_page(
+        account,
+        &ticket,
+        revision,
+        page,
+        records,
+        complete,
+        clock_now(),
+    )
+    .unwrap()
 }
 
 /// Records `payments` as `key`'s whole history read from `revision`, from page zero.
@@ -85,8 +127,7 @@ pub(in crate::wallet::one_time_ivk) fn look_up(
     payments: &[PendingPayment],
 ) -> bool {
     let records: Vec<_> = payments.iter().map(directory_answer).collect();
-    db.record_one_time_lookup(account, key, revision, 0, &records, true, clock_now())
-        .unwrap()
+    record_page(db, account, key, revision, 0, &records, true)
 }
 
 /// The path of the chain's Ironwood leaf at `position` at the cached tip.
@@ -144,15 +185,15 @@ pub(in crate::wallet::one_time_ivk) fn send_witness(
 }
 
 /// Pays [`key8`] in a [`restored_wallet`] before the wallet knows the key and scans past
-/// the payment, then runs a pass that finds the key paid and records its lookup: the
-/// payment is a late candidate. Returns the payment and the publication, which ends at the
+/// the payment, then covers it with a snapshot that holds the key, and records its lookup:
+/// the payment is a late candidate. Returns the payment and the publication, which ends at the
 /// scanned tip.
 pub(in crate::wallet::one_time_ivk) fn late_fixture() -> (State, PendingPayment, PublicationEnd) {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
     let candidate = pay_candidate(&mut st, key8());
     st.generate_and_scan_empty_blocks_with_one_time_ivks(2);
-    let publication = discover(&mut st, account, &[paid(key8())]);
+    let publication = cover(&mut st, account, &[key8()]);
     let db = st.wallet_mut().db_mut();
     assert!(look_up(
         db,
@@ -176,17 +217,16 @@ pub(in crate::wallet::one_time_ivk) fn one_time_notes(st: &State) -> Vec<(i64, b
 }
 
 /// A payment found after the scan passed its block waits for its inclusion path, then is
-/// admitted unspent, once, and discovery completes.
+/// admitted unspent, once, and recovery completes.
 #[test]
 fn a_late_payment_is_admitted_once_its_path_arrives() {
     let (mut st, candidate, publication) = late_fixture();
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
     let found = status(db, account);
-    assert_eq!(found.publication, Some(publication));
-    // The waiting payment keeps discovery incomplete, so the app keeps running it.
+    // The waiting payment keeps recovery incomplete, so the app keeps running it.
     assert!(!found.complete);
-    assert!(found.lookups.is_empty());
+    assert_eq!(found.lookups, 0);
     assert_eq!(found.witnesses.len(), 1);
     assert_eq!(found.witnesses[0].position, candidate.position);
     assert!(one_time_notes(&st).is_empty());
@@ -203,7 +243,7 @@ fn a_late_payment_is_admitted_once_its_path_arrives() {
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
-/// A late payment whose note was spent before discovery found it is admitted spent: the
+/// A late payment whose note was spent before recovery found it is admitted spent: the
 /// spending transaction carries an output the scan recognized, so the journal holds the
 /// note's nullifier.
 #[test]
@@ -224,7 +264,7 @@ fn a_spent_late_payment_is_admitted_spent_through_the_journal() {
     );
     st.scan_cached_blocks_with_one_time_ivks(height, 1);
     st.generate_and_scan_empty_blocks_with_one_time_ivks(2);
-    let publication = discover(&mut st, account, &[paid(key8())]);
+    let publication = cover(&mut st, account, &[key8()]);
     let db = st.wallet_mut().db_mut();
     assert!(look_up(
         db,
@@ -264,7 +304,7 @@ fn admitting_a_spent_late_payment_promotes_its_funding_memo() {
     .unwrap();
     let sql = "UPDATE ironwood_received_notes SET memo = ?1 WHERE recipient_key_scope = 1";
     exec(st.wallet().conn(), sql, [memo.as_slice()]);
-    let publication = discover(&mut st, account, &[paid(key8())]);
+    let publication = cover(&mut st, account, &[key8()]);
     let refund = KeyId::new(Purpose::Refund, 3);
     let facts = |st: &State| -> (bool, bool) {
         let sql = "SELECT authenticated, advances_allocation FROM ironwood_one_time_keys
@@ -310,7 +350,7 @@ fn a_late_payment_keeps_a_sibling_the_wallet_already_holds() {
         }
         // A later scan starts after the payment's block.
         pay(&mut st, &foreign, 10_000);
-        let publication = discover(&mut st, account, &[paid(key8())]);
+        let publication = cover(&mut st, account, &[key8()]);
         let db = st.wallet_mut().db_mut();
         assert!(look_up(
             db,
@@ -327,22 +367,22 @@ fn a_late_payment_keeps_a_sibling_the_wallet_already_holds() {
     panic!("the payment was never its bundle's first action");
 }
 
-/// A publication above the wallet's chain tip, or older than the current pass's, is
-/// refused.
+/// A snapshot ending at a block the wallet has not stored waits, and one ending at or
+/// below the frontier no longer continues it.
 #[test]
-fn stale_and_future_publications_are_refused() {
+fn snapshots_ahead_of_the_scan_or_behind_the_frontier_are_refused() {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
     let current = publication_at(&st, tip(&st).height);
     let mut future = current;
     future.height = current.height + 10;
     let db = st.wallet_mut().db_mut();
-    assert!(!run_pass(db, account, future, &[]));
-    assert!(run_pass(db, account, current, &[]));
+    assert!(!cover_at(db, account, future, &[]));
+    assert!(cover_at(db, account, current, &[]));
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    discover(&mut st, account, &[]);
+    cover(&mut st, account, &[]);
     let db = st.wallet_mut().db_mut();
-    assert!(!run_pass(db, account, current, &[]));
+    assert!(!cover_at(db, account, current, &[]));
 }
 
 /// A rewind below a late payment returns it to a hint, which the rescan settles.
@@ -359,27 +399,6 @@ fn a_rewind_returns_late_payments_to_hints() {
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
-/// A publication ending before the birthday completes discovery without lookups, still
-/// protecting its paid keys from issuance. Its keys close, so a recheck checks them for a
-/// payment after the birthday.
-#[test]
-fn a_publication_before_the_birthday_needs_no_lookups() {
-    let mut st = restored_wallet();
-    let account = st.test_account().unwrap().id();
-    let birthday = st.test_account().unwrap().birthday().height();
-    let publication = PublicationEnd {
-        height: birthday - 1,
-        hash: [3; 32],
-        tree_size: 0,
-    };
-    let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, publication, &[paid(key8())]));
-    let found = status(db, account);
-    assert!(found.complete);
-    assert!(found.lookups.is_empty());
-    assert!(key_state(db, key8()).1);
-}
-
 /// Whether the wallet's one queued candidate is a scan hint rather than a late candidate.
 fn scan_hint(st: &State) -> bool {
     value(
@@ -389,11 +408,13 @@ fn scan_hint(st: &State) -> bool {
     )
 }
 
-/// Mines, without scanning, a block paying [`key8`] above a scanned tip, and runs a pass
-/// whose publication ends there, recording the payment: a scan hint. Returns the payment.
+/// Covers a [`restored_wallet`], mines without scanning a block paying [`key8`] above its
+/// scanned tip, and looks the key up through a publication ending there, as "Check swap
+/// history" does, recording the payment: a scan hint. Returns the payment.
 fn hint_fixture() -> (State, PendingPayment) {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
+    cover(&mut st, account, &[]);
     let fvk = derive(&st, key8());
     let amount = Zatoshis::const_from_u64(100_000);
     let paid_to = IronwoodFvk(fvk.clone());
@@ -402,7 +423,8 @@ fn hint_fixture() -> (State, PendingPayment) {
     st.wallet_mut().update_chain_tip(height).unwrap();
     let publication = publication_at(&st, height);
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, publication, &[paid(key8())]));
+    db.restart_one_time_lookups(account, &[key8()], height, clock_now())
+        .unwrap();
     assert!(look_up(
         db,
         account,
@@ -462,194 +484,59 @@ fn a_missed_hint_restarts_its_lookup_backed_off() {
     );
     assert!(cutoff.is_some());
     assert!(next_attempt > clock_now());
-    assert!(status(db, account).lookups.is_empty());
+    assert!(due(db, account).is_empty());
 }
 
-/// A fresh account's key registered for a lookup after discovery finished, as a recovered
-/// refund key is, keeps discovery incomplete until a pass looks it up.
+/// A lookup read from a revision whose last block differs from the wallet's is refused at
+/// once and stays due, so a revision that matches completes it.
 #[test]
-fn a_fresh_accounts_waiting_lookup_keeps_discovery_incomplete() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let from = tip(&st).height + 1;
-    let db = st.wallet_mut().db_mut();
-    let key = reserve_key(db, account, Purpose::Receive, from).key_id();
-    exec(
-        &db.conn,
-        "INSERT INTO ironwood_one_time_lookups (one_time_key_id)
-         SELECT id FROM ironwood_one_time_keys WHERE key_index = ?1",
-        [key.index().to_be_bytes()],
-    );
-    let found = status(db, account);
-    assert!(!found.complete);
-    assert!(found.publication.is_none());
-    discover(&mut st, account, &[]);
-    let due = status(st.wallet().db(), account).lookups;
-    assert_eq!(due.len(), 1);
-    assert_eq!(due[0].work.key, key);
-}
-
-/// A publication whose last block differs from the wallet's is rejected: nothing is due
-/// against it, and the account waits for a newer one. Its paid key's lookup stays due in
-/// the next pass.
-#[test]
-fn a_publication_off_the_wallets_chain_is_rejected() {
+fn a_revision_off_the_wallets_chain_is_refused() {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
-    let mut publication = publication_at(&st, tip(&st).height);
-    publication.hash = [9; 32];
+    let publication = cover(&mut st, account, &[key8()]);
+    let wrong = PublicationEnd {
+        hash: [9; 32],
+        ..publication
+    };
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, publication, &[paid(key8())]));
+    assert!(!look_up(db, account, key8(), wrong, &[]));
     let found = status(db, account);
     assert!(!found.complete);
-    assert!(found.lookups.is_empty());
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let publication = discover(&mut st, account, &[]);
-    let db = st.wallet_mut().db_mut();
-    let found = status(db, account);
-    assert!(!found.complete);
-    assert_eq!(found.lookups.len(), 1);
+    assert_eq!(found.lookups, 1);
     assert!(look_up(db, account, key8(), publication, &[]));
     assert!(status(db, account).complete);
 }
 
-/// A publication rejected for its tree size can be corrected at the same block, and a claim
-/// that contradicts an accepted one is refused. Another account's pass over the rejected
-/// claim starts over.
+/// A revision rejected for its tree size can be corrected at the same block, and a claim
+/// that contradicts an accepted one is refused.
 #[test]
 fn a_rejected_tree_size_can_be_corrected() {
-    let mut st = ironwood_wallet();
+    let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
-    let seed = SecretVec::new(vec![3; 32]);
-    let birthday = st.test_account().unwrap().birthday().clone();
-    let (other, _) = st
-        .wallet_mut()
-        .db_mut()
-        .create_account("other", &seed, &birthday, None)
-        .unwrap();
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let publication = publication_at(&st, tip(&st).height);
+    let publication = cover(&mut st, account, &[key8()]);
     let wrong = PublicationEnd {
         tree_size: publication.tree_size + 1,
         ..publication
     };
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, other, wrong, &[]));
-    assert!(run_pass(db, account, wrong, &[paid(key8())]));
-    let found = status(db, account);
-    assert!(found.publication.is_none());
-    assert!(found.lookups.is_empty());
-    assert!(run_pass(db, account, publication, &[paid(key8())]));
-    let found = status(db, account);
-    assert_eq!(found.publication, Some(publication));
-    assert_eq!(found.lookups.len(), 1);
-    assert!(!run_pass(db, account, wrong, &[]));
     assert!(!look_up(db, account, key8(), wrong, &[]));
+    assert_eq!(status(db, account).lookups, 1);
     assert!(look_up(db, account, key8(), publication, &[]));
     assert!(status(db, account).complete);
-    let found = status(db, other);
-    assert!(found.publication.is_none());
-    assert!(!found.complete);
+    db.restart_one_time_lookups(account, &[], publication.height, clock_now())
+        .unwrap();
+    assert!(!look_up(db, account, key8(), wrong, &[]));
 }
 
-/// A recheck reads again the history of a key with a known payment, including one before
-/// the birthday, but not of a key the filters only marked seen, which waits for newer
-/// filters to mark it paid.
+/// An unknown account is an error, not an account with nothing to recover.
 #[test]
-fn a_recheck_looks_up_only_keys_with_payments() {
-    let (mut st, candidate, _) = late_fixture();
-    let account = st.test_account().unwrap().id();
-    send_witness(&mut st, key8(), &candidate);
-    let seen = |index| FilterCheck {
-        key: KeyId::new(Purpose::Receive, index),
-        paid: false,
-        ..paid(key8())
-    };
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    discover(&mut st, account, &[seen(9), seen(10)]);
-    let db = st.wallet_mut().db_mut();
-    exec(
-        &db.conn,
-        "UPDATE ironwood_one_time_keys SET paid_before_birthday = 1 WHERE key_index = ?1",
-        [10u64.to_be_bytes()],
-    );
-    db.recheck_one_time_key_history(account).unwrap();
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    discover(&mut st, account, &[]);
-    let db = st.wallet_mut().db_mut();
-    let due: Vec<KeyId> = status(db, account)
-        .lookups
-        .iter()
-        .map(|l| l.work.key)
-        .collect();
-    assert_eq!(due, [key8(), KeyId::new(Purpose::Receive, 10)]);
-}
-
-/// A filter hit on a closed key past the searched range, maybe a false positive at a sparse
-/// index, does not move refund issuance past it.
-#[test]
-fn a_hit_past_the_search_does_not_advance_allocation() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let publication = publication_at(&st, tip(&st).height);
-    let sparse = FilterCheck {
-        key: KeyId::new(Purpose::Refund, 1_000_000),
-        paid: false,
-        ..paid(key8())
-    };
-    let searched = EnumerationCursor {
-        next: 100,
-        reach: 100,
-    };
-    let db = st.wallet_mut().db_mut();
-    for (purpose, checks) in [(Purpose::Receive, vec![]), (Purpose::Refund, vec![sparse])] {
-        assert!(
-            db.record_one_time_filter_checks(
-                account,
-                publication,
-                purpose,
-                &checks,
-                searched,
-                true,
-                clock_now()
-            )
-            .unwrap()
-        );
-    }
-    let next = reserve_key(db, account, Purpose::Refund, start());
-    assert_eq!(next.key_id().index(), 0);
-}
-
-/// An unknown account is an error, not an account with no discovery to run.
-#[test]
-fn an_unknown_accounts_discovery_is_an_error() {
+fn an_unknown_accounts_recovery_is_an_error() {
     let st = restored_wallet();
     let unknown = AccountUuid::from_uuid(uuid::Uuid::nil());
     assert!(matches!(
-        st.wallet().db().one_time_discovery(unknown, clock_now()),
+        st.wallet().db().one_time_recovery_status(unknown),
         Err(SqliteClientError::AccountUnknown)
     ));
-}
-
-/// A key the filters mark seen but not paid closes even when the publication was accepted
-/// before the pass registered it, so a newer publication rechecks it.
-#[test]
-fn a_seen_key_closes_against_an_accepted_publication() {
-    let mut st = restored_wallet();
-    let account = st.test_account().unwrap().id();
-    let seen = FilterCheck {
-        paid: false,
-        ..paid(key8())
-    };
-    discover(&mut st, account, &[seen]);
-    let db = st.wallet_mut().db_mut();
-    let (closed,): (bool,) = row(
-        &db.conn,
-        "SELECT closed_at IS NOT NULL FROM ironwood_one_time_keys WHERE key_index = ?1",
-        [key8().index().to_be_bytes()],
-    );
-    assert!(closed);
-    assert!(status(db, account).complete);
 }
 
 /// A page refused for a bad record keeps nothing it queued before that record, so the
@@ -660,17 +547,22 @@ fn a_refused_page_queues_nothing() {
     let account = st.test_account().unwrap().id();
     let candidate = pay_candidate(&mut st, key8());
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let publication = discover(&mut st, account, &[paid(key8())]);
+    let publication = cover(&mut st, account, &[key8()]);
     let db = st.wallet_mut().db_mut();
     let beyond = DirectoryPayment {
         height: u32::from(publication.height) + 1,
         ..directory_answer(&candidate)
     };
     let page = [directory_answer(&candidate), beyond];
-    assert!(
-        !db.record_one_time_lookup(account, key8(), publication, 0, &page, true, clock_now())
-            .unwrap()
-    );
+    assert!(!record_page(
+        db,
+        account,
+        key8(),
+        publication,
+        0,
+        &page,
+        true
+    ));
     assert!(pending(db, account, key8()).is_empty());
     exec(
         &db.conn,
@@ -693,16 +585,14 @@ fn paging_resumes_from_its_cursor() {
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     // The scan did not know the key, so both payments are late.
     assert!(unspent_keys(&st, tip(&st).height).is_empty());
-    let publication = discover(&mut st, account, &[paid(key8())]);
+    let publication = cover(&mut st, account, &[key8()]);
     let db = st.wallet_mut().db_mut();
-    let now = clock_now();
     let page = |p: &PendingPayment| [directory_answer(p)];
     let record = |db: &mut Db, from: u32, p: &PendingPayment, done: bool| {
-        db.record_one_time_lookup(account, key8(), publication, from, &page(p), done, now)
-            .unwrap()
+        record_page(db, account, key8(), publication, from, &page(p), done)
     };
     assert!(record(db, 0, &first, false));
-    let LookupWork { applied, last, .. } = status(db, account).lookups[0].clone();
+    let LookupWork { applied, last, .. } = due(db, account)[0].work.clone();
     assert_eq!(applied, 1);
     assert_eq!(
         last.map(|(position, _)| position),
@@ -711,71 +601,8 @@ fn paging_resumes_from_its_cursor() {
     assert!(!record(db, 2, &second, true));
     assert!(record(db, 1, &second, true));
     let found = status(db, account);
-    assert!(found.lookups.is_empty());
+    assert_eq!(found.lookups, 0);
     assert_eq!(found.witnesses.len(), 2);
-}
-
-/// A fresh account needs no discovery, even once a key it issued closes without a payment,
-/// until a recheck asks for it. The recheck's pass looks up the closed key the filters mark
-/// paid, and its discovery stays visible while that lookup is unfinished, even once a
-/// payment it found leaves no key closed unpaid. Issuance waits only for the pass's
-/// registration.
-#[test]
-fn a_fresh_account_rechecks_on_request() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    // The key starts after its payment, so the scan misses it and discovery finds it late.
-    let after = tip(&st).height + 10;
-    let db = st.wallet_mut().db_mut();
-    assert!(
-        db.one_time_discovery(account, clock_now())
-            .unwrap()
-            .is_none()
-    );
-    let key = reserve_key(db, account, Purpose::Receive, after).key_id();
-    exec(
-        &db.conn,
-        "UPDATE ironwood_one_time_keys SET closed_at = 1 WHERE key_index = ?1",
-        [key.index().to_be_bytes()],
-    );
-    assert!(
-        db.one_time_discovery(account, clock_now())
-            .unwrap()
-            .is_none()
-    );
-    db.recheck_one_time_key_history(account).unwrap();
-    assert!(status(db, account).publication.is_none());
-    let candidate = pay_candidate(&mut st, key);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let publication = discover(&mut st, account, &[paid(key)]);
-    let db = st.wallet_mut().db_mut();
-    let page = [directory_answer(&candidate)];
-    assert!(
-        db.record_one_time_lookup(account, key, publication, 0, &page, false, clock_now())
-            .unwrap()
-    );
-    send_witness(&mut st, key, &candidate);
-    assert_eq!(one_time_notes(&st), [(100_000, false)]);
-    let db = st.wallet_mut().db_mut();
-    let found = status(db, account);
-    assert!(!found.complete);
-    assert_eq!(found.lookups.len(), 1);
-    assert!(
-        prepare_from(
-            db,
-            account,
-            clock_now(),
-            after,
-            Some(&empty_seen(clock_now()))
-        )
-        .unwrap()
-        .is_ok()
-    );
-    assert!(
-        db.record_one_time_lookup(account, key, publication, 1, &[], true, clock_now())
-            .unwrap()
-    );
-    assert!(status(db, account).complete);
 }
 
 /// A late payment whose blocks the scan finished without journal coverage, as before the
@@ -807,43 +634,42 @@ fn a_late_payment_over_uncovered_blocks_is_rescanned() {
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
-/// A lookup still due when a newer pass starts reads on to the newer publication's end,
-/// keeping its cursor, so it finds a payment between the two. It refuses a revision ending
-/// below that cutoff, which cannot show the history through it.
+/// A lookup still due when a newer step hits its key again reads on to the newer step's
+/// end, keeping its cursor, so it finds a payment between the two. It refuses a revision
+/// ending below that cutoff, which cannot show the history through it.
 #[test]
-fn a_new_pass_raises_a_due_lookups_cutoff() {
+fn a_newer_hit_raises_a_due_lookups_cutoff() {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
-    let first = discover(&mut st, account, &[paid(key8())]);
+    let first = cover(&mut st, account, &[key8()]);
     let candidate = pay_candidate(&mut st, key8());
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let second = discover(&mut st, account, &[paid(key8())]);
+    let second = cover(&mut st, account, &[key8()]);
     let db = st.wallet_mut().db_mut();
-    let due = status(db, account).lookups;
-    assert_eq!(due.len(), 1);
-    assert_eq!(due[0].cutoff, second.height);
+    let tickets = due(db, account);
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0].work.cutoff, second.height);
     assert!(!look_up(db, account, key8(), first, &[]));
     assert!(look_up(db, account, key8(), second, &[candidate]));
     assert_eq!(status(db, account).witnesses.len(), 1);
 }
 
-/// A key registered for a lookup after its account's pass, as a refund key recovered from
-/// a funding memo is, is looked up through every block the scan stored without it, not
-/// only through the pass's publication.
+/// A key registered for a lookup after the frontier passed it, as a refund key recovered
+/// from a funding memo is, is looked up through every block the scan stored without it.
 #[test]
-fn a_key_registered_after_the_pass_is_looked_up_through_the_scanned_blocks() {
+fn a_key_registered_for_a_lookup_is_looked_up_through_the_scanned_blocks() {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
-    let pass = discover(&mut st, account, &[]);
+    let covered = cover(&mut st, account, &[]);
     let candidate = pay_candidate(&mut st, key8());
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     let scanned = publication_at(&st, tip(&st).height);
     let db = st.wallet_mut().db_mut();
     recover(db, account, key8(), candidate.height);
-    let due = status(db, account).lookups;
-    assert_eq!(due.len(), 1);
-    assert_eq!(due[0].cutoff, scanned.height);
-    assert!(!look_up(db, account, key8(), pass, &[]));
+    let tickets = due(db, account);
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0].work.cutoff, scanned.height);
+    assert!(!look_up(db, account, key8(), covered, &[]));
     assert!(look_up(db, account, key8(), scanned, &[candidate]));
     assert_eq!(status(db, account).witnesses.len(), 1);
 }
@@ -856,13 +682,13 @@ fn unscanned_publication(st: &mut State) -> PublicationEnd {
     publication_at(st, height)
 }
 
-/// A lookup read from a revision the scan has not judged yet keeps discovery incomplete,
+/// A lookup read from a revision the scan has not judged yet keeps recovery incomplete,
 /// even with nothing found, until the scan finds that revision on the wallet's chain.
 #[test]
-fn a_lookup_from_an_unjudged_revision_keeps_discovery_incomplete() {
+fn a_lookup_from_an_unjudged_revision_keeps_recovery_incomplete() {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
-    discover(&mut st, account, &[paid(key8())]);
+    cover(&mut st, account, &[key8()]);
     let revision = unscanned_publication(&mut st);
     let db = st.wallet_mut().db_mut();
     assert!(look_up(db, account, key8(), revision, &[]));
@@ -880,7 +706,7 @@ fn a_lookup_from_a_rejected_revision_starts_over() {
     let account = st.test_account().unwrap().id();
     let candidate = pay_candidate(&mut st, key8());
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    discover(&mut st, account, &[paid(key8())]);
+    cover(&mut st, account, &[key8()]);
     let revision = unscanned_publication(&mut st);
     let wrong = PublicationEnd {
         hash: [9; 32],
@@ -897,9 +723,9 @@ fn a_lookup_from_a_rejected_revision_starts_over() {
     st.scan_cached_blocks_with_one_time_ivks(revision.height, 1);
     let db = st.wallet_mut().db_mut();
     assert!(pending(db, account, key8()).is_empty());
-    let due = status(db, account).lookups;
-    assert_eq!(due.len(), 1);
-    assert_eq!((due[0].applied, due[0].last), (0, None));
+    let tickets = due(db, account);
+    assert_eq!(tickets.len(), 1);
+    assert_eq!((tickets[0].work.applied, tickets[0].work.last), (0, None));
     assert!(look_up(
         db,
         account,
@@ -963,7 +789,7 @@ fn a_late_payment_waits_for_coverage_of_the_scanned_tip() {
         Zatoshis::const_from_u64(20_000),
     );
     st.scan_cached_blocks_with_one_time_ivks(height, 1);
-    let publication = discover(&mut st, account, &[paid(key8())]);
+    let publication = cover(&mut st, account, &[key8()]);
     let db = st.wallet_mut().db_mut();
     assert!(look_up(
         db,
@@ -1022,7 +848,7 @@ fn a_late_payment_over_a_one_block_coverage_hole_is_rescanned() {
 }
 
 /// A late payment the scan has since stored under another action is redundant: its path
-/// dequeues it, and discovery completes.
+/// dequeues it, and recovery completes.
 #[test]
 fn a_late_payment_the_scan_stored_elsewhere_is_dequeued() {
     let (mut st, candidate, _) = late_fixture();
@@ -1049,39 +875,20 @@ fn a_late_payment_the_scan_stored_elsewhere_is_dequeued() {
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
-/// Issuance waits until the pass checked both purposes against a publication that matched
-/// the wallet's chain: not while the scan has yet to judge it, nor before the refund keys
-/// are checked.
+/// Issuance waits until the account's windows were checked against a seen set, so it
+/// never issues an index another device gave out.
 #[test]
-fn issuance_waits_for_both_purposes_against_a_judged_publication() {
+fn issuance_waits_for_a_seen_check() {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
-    let unjudged = unscanned_publication(&mut st);
-    let gap = |db: &mut Db, tip| {
-        matches!(
-            reserve_refund(db, account, tip),
-            Ok(Err(ReservationPolicy::Gap))
-        )
-    };
+    let tip = tip(&st).height;
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, unjudged, &[]));
-    assert!(gap(db, unjudged.height));
-    st.scan_cached_blocks_with_one_time_ivks(unjudged.height, 1);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let newer = publication_at(&st, tip(&st).height);
-    let done = EnumerationCursor {
-        next: 100,
-        reach: 100,
-    };
-    let db = st.wallet_mut().db_mut();
-    let check = |db: &mut Db, purpose| {
-        db.record_one_time_filter_checks(account, newer, purpose, &[], done, true, clock_now())
-            .unwrap()
-    };
-    assert!(check(db, Purpose::Receive));
-    assert!(gap(db, newer.height));
-    assert!(check(db, Purpose::Refund));
-    let key = reserve_refund(db, account, newer.height).unwrap();
+    assert!(matches!(
+        reserve_refund(db, account, tip),
+        Ok(Err(ReservationPolicy::Gap))
+    ));
+    check_seen(db, account);
+    let key = reserve_refund(db, account, tip).unwrap();
     assert_eq!(key.unwrap().key_id(), KeyId::new(Purpose::Refund, 0));
 }
 
@@ -1114,7 +921,7 @@ fn a_payment_before_the_birthday_is_late_not_a_hint() {
     let publication = publication_at(&st, born);
     let path = witness_at(&st, candidate.position);
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, other, publication, &[paid(key8())]));
+    assert!(cover_at(db, other, publication, &[key8()]));
     assert!(look_up(
         db,
         other,
@@ -1146,17 +953,28 @@ fn a_payment_before_the_birthday_is_late_not_a_hint() {
     assert!(paid_before);
 }
 
-/// A rewind below a note a lookup found reopens its key, which closed without scanning,
-/// from the note's block, so the rescan finds the note again.
+/// A rewind below a note a lookup found makes the lookup due again, so the note is found
+/// again on the replacing chain without reopening its key.
 #[test]
-fn a_rewind_below_a_looked_up_note_scans_its_key_again() {
+fn a_rewind_below_a_looked_up_note_looks_it_up_again() {
     let (mut st, candidate, _) = late_fixture();
+    let account = st.test_account().unwrap().id();
     send_witness(&mut st, key8(), &candidate);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
-    st.truncate_to_height_retaining_cache(candidate.height - 1);
     let tip = st.latest_cached_block().unwrap().height();
+    st.truncate_to_height_retaining_cache(candidate.height - 1);
     let blocks = (tip - candidate.height) as usize + 1;
     st.scan_cached_blocks_with_one_time_ivks(candidate.height, blocks);
+    let publication = publication_at(&st, tip);
+    let db = st.wallet_mut().db_mut();
+    assert!(look_up(
+        db,
+        account,
+        key8(),
+        publication,
+        std::slice::from_ref(&candidate)
+    ));
+    send_witness(&mut st, key8(), &candidate);
     let mined: Vec<Option<u32>> = column(
         st.wallet().conn(),
         "SELECT t.mined_height FROM ironwood_received_notes n
@@ -1165,56 +983,6 @@ fn a_rewind_below_a_looked_up_note_scans_its_key_again() {
         [],
     );
     assert_eq!(mined, [Some(u32::from(candidate.height))]);
-}
-
-/// A pass that lists a key as recent watches it from the publication's end, even though
-/// issuance registered the key for a lookup from the provider's seen set before the pass.
-/// Once the watch ends, a later pass that lists it as recent again, as every key is without
-/// a current recent set, does not reopen it.
-#[test]
-fn a_pass_watches_a_recent_key_once_even_if_issuance_registered_it() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let key = KeyId::new(Purpose::Receive, 0);
-    let receiver = derive(&st, key)
-        .address_at(0u32, Scope::External)
-        .to_raw_address_bytes();
-    let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| *r == receiver).collect();
-    let seen = ProviderSeen {
-        since: 0,
-        until: clock_now(),
-        contains: &contains,
-    };
-    let from = tip(&st).height + 1;
-    let db = st.wallet_mut().db_mut();
-    let issued = prepare_from(db, account, clock_now(), from, Some(&seen)).unwrap();
-    assert!(issued.is_ok_and(|k| k.key_id() != key));
-    let watch = |st: &State| -> (Option<u32>, bool) {
-        row(
-            st.wallet().conn(),
-            "SELECT active_from, closed_at IS NOT NULL FROM ironwood_one_time_keys
-             WHERE purpose = 1 AND key_index = ?1",
-            [key.index().to_be_bytes()],
-        )
-    };
-    assert_eq!(watch(&st), (None, false));
-    let recent = FilterCheck {
-        key,
-        seen: true,
-        paid: false,
-        recent: true,
-    };
-    let pass = discover(&mut st, account, &[recent]);
-    let start = u32::from(pass.height) + 1;
-    assert_eq!(watch(&st), (Some(start), false));
-    exec(
-        st.wallet().conn(),
-        "UPDATE ironwood_one_time_keys SET closed_at = 1 WHERE purpose = 1 AND key_index = ?1",
-        [key.index().to_be_bytes()],
-    );
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    discover(&mut st, account, &[recent]);
-    assert_eq!(watch(&st), (Some(start), true));
 }
 
 /// Pays `key` in a new scanned block, before the wallet scans with it, and returns the

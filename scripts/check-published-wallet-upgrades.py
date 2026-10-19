@@ -41,8 +41,8 @@ UNCONDITIONAL_MIGRATIONS = {
 # unless the writer stored one-time IVK data.
 ONE_TIME_IVK_TABLES = (
     "ironwood_one_time_keys", "ironwood_one_time_operations", "ironwood_one_time_payment_recovery",
-    "ironwood_one_time_fresh_accounts", "ironwood_one_time_publications",
-    "ironwood_one_time_lookups", "ironwood_one_time_lookup_reads", "ironwood_one_time_discovery",
+    "ironwood_one_time_publications", "ironwood_one_time_lookups", "ironwood_one_time_lookup_reads",
+    "ironwood_one_time_recovery", "ironwood_one_time_receiver_cache", "ironwood_one_time_obligations",
     "ironwood_spend_journal", "ironwood_spend_journal_nullifiers", "ironwood_journal_coverage",
 )
 WRITERS = ("rc5", "rc7", "rc9", "pre-migrations")
@@ -51,6 +51,8 @@ REFUSING_READERS = ("rc9", "pre-migrations")
 # Writers that also store one-time IVK keys and operations, and the tables holding them.
 ONE_TIME_WRITERS = ("rc9",)
 ONE_TIME_SEEDED_TABLES = ("ironwood_one_time_keys", "ironwood_one_time_operations", "ironwood_one_time_fresh_accounts")
+# The seeded tables an upgrade keeps; it drops the fresh account marks.
+ONE_TIME_KEPT_TABLES = ONE_TIME_SEEDED_TABLES[:2]
 
 
 def source_tree(root, rev):
@@ -157,10 +159,11 @@ def columns(conn, relation):
 
 
 def one_time_rows(path, kept=None):
-    """Each seeded one-time IVK table's rows, restricted to the columns in `kept` if given."""
+    """Each seeded one-time IVK table's rows, or each table `kept` names restricted to its
+    columns there."""
     with sqlite3.connect(path) as conn:
         rows = {}
-        for table in ONE_TIME_SEEDED_TABLES:
+        for table in kept if kept else ONE_TIME_SEEDED_TABLES:
             names = kept[table][0] if kept else columns(conn, table)
             select = ", ".join(f'"{name}"' for name in names)
             rows[table] = (names, conn.execute(f'SELECT {select} FROM "{table}" ORDER BY rowid').fetchall())
@@ -230,12 +233,15 @@ def main():
             assert_no_private_work(db, version)
             print(f"PASS {version}: ingestion before upgrade; current upgrade preserved accounts, transactions, classification values and UTXOs; legacy provenance grants no coverage; the unconditional migrations queued no private work; repeat initialization preserved journal", flush=True)
             if one_time:
-                assert one_time_rows(db, old_one_time) == old_one_time, f"{version}: the upgrade changed one-time IVK rows"
+                kept = {t: old_one_time[t] for t in ONE_TIME_KEPT_TABLES}
+                assert one_time_rows(db, kept) == kept, f"{version}: the upgrade changed one-time IVK rows"
                 with sqlite3.connect(db) as conn:
-                    floors = conn.execute("SELECT reservation_floor, pass_watch_height FROM ironwood_one_time_keys").fetchall()
-                assert floors == [(None, None)] * 2, f"{version}: upgraded keys got {floors}"
+                    floors = conn.execute("SELECT reservation_floor FROM ironwood_one_time_keys").fetchall()
+                    dropped = conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'ironwood_one_time_fresh_accounts'").fetchone()[0]
+                assert floors == [(None,)] * 2, f"{version}: upgraded keys got {floors}"
+                assert dropped == 0, f"{version}: the upgrade kept the fresh account marks"
                 run("current", "one-time-use", db, *seeded)
-                print(f"PASS {version} one-time IVK data: the upgrade preserved its keys, operations and fresh account with no reservation floor or pass watch; the current wallet resumed the started incoming swap, built the refund funding memo and kept both keys open", flush=True)
+                print(f"PASS {version} one-time IVK data: the upgrade preserved its keys and operations with no reservation floor and dropped the fresh account mark; the current wallet resumed the started incoming swap, built the refund funding memo and kept both keys open", flush=True)
             # The writer, now a prior reader, opens the upgraded database. A build that checks
             # for unknown migrations refuses it and changes nothing; rc5 and rc7 predate that
             # check, which is reported rather than assumed.

@@ -218,13 +218,14 @@ fn main() {
         #[cfg(feature = "current")]
         "one-time-use" => {
             // Uses the state "one-time" left, after the current library upgraded it.
-            use zcash_client_backend::data_api::one_time_ivk::restore::OneTimeIvkRestoreRead;
+            use zcash_client_backend::data_api::one_time_ivk::coverage::OneTimeIvkCoverageRead;
 
             let (request, refund_deposit, refund) = (&args[4], &args[5], &args[6]);
             let now = unix_now();
             let account = db.get_account_ids().unwrap()[0];
-            // A fresh account has no discovery to run.
-            assert_eq!(db.one_time_discovery(account, now).unwrap(), None);
+            // The upgrade leaves recovery to start from nothing.
+            let status = db.one_time_recovery_status(account).unwrap();
+            assert!(status.is_none_or(|status| status.frontier.is_none()));
             let deposit = db
                 .start_receive_operation(account, request, now)
                 .unwrap()

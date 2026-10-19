@@ -18,14 +18,13 @@ pub(crate) const REJECTED: u8 = 2;
 
 /// Repairs one-time IVK state for a rewind that rescans every block above `height`.
 /// Open keys start at the first rescanned block at the latest, which
-/// `wallet::truncate_to_height_internal` sets after this in every build. A closed key that
-/// scanned reopens if the rewind leaves one of its receipts short of the confirmations
-/// closing requires (see `WalletDb::close_finished_one_time_keys`), and closes again once
-/// that receipt is confirmed again. A key closed without scanning, whose note a lookup
-/// found, reopens from its first note above `height`, so the rescan finds the note again,
-/// and closes the same way.
+/// `wallet::truncate_to_height_internal` sets after this in every build. A closed incoming
+/// key that scanned reopens if the rewind leaves one of its receipts short of the
+/// confirmations closing requires (see `WalletDb::close_finished_one_time_keys`), and closes
+/// again once that receipt is confirmed again. A refund key stays closed: recovery finds a
+/// replaced refund again from the directory, as the frontier moves back below it.
 ///
-/// Discovery is repaired too, since blocks above `height` may be replaced: a publication
+/// Lookups are repaired too, since blocks above `height` may be replaced: a publication
 /// ending there is judged again, a late candidate there becomes a hint again (its block is
 /// rescanned), a path anchored there is requested again, and a cursor that passed a record
 /// there restarts, since the replacement chain may put a record before it. A lookup done
@@ -45,22 +44,11 @@ pub(crate) fn truncate(
         .saturating_sub(ConfirmationsPolicy::default().untrusted().get());
     conn.execute(
         "UPDATE ironwood_one_time_keys SET closed_at = NULL
-         WHERE closed_at IS NOT NULL AND active_from IS NOT NULL AND id IN (
+         WHERE purpose = 1 AND closed_at IS NOT NULL AND active_from IS NOT NULL AND id IN (
              SELECT n.one_time_key_id FROM ironwood_received_notes n
              JOIN transactions t ON t.id_tx = n.transaction_id
              WHERE t.mined_height > ?1)",
         [confirmed_below],
-    )?;
-    let note_above = "SELECT MIN(t.mined_height) FROM ironwood_received_notes n
-         JOIN transactions t ON t.id_tx = n.transaction_id
-         WHERE n.one_time_key_id = ironwood_one_time_keys.id AND t.mined_height > ?1";
-    conn.execute(
-        &format!(
-            "UPDATE ironwood_one_time_keys SET closed_at = NULL, active_from = ({note_above})
-             WHERE closed_at IS NOT NULL AND active_from IS NULL
-               AND ({note_above}) IS NOT NULL"
-        ),
-        [u32::from(height)],
     )?;
     let floor = u32::from(height);
     // A publication judged either way against a block the rewind replaces is judged again,
@@ -152,12 +140,11 @@ pub(crate) fn truncate(
     Ok(())
 }
 
-/// Reopens `account`'s discovery after a rewind lowered its birthday: the next pass checks
-/// every key again, and every lookup restarts from page zero due through the target it
-/// had, since outcomes outside the old range no longer hold. The account is no longer
-/// treated as fresh. Its whole receiver set owes the history from the new birthday through
+/// Reopens `account`'s history after a rewind lowered its birthday: every lookup restarts
+/// from page zero due through the target it had, since outcomes outside the old range no
+/// longer hold, and its whole receiver set owes the history from the new birthday through
 /// its frontier.
-pub(crate) fn reopen_discovery(
+pub(crate) fn lower_birthday(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
 ) -> Result<(), SqliteClientError> {
@@ -190,17 +177,11 @@ pub(crate) fn reopen_discovery(
             join_set(conn, id, Owed::Key(key, purpose))?;
         }
     }
-    let owner = "(SELECT id FROM accounts WHERE uuid = ?1)";
-    conn.execute(
-        &format!("DELETE FROM ironwood_one_time_discovery WHERE account_id = {owner}"),
-        [account.0],
-    )?;
-    conn.execute(
-        &format!("DELETE FROM ironwood_one_time_fresh_accounts WHERE account_id = {owner}"),
-        [account.0],
-    )?;
-    let keys = format!("SELECT id FROM ironwood_one_time_keys WHERE account_id = {owner}");
-    restart_cursor(conn, &keys, account.0)
+    restart_cursor(
+        conn,
+        "SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1",
+        id,
+    )
 }
 
 /// SQL assignments on `ironwood_one_time_lookups` that fence out every walk dispatched

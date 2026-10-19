@@ -531,11 +531,7 @@ CREATE INDEX idx_orchard_received_note_spends_transaction_id ON orchard_received
 /// Registered one-time keys, each with at most one incoming reservation. Empty lookahead
 /// entries do not advance allocation. `reservation_floor` is the highest operation ID on
 /// the key when its current reservation was made, so only later operations belong to it;
-/// it is NULL on a reservation made before the column existed. `pass_watch_height` is the
-/// end of the publication whose discovery pass gave the key its recent watch, so no later
-/// pass reopens it. A rewind keeps it: an open key keeps scanning from the rewind height,
-/// and the watch covered blocks after the publication, which a lower birthday does not
-/// change. `authenticated` and `issuance_blocked` are facts directory coverage keeps
+/// it is NULL on a reservation made before the column existed. `authenticated` and `issuance_blocked` are facts directory coverage keeps
 /// apart from allocation (see `one_time_ivk::coverage`). A key is never deleted apart from
 /// its account.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_KEYS: &str = "CREATE TABLE ironwood_one_time_keys (
@@ -556,7 +552,6 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_KEYS: &str = "CREATE TABLE ironwood_one
                 active_from INTEGER CHECK (active_from BETWEEN 0 AND 4294967295),
                 closed_at INTEGER,
                 reservation_floor INTEGER,
-                pass_watch_height INTEGER CHECK (pass_watch_height BETWEEN 0 AND 4294967295),
                 authenticated INTEGER NOT NULL DEFAULT 0
                     CHECK (authenticated IN (0, 1)),
                 issuance_blocked INTEGER NOT NULL
@@ -2096,24 +2091,6 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_PUBLICATIONS: &str =
                 PRIMARY KEY (height, hash)
             )";
 
-/// An account's swap history discovery against a publication: how far each purpose's
-/// candidate keys were checked against its filters (see `one_time_ivk::restore`).
-pub(super) const TABLE_IRONWOOD_ONE_TIME_DISCOVERY: &str =
-    "CREATE TABLE ironwood_one_time_discovery (
-                account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
-                publication_height INTEGER NOT NULL
-                    CHECK (publication_height BETWEEN 0 AND 4294967295),
-                publication_hash BLOB NOT NULL CHECK (length(publication_hash) = 32),
-                receive_next INTEGER NOT NULL DEFAULT 0 CHECK (receive_next >= 0),
-                receive_reach INTEGER NOT NULL DEFAULT 0 CHECK (receive_reach >= 0),
-                refund_next INTEGER NOT NULL DEFAULT 0 CHECK (refund_next >= 0),
-                refund_reach INTEGER NOT NULL DEFAULT 0 CHECK (refund_reach >= 0),
-                receive_done INTEGER NOT NULL DEFAULT 0 CHECK (receive_done IN (0, 1)),
-                refund_done INTEGER NOT NULL DEFAULT 0 CHECK (refund_done IN (0, 1)),
-                FOREIGN KEY (publication_height, publication_hash)
-                    REFERENCES ironwood_one_time_publications(height, hash)
-            )";
-
 /// An account's directory coverage (see `one_time_ivk::coverage`): its receiver-set
 /// generation, each purpose's window extent and derivation progress, the history it
 /// follows, its frontier with the generation tested there, the snapshot pinned to
@@ -2137,6 +2114,7 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str =
                 bootstrap_hash BLOB CHECK (length(bootstrap_hash) = 32),
                 bootstrap_digest BLOB CHECK (length(bootstrap_digest) = 32),
                 seen_checked_at INTEGER,
+                seen_ready INTEGER NOT NULL DEFAULT 0 CHECK (seen_ready IN (0, 1)),
                 CHECK ((catalog IS NULL) = (epoch IS NULL)),
                 CHECK ((frontier_height IS NULL) = (frontier_hash IS NULL)
                     AND (frontier_height IS NULL) = (tested_generation IS NULL)
@@ -2184,13 +2162,6 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_OBLIGATIONS: &str =
 pub(super) const INDEX_IRONWOOD_ONE_TIME_OBLIGATIONS_ACCOUNT: &str =
     "CREATE INDEX idx_ironwood_one_time_obligations_account
                 ON ironwood_one_time_obligations(account_id)";
-
-/// Accounts whose seed has no one-time key history to restore (see
-/// `WalletDb::mark_one_time_account_fresh`).
-pub(super) const TABLE_IRONWOOD_ONE_TIME_FRESH_ACCOUNTS: &str =
-    "CREATE TABLE ironwood_one_time_fresh_accounts (
-                account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE
-            )";
 
 pub(super) const TABLE_IRONWOOD_SPEND_JOURNAL: &str = "CREATE TABLE ironwood_spend_journal (
                 block_height INTEGER NOT NULL CHECK (block_height BETWEEN 0 AND 4294967295),

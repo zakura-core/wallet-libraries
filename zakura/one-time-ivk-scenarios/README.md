@@ -24,10 +24,11 @@ python3 scripts/dev.py test --config one-time-ivk-scenarios E2-restore
 Randomized worlds (`Z-fuzz-<seed>`) generate a history of swaps, devices, outages,
 reorgs, restores and spends from a seed, run it with the same harness, and check it
 with an oracle after every sync: no spent note shown unspent, no note the chain lacks
-or holds once, a balance within what the chain holds, no reissued address, every
-payment a completed discovery pass lists, bounded directory requests, and, once the
-world is stable, discovery that completes and goes quiet and every payment the
-contract promises. The default set runs the first five seeds, less any slow one.
+or holds once, a balance within what the chain holds, no reissued address and bounded
+directory requests, and, once the world is stable, recovery that completes through the
+chain it had and goes quiet (no lookups, paths or snapshots, though it keeps reading
+the catalog and new buckets), and every payment the contract promises, without Check
+swap history. The default set runs the first five seeds, less any slow one.
 `ONE_TIME_IVK_FUZZ_SEEDS` names a seed or a `start..end` range,
 `ONE_TIME_IVK_FUZZ_PROFILE=late` or `reorg` biases the worlds toward the late path or
 reorgs, and `ONE_TIME_IVK_FUZZ_SKIP` drops plan steps by number to minimize a failing
@@ -52,8 +53,9 @@ wallet-libraries commit it ran against, which includes the receiver crates.
 ## What is real and what is simulated
 
 Real: the SQLite wallet store and its one-time IVK tables, compact scanning, the
-receiver restore client (`zakura-pir-receiver`), the receiver directory's
-publications and PIR evaluation (`zakura-receiver-directory`, `zakura-receiver-pir`),
+receiver recovery client (`zakura-pir-receiver`), the receiver directory's
+publications, recovery objects (catalog, paid buckets, cumulative snapshots and the
+seen set) and PIR evaluation (`zakura-receiver-directory`, `zakura-receiver-pir`),
 answered in process on the service's routes, Ironwood note encryption, and signed transactions
 with proofs where a scenario needs them (swap funding, payouts that a reorg
 returns).
@@ -68,26 +70,28 @@ Simulated:
 - NEAR. Quotes, deposit addresses, statuses (normalized through
   `zakura-near-intents`), payouts and refunds, and the seen and recent sets its
   explorer feed gives the directory, with a configurable read lag.
-- The receiver directory. Publications are built from the chain's zero-OVK payments,
-  two blocks behind the tip, the way the indexer builds them. Failures can be
+- The receiver directory. Publications and their recovery objects are built from the
+  chain's zero-OVK payments, two blocks behind the tip, the way the indexer builds them.
+  Failures, omitted payments, retention and corrections under a new epoch can be
   injected.
-- Vizor's sync loop. A discovery run, then scanning with status and payload work
-  served from the chain, closing finished keys, then another discovery run. Payload
+- Vizor's sync loop. A recovery run, then scanning with status and payload work
+  served from the chain, closing finished keys, then another recovery run. Payload
   work goes over the public path, not Enhance PIR.
 - Time. One clock follows the chain; a device can run fast or slow.
 
 ## Reading the outcomes
 
 Every payment to a one-time key gets a class for each wallet that should see it:
-found live (scanning while the key was open), found by discovery (a restore's lookups),
+found live (scanning while the key was open), found by discovery (recovery's lookups),
 found after recheck (only after Check swap history), or missed. Each scenario states the class the documented contract predicts,
 with the reason, and fails when the wallet does something else. A miss the library
 documents passes and is listed under the documented gaps, because whether it is
 acceptable is a product decision.
 
 Checks cover what is not a payment: balances after settling, address reuse, key
-states. Before a scenario is judged, every wallet keeps syncing until it is quiet, as
-Vizor's polling would, so a find that needs another sync still counts.
+states. Before a scenario is judged, every wallet keeps syncing until it is quiet and
+its recovery has covered every block the chain had, as Vizor's polling would, so a find
+that needs another sync or a bucket that has yet to close still counts.
 
 Where finding a payment is not enough, a scenario then spends every one-time note the
 wallet holds through ordinary sends. Each send is checked as consensus would check it:

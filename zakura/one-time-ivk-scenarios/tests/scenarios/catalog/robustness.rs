@@ -78,8 +78,8 @@ fn directory_down_at_restore() -> Scenario {
         group: RESTORE,
         title: "The receiver directory is down when the seed is restored, and back an hour later"
             .into(),
-        summary: "Without the directory a restore's discovery cannot check its keys, so it cannot \
-            issue new addresses either (Gap). Discovery runs once the directory answers."
+        summary: "Without the directory a restore cannot check its windows against the seen set, \
+            so it cannot issue new addresses either (Gap). Recovery runs once the directory answers."
             .into(),
         params: vec![("outage".into(), "1h".into())],
         slow: false,
@@ -91,7 +91,7 @@ fn directory_down_at_restore() -> Scenario {
             ctx.sync(b);
             let quote = ctx.prepare_incoming(b);
             ctx.check(
-                "B cannot issue an address while its discovery is incomplete",
+                "B cannot issue an address before its seen check",
                 quote == Err(ReservationPolicy::Gap),
                 format!("{quote:?}"),
             );
@@ -105,7 +105,7 @@ fn directory_down_at_restore() -> Scenario {
                 &swap.label(),
                 &payout,
                 Class::FoundByDiscovery,
-                "Discovery runs once the directory answers.",
+                "Recovery runs once the directory answers.",
             );
         }),
     }
@@ -120,7 +120,7 @@ fn directory_errors(status: u16) -> Scenario {
         ),
         summary: "409 and 410 mean a new publication; anything else, 429 included, is a retryable \
             transport failure that backs the key off. Either way the payment is found by a later \
-            discovery run."
+            recovery run."
             .into(),
         params: vec![("status".into(), status.to_string())],
         slow: false,
@@ -140,13 +140,13 @@ fn directory_errors(status: u16) -> Scenario {
                 &swap.label(),
                 &payout,
                 Class::FoundByDiscovery,
-                "A later discovery run finds the payment after the failures.",
+                "A later recovery run finds the payment after the failures.",
             );
         }),
     }
 }
 
-/// A restore's discovery loses the directory on I1's second payment page, after reading
+/// A restore's recovery loses the directory on I1's second payment page, after reading
 /// I1's first and finishing I0. The directory answers HTTP 503, or, when `stops`, the app
 /// stops during the request and its next sync's witness download fails too. Every payment
 /// must be credited once in the end, and I1's retry must wait out its backoff.
@@ -166,9 +166,9 @@ fn directory_fails_on_a_later_page(stops: bool) -> Scenario {
         title: format!("A restore's lookup of a twice-paid key fails on its second page: {what}"),
         summary:
             "A lookup keeps each page it reads as its cursor, and a failure partway backs the \
-            key off while the others finish. The pages read are scan hints, and the scan tries \
-            the key on each hinted batch, so it finds the payments meanwhile. Once retried, the \
-            lookup resumes from its cursor, and every payment is credited exactly once."
+            key off while the others finish. The late path admits the payments already read \
+            meanwhile. Once retried, the lookup resumes from its cursor, and every payment is \
+            credited exactly once."
                 .into(),
         params: vec![("failure".into(), what.into())],
         slow: false,
@@ -197,6 +197,9 @@ fn directory_fails_on_a_later_page(stops: bool) -> Scenario {
             }
             ctx.wait(2 * DAY);
             let b = ctx.device("B", SEED, birthday);
+            // Recovery tests a bucket or snapshot only once the scan stored its last block, so
+            // B scans first and its next run makes the lookups.
+            ctx.scan_only(b);
             // Lookups run in key order: I0's page, then I1's two pages.
             let fault = Fault {
                 request: "POST /v1/receiver/query",
@@ -213,9 +216,13 @@ fn directory_fails_on_a_later_page(stops: bool) -> Scenario {
                     .collect::<Vec<_>>()
             };
             let after_failure = receipts(ctx);
+            // The late path admits every page read before the failure, and I1 then waits out
+            // its backoff. A stopped app records no walk, but the restarted app's run after
+            // the scan reads every page.
+            let read = if stops { [1, 2, 1] } else { [1, 1, 1] };
             ctx.check(
-                "the scan finds every payment in the hinted batches meanwhile",
-                after_failure == [1, 2, 1],
+                "the late path admits every payment read in the sync",
+                after_failure == read,
                 format!("receipts per key {after_failure:?}"),
             );
             let backoff = ctx.get(b).lookup_state(Purpose::Receive, 1);
@@ -269,7 +276,7 @@ fn directory_fails_on_a_later_page(stops: bool) -> Scenario {
                     label,
                     payout,
                     Class::FoundAutomatically,
-                    "Each payment's block is a scan hint or is found by the key a hint makes the scan try.",
+                    "Recovery looks each paid key up, and the late path admits each payment.",
                 );
             }
             ctx.check_balance(b, values.iter().sum());
@@ -282,9 +289,9 @@ fn omitted_payment() -> Scenario {
         id: "E7-indexer-omits-then-lists-payment".into(),
         group: RESTORE,
         title: "The directory's first publications omit a payment, later ones list it".into(),
-        summary: "An empty page zero means no indexed payment, not an unused address. A key \
-            discovery closed unpaid is not rechecked on its own; Check swap history finds the \
-            payment once the indexer lists it."
+        summary: "An empty page zero means no indexed payment, not an unused address. Once the \
+            indexer lists the payment, the directory corrects its published history under a new \
+            epoch, so recovery bootstraps again and finds it."
             .into(),
         params: Vec::new(),
         slow: false,
@@ -297,16 +304,19 @@ fn omitted_payment() -> Scenario {
             ctx.sync(b);
             ctx.wait(HOUR);
             ctx.dev(b).reach.publication.omit.clear();
-            ctx.log("directory", "publications list the payout again");
+            ctx.dev(b).reach.publication.epoch += 1;
+            ctx.log(
+                "directory",
+                "publications list the payout again, under a new payment-history epoch",
+            );
             keep_syncing(ctx, b, 10 * MINUTE, HOUR);
-            ctx.check_swap_history(b);
             ctx.expect(
                 b,
                 "payout",
                 &swap.label(),
                 &payout,
-                Class::FoundAfterRecheck,
-                "The restored key closed unpaid, and discovery never refreshes a closed key on its own, so Check swap history looks it up (recheck_one_time_key_history).",
+                Class::FoundByDiscovery,
+                "The correction's new epoch drops B's coverage, so B bootstraps again from the corrected cumulative snapshot and looks the key up.",
             );
         }),
     }
@@ -317,9 +327,10 @@ fn quiet_chain() -> Scenario {
         id: "E7-quiet-chain-defers-restore".into(),
         group: RESTORE,
         title: "A restore on a chain with no shielded outputs for 300 blocks".into(),
-        summary: "Discovery runs before the restore scan, so the payment is a scan hint: the scan \
-            finds the note itself, with no inclusion path. A late payment would need a tree \
-            checkpoint within 100 blocks of its path's anchor, which a quiet chain may lack."
+        summary: "Recovery tests a bucket only once the scan stored its last block, so a restore \
+            finds the payment late, and a late payment needs a tree checkpoint within 100 blocks \
+            of its path's anchor, which a quiet chain may lack. It is admitted once shielded \
+            activity resumes, if not before."
             .into(),
         params: vec![("quiet blocks".into(), "300".into())],
         slow: false,
@@ -338,16 +349,12 @@ fn quiet_chain() -> Scenario {
             ctx.chain.traffic = Traffic::default();
             ctx.log("chain", "shielded activity resumes");
             keep_syncing(ctx, b, 10 * MINUTE, HOUR);
-            ctx.check(
-                "the scan finds the hinted payment on the quiet chain",
-                early,
-                if early {
-                    "credited on the quiet chain"
-                } else {
-                    "deferred while the chain was quiet"
-                },
+            ctx.metric(
+                "credited while the chain was quiet",
+                f64::from(u8::from(early)),
+                "payments",
             );
-            ctx.expect(b, "payout", &swap.label(), &payout, Class::FoundByDiscovery, "The payment's lookup is a scan hint, so the scan finds it without an inclusion path.");
+            ctx.expect(b, "payout", &swap.label(), &payout, Class::FoundByDiscovery, "Recovery looks the paid key up and the late path admits the payment once a checkpoint anchors its path.");
         }),
     }
 }

@@ -875,21 +875,17 @@ pub(crate) fn one_time_key_open(conn: &Connection) -> Result<bool, SqliteClientE
 }
 
 /// Whether a build without `orchard` must refuse scanned blocks: a key is open (see
-/// [`one_time_key_open`]), discovery waits for the scan to judge a publication that a pass
-/// in its account's range or a lookup uses, or a payment candidate waits, whether for the
-/// scan to try its key, to cover its blocks or to judge its publication. Only an `orchard`
-/// build's scan does those (see `one_time_ivk::restore::discovery`).
+/// [`one_time_key_open`]), a lookup waits for the scan to judge a publication it read, or a
+/// payment candidate waits, whether for the scan to try its key, to cover its blocks or to
+/// judge its publication. Only an `orchard` build's scan does those (see
+/// `one_time_ivk::restore::discovery`).
 #[cfg(not(feature = "orchard"))]
 pub(crate) fn one_time_scan_required(conn: &Connection) -> Result<bool, SqliteClientError> {
     Ok(one_time_key_open(conn)?
         || conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_publications p WHERE p.state = ?1 AND (
-                 EXISTS(SELECT 1 FROM ironwood_one_time_discovery d
-                     JOIN accounts a ON a.id = d.account_id
-                     WHERE d.publication_height = p.height AND d.publication_hash = p.hash
-                       AND p.height >= a.birthday_height)
-                 OR EXISTS(SELECT 1 FROM ironwood_one_time_lookup_reads r
-                     WHERE r.publication_height = p.height AND r.publication_hash = p.hash)))
+            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_publications p WHERE p.state = ?1
+                 AND EXISTS(SELECT 1 FROM ironwood_one_time_lookup_reads r
+                     WHERE r.publication_height = p.height AND r.publication_hash = p.hash))
              OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery)",
             [one_time_rewind::PROVISIONAL],
             |row| row.get(0),
@@ -5056,7 +5052,7 @@ pub(crate) fn rewind_to_chain_state<P: consensus::Parameters>(
             )
             .map_err(|e| RewindError::DataSource(e.into()))?;
         if lowered > 0 {
-            one_time_rewind::reopen_discovery(conn, *uuid).map_err(RewindError::DataSource)?;
+            one_time_rewind::lower_birthday(conn, *uuid).map_err(RewindError::DataSource)?;
         }
     }
 
@@ -7587,8 +7583,7 @@ mod tests {
 
     /// When the rewind target is below every account's birthday but the caller acknowledges
     /// the lowering by including the account in `reset_account_birthdays`, the rewind
-    /// proceeds and the listed account's birthday is lowered to the new floor. An account
-    /// declared fresh for one-time IVK discovery is no longer, since it now has history.
+    /// proceeds and the listed account's birthday is lowered to the new floor.
     #[test]
     fn rewind_to_chain_state_below_all_birthdays_with_account_in_reset_succeeds() {
         let mut st = TestBuilder::new()
@@ -7602,25 +7597,6 @@ mod tests {
         // account's birthday, so the safeguard fires when the caller hasn't
         // acknowledged any reset.
         let target_height = original_birthday - 10;
-        let fresh = |st: &TestState<_, crate::testing::db::TestDb, _>| -> bool {
-            st.wallet()
-                .conn()
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_fresh_accounts)",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap()
-        };
-        st.wallet()
-            .conn()
-            .execute_batch(
-                "INSERT INTO ironwood_one_time_fresh_accounts (account_id)
-                 SELECT id FROM accounts",
-            )
-            .unwrap();
-        assert!(fresh(&st));
-
         st.wallet_mut()
             .rewind_to_chain_state(
                 ChainState::empty(target_height, BlockHash([0; 32])),
@@ -7633,7 +7609,6 @@ mod tests {
             account_birthday(st.wallet().conn(), account_id),
             Ok(b) if b == target_height + 1
         );
-        assert!(!fresh(&st));
     }
 
     /// `rewind_to_chain_state` must reject `reset_account_birthdays` containing an

@@ -82,10 +82,11 @@ fn refund_once(delay: i64) -> Scenario {
         id: format!("B1-refund-after-{}", span(delay)),
         group: FUNDING,
         title: format!("NEAR refunds a ZEC-to-X swap {} after funding", span(delay)),
-        summary: "The deposit carries a refund memo naming the swap's one-time refund key. Shows that \
-            the funding wallet finds the refund while the key scans, that a refund after the 30-day \
-            limit relies on the paid-filter check, and that a restore recovers the key from the memo."
-            .into(),
+        summary:
+            "The deposit carries a refund memo naming the swap's one-time refund key. Shows that \
+            the funding wallet finds the refund while the key scans, that recovery finds a refund \
+            after the 30-day limit, and that a restore recovers the key from the memo."
+                .into(),
         params: vec![("refund after funding".into(), span(delay))],
         slow: delay > 30 * DAY,
         run: Box::new(move |ctx| {
@@ -107,20 +108,23 @@ fn refund_once(delay: i64) -> Scenario {
             let b = ctx.device("B", SEED, f.birthday);
             ctx.sync(b);
             ctx.sync(b);
-            let within = delay < 30 * DAY;
-            if !within {
-                ctx.check_swap_history(f.a);
-            }
-            let (class, why) = if within {
+            let (class, why) = if delay < 30 * DAY {
                 (Class::FoundLive, REFUND_OPEN)
             } else {
                 (
-                    Class::FoundAfterRecheck,
-                    "The key closed unpaid 30 days after the deadline, and discovery never refreshes a closed key on its own, so Check swap history finds the refund.",
+                    Class::FoundByDiscovery,
+                    "The key closed unpaid 30 days after the deadline, but it stays registered, so recovery tests it against the bucket holding the refund.",
                 )
             };
             ctx.expect(f.a, "refund", &f.key, &refund, class, why);
-            ctx.expect(b, "refund", &f.key, &refund, Class::FoundByDiscovery, RESTORE_MEMO);
+            ctx.expect(
+                b,
+                "refund",
+                &f.key,
+                &refund,
+                Class::FoundByDiscovery,
+                RESTORE_MEMO,
+            );
             ctx.check_same_balance(f.a, b);
             if delay == 30 * MINUTE {
                 ctx.spend_one_time_notes(f.a);
@@ -145,8 +149,8 @@ fn refunded_twice(gap: Option<i64>) -> Scenario {
             ))
         ),
         summary: "A refund key closes once its receipts cover the refunded amount NEAR reported. \
-            A second refund to the same key after that is found only by Check swap history on the \
-            funding wallet, while a restore finds both."
+            Recovery finds a second refund to the same key after that, on the funding wallet and \
+            on a restore."
             .into(),
         params: vec![("gap".into(), name.clone())],
         slow: false,
@@ -195,7 +199,6 @@ fn refunded_twice(gap: Option<i64>) -> Scenario {
             let b = ctx.device("B", SEED, f.birthday);
             ctx.sync(b);
             ctx.sync(b);
-            ctx.check_swap_history(f.a);
             ctx.expect(
                 f.a,
                 "refund 1",
@@ -211,8 +214,8 @@ fn refunded_twice(gap: Option<i64>) -> Scenario {
                 )
             } else {
                 (
-                    Class::FoundAfterRecheck,
-                    "The key closed once refund 1 covered the reported refundedAmount and had 10 confirmations; a later payment to a closed key that was already paid is found only by Check swap history.",
+                    Class::FoundByDiscovery,
+                    "The key closed once refund 1 covered the reported refundedAmount and had 10 confirmations, but it stays registered, so recovery tests it against the bucket holding refund 2.",
                 )
             };
             ctx.expect(f.a, "refund 2", &f.key, &second, class, why);
@@ -247,11 +250,9 @@ fn restore_before_refund(delay: i64) -> Scenario {
             "Restore while a refund is owed, refund {} after the restore",
             span(delay)
         ),
-        summary:
-            "A restore recovers the refund key from the funding memo. NEAR was given the refund \
-            address within the last day, so the key scans for 24 hours after discovery finds it; \
-            a later refund is found only by Check swap history."
-                .into(),
+        summary: "A restore recovers the refund key from the funding memo, so recovery tests it \
+            against every later bucket and finds the refund however late, without scanning the key."
+            .into(),
         params: vec![("refund after restore".into(), span(delay))],
         slow: false,
         run: Box::new(move |ctx| {
@@ -260,12 +261,6 @@ fn restore_before_refund(delay: i64) -> Scenario {
             let b = ctx.device("B", SEED, f.birthday);
             ctx.sync(b);
             ctx.sync(b);
-            let watched = ctx.get(b).scanning();
-            ctx.check(
-                format!("B watches {} after its restore's discovery", f.key),
-                watched.contains(&f.key),
-                format!("scanning {watched:?}"),
-            );
             let t = ctx.chain.now();
             let mut day = t + DAY;
             while day < t + delay {
@@ -279,21 +274,14 @@ fn restore_before_refund(delay: i64) -> Scenario {
             ctx.sync(b);
             ctx.wait(HOUR);
             ctx.sync(b);
-            if delay >= 24 * HOUR {
-                ctx.check_swap_history(b);
-            }
-            let (class, why) = if delay < 24 * HOUR {
-                (
-                    Class::FoundLive,
-                    "NEAR was given the refund address within the last day, so the restored key scans for 24 hours after discovery finds it.",
-                )
-            } else {
-                (
-                    Class::FoundAfterRecheck,
-                    "The restored key closed after its 24-hour watch with no payment, and discovery never refreshes a closed key on its own, so Check swap history finds the refund.",
-                )
-            };
-            ctx.expect(b, "refund", &f.key, &refund, class, why);
+            ctx.expect(
+                b,
+                "refund",
+                &f.key,
+                &refund,
+                Class::FoundAutomatically,
+                "B recovered the refund key from the funding memo, so the bucket holding the refund tests it and recovery looks it up.",
+            );
             if delay == 25 * HOUR {
                 ctx.spend_one_time_notes(b);
             }

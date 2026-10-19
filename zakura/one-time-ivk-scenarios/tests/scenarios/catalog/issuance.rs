@@ -46,7 +46,7 @@ pub fn all() -> Vec<Scenario> {
     scenarios
 }
 
-/// A wallet created after 20 blocks, synced so its discovery has run.
+/// A wallet created after 20 blocks, synced so its recovery has run.
 fn wallet(ctx: &mut Ctx, name: &str) -> Dev {
     ctx.mine(20);
     let birthday = ctx.chain.tip() + 1;

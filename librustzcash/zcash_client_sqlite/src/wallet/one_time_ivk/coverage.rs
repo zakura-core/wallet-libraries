@@ -860,11 +860,31 @@ pub(crate) fn record_seen<P: Parameters>(
         generation == before.generation && after.generation == generation && after.complete();
     if stable {
         conn.execute(
-            "UPDATE ironwood_one_time_recovery SET seen_checked_at = ?2 WHERE account_id = ?1",
+            "UPDATE ironwood_one_time_recovery SET seen_checked_at = ?2, seen_ready = 1
+             WHERE account_id = ?1",
             params![owner.0, now],
         )?;
     }
     Ok(stable)
+}
+
+/// Whether account `owner`'s windows were ever checked against a seen set until it held
+/// nothing they were not grown for (see `OneTimeIvkCoverageWrite::record_one_time_seen`).
+/// Issuance waits for it, so it never issues an index another device gave out before. A
+/// later window growth makes the check due again but leaves this, since seen sets only
+/// grow and issuance reads a fresh one itself.
+pub(in crate::wallet::one_time_ivk) fn seen_ready(
+    conn: &Connection,
+    owner: i64,
+) -> Result<bool, SqliteClientError> {
+    Ok(conn
+        .query_row(
+            "SELECT seen_ready FROM ironwood_one_time_recovery WHERE account_id = ?1",
+            [owner],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
 }
 
 /// Implements `OneTimeIvkCoverageWrite::restart_one_time_lookups`.

@@ -1,44 +1,39 @@
-//! Discovery of a restored seed's one-time keys through a receiver directory over PIR.
+//! Recovery of a seed's one-time keys through a receiver directory over PIR.
 //!
-//! A restored wallet cannot rescan public history for every key its seed may have used,
-//! so it checks candidate receivers against a receiver directory's public filters and
-//! looks up the paid ones: the directory is a public index of Ironwood payments sent with
-//! the zero outgoing viewing key, keyed by receiver. Lookups use PIR, so a lookup does not
-//! reveal which receiver it reads. Whether and when the wallet looks up is not hidden: it
-//! follows the publication's paid filter and retries failed lookups, so a dishonest
-//! directory that changes what it serves can test whether the wallet holds a receiver it
-//! chose. The wallet judges each publication against its own chain and authenticates every
-//! payment with its derived key before crediting it.
+//! A wallet cannot rescan public history for every key its seed may have used, so it tests
+//! its receivers against a receiver directory's public paid sets and looks up the paid
+//! ones: the directory is a public index of Ironwood payments sent with the zero outgoing
+//! viewing key, keyed by receiver. Lookups use PIR, so a lookup does not reveal which
+//! receiver it reads. Whether and when the wallet looks up is not hidden: it follows the
+//! paid sets and retries failed lookups, so a dishonest directory that changes what it
+//! serves can test whether the wallet holds a receiver it chose. The wallet judges each
+//! publication against its own chain and authenticates every payment with its derived key
+//! before crediting it.
 //!
-//! Once the wallet holds a payment discovery found, it is an ordinary note: its
+//! Recovery tests receivers locally against objects every wallet downloads alike on a
+//! common schedule: the catalog head, closed paid buckets, cumulative paid snapshots and
+//! the seen set. Those downloads reveal no membership, though one triggered by a window's
+//! growth reveals activity. A lookup after a bucket hit points to the receivers paid in
+//! that bucket, so repeated payments allow intersection.
+//!
+//! Once the wallet holds a payment recovery found, it is an ordinary note: its
 //! enhancement, scan priority and any rebroadcast follow as for any note. So when a
 //! directory's answer is wrong, traffic to the wallet's other services can differ from an
 //! honest answer's, another route to the test above.
 //!
-//! Continuous recovery tests receivers locally against objects every wallet downloads
-//! alike on a common schedule: the catalog head, closed paid buckets, cumulative paid
-//! snapshots and the seen set. Those downloads reveal no membership, though one triggered
-//! by a window's growth reveals activity. A lookup after a bucket hit points to the
-//! receivers paid in that bucket, so repeated payments allow intersection.
-//!
-//! `fetch_seen` downloads the swap provider seen sets that a wallet checks before issuing
-//! a swap address. The `wallet` feature adds `recover` and `check_history`, which run
-//! continuous recovery for any wallet store that implements the backend's
-//! `OneTimeIvkCoverageWrite`, and `discover`, which runs the older discovery pass over its
+//! `fetch_seen` downloads the seen set that a wallet checks before issuing a swap address.
+//! The `wallet` feature adds `recover` and `check_history`, which run recovery for any
+//! wallet store that implements the backend's `OneTimeIvkCoverageWrite` and
 //! `OneTimeIvkRestoreWrite`. The caller supplies transports, which carry its route policy,
 //! cancellation and timeouts, and a `WriteLock` that serializes wallet writes with its
-//! other writers. Dropping any of these futures at any await is safe: each wallet step
-//! commits on its own.
+//! other writers. Dropping either future at any await is safe: each wallet step commits on
+//! its own.
 
-#[cfg(feature = "wallet")]
-mod discovery;
 #[cfg(feature = "wallet")]
 mod recovery;
 mod seen;
 #[cfg(feature = "wallet")]
 mod session;
-#[cfg(feature = "wallet")]
-pub use discovery::{Discovered, FIRST_WINDOW, GAP, KEYS_PER_RUN, discover};
 #[cfg(feature = "wallet")]
 pub use recovery::{
     DERIVE_PER_RUN, Delay, OBJECTS_PER_RUN, Recovered, SEEN_REFRESH_SECS, check_history, recover,
@@ -51,7 +46,7 @@ pub use receiver_pir::{Error as DirectoryError, transport::Transport};
 /// The directory format and client underneath, for callers that need them directly.
 /// They parse records and witness files structurally only: records from
 /// `DirectoryClient::page` and the bytes from `DirectoryClient::witnesses` are
-/// unchecked. Validate them with `zakura-receiver-crypto`, as `discover` does, before use.
+/// unchecked. Validate them with `zakura-receiver-crypto`, as `recover` does, before use.
 pub use {receiver_directory, receiver_pir};
 
 /// The directory error for data a receiver check refuses: the same error the

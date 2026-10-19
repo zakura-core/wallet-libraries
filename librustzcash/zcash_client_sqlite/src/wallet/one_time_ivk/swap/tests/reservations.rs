@@ -18,15 +18,17 @@ const NO_RECEIPT: OperationStatus = Terminal(ReceiptExpectation::None);
 /// A time when every quote with the default deadline is past it and the cooldown.
 const EXPIRED: i64 = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
 
-/// An Ironwood wallet scanned through one block holding an ordinary note.
+/// An Ironwood wallet scanned through one block holding an ordinary note, whose windows
+/// were checked against a seen set.
 fn fixture() -> State {
     let mut st = undiscovered();
     let account = st.test_account().unwrap().id();
-    discover(&mut st, account, &[]);
+    check_seen(st.wallet_mut().db_mut(), account);
     st
 }
 
-/// A funded wallet whose discovery has not run, so issuance waits.
+/// A funded wallet whose windows were never checked against a seen set, so issuance
+/// waits.
 fn undiscovered() -> State {
     let mut st = ironwood_wallet();
     let ordinary = parent(&st);
@@ -267,15 +269,15 @@ fn issue(st: &mut State, seen: Option<(i64, i64, &[u64])>) -> Result<u64, Reserv
 /// Finishes the test account's due lookups with empty histories, as a receiver directory
 /// that saw nothing would. Returns how many it finished.
 fn finish_lookups(st: &mut State) -> usize {
-    use store::restore::tests::discovery::{look_up, status};
+    use store::restore::tests::discovery::{due, look_up, publication_at};
     let account = st.test_account().unwrap().id();
+    let publication = publication_at(st, tip(st).height);
     let db = st.wallet_mut().db_mut();
-    let found = status(db, account);
-    let publication = found.publication.unwrap();
-    for lookup in &found.lookups {
-        assert!(look_up(db, account, lookup.work.key, publication, &[]));
+    let keys: Vec<_> = due(db, account).iter().map(|t| t.work.work.key).collect();
+    for key in &keys {
+        assert!(look_up(db, account, *key, publication, &[]));
     }
-    found.lookups.len()
+    keys.len()
 }
 
 /// A reservation is reclaimed, without a status if unstarted, once its latest quote
@@ -660,29 +662,25 @@ fn quoting_and_reclamation_wait_for_the_tip_and_queued_candidates() {
     }
 }
 
-/// Issuance waits for discovery. Once it is done, issuance resumes at the lowest address
-/// never quoted, unless a swap issued before the restore paid that address during the
-/// watch. Here the provider's recent sets were missing, so discovery watches every
-/// address without marking it used.
+/// Issuance waits for the seen check. Once it is done, issuance resumes at the lowest
+/// address never quoted, unless a swap issued before the restore paid that address, which
+/// recovery found.
 #[test]
-fn issuance_waits_for_discovery_and_skips_addresses_paid_during_the_watch() {
+fn issuance_waits_for_the_seen_check_and_skips_addresses_recovery_found_paid() {
+    use store::restore::tests::discovery::look_up;
     for paid in [false, true] {
         let mut st = undiscovered();
         let key = KeyId::new(Purpose::Receive, 0);
         assert_eq!(refusal(try_prepare(&mut st, NOW, None)), Some(Gap));
-        let watched = FilterCheck {
-            key,
-            seen: false,
-            paid: false,
-            recent: true,
-        };
         let account = st.test_account().unwrap().id();
-        discover(&mut st, account, &[watched]);
+        check_seen(st.wallet_mut().db_mut(), account);
         if paid {
             let fvk = derive(&st, key);
-            pay(&mut st, &fvk, 100_000);
-            confirm(&mut st);
-            assert!(holds_note(&st, key));
+            let height = pay(&mut st, &fvk, 100_000);
+            let candidate = candidate_at(&st, height, &fvk);
+            let publication = cover(&mut st, account, &[key]);
+            let db = st.wallet_mut().db_mut();
+            assert!(look_up(db, account, key, publication, &[candidate]));
         }
         let issued = prepare(&mut st, NOW).key_id().index();
         assert_eq!(issued, u64::from(paid), "{paid}");
@@ -725,16 +723,9 @@ fn issuance_checks_addresses_past_the_lookahead_against_the_seen_set() {
 fn issuance_skips_restored_addresses_the_provider_saw() {
     let mut st = undiscovered();
     // The old device quoted the first three addresses.
-    let seen: Vec<_> = (0..3)
-        .map(|index| FilterCheck {
-            key: KeyId::new(Purpose::Receive, index),
-            seen: true,
-            paid: false,
-            recent: false,
-        })
-        .collect();
+    let seen: Vec<_> = (0..3).map(|i| KeyId::new(Purpose::Receive, i)).collect();
     let account = st.test_account().unwrap().id();
-    discover(&mut st, account, &seen);
+    see(st.wallet_mut().db_mut(), account, &seen);
     assert_eq!(prepare(&mut st, NOW).key_id().index(), 3);
     abandon_indices(&mut st, 4..RECEIVE_GAP_LIMIT + 3);
     let draft = prepare(&mut st, NOW);
@@ -799,21 +790,17 @@ fn reorg_retains_used_marker_and_seen_addresses_keep_the_bound() {
     assert!(active_from(&st, first.key_id()).is_some());
 }
 
-/// Issuance refuses a tip too far ahead of the scanned one and, unless the account was
-/// declared fresh, waits for discovery. It then takes the lowest address never quoted,
-/// scanned from above the scanned tip, while a refund key starts scanning only once its
-/// funding transaction is stored.
+/// Issuance refuses a tip too far ahead of the scanned one and waits for the seen check,
+/// even on an account created from a fresh seed. It then takes the lowest address never
+/// quoted, scanned from above the scanned tip, while a refund key starts scanning only
+/// once its funding transaction is stored.
 #[test]
-fn issuance_starts_after_the_scanned_tip_once_discovery_is_done() {
-    for fresh in [false, true] {
+fn issuance_starts_after_the_scanned_tip_once_the_seen_check_is_done() {
+    {
         let mut st = undiscovered();
         let account = st.test_account().unwrap().id();
         let (h, _) = st.generate_empty_block();
         st.wallet_mut().update_chain_tip(h).unwrap();
-        let db = st.wallet_mut().db_mut();
-        if fresh {
-            db.mark_one_time_account_fresh(account).unwrap();
-        }
         st.scan_cached_blocks_with_one_time_ivks(h, 1);
         let through = tip(&st);
         let db = st.wallet_mut().db_mut();
@@ -824,41 +811,19 @@ fn issuance_starts_after_the_scanned_tip_once_discovery_is_done() {
         let refund = reserve_refund(db, account, behind);
         assert_eq!(refusal(refund), Some(Coverage));
         let near = through.height + ISSUANCE_TIP_LAG;
-        if !fresh {
-            let issued = db.prepare_receive_reservation(account, NOW, near, None);
-            assert_eq!(refusal(issued), Some(Gap));
-            discover(&mut st, account, &[]);
-        }
-        let db = st.wallet_mut().db_mut();
+        let issued = db.prepare_receive_reservation(account, NOW, near, None);
+        assert_eq!(refusal(issued), Some(Gap));
+        check_seen(db, account);
         let seen = empty_seen(NOW);
         let issued = db.prepare_receive_reservation(account, NOW, near, Some(&seen));
         let r = issued.unwrap().unwrap().key_id();
-        assert_eq!(r, KeyId::new(Purpose::Receive, 0), "fresh={fresh}");
+        assert_eq!(r, KeyId::new(Purpose::Receive, 0));
         let refund = reserve_refund(db, account, through.height);
         let refund = refund.unwrap().unwrap().key_id();
         assert_eq!(refund, KeyId::new(Purpose::Refund, 0));
         assert_eq!(active_from(&st, r), Some(through.height + 1));
         assert_eq!(active_from(&st, refund), None);
     }
-}
-
-/// A fresh account still skips an address the provider's seen set holds. Declaring an
-/// account fresh again changes nothing, and one that already has one-time keys is refused.
-#[test]
-fn a_fresh_account_still_checks_the_seen_set() {
-    let mut st = fixture();
-    let account = st.test_account().unwrap().id();
-    let db = st.wallet_mut().db_mut();
-    db.mark_one_time_account_fresh(account).unwrap();
-    let (since, until) = covering(NOW);
-    assert_eq!(issue(&mut st, Some((since, until, &[0]))), Ok(1));
-    let db = st.wallet_mut().db_mut();
-    db.mark_one_time_account_fresh(account).unwrap();
-    let mut st = fixture();
-    let account = st.test_account().unwrap().id();
-    let db = st.wallet_mut().db_mut();
-    reserve_key(db, account, Purpose::Refund, BlockHeight::from_u32(100));
-    assert!(rejected_input(db.mark_one_time_account_fresh(account)));
 }
 
 /// Starting an accepted quote returns its deposit instructions and starts only its
@@ -1213,20 +1178,14 @@ fn issuance_needs_a_fresh_seen_set() {
     }
 }
 
-/// Discovery registers the keys a restored seed used without a seen set, which issuance
+/// Recovery registers the keys a restored seed used without a seen set, which issuance
 /// then needs.
 #[test]
 fn recovery_registers_keys_without_a_seen_set() {
     let mut st = undiscovered();
     let account = st.test_account().unwrap().id();
     let key = KeyId::new(Purpose::Receive, 0);
-    let seen = FilterCheck {
-        key,
-        seen: true,
-        paid: false,
-        recent: false,
-    };
-    discover(&mut st, account, &[seen]);
+    see(st.wallet_mut().db_mut(), account, &[key]);
     assert!(get_key(st.wallet().db(), account, key).unwrap().is_some());
     assert_eq!(
         refusal(try_prepare(&mut st, NOW, None)),

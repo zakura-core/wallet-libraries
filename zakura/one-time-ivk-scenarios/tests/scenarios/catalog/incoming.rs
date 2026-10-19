@@ -17,7 +17,7 @@ const HALF: u64 = ZEC / 2;
 const CONFIRMATIONS: u32 = 10;
 
 const OPEN_LIVE: &str = "The key was open: an incoming key scans from its reservation until its swap settles (a final status and every receipt confirmed 10 times), or 30 days after its deadline.";
-const RESTORE_DISCOVERY: &str = "A restore's discovery checks the incoming lookahead against the receiver directory, which lists NEAR's zero-OVK payouts, and looks each paid key up, one page per payment.";
+const RESTORE_DISCOVERY: &str = "A restore tests its incoming receiver window against the receiver directory's paid sets, which list NEAR's zero-OVK payouts, and looks each paid key up, one page per payment.";
 const OWN_OVK: &str = "The payer used its own OVK, so the receiver directory cannot list the payment, and a key that is not scanning cannot find it.";
 
 pub fn all() -> Vec<Scenario> {
@@ -110,7 +110,7 @@ fn payer_name(payer: Payer) -> &'static str {
 
 /// NEAR pays an incoming address, then the same address is paid again after `gap`
 /// (in the same transaction when `None`). Wallet A made the swap; wallet B restores
-/// the seed a day after the second payment. A finally runs Check swap history.
+/// the seed a day after the second payment.
 fn paid_twice(gap: Option<i64>, payer2: Payer, offline: bool) -> Scenario {
     let gap_name = gap.map_or("same-tx".to_string(), span);
     let mode = if offline { "offline" } else { "online" };
@@ -125,8 +125,8 @@ fn paid_twice(gap: Option<i64>, payer2: Payer, offline: bool) -> Scenario {
         payer2.label()
     );
     let summary = "NEAR pays a one-time incoming address, then the same address is paid again. \
-        Shows when the device that made the swap finds the second payment (live, only after Check \
-        swap history, or never) and what a later seed restore finds."
+        Shows when the device that made the swap finds the second payment (live, through \
+        recovery once its key closed, or never) and what a later seed restore finds."
         .to_string();
     let params = vec![
         ("gap".into(), gap_name.clone()),
@@ -222,7 +222,6 @@ fn paid_twice(gap: Option<i64>, payer2: Payer, offline: bool) -> Scenario {
             let b = ctx.device("B", SEED, s.birthday);
             ctx.sync(b);
             ctx.sync(b);
-            ctx.check_swap_history(a);
 
             ctx.expect(a, "payout 1", &key, &p1, Class::FoundLive, OPEN_LIVE);
             let (a2, why) = if open_when_paid {
@@ -236,13 +235,13 @@ fn paid_twice(gap: Option<i64>, payer2: Payer, offline: bool) -> Scenario {
                 )
             } else if payer2 == Payer::Near {
                 (
-                    Class::FoundAfterRecheck,
-                    "The key had closed with a known payment. A later payment to a closed key that was already paid is found only by Check swap history (close_finished_one_time_keys).",
+                    Class::FoundByDiscovery,
+                    "The key had closed with a known payment, but it stays registered, so recovery tests it against the bucket holding payout 2 and looks it up.",
                 )
             } else {
                 (
                     Class::MissedDocumented,
-                    "The key had closed, and the payer used its own OVK, so the receiver directory cannot list the payment and even Check swap history cannot find it.",
+                    "The key had closed, and the payer used its own OVK, so the receiver directory cannot list the payment and recovery cannot find it.",
                 )
             };
             ctx.expect(a, "payout 2", &key, &p2, a2, why);
@@ -256,12 +255,6 @@ fn paid_twice(gap: Option<i64>, payer2: Payer, offline: bool) -> Scenario {
             );
             let (b2, why) = match payer2 {
                 Payer::Near => (Class::FoundByDiscovery, RESTORE_DISCOVERY),
-                // B's scan tries the key on the whole batch holding payout 1's hint, so it
-                // finds a payment in the same batch, but no other.
-                Payer::Wallet if gap.is_none_or(|g| g <= HOUR) => (
-                    Class::FoundAutomatically,
-                    "Payout 1's lookup is a scan hint, and the scan tries its key on the whole batch holding it, which holds payout 2 too.",
-                ),
                 Payer::Wallet => (Class::MissedDocumented, OWN_OVK),
             };
             ctx.expect(b, "payout 2", &key, &p2, b2, why);
@@ -272,8 +265,8 @@ fn paid_twice(gap: Option<i64>, payer2: Payer, offline: bool) -> Scenario {
 }
 
 /// Wallet A quotes an incoming swap; half an hour later the seed is restored on wallet B
-/// (A's device is gone). NEAR pays `after` the restore. With a `fresh` recent set the
-/// restored key is watched for 24 hours; with a stale feed every restored key is.
+/// (A's device is gone). NEAR pays `after` the restore, with NEAR's feed `fresh` or stale,
+/// which recovery does not depend on.
 fn restore_in_flight(after: i64, fresh: bool) -> Scenario {
     let feed = if fresh { "fresh" } else { "stale" };
     Scenario {
@@ -283,10 +276,11 @@ fn restore_in_flight(after: i64, fresh: bool) -> Scenario {
             "Restore while an incoming swap is in flight, payout {} later, {feed} NEAR feed",
             span(after)
         ),
-        summary: "The seed is restored on a new device while NEAR still owes a payout. A restored \
-            key that NEAR was given recently scans for 24 hours after discovery finds it; a later \
-            payout is found only by Check swap history."
-            .into(),
+        summary:
+            "The seed is restored on a new device while NEAR still owes a payout. The address \
+            is in the restored receiver window, so recovery finds the payout from the bucket that \
+            holds it, however late, without scanning the key."
+                .into(),
         params: vec![
             ("payout after restore".into(), span(after)),
             ("NEAR feed".into(), feed.into()),
@@ -301,17 +295,11 @@ fn restore_in_flight(after: i64, fresh: bool) -> Scenario {
             }
             let b = ctx.device("B", SEED, s.birthday);
             ctx.sync(b);
-            let watched = ctx.get(b).scanning();
-            let open_keys = watched.len();
+            let open_keys = ctx.get(b).scanning().len();
             ctx.metric(
-                "B keys scanning after its restore's discovery",
+                "B keys scanning after its restore's recovery",
                 open_keys as f64,
                 "keys",
-            );
-            ctx.check(
-                format!("B watches {} after its restore's discovery", s.key),
-                watched.contains(&s.key),
-                format!("scanning {watched:?}"),
             );
             let t = ctx.chain.now();
             let mut day = t + DAY;
@@ -326,22 +314,14 @@ fn restore_in_flight(after: i64, fresh: bool) -> Scenario {
             ctx.sync(b);
             ctx.wait(HOUR);
             ctx.sync(b);
-            let within = after < 24 * HOUR;
-            if !within {
-                ctx.check_swap_history(b);
-            }
-            let (class, why) = if within {
-                (
-                    Class::FoundLive,
-                    "NEAR was given the address within the last day, so the restored key scans for 24 hours after discovery finds it (RESTORE_WATCH_SECS).",
-                )
-            } else {
-                (
-                    Class::FoundAfterRecheck,
-                    "The restored key closed after its 24-hour watch with no payment. Discovery never refreshes a closed key on its own, so Check swap history finds the payment (recheck_one_time_key_history).",
-                )
-            };
-            ctx.expect(b, "payout", &s.key, &payout, class, why);
+            ctx.expect(
+                b,
+                "payout",
+                &s.key,
+                &payout,
+                Class::FoundByDiscovery,
+                "The address is in B's receiver window, so the bucket holding the payout tests it and recovery looks it up.",
+            );
             ctx.check_balance(b, ZEC);
             if after == HOUR && fresh {
                 ctx.spend_one_time_notes(b);
@@ -351,8 +331,8 @@ fn restore_in_flight(after: i64, fresh: bool) -> Scenario {
 }
 
 /// Wallet A quotes `unpaid` incoming swaps that NEAR never pays, then one it does. B
-/// restores the seed. When NEAR's feed `covered` the quotes, the seen set walks the
-/// restore lookahead past them; otherwise it stops 30 indices above the last payment.
+/// restores the seed. When NEAR's feed `covered` the quotes, the seen set grows the
+/// receiver window past them; otherwise it ends 30 indices above the last payment.
 fn beyond_lookahead(unpaid: u64, covered: bool) -> Scenario {
     let feed = if covered {
         "feed-covers"
@@ -366,13 +346,21 @@ fn beyond_lookahead(unpaid: u64, covered: bool) -> Scenario {
             "{unpaid} unpaid incoming quotes, then a paid one; NEAR's seen set {} them",
             if covered { "covers" } else { "misses" }
         ),
-        summary: "A restore checks the first 100 incoming keys against the directory's filters, then goes \
-            on until 30 in a row are unused. Payments and seen-set hits count as used; quotes NEAR's \
-            feed never recorded do not, so a payment past both is never found."
+        summary: "A restore's receiver window covers the first 100 incoming keys, and grows to 30 \
+            past every index a payment or NEAR's seen set shows used; quotes NEAR's feed never \
+            recorded do not count, so a payment past both is never found."
             .into(),
         params: vec![
             ("unpaid quotes first".into(), unpaid.to_string()),
-            ("seen set".into(), if covered { "covers them" } else { "misses them" }.into()),
+            (
+                "seen set".into(),
+                if covered {
+                    "covers them"
+                } else {
+                    "misses them"
+                }
+                .into(),
+            ),
         ],
         slow: false,
         run: Box::new(move |ctx| {
@@ -404,26 +392,36 @@ fn beyond_lookahead(unpaid: u64, covered: bool) -> Scenario {
                 // The directory's NEAR feed now starts after every quote, as one deployed
                 // with a later `--near-since` would: its seen set holds none of them.
                 ctx.near.feed_started = ctx.chain.now() - HOUR;
-                ctx.log("directory", "NEAR feed restarted: its seen set starts an hour ago");
+                ctx.log(
+                    "directory",
+                    "NEAR feed restarted: its seen set starts an hour ago",
+                );
             }
             let b = ctx.device("B", SEED, birthday);
             for _ in 0..3 {
                 ctx.sync(b);
             }
-            ctx.expect(a, "payout", &swap.label(), &payout, Class::FoundLive, OPEN_LIVE);
-            let (class, why) = if covered || unpaid < zakura_pir_receiver::FIRST_WINDOW {
+            ctx.expect(
+                a,
+                "payout",
+                &swap.label(),
+                &payout,
+                Class::FoundLive,
+                OPEN_LIVE,
+            );
+            let (class, why) = if covered || unpaid < WINDOW_FLOOR {
                 (
                     Class::FoundByDiscovery,
                     if covered {
-                        "Every unpaid quote is in NEAR's seen set, and seen hits move discovery's checks on like payments, so they reach the paid index."
+                        "Every unpaid quote is in NEAR's seen set, and seen hits grow the receiver window like payments, so it reaches the paid index."
                     } else {
-                        "The paid index is among the first 100, which discovery always checks against the paid filter."
+                        "The paid index is among the first 100, which the receiver window always covers."
                     },
                 )
             } else {
                 (
                     Class::MissedDocumented,
-                    "NEAR's seen set never recorded the unpaid quotes, so discovery's checks stop 30 indices past the last used one beyond the first 100, and an incoming index past that is never checked.",
+                    "NEAR's seen set never recorded the unpaid quotes, so the receiver window ends 30 indices past the last used one beyond the first 100, and an incoming index past that is never tested.",
                 )
             };
             ctx.expect(b, "payout", &swap.label(), &payout, class, why);
@@ -431,6 +429,9 @@ fn beyond_lookahead(unpaid: u64, covered: bool) -> Scenario {
         }),
     }
 }
+
+/// Indices every receiver window covers from zero (the SQLite store's `WINDOW_FLOOR`).
+const WINDOW_FLOOR: u64 = 100;
 
 /// NEAR never reports a status after the quote, then pays `after_deadline` past the
 /// deposit deadline. The key scans until 30 days after the deadline.
@@ -518,7 +519,7 @@ fn split_payout(amount_out: Option<u64>) -> Scenario {
         ),
         summary: "A final status closes a key once its receipts cover what the provider promised. \
             Without an amount the store expects one zatoshi, so the key can close after the first \
-            part and the second needs Check swap history."
+            part, and recovery finds the second from its bucket."
             .into(),
         params: vec![(
             "amountOut".into(),
@@ -540,7 +541,6 @@ fn split_payout(amount_out: Option<u64>) -> Scenario {
             ctx.sync(a);
             ctx.wait(DAY);
             ctx.sync(a);
-            ctx.check_swap_history(a);
             ctx.expect(a, "payout part 1", &key, &p1, Class::FoundLive, OPEN_LIVE);
             let (class, why) = if amount_out.is_some() {
                 (
@@ -549,8 +549,8 @@ fn split_payout(amount_out: Option<u64>) -> Scenario {
                 )
             } else {
                 (
-                    Class::FoundAfterRecheck,
-                    "SUCCESS without amountOut expects one zatoshi, so the key closes once the first part has 10 confirmations; the second part to a paid, closed key is found only by Check swap history.",
+                    Class::FoundByDiscovery,
+                    "SUCCESS without amountOut expects one zatoshi, so the key closes once the first part has 10 confirmations; the key stays registered, so recovery tests it against the bucket holding the second part.",
                 )
             };
             ctx.expect(a, "payout part 2", &key, &p2, class, why);

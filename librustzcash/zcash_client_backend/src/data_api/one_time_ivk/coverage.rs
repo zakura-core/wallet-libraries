@@ -200,8 +200,9 @@ pub struct RecoveryStatus {
     pub lookups: usize,
     /// Late candidates whose inclusion path is due.
     pub witnesses: Vec<WitnessRequest>,
-    /// The lowest block a late candidate's inclusion path may be anchored at (see
-    /// [`DiscoveryStatus::witness_anchor_floor`](super::restore::DiscoveryStatus::witness_anchor_floor)).
+    /// The lowest block a late candidate's inclusion path may be anchored at: a path to an
+    /// older root is too old for the wallet to check (see
+    /// [`OneTimeIvkRestoreWrite::record_one_time_witness`](super::restore::OneTimeIvkRestoreWrite::record_one_time_witness)).
     pub witness_anchor_floor: BlockHeight,
     /// When the windows last grew against a seen set until it held none of their
     /// receivers it had not grown them for, in the caller's clock seconds (see
@@ -339,13 +340,21 @@ pub trait OneTimeIvkCoverageWrite: OneTimeIvkWrite + OneTimeIvkCoverageRead {
         now: i64,
     ) -> Result<Vec<LookupTicket>, <Self as WalletRead>::Error>;
 
-    /// Applies a page of `ticket`'s walk as
-    /// [`OneTimeIvkRestoreWrite::record_one_time_lookup`] does, against the ticket's own
-    /// target. Completing it marks the lookup done through that target alone: a target
-    /// widened since stays due. Returns false, applying nothing, unless the ticket is the
-    /// lookup's latest and its generation is current.
+    /// Applies `records`, consecutive records of `ticket`'s key's history starting at `page`,
+    /// read from the directory revision ending at `revision`, and advances its cursor (see
+    /// [`LookupWork`]). `page` is the cursor's `applied`, or zero to restart it. A payment
+    /// whose block the scan has not stored becomes a scan hint; one it has becomes a late
+    /// candidate. `complete` marks the lookup done through the ticket's own target alone:
+    /// a target widened since stays due.
     ///
-    /// [`OneTimeIvkRestoreWrite::record_one_time_lookup`]: super::restore::OneTimeIvkRestoreWrite::record_one_time_lookup
+    /// Returns false, applying nothing, unless the ticket is the lookup's latest and its
+    /// generation is current, its cursor has not moved since, and `revision` reaches the
+    /// target and was not rejected. It also returns false when it refuses the page, because
+    /// a record fails authentication or lies above the target: that backs the lookup off.
+    ///
+    /// The store judges `revision` against its chain once the scan stores its last block.
+    /// If it fails, every cursor that read from it restarts and its unadmitted candidates
+    /// are dropped.
     #[allow(clippy::too_many_arguments)]
     fn record_one_time_lookup_page(
         &mut self,

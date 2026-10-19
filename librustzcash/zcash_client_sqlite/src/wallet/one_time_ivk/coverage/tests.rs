@@ -660,7 +660,7 @@ fn lowering_the_birthday_owes_every_receiver_its_history() {
     let db = st.wallet_mut().db_mut();
     let sql = "UPDATE accounts SET birthday_height = ?1";
     exec(&db.conn, sql, [u32::from(lowered)]);
-    tx(db, |c, _| one_time_rewind::reopen_discovery(c, account)).unwrap();
+    tx(db, |c, _| one_time_rewind::lower_birthday(c, account)).unwrap();
     let owed: Vec<_> = coverage(&st, account)
         .obligations
         .into_iter()

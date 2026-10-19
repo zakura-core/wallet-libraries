@@ -102,8 +102,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// [`ProviderSeen`] for the addresses never issued and [`RECEIVE_GAP_LIMIT`] for the
     /// window. `seen` is the provider's current set, if the caller could fetch it, `now`
     /// the caller's clock in Unix seconds, and `tip` the network's chain tip (see
-    /// [`ISSUANCE_TIP_LAG`]). Issuance waits for the account's discovery to register the
-    /// indices its filters mark paid or seen (see `DiscoveryStatus::complete`), and checks
+    /// [`ISSUANCE_TIP_LAG`]). Issuance waits until the account's windows were checked
+    /// against a seen set (see `OneTimeIvkCoverageWrite::record_one_time_seen`), and checks
     /// the set first, so the lookahead covers any window its hits widen.
     ///
     /// One swap attempt keeps one address however often it is quoted again. The draft, an
@@ -233,7 +233,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     ///
     /// A key closes once every operation on it has a conclusive final status and its
     /// receipts cover what the provider promised, or `COMPLETION_LIMIT_SECS` after its
-    /// latest deadline (registration without operations); a key only discovery found
+    /// latest deadline (registration without operations); a key only recovery found
     /// closes `RESTORE_WATCH_SECS` after the block its lookup finished at, or registration
     /// if later. An open reservation holds its key open, once started only until that limit:
     /// the address then stays reserved, so it is never reissued. A key stays open while
@@ -242,10 +242,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// and the scanned height equal `tip`, which the caller just confirmed, and closing
     /// uses the earlier of `now` and `tip`'s block time.
     ///
-    /// No provider status reopens a closed key; a rewind does, when it un-mines a receipt
-    /// or leaves it short of those confirmations. A later payment to a closed key is found
-    /// only by [`Self::recheck_one_time_key_history`], and an incoming index beyond the
-    /// restored lookahead is never checked.
+    /// No provider status reopens a closed key; a rewind reopens an incoming one when it
+    /// un-mines a receipt or leaves it short of those confirmations. Recovery from the
+    /// receiver directory finds a later payment to a closed key, or to one past its window
+    /// once the seen set grows the window to it.
     pub fn close_finished_one_time_keys(
         &mut self,
         account: AccountUuid,

@@ -1,5 +1,5 @@
-//! A receiver directory publication's PIR session, shared by discovery and recovery: paging
-//! through a key's history and fetching late payments' inclusion paths.
+//! A receiver directory publication's PIR session: paging through a key's history and
+//! fetching late payments' inclusion paths.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -7,17 +7,14 @@ use std::task::Poll;
 
 use receiver_directory::{RawRecord, snapshot::check_next};
 use receiver_pir::{AcceptedCoverage, transport::DirectoryClient};
-use zakura_one_time_ivk::KeyId;
 use zakura_receiver_crypto::{
     Receiver,
     witness::{Publication, WitnessSnapshot},
 };
 use zcash_client_backend::data_api::{
     WalletRead,
-    one_time_ivk::restore::{DirectoryPayment, LookupWork, OneTimeIvkRestoreWrite, PublicationEnd},
-    transparent_ledger::ChainPoint,
+    one_time_ivk::restore::{DirectoryPayment, LookupWork, PublicationEnd},
 };
-use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::BlockHeight;
 
 use crate::{DirectoryError, Transport, checked};
@@ -56,13 +53,13 @@ pub trait WriteLock {
 /// What a walk through one key's history read.
 pub(crate) struct Walk {
     /// The page the records start at.
-    start: u32,
+    pub(crate) start: u32,
     /// Consecutive records from `start`, at or below the cutoff.
-    records: Vec<RawRecord>,
+    pub(crate) records: Vec<RawRecord>,
     /// Whether the walk read every record at or below the cutoff.
-    complete: bool,
+    pub(crate) complete: bool,
     /// Why the walk stopped early, if it did.
-    error: Option<DirectoryError>,
+    pub(crate) error: Option<DirectoryError>,
 }
 
 /// A receiver-directory publication whose coverage the client checked. Its PIR session and
@@ -159,7 +156,7 @@ impl<'a, T: Transport> Session<'a, T> {
     }
 
     /// The publication's common witnesses, downloading them once over the open session.
-    async fn witnesses(&mut self) -> Result<&WitnessSnapshot, DirectoryError> {
+    pub(crate) async fn witnesses(&mut self) -> Result<&WitnessSnapshot, DirectoryError> {
         if self.witnesses.is_none() {
             let client = self.client();
             let bytes = client.witnesses().await?;
@@ -174,7 +171,7 @@ impl<'a, T: Transport> Session<'a, T> {
     /// cursor must still be the one the wallet applied, or the walk restarts from page zero.
     /// Stops at the first record above the cutoff, at the last page, or after
     /// [`PAGES_PER_LOOKUP`] pages.
-    async fn page_through(&self, lookup: &LookupWork) -> Walk {
+    pub(crate) async fn page_through(&self, lookup: &LookupWork) -> Walk {
         let session = self.client();
         let cutoff = u32::from(lookup.cutoff);
         let mut walk = Walk {
@@ -247,134 +244,6 @@ impl<'a, T: Transport> Session<'a, T> {
     }
 }
 
-/// How a caller records one walk's page: its revision, its first page, its payments and
-/// whether it completed. Returns whether the wallet took it.
-pub(crate) type RecordPage<'r, W, I> = dyn FnMut(
-        &mut W,
-        &I,
-        PublicationEnd,
-        u32,
-        &[DirectoryPayment],
-        bool,
-    ) -> Result<bool, AccountError<W>>
-    + 'r;
-
-/// Looks up each of `lookups`' histories over the open session, [`PARALLEL_LOOKUPS`] at a
-/// time, `work` giving each one's key and cursor, and records each walk with `record` under
-/// `lock`'s `label`. A failed read, or a page the wallet refused, backs its lookup off and is
-/// listed in `failed`; a page the wallet skipped for another reason is listed without a
-/// backoff. Lookups go on after one fails unless the directory's connection failed or it
-/// revoked the session. Returns whether a walk stopped at its page budget, leaving more due.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn look_up<W, T, L, I>(
-    wallet: &mut W,
-    session: &Session<'_, T>,
-    account: AccountId<W>,
-    lookups: &[I],
-    work: impl Fn(&I) -> &LookupWork,
-    record: &mut RecordPage<'_, W, I>,
-    (lock, label): (&L, &'static str),
-    now: i64,
-    failed: &mut Vec<(KeyId, Error<AccountError<W>>)>,
-) -> Result<bool, Error<AccountError<W>>>
-where
-    W: OneTimeIvkRestoreWrite,
-    T: Transport,
-    L: WriteLock,
-{
-    let revision = session.publication_end();
-    let mut more = false;
-    for batch in lookups.chunks(PARALLEL_LOOKUPS) {
-        let walks = join_all(batch.iter().map(|item| session.page_through(work(item)))).await;
-        let mut stop = false;
-        for (item, walk) in batch.iter().zip(walks) {
-            let key = work(item).work.key;
-            let mut defer = false;
-            more |= !walk.complete && walk.error.is_none();
-            if !walk.records.is_empty() || walk.complete {
-                match walk
-                    .records
-                    .into_iter()
-                    .map(directory_payment)
-                    .collect::<Result<Vec<_>, _>>()
-                {
-                    Ok(payments) => {
-                        let recorded = lock
-                            .write(label, || {
-                                record(wallet, item, revision, walk.start, &payments, walk.complete)
-                            })
-                            .map_err(Error::Wallet)?;
-                        // The wallet backs off a lookup whose page it refused, but not one
-                        // that was no longer due, moved, or read too old a revision.
-                        if !recorded {
-                            failed.push((
-                                key,
-                                Error::Unavailable("the wallet did not record the page"),
-                            ));
-                        }
-                    }
-                    Err(e) => {
-                        failed.push((key, e.into()));
-                        defer = true;
-                    }
-                }
-            }
-            if let Some(e) = walk.error {
-                stop |= matches!(e, DirectoryError::Revision | DirectoryError::Transport(_));
-                failed.push((key, e.into()));
-                defer = true;
-            }
-            if defer {
-                lock.write(label, || wallet.defer_one_time_lookup(account, key, now))
-                    .map_err(Error::Wallet)?;
-            }
-        }
-        if stop {
-            break;
-        }
-    }
-    Ok(more)
-}
-
-/// Fetches each of `requests`' inclusion paths from the open session's common witnesses
-/// and records it under `lock`'s `label`, as `(key, position, cmx)`. A path the witnesses
-/// cannot give is listed in `failed` and requested again later.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn record_witnesses<W, T, L>(
-    wallet: &mut W,
-    session: &mut Session<'_, T>,
-    account: AccountId<W>,
-    requests: impl IntoIterator<Item = (KeyId, u32, [u8; 32])>,
-    (lock, label): (&L, &'static str),
-    now: i64,
-    failed: &mut Vec<(KeyId, Error<AccountError<W>>)>,
-) -> Result<(), Error<AccountError<W>>>
-where
-    W: OneTimeIvkRestoreWrite,
-    T: Transport,
-    L: WriteLock,
-{
-    session.connect().await?;
-    let publication = session.publication_end();
-    let anchor = ChainPoint {
-        height: publication.height,
-        hash: BlockHash(publication.hash),
-    };
-    let witnesses = session.witnesses().await?;
-    for (key, position, cmx) in requests {
-        // The common witnesses hold every record's position in this publication.
-        match witnesses.path(position, cmx) {
-            Ok(siblings) => lock
-                .write(label, || {
-                    wallet.record_one_time_witness(account, key, position, anchor, siblings, now)
-                })
-                .map_err(Error::Wallet)?,
-            Err(e) => failed.push((key, Error::Directory(checked(e)))),
-        }
-    }
-    Ok(())
-}
-
 /// The fields of the session's validated manifest that its witness file binds to.
 fn publication(manifest: &receiver_pir::Manifest) -> Result<Publication, DirectoryError> {
     let directory = &manifest.directory;
@@ -393,7 +262,7 @@ fn publication(manifest: &receiver_pir::Manifest) -> Result<Publication, Directo
 /// A directory record's payment as the wallet takes it, after checking that its note
 /// commitment and Action nullifier are canonical and its ephemeral key valid. The directory
 /// crates parse records structurally only.
-fn directory_payment(record: RawRecord) -> Result<DirectoryPayment, DirectoryError> {
+pub(crate) fn directory_payment(record: RawRecord) -> Result<DirectoryPayment, DirectoryError> {
     let payment = record.payment;
     zakura_receiver_crypto::Payment {
         height: payment.height,

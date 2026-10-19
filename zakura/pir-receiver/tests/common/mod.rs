@@ -11,10 +11,9 @@ use receiver_directory::{
     catalog::{BucketIndex, CatalogHead},
     paid::{BUCKET_BLOCKS, PaidSet, Span, bucket_start},
     seen::SeenSet,
-    snapshot::{Manifest, PROFILE, ProviderSet, Snapshot},
+    snapshot::{Manifest, PROFILE, Snapshot},
 };
 use receiver_pir::{MIN_ROWS, server::Server};
-use zakura_one_time_ivk::swap::RESTORE_WATCH_SECS;
 use zakura_pir_receiver::{DirectoryError, Transport, WriteLock};
 use zakura_receiver_crypto::{
     Payment, Receiver, Record,
@@ -23,12 +22,10 @@ use zakura_receiver_crypto::{
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _,
     chain::BlockSource as _,
-    one_time_ivk::{OneTimeIvkRead as _, restore::PublicationEnd},
     testing::{AddressType, IronwoodFvk, TestBuilder, TestState},
     transparent_ledger::ChainPoint,
 };
 use zcash_client_sqlite::{
-    AccountUuid,
     testing::{
         BlockCache,
         db::{TestDb, TestDbFactory},
@@ -37,16 +34,6 @@ use zcash_client_sqlite::{
 };
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork, value::Zatoshis};
-
-/// Asserts that a value matches a pattern, showing the value otherwise.
-#[macro_export]
-macro_rules! assert_matches {
-    ($value:expr, $($pattern:tt)+) => {
-        match &$value {
-            value => assert!(matches!(value, $($pattern)+), "{value:?}"),
-        }
-    };
-}
 
 pub type State = TestState<BlockCache, TestDb, LocalNetwork>;
 
@@ -88,24 +75,6 @@ pub fn tip(st: &State) -> ChainPoint {
     }
 }
 
-/// The publication ending at the stored block `height`, as the wallet's chain has it.
-pub fn stored_publication(st: &State, height: BlockHeight) -> PublicationEnd {
-    st.wallet()
-        .conn()
-        .query_row(
-            "SELECT hash, ironwood_commitment_tree_size FROM blocks WHERE height = ?1",
-            [u32::from(height)],
-            |r| {
-                Ok(PublicationEnd {
-                    height,
-                    hash: r.get(0)?,
-                    tree_size: r.get(1)?,
-                })
-            },
-        )
-        .unwrap()
-}
-
 /// The test account's Orchard key, which its one-time keys derive from.
 pub fn parent(st: &State) -> FullViewingKey {
     FullViewingKey::from(st.test_account().unwrap().usk().orchard())
@@ -122,25 +91,10 @@ pub fn receiver(st: &State, index: u64) -> Receiver {
     key_receiver(&parent(st), KeyId::new(Purpose::Receive, index))
 }
 
-/// Pays incoming one-time key `index` under the Orchard key `parent` in a new block left
-/// unscanned, and returns the payment as the directory lists it. The output is the
-/// chain's Ironwood leaf at `position`, which is the number of earlier Ironwood outputs.
-pub fn pay_unscanned_to(
-    st: &mut State,
-    parent: &FullViewingKey,
-    index: u64,
-    position: u64,
-) -> Record {
-    pay_key_unscanned(st, parent, KeyId::new(Purpose::Receive, index), position)
-}
-
-/// [`pay_unscanned_to`] for one-time key `key`, of either purpose.
-pub fn pay_key_unscanned(
-    st: &mut State,
-    parent: &FullViewingKey,
-    key: KeyId,
-    position: u64,
-) -> Record {
+/// Pays one-time key `key` under the Orchard key `parent` in a new block left unscanned,
+/// and returns the payment as the directory lists it. The output is the chain's Ironwood
+/// leaf at `position`, which is the number of earlier Ironwood outputs.
+pub fn pay_unscanned(st: &mut State, parent: &FullViewingKey, key: KeyId, position: u64) -> Record {
     let fvk = key.derive(parent).unwrap();
     let (height, _, _) = st.generate_next_block(
         &IronwoodFvk(fvk),
@@ -170,20 +124,6 @@ pub fn pay_key_unscanned(
     }
 }
 
-/// [`pay_unscanned_to`] for the test account.
-pub fn pay_unscanned(st: &mut State, index: u64, position: u64) -> Record {
-    let parent = parent(st);
-    pay_unscanned_to(st, &parent, index, position)
-}
-
-/// [`pay_unscanned`], then scans the payment's block. Scanning cannot find it: discovery
-/// has not registered the key yet.
-pub fn pay_restored_key(st: &mut State, index: u64, position: u64) -> Record {
-    let record = pay_unscanned(st, index, position);
-    st.scan_cached_blocks_with_one_time_ivks(BlockHeight::from(record.payment.height), 1);
-    record
-}
-
 /// The cached block at `height`.
 pub fn cached(
     st: &State,
@@ -197,40 +137,6 @@ pub fn cached(
         })
         .unwrap();
     block.unwrap()
-}
-
-/// A restored wallet at its fully scanned tip, after payments to its incoming keys.
-pub struct Restored {
-    pub st: State,
-    pub account: AccountUuid,
-    pub through: ChainPoint,
-    /// The payments as the directory lists them, in chain order.
-    pub records: Vec<Record>,
-}
-
-/// Pays incoming key `paid[i]` as the chain's Ironwood output `i`, each payment a page of
-/// its key's lookup, scanning each before discovery knows the key, then scans one more
-/// block.
-pub fn restored(paid: &[u64]) -> Restored {
-    let mut st = ironwood_wallet_in(TestDbFactory::default());
-    let account = st.test_account().unwrap().id();
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let mut records = Vec::new();
-    for (position, index) in (0..).zip(paid) {
-        let mut record = pay_restored_key(&mut st, *index, position);
-        let pages = |paid: &[u64]| paid.iter().filter(|i| *i == index).count();
-        record.page = pages(&paid[..records.len()]).try_into().unwrap();
-        record.total = pages(paid).try_into().unwrap();
-        records.push(record);
-    }
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let through = tip(&st);
-    Restored {
-        st,
-        account,
-        through,
-        records,
-    }
 }
 
 /// The test account's total balance in zatoshis.
@@ -252,68 +158,13 @@ pub fn one_time_value(st: &State) -> u64 {
         .unwrap()
 }
 
-/// The indices of the keys the wallet scans with, in order.
-pub fn scanning(st: &State) -> Vec<u64> {
-    let keys = st.wallet().get_one_time_scanning_keys().unwrap();
-    let mut indices: Vec<_> = keys.iter().map(|k| k.key_id().index()).collect();
-    indices.sort();
-    indices
-}
-
-/// A swap provider's sets: an empty recent set covering the wallet's restore watch, and
-/// every receiver it ever had, from a feed that started long before [`NOW`] and last
-/// read the provider a minute before it.
-pub fn provider(seen: &[Receiver]) -> Vec<ProviderSet> {
-    provider_named("near-intents", seen)
-}
-
-/// [`provider`]'s sets for the provider `name`.
-pub fn provider_named(name: &str, seen: &[Receiver]) -> Vec<ProviderSet> {
-    let since_unix = NOW - 2 * RESTORE_WATCH_SECS;
-    let until_unix = NOW - 60;
-    vec![
-        ProviderSet {
-            label: format!("{name}/recent"),
-            window_secs: Some(RESTORE_WATCH_SECS.try_into().unwrap()),
-            since_unix,
-            until_unix,
-            receivers: Vec::new(),
-        },
-        ProviderSet {
-            label: format!("{name}/seen"),
-            window_secs: None,
-            since_unix,
-            until_unix,
-            receivers: seen.iter().map(|r| *r.as_bytes()).collect(),
-        },
-    ]
-}
-
 /// A publication of `records` ending at `end`, with the common witnesses over the
-/// chain's Ironwood `commitments`, if any, and the swap `provider` sets in its filters,
-/// served by the receiver service's routes.
+/// chain's Ironwood `commitments`, if any, and a catalog head of digest `catalog` with the recovery `objects` it names, by route (see
+/// [`recovery_objects`]), served by the receiver service's routes.
 pub fn publish(
     records: &[Record],
     commitments: &[[u8; 32]],
     end: ChainPoint,
-    provider: &[ProviderSet],
-) -> Routes {
-    publish_with(
-        records,
-        commitments,
-        end,
-        provider,
-        ([0; 32], BTreeMap::new()),
-    )
-}
-
-/// [`publish`] with a catalog head of digest `catalog` and the recovery `objects` it
-/// names, by route (see [`recovery_objects`]).
-pub fn publish_with(
-    records: &[Record],
-    commitments: &[[u8; 32]],
-    end: ChainPoint,
-    provider: &[ProviderSet],
     (catalog, objects): (Hash, BTreeMap<String, Vec<u8>>),
 ) -> Routes {
     // Each record's row slot, which the publisher writes after validating it.
@@ -342,7 +193,7 @@ pub fn publish_with(
         filters_sha256: [0; 32],
         catalog_sha256: catalog,
     };
-    let snapshot = Snapshot::build(manifest, &records, provider).unwrap();
+    let snapshot = Snapshot::build(manifest, &records, &[]).unwrap();
     let positions = records
         .iter()
         .map(|record| u32::try_from(record.payment.position).unwrap())
@@ -433,13 +284,6 @@ impl Routes {
             _ => (404, Vec::new()),
         }
     }
-}
-
-/// Serves a [`publish`]ed publication of `records`, the chain's only Ironwood outputs,
-/// ending at `end`, with a provider that has seen nothing.
-pub fn serve(records: &[Record], end: ChainPoint) -> Directory {
-    let commitments: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
-    Directory::new(publish(records, &commitments, end, &provider(&[])))
 }
 
 /// Serves a directory's routes in process and records every request.
@@ -709,11 +553,5 @@ pub fn recovering(
 ) -> Directory {
     let records = paged(records);
     let objects = recovery_objects(st, &records, u32::from(end.height), history);
-    Directory::new(publish_with(
-        &records,
-        commitments,
-        end,
-        &provider(&[]),
-        objects,
-    ))
+    Directory::new(publish(&records, commitments, end, objects))
 }

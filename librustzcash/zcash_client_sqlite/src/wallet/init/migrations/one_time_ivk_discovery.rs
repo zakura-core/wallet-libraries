@@ -1,19 +1,19 @@
-//! Replaces one-time IVK restore sweeps and nullifier retention with discovery (see
-//! `one_time_ivk::restore`), adds the spend journal (see `one_time_ivk::journal`), and
-//! adds each incoming reservation's operation floor.
+//! Replaces one-time IVK restore sweeps and nullifier retention with continuous recovery
+//! from a receiver directory (see `one_time_ivk::coverage` and `one_time_ivk::restore`),
+//! adds the spend journal (see `one_time_ivk::journal`), and adds each incoming
+//! reservation's operation floor.
 //!
 //! Released wallets hold no restore sweeps or queued payments, since no wallet ran a
-//! swap restore, so those tables are replaced, not converted. No account has discovery
-//! state, and no block is covered by the journal. The retained nullifiers' coverage marks
-//! and floors are dropped; `nullifier_map` keeps its rows until ordinary pruning. Existing
-//! reservations get no operation floor, so every operation on their keys counts as theirs.
-//! No key has a pass's recent watch, since no pass ran.
+//! swap restore, so those tables are replaced, not converted. No block is covered by the
+//! journal. The retained nullifiers' coverage marks and floors are dropped;
+//! `nullifier_map` keeps its rows until ordinary pruning. Existing reservations get no
+//! operation floor, so every operation on their keys counts as theirs. Fresh accounts are
+//! no longer marked: every account recovers alike, so the table is dropped.
 //!
-//! It also adds the state of continuous directory recovery (see `one_time_ivk::coverage`):
-//! each key's `authenticated` and `issuance_blocked` facts, each account's receiver
-//! windows, directory coverage and seen check, historical obligations, and lookup target
-//! generations.
-//! A stored key is authenticated if this wallet reserved it or it was paid, and blocked if
+//! Recovery's state is each key's `authenticated` and `issuance_blocked` facts, each
+//! account's receiver windows, directory coverage and seen check, historical obligations,
+//! lookups and their target generations, and the publications lookups read from. A stored
+//! key is authenticated if this wallet reserved it or it was paid, and blocked if
 //! it was paid, seen, quoted and accepted, or is a refund key, which issuance never
 //! reissued. No account has coverage yet.
 use std::collections::HashSet;
@@ -41,7 +41,7 @@ impl schemerz::Migration<Uuid> for Migration {
     }
 
     fn description(&self) -> &'static str {
-        "Replaces one-time IVK restore sweeps and retention with discovery and the spend journal, and adds reservation operation floors."
+        "Replaces one-time IVK restore sweeps and retention with continuous recovery and the spend journal, and adds reservation operation floors."
     }
 }
 
@@ -108,20 +108,7 @@ impl RusqliteMigration for Migration {
                 CHECK ((witness IS NULL) = (witness_height IS NULL)
                     AND (witness IS NULL) = (witness_hash IS NULL))
             );
-            CREATE TABLE ironwood_one_time_discovery (
-                account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
-                publication_height INTEGER NOT NULL
-                    CHECK (publication_height BETWEEN 0 AND 4294967295),
-                publication_hash BLOB NOT NULL CHECK (length(publication_hash) = 32),
-                receive_next INTEGER NOT NULL DEFAULT 0 CHECK (receive_next >= 0),
-                receive_reach INTEGER NOT NULL DEFAULT 0 CHECK (receive_reach >= 0),
-                refund_next INTEGER NOT NULL DEFAULT 0 CHECK (refund_next >= 0),
-                refund_reach INTEGER NOT NULL DEFAULT 0 CHECK (refund_reach >= 0),
-                receive_done INTEGER NOT NULL DEFAULT 0 CHECK (receive_done IN (0, 1)),
-                refund_done INTEGER NOT NULL DEFAULT 0 CHECK (refund_done IN (0, 1)),
-                FOREIGN KEY (publication_height, publication_hash)
-                    REFERENCES ironwood_one_time_publications(height, hash)
-            );
+            DROP TABLE ironwood_one_time_fresh_accounts;
             CREATE TABLE ironwood_spend_journal (
                 block_height INTEGER NOT NULL CHECK (block_height BETWEEN 0 AND 4294967295),
                 tx_index INTEGER NOT NULL CHECK (tx_index BETWEEN 0 AND 65535),
@@ -148,8 +135,6 @@ impl RusqliteMigration for Migration {
             );
             ALTER TABLE ironwood_one_time_keys ADD COLUMN reservation_floor INTEGER;
 
-            ALTER TABLE ironwood_one_time_keys ADD COLUMN pass_watch_height INTEGER
-                CHECK (pass_watch_height BETWEEN 0 AND 4294967295);
             ALTER TABLE ironwood_one_time_keys ADD COLUMN authenticated INTEGER NOT NULL DEFAULT 0
                 CHECK (authenticated IN (0, 1));
             ALTER TABLE ironwood_one_time_keys ADD COLUMN issuance_blocked INTEGER NOT NULL
@@ -179,6 +164,7 @@ impl RusqliteMigration for Migration {
                 bootstrap_hash BLOB CHECK (length(bootstrap_hash) = 32),
                 bootstrap_digest BLOB CHECK (length(bootstrap_digest) = 32),
                 seen_checked_at INTEGER,
+                seen_ready INTEGER NOT NULL DEFAULT 0 CHECK (seen_ready IN (0, 1)),
                 CHECK ((catalog IS NULL) = (epoch IS NULL)),
                 CHECK ((frontier_height IS NULL) = (frontier_hash IS NULL)
                     AND (frontier_height IS NULL) = (tested_generation IS NULL)

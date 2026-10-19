@@ -14,8 +14,8 @@ pub(super) use zcash_client_backend::{
         one_time_ivk::{
             OneTimeIvkRead as _,
             restore::{
-                DirectoryPayment, EnumerationCursor, FilterCheck, OneTimeIvkRestoreRead as _,
-                OneTimeIvkRestoreWrite as _, PublicationEnd, recovery::EncryptedNote,
+                DirectoryPayment, OneTimeIvkRestoreWrite as _, PublicationEnd,
+                recovery::EncryptedNote,
             },
         },
         testing::{AddressType, IronwoodFvk, TestBuilder, TestRng, TestState},
@@ -73,18 +73,48 @@ pub(super) fn ironwood_wallet() -> State {
         .build()
 }
 
-/// An Ironwood wallet scanned through one empty block, so it is at its tip, whose account
-/// was created from a fresh seed, so issuance waits for no discovery.
+/// An Ironwood wallet scanned through one empty block, so it is at its tip, whose windows
+/// were checked against a seen set that holds none of them, so issuance waits for nothing.
 pub(super) fn scanned_wallet() -> State {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
-    let db = st.wallet_mut().db_mut();
-    db.mark_one_time_account_fresh(account).unwrap();
+    check_seen(st.wallet_mut().db_mut(), account);
     st
 }
 
-/// An Ironwood wallet scanned through one empty block, whose account was restored, so
-/// issuance waits for its discovery.
+/// Checks `account`'s windows against a seen set that holds none of them, as recovery does
+/// before the first swap.
+pub(super) fn check_seen(db: &mut Db, account: AccountUuid) {
+    see(db, account, &[]);
+}
+
+/// Checks `account`'s windows against a seen set that holds `held`, as recovery does,
+/// growing them until the check is stable.
+pub(super) fn see(db: &mut Db, account: AccountUuid, held: &[KeyId]) {
+    use zcash_client_backend::data_api::one_time_ivk::coverage::{
+        OneTimeIvkCoverageRead as _, OneTimeIvkCoverageWrite as _,
+    };
+    let now = clock_now();
+    loop {
+        assert!(db.prepare_one_time_coverage(account, 1_000, now).unwrap());
+        let coverage = db.one_time_coverage(account).unwrap().unwrap();
+        let in_window = |key: &&KeyId| {
+            let window = coverage.windows.iter().find(|w| w.purpose == key.purpose());
+            window.is_some_and(|w| key.index() < w.end)
+        };
+        let hits: Vec<_> = held.iter().filter(in_window).copied().collect();
+        let generation = db.one_time_receiver_set(account).unwrap().generation;
+        if db
+            .record_one_time_seen(account, generation, &hits, now)
+            .unwrap()
+        {
+            return;
+        }
+    }
+}
+
+/// An Ironwood wallet scanned through one empty block, whose windows were never checked
+/// against a seen set, so issuance waits.
 pub(super) fn restored_wallet() -> State {
     let mut st = ironwood_wallet();
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
@@ -153,26 +183,23 @@ pub(crate) fn reserve_key(
     reserve(db, account, purpose, from).unwrap()
 }
 
-/// Runs a whole discovery pass for `account` against a publication ending at the scanned
-/// tip, with incoming `checks` and no refund key used, and returns the publication.
-pub(super) fn discover(
-    st: &mut State,
-    account: AccountUuid,
-    checks: &[FilterCheck],
-) -> PublicationEnd {
-    use store::restore::tests::discovery::{publication_at, run_pass};
+/// Covers `account`'s receiver set through the scanned tip with a snapshot that holds only
+/// `hits` (see `restore::tests::discovery::cover_at`), and returns the publication ending
+/// there.
+pub(super) fn cover(st: &mut State, account: AccountUuid, hits: &[KeyId]) -> PublicationEnd {
+    use store::restore::tests::discovery::{cover_at, publication_at};
     let publication = publication_at(st, tip(st).height);
-    assert!(run_pass(
+    assert!(cover_at(
         st.wallet_mut().db_mut(),
         account,
         publication,
-        checks
+        hits
     ));
     publication
 }
 
-/// Registers `key` as a restore discovers it, from `from`, with its history due for a
-/// lookup unless this wallet scanned it.
+/// Registers `key` as a recovered funding memo's key is, from `from`, with its history due
+/// for a lookup unless this wallet scanned it.
 pub(super) fn recover(
     db: &mut Db,
     account: AccountUuid,

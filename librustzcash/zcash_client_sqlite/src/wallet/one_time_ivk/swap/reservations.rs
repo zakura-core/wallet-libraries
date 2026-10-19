@@ -13,8 +13,8 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 use super::{RESERVED, ReservationPolicy, lifecycle::record};
 use crate::wallet::one_time_ivk::{
     Discovery, KeyId, OneTimeKey, Purpose, account_key, activate, authenticate_key, block_issuance,
-    corrupt, coverage::advanced, decode_index, index_after, invalid, key_by_id, register,
-    restore::discovery, restore_start,
+    corrupt, coverage, coverage::advanced, decode_index, index_after, invalid, key_by_id, register,
+    restore_start,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
@@ -643,8 +643,9 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     seen: Option<&ProviderSeen<'_>>,
 ) -> Result<Result<OneTimeKey, ReservationPolicy>, SqliteClientError> {
     let (a, parent) = account_key(conn, params, account)?;
-    // A restored account's discovery may still reveal used indices.
-    if !discovery::issuance_ready(conn, params, a)? {
+    // Until the windows were checked against a seen set, another device may have given
+    // out any index.
+    if !coverage::seen_ready(conn, a.0)? {
         return Ok(Err(ReservationPolicy::Gap));
     }
     let end = recovery_end(conn, a.0)?;

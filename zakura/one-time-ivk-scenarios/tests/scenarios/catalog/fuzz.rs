@@ -2,7 +2,7 @@
 //! devices and runs it against the harness: blocks, incoming and refund quotes (paid,
 //! abandoned, paid late), NEAR's payouts and refunds and statuses, spends of one-time
 //! notes, restores with various birthdays, a second install and a second account,
-//! directory outages, failing requests, app restarts in the middle of discovery, lagging,
+//! directory outages, failing requests, app restarts in the middle of recovery, lagging,
 //! stale and bad publications, reorgs (with transactions mined again at once if the new
 //! branch still accepts them, or payouts paid again later), Check swap history, app
 //! restarts and a fast or slow device clock.
@@ -10,14 +10,14 @@
 //! After every sync an oracle checks the wallet against the chain: it never shows a note
 //! the chain spent as unspent, never holds a note the chain does not have, never credits
 //! one twice, and its balance never exceeds what the chain still holds for its keys. Each
-//! quote is checked for address reuse. Each completed discovery pass must hold every
-//! payment its publication lists for the keys its search reaches. At the end the world
-//! stabilizes (the directory answers, nothing is injected) and every wallet's discovery
-//! must complete within a day of chain time, then go quiet: no directory request per sync.
-//! The payments the documented contract promises (see [`Exec::promise`]) must be credited;
-//! the others are reported, not judged. Directory requests per sync are bounded, and a run
-//! of syncs that keep downloading filters, witnesses or lookups while nothing changes
-//! fails.
+//! quote is checked for address reuse. At the end the world stabilizes (the directory
+//! answers, nothing is injected) and every wallet's recovery must complete through the
+//! chain it had when the world stabilized within a day of chain time, then go quiet: no
+//! lookup, inclusion path or cumulative snapshot per sync, though recovery keeps reading
+//! the catalog and each new bucket. The payments the documented contract promises (see
+//! [`Exec::promise`]) must be credited, without Check swap history; the others are
+//! reported, not judged. Directory requests per sync are bounded, and a run of syncs that
+//! keep downloading snapshots, witnesses or lookups while nothing changes fails.
 //!
 //! Seeds come from `ONE_TIME_IVK_FUZZ_SEEDS` (`start..end` or one seed; five by
 //! default). A failure prints the seed, how to replay it, and the last steps.
@@ -27,9 +27,7 @@
 //!
 //! Left out: payers other than NEAR's zero OVK, mempool payouts, refund quotes on a
 //! second install or restored device (they would spend the same notes as the original),
-//! payouts reorged out for good, a directory that omits payments (E7 covers it), and a
-//! refund key's watch after a restore (judged only through discovery and Check swap
-//! history).
+//! payouts reorged out for good, and a directory that omits payments (E7 covers it).
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -38,9 +36,9 @@ use std::{
 };
 
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
-use zakura_one_time_ivk::swap::{COMPLETION_LIMIT_SECS, RESTORE_WATCH_SECS};
+use zakura_one_time_ivk::swap::COMPLETION_LIMIT_SECS;
 use zakura_one_time_ivk_scenarios::{Class, PaymentResult, zec};
-use zcash_client_sqlite::wallet::one_time_ivk::swap::RECEIVE_RECLAIM_SECONDS;
+use zcash_client_sqlite::wallet::one_time_ivk::swap::{RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BlockHeight;
 
@@ -60,15 +58,8 @@ const DEFAULT_SEEDS: u64 = 5;
 const FUNDS: u64 = 5 * ZEC;
 /// Fee margin the app keeps when funding a deposit.
 const FUNDING_FEE: u64 = 15_000;
-/// Keys discovery always checks (`zakura_pir_receiver::FIRST_WINDOW`).
-const FIRST_WINDOW: u64 = zakura_pir_receiver::FIRST_WINDOW;
-/// Unused keys after which discovery's search stops (`zakura_pir_receiver::GAP`).
-const GAP: u64 = zakura_pir_receiver::GAP;
-/// How old a recent set's read may be and still rule a receiver out (the receiver
-/// client's `RECENT_SET_MAX_AGE_SECS`).
-const RECENT_SET_MAX_AGE_SECS: i64 = 15 * 60;
-/// Margin the oracle keeps around a documented time limit before judging a payment.
-const MARGIN: i64 = 2 * HOUR;
+/// Indices every receiver window covers from zero (the SQLite store's `WINDOW_FLOOR`).
+const WINDOW_FLOOR: u64 = 100;
 /// Consecutive stable syncs that may download the same directory material.
 const STREAK: u32 = 12;
 
@@ -113,18 +104,16 @@ fn regressions() -> Vec<Scenario> {
     ]
 }
 
-/// Seed 343: B1, a restored install, quotes on I0. A, a fresh account, then quotes on I1,
-/// and its issuance finds I0 in NEAR's seen set and registers it for a lookup. A's first
-/// pass lists I0 as recent, so it must watch I0 for a day although issuance registered it
-/// first, and find NEAR's payout half a day later.
+/// Seed 343: B1, a restored install, quotes on I0. A, a new account, then quotes on I1, and
+/// its issuance finds I0 in NEAR's seen set and registers it for a lookup. I0 is then in
+/// A's receiver set, so the bucket holding NEAR's payout half a day later finds it.
 fn seen_before_first_pass() -> Scenario {
     Scenario {
         id: "Z-seen-key-before-first-pass".into(),
         group: FUZZ,
-        title: "A fresh account registers another install's seen address before its first pass"
-            .into(),
-        summary: "A recent key issuance registered from the seen set before the pass still gets \
-            the pass's watch."
+        title: "A new account registers another install's seen address before it recovers".into(),
+        summary: "A key issuance registered from the seen set is tested against every later \
+            bucket, so a payment after its lookup is found."
             .into(),
         params: vec![],
         slow: false,
@@ -134,7 +123,6 @@ fn seen_before_first_pass() -> Scenario {
             ctx.mine(5);
             let a = ctx.device("A", SEED, birthday);
             ctx.dev(a).feed_clock = true;
-            ctx.dev(a).mark_fresh();
             ctx.mine(10);
             ctx.sync(a);
             ctx.wait(2 * DAY);
@@ -175,7 +163,7 @@ fn seen_before_first_pass() -> Scenario {
                 &swap.label(),
                 &payout,
                 Class::FoundAutomatically,
-                "A's first pass lists I0 as recent, so A watches it for a day from the pass.",
+                "Issuance registered I0 from the seen set, so the bucket holding the payout tests it.",
             );
         }),
     }
@@ -251,28 +239,27 @@ fn seen_after_pass() -> Scenario {
                 &swap.label(),
                 &payout,
                 Class::FoundAutomatically,
-                "Issuance registers the seen address for a lookup, and discovery looks up a key registered after it finished once a publication reaches the blocks A2 scanned.",
+                "Issuance registers the seen address for a lookup through the blocks A2 scanned, and each later bucket tests it.",
             );
         }),
     }
 }
 
-/// Seed 300: A funds a ZEC-to-X swap after A2, a second install of the seed, finished its
-/// discovery pass. A2 scans the funding memo, which registers the refund key for a lookup
-/// (`recover_refund_memos`) that must read past A2's old pass publication, through the
-/// blocks A2 scanned without the key. `early`: A2 scans the memo before NEAR refunds, so
-/// the lookup ends before the refund and, with no watch on a recovered refund key, only
-/// Check swap history finds it.
+/// Seed 300: A funds a ZEC-to-X swap after A2, a second install of the seed, recovered.
+/// A2 scans the funding memo, which registers the refund key for a lookup
+/// (`recover_refund_memos`) through the blocks A2 scanned without the key. `early`: A2
+/// scans the memo before NEAR refunds, so the lookup ends before the refund, and the
+/// bucket holding the refund finds it.
 fn memo_after_pass(early: bool) -> Scenario {
     let when = if early { "before" } else { "after" };
     Scenario {
         id: format!("Z-memo-after-pass-scanned-{when}-refund"),
         group: FUZZ,
         title: format!(
-            "A second install scans a funding memo after its discovery pass, {when} the refund"
+            "A second install scans a funding memo after it recovered, {when} the refund"
         ),
         summary: "A refund key recovered from a funding memo is looked up through the blocks the \
-            wallet scanned without it, past the account's pass publication."
+            wallet scanned without it, and tested against every later bucket."
             .into(),
         params: vec![("A2 scans the memo".into(), format!("{when} the refund"))],
         slow: false,
@@ -336,19 +323,19 @@ fn memo_after_pass(early: bool) -> Scenario {
                 Class::FoundLive,
                 "A funded R0 and scans it.",
             );
-            let (class, why) = if early {
-                ctx.check_swap_history(a2);
-                (
-                    Class::FoundAfterRecheck,
-                    "A2 recovered R0 from A's funding memo before the refund, so its lookup ended first. A recovered refund key has no watch, so only Check swap history finds a later refund.",
-                )
+            let why = if early {
+                "A2 recovered R0 from A's funding memo before the refund, so its lookup ended first, and the bucket holding the refund tests R0."
             } else {
-                (
-                    Class::FoundAutomatically,
-                    "A2 recovers R0 from A's funding memo, and discovery looks up a key registered after it finished once a publication reaches the blocks A2 scanned.",
-                )
+                "A2 recovers R0 from A's funding memo and looks it up through the blocks it scanned without it."
             };
-            ctx.expect(a2, "refund", &swap.label(), &refund, class, why);
+            ctx.expect(
+                a2,
+                "refund",
+                &swap.label(),
+                &refund,
+                Class::FoundAutomatically,
+                why,
+            );
             ctx.check_same_balance(a, a2);
         }),
     }
@@ -591,9 +578,7 @@ enum Step {
         birthday: Birthday,
         accounts: u8,
     },
-    AddAccount {
-        fresh: bool,
-    },
+    AddAccount,
     Directory {
         slot: usize,
         up: bool,
@@ -622,7 +607,6 @@ struct Plan {
     seed: u64,
     horizon: i64,
     skew: i64,
-    fresh: bool,
     a2: bool,
     read_lag: i64,
     /// NEAR pays with signed transactions, which a reorg can return to the chain.
@@ -638,7 +622,6 @@ impl Plan {
     fn generate(seed: u64, profile: Profile) -> Self {
         let mut r = Rng::new(seed);
         let horizon = r.weighted(&[(8 * HOUR, 30), (2 * DAY, 40), (5 * DAY, 20), (35 * DAY, 10)]);
-        let fresh = r.chance(40);
         let skew = if r.chance(15) {
             r.pick(&[5 * MINUTE, 2 * HOUR, -2 * HOUR, DAY, -DAY])
         } else {
@@ -649,9 +632,6 @@ impl Plan {
         let reorg = profile == Profile::Reorg || r.chance(25);
         let mut s = Schedule::new();
         let mut notes = vec![format!("horizon {}", span_of(horizon))];
-        if fresh {
-            notes.push("A's seed is fresh".into());
-        }
         if skew != 0 {
             notes.push(format!("A's clock {}", span_of_signed(skew)));
         }
@@ -663,13 +643,8 @@ impl Plan {
         }
         let second = r.chance(20).then(|| r.range(10 * MINUTE, horizon / 3));
         if let Some(at) = second {
-            let fresh = r.chance(50);
-            s.at(at, Step::AddAccount { fresh });
-            notes.push(format!(
-                "A adds a second account at +{}{}",
-                span_of(at),
-                if fresh { ", fresh" } else { "" }
-            ));
+            s.at(at, Step::AddAccount);
+            notes.push(format!("A adds a second account at +{}", span_of(at)));
         }
         let count = if profile == Profile::Late {
             r.weighted(&[(3usize, 40), (4, 30), (6, 30)])
@@ -1002,7 +977,6 @@ impl Plan {
             seed,
             horizon,
             skew,
-            fresh,
             a2,
             read_lag,
             real_payouts: reorg,
@@ -1020,7 +994,6 @@ impl Plan {
             ("swaps".into(), self.swaps.len().to_string()),
             ("steps".into(), self.steps.len().to_string()),
             ("second install".into(), self.a2.to_string()),
-            ("fresh seed".into(), self.fresh.to_string()),
             ("A clock skew".into(), format!("{} s", self.skew)),
             ("feed read lag".into(), span_of(self.read_lag)),
             ("reorg".into(), self.real_payouts.to_string()),
@@ -1352,47 +1325,6 @@ struct Given {
     w: W,
 }
 
-/// A discovery pass a wallet completed.
-#[derive(Clone, Copy, Debug)]
-struct Pass {
-    end: u32,
-    /// The hash of the publication's last block, which tells a replacement pass through
-    /// the same height from the one it replaces.
-    hash: [u8; 32],
-    /// When the NEAR feed the pass's filters came from was last read.
-    feed_until: i64,
-    /// The pass a Check swap history started.
-    recheck: bool,
-    /// The wallet's first completed pass.
-    first: bool,
-    /// The first pass completed after a reorg, which replaces one the reorg may have
-    /// invalidated.
-    replacement: bool,
-    /// Completed while the account was declared fresh (see [`stored_pass`]).
-    fresh: bool,
-}
-
-impl Pass {
-    /// Whether the oracle holds the pass to the payments its publication lists (see
-    /// [`Exec::pass_promises`]): a first, Check swap history or replacement pass.
-    fn judged(&self) -> bool {
-        self.first || self.recheck || self.replacement
-    }
-
-    /// The pass's kind, for the trace and the report.
-    fn kind(&self) -> &'static str {
-        if self.recheck {
-            "Check swap history"
-        } else if self.first {
-            "first"
-        } else if self.replacement {
-            "replacement"
-        } else {
-            "later"
-        }
-    }
-}
-
 /// How a wallet credited a payment.
 #[derive(Clone, Copy, Debug)]
 struct Credit {
@@ -1413,7 +1345,7 @@ struct Note {
 /// Directory requests by kind, for one sync.
 #[derive(Default)]
 struct Requests {
-    filters: u32,
+    snapshots: u32,
     witnesses: u32,
     queries: u32,
     total: u32,
@@ -1425,8 +1357,8 @@ impl Requests {
         let mut r = Self::default();
         for q in requests {
             r.total += 1;
-            if q.contains("/filters/") {
-                r.filters += 1;
+            if q.contains("/paid/") {
+                r.snapshots += 1;
             } else if q.contains("/witness/") {
                 r.witnesses += 1;
             } else if q.ends_with("/query") {
@@ -1445,20 +1377,12 @@ struct Exec<'p> {
     /// Each wallet account's handle.
     wallets: BTreeMap<W, Dev>,
     births: BTreeMap<W, u32>,
-    /// Accounts declared fresh, which run discovery only for work they started (see
-    /// [`stored_pass`]).
-    fresh: BTreeSet<W>,
     swaps: Vec<SwapRt>,
     pays: Vec<OPay>,
     own: Vec<OwnTx>,
     given: Vec<Given>,
     /// Payments NEAR pays again after a reorg removed them: (due time, payment).
     repay: Vec<(i64, usize)>,
-    passes: BTreeMap<W, Vec<Pass>>,
-    /// Wallets with a completed pass when a reorg happened, whose next new pass is its
-    /// replacement.
-    reorged: BTreeSet<W>,
-    rechecking: BTreeSet<W>,
     /// Wallets running a Check swap history, whose finds count as the recheck's.
     in_recheck: BTreeSet<W>,
     credits: BTreeMap<(W, ([u8; 32], u32)), Credit>,
@@ -1468,7 +1392,7 @@ struct Exec<'p> {
     troubled: BTreeSet<usize>,
     /// The publication is odd for everyone.
     odd_publication: bool,
-    /// Per slot, runs of consecutive stable syncs downloading (filters, witnesses, lookups).
+    /// Per slot, runs of consecutive stable syncs downloading (snapshots, witnesses, lookups).
     streaks: BTreeMap<usize, (u32, u32, u32)>,
     /// Each slot's sync heights.
     synced_at: BTreeMap<usize, Vec<u32>>,
@@ -1491,15 +1415,11 @@ impl<'p> Exec<'p> {
             slots: [None; 4],
             wallets: BTreeMap::new(),
             births: BTreeMap::new(),
-            fresh: BTreeSet::new(),
             swaps: (0..plan.swaps.len()).map(|_| SwapRt::default()).collect(),
             pays: Vec::new(),
             own: Vec::new(),
             given: Vec::new(),
             repay: Vec::new(),
-            passes: BTreeMap::new(),
-            reorged: BTreeSet::new(),
-            rechecking: BTreeSet::new(),
             in_recheck: BTreeSet::new(),
             credits: BTreeMap::new(),
             funds: Vec::new(),
@@ -1558,10 +1478,6 @@ impl<'p> Exec<'p> {
         ctx.mine(5);
         let a = ctx.device_with_skew("A", SEED, birthday, plan.skew);
         ctx.dev(a).feed_clock = true;
-        if plan.fresh {
-            ctx.dev(a).mark_fresh();
-            self.fresh.insert(W { slot: A, acct: 0 });
-        }
         self.add(A, 0, a);
         self.births.insert(W { slot: A, acct: 0 }, self.birthday);
         if plan.a2 {
@@ -1671,16 +1587,12 @@ impl<'p> Exec<'p> {
                 birthday,
                 accounts,
             } => self.restore(ctx, slot, birthday, accounts),
-            Step::AddAccount { fresh } => {
+            Step::AddAccount => {
                 let a = self.slots[A].expect("A");
                 let birthday = ctx.chain.tip() + 1;
                 ctx.mine(1);
                 let a1 = ctx.add_account(a, "A#1", SEED, birthday);
                 let w = W { slot: A, acct: 1 };
-                if fresh {
-                    ctx.dev(a1).mark_fresh();
-                    self.fresh.insert(w);
-                }
                 self.add(A, 1, a1);
                 self.births.insert(w, u32::from(birthday));
                 let fvk = ctx.get(a1).fvk.clone();
@@ -1795,13 +1707,13 @@ impl<'p> Exec<'p> {
             .push(u32::from(ctx.chain.tip()));
         let req = Requests::of(&report.requests);
         let mut text = format!(
-            "{} syncs: scanned {}, found {}+{}, {} requests ({} filters, {} witnesses, {} queries)",
+            "{} syncs: scanned {}, found {}+{}, {} requests ({} snapshots, {} witnesses, {} queries)",
             NAMES[slot],
             report.scanned_blocks,
             report.found_live,
             report.found_by_discovery,
             req.total,
-            req.filters,
+            req.snapshots,
             req.witnesses,
             req.queries
         );
@@ -1813,7 +1725,7 @@ impl<'p> Exec<'p> {
         }
         self.note(ctx, NAMES[slot], text);
         self.costs(ctx, slot, &req);
-        // An outage lasts until its directory step; a fault hits one discovery run.
+        // An outage lasts until its directory step; a fault hits one recovery run.
         if ctx.get(dev).reach.directory {
             self.troubled.remove(&slot);
         }
@@ -1825,16 +1737,17 @@ impl<'p> Exec<'p> {
     /// Checks one sync's directory requests on `slot`.
     fn costs(&mut self, ctx: &mut Ctx, slot: usize, req: &Requests) {
         let accounts = self.wallets.keys().filter(|w| w.slot == slot).count() as u32;
-        if req.filters > 2 * accounts || req.witnesses > 2 * accounts {
+        // A run may fetch the current snapshot and the one it pinned, and a sync runs twice.
+        if req.snapshots > 4 * accounts || req.witnesses > 2 * accounts {
             self.violation(
                 ctx,
                 format!(
-                    "{} downloads directory material at most once per discovery run",
+                    "{} downloads directory material at most twice per recovery run",
                     NAMES[slot]
                 ),
                 format!(
-                    "{} filter and {} witness downloads in one sync of {accounts} account(s)",
-                    req.filters, req.witnesses
+                    "{} snapshot and {} witness downloads in one sync of {accounts} account(s)",
+                    req.snapshots, req.witnesses
                 ),
             );
         }
@@ -1844,12 +1757,12 @@ impl<'p> Exec<'p> {
             *streak = (0, 0, 0);
             return;
         }
-        streak.0 = if req.filters > 0 { streak.0 + 1 } else { 0 };
+        streak.0 = if req.snapshots > 0 { streak.0 + 1 } else { 0 };
         streak.1 = if req.witnesses > 0 { streak.1 + 1 } else { 0 };
         streak.2 = if req.queries > 0 { streak.2 + 1 } else { 0 };
         let (f, w, q) = *streak;
         for (what, n, limit) in [
-            ("filters", f, STREAK),
+            ("snapshots", f, STREAK),
             ("witnesses", w, STREAK),
             ("lookups", q, 2 * STREAK),
         ] {
@@ -1863,7 +1776,7 @@ impl<'p> Exec<'p> {
         }
     }
 
-    /// Reads every account on `slot`: new credits, and completed discovery passes.
+    /// Reads every account on `slot` for new credits.
     fn observe(&mut self, ctx: &mut Ctx, slot: usize) {
         let ws: Vec<W> = self
             .wallets
@@ -1888,129 +1801,35 @@ impl<'p> Exec<'p> {
                     .and_modify(|c| c.height = height)
                     .or_insert(Credit { class, height });
             }
-            let fresh = self.fresh.contains(&w);
-            let account = ctx.get(dev).account;
-            let done = match ctx.get(dev).discovery(&ctx.chain, account) {
-                Some(status) => status
-                    .publication
-                    .filter(|_| status.complete)
-                    .map(|p| (u32::from(p.height), p.hash)),
-                // A fresh account's status is `None` once its work finished, which hides a
-                // completed pass, so the oracle reads the pass the wallet stored.
-                None if fresh => stored_pass(ctx, dev),
-                None => None,
-            };
-            let Some((end, hash)) = done else {
-                continue;
-            };
-            let recheck = self.rechecking.remove(&w);
-            let known = self.passes.entry(w).or_default();
-            if !recheck && known.last().is_some_and(|p| p.end == end && p.hash == hash) {
-                continue;
-            }
-            let first = known.is_empty();
-            let replacement = self.reorged.remove(&w) && !first && !recheck;
-            let pass = Pass {
-                end,
-                hash,
-                feed_until: ctx.near.read_until(ctx.chain.now()),
-                recheck,
-                first,
-                replacement,
-                fresh,
-            };
-            self.passes.entry(w).or_default().push(pass);
-            let of = if fresh { " of a fresh account" } else { "" };
-            self.note(
-                ctx,
-                &w.name(),
-                format!(
-                    "discovery complete through {end} ({} pass{of})",
-                    pass.kind()
-                ),
-            );
-            if pass.judged() {
-                self.judge_pass(ctx, w, pass);
-            }
         }
     }
 
-    /// The highest key index discovery's search reaches for `purpose` of account `acct`,
-    /// against a publication through `end` whose feed was read until `feed_until`: the
-    /// first window, then on until `GAP` unused keys in a row.
-    fn reach(&self, acct: u8, refund: bool, end: u32, feed_until: i64, feed_started: i64) -> u64 {
+    /// The first index past the receiver window of `purpose` of account `acct` once every
+    /// piece of evidence is known: its floor, grown to [`RECEIVE_GAP_LIMIT`] past each index
+    /// NEAR's feed, which started at `feed_started`, recorded as given, or that a live
+    /// payment paid, repeatedly, as the seen set and admitted payments grow it.
+    fn window(&self, acct: u8, refund: bool, feed_started: i64) -> u64 {
         let used: BTreeSet<u64> = self
             .given
             .iter()
-            .filter(|g| g.key.acct == acct && g.key.refund == refund)
-            .filter(|g| g.at >= feed_started && g.at <= feed_until)
+            .filter(|g| g.key.acct == acct && g.key.refund == refund && g.at >= feed_started)
             .map(|g| g.key.index)
             .chain(
                 self.pays
                     .iter()
                     .filter(|p| p.alive && p.key.acct == acct && p.key.refund == refund)
-                    .filter(|p| u32::from(p.mined.height) <= end)
                     .map(|p| p.key.index),
             )
             .collect();
-        let mut reach = FIRST_WINDOW;
+        let mut end = WINDOW_FLOOR;
         let mut i = 0;
-        while i < reach {
+        while i < end {
             if used.contains(&i) {
-                reach = reach.max(i + 1 + GAP);
+                end = end.max(i + 1 + RECEIVE_GAP_LIMIT);
             }
             i += 1;
         }
-        reach
-    }
-
-    /// Whether a completed pass `pass` of `w` promises payment `i`: a NEAR payment at or
-    /// after the birthday, through the publication's end, to a key the search reaches.
-    fn pass_promises(&self, ctx: &Ctx, w: W, pass: &Pass, i: usize) -> bool {
-        let p = &self.pays[i];
-        let h = u32::from(p.mined.height);
-        p.alive
-            && p.key.acct == w.acct
-            && h >= self.births[&w]
-            && h <= pass.end
-            && p.key.index
-                < self.reach(
-                    w.acct,
-                    p.key.refund,
-                    pass.end,
-                    pass.feed_until,
-                    ctx.near.feed_started,
-                )
-    }
-
-    /// Judges a completed pass: it must hold every payment it promises.
-    fn judge_pass(&mut self, ctx: &mut Ctx, w: W, pass: Pass) {
-        let missing: Vec<String> = (0..self.pays.len())
-            .filter(|&i| self.pass_promises(ctx, w, &pass, i))
-            .filter(|&i| !self.credits.contains_key(&(w, self.pays[i].mined.id())))
-            .map(|i| {
-                let p = &self.pays[i];
-                format!(
-                    "{} to {} at {}",
-                    p.label,
-                    p.key.label(),
-                    u32::from(p.mined.height)
-                )
-            })
-            .collect();
-        if !missing.is_empty() {
-            self.violation(
-                ctx,
-                format!(
-                    "{}'s complete discovery holds every payment it lists",
-                    w.name()
-                ),
-                format!(
-                    "discovery reports complete through {} (birthday {}) without {missing:?}",
-                    pass.end, self.births[&w]
-                ),
-            );
-        }
+        end
     }
 
     /// The oracle's checks of `slot`'s accounts against the chain after a sync.
@@ -2538,13 +2357,6 @@ impl<'p> Exec<'p> {
             "chain",
             format!("reorg: blocks above {to} are replaced"),
         );
-        let reorged: Vec<W> = self
-            .passes
-            .iter()
-            .filter(|(_, passes)| !passes.is_empty())
-            .map(|(w, _)| *w)
-            .collect();
-        self.reorged.extend(reorged);
         let mut again: Vec<(u32, bool, usize)> = Vec::new();
         for (i, p) in self.pays.iter_mut().enumerate() {
             if p.alive && u32::from(p.mined.height) > to {
@@ -2640,21 +2452,21 @@ impl<'p> Exec<'p> {
         ctx.mine(tail);
     }
 
-    /// Runs Check swap history on `w`, then syncs its device until its pass completes, at
-    /// most a day of chain time.
+    /// Runs Check swap history on `w`, then syncs its device until its recovery completes
+    /// through the chain it had when the check began, at most a day of chain time.
     fn recheck(&mut self, ctx: &mut Ctx, w: W, judge: bool) {
         let dev = self.wallets[&w];
         self.sync(ctx, w.slot);
-        ctx.dev(dev).begin_recheck();
-        // A fresh account asked to recheck runs the pass as a restored one does.
-        self.fresh.remove(&w);
+        let through = ctx.chain.tip();
+        ctx.begin_recheck(dev);
         self.note(ctx, &w.name(), "runs Check swap history");
-        self.rechecking.insert(w);
         self.in_recheck.insert(w);
         let started = ctx.chain.now();
+        let mut done = false;
         while ctx.chain.now() < started + DAY {
-            self.sync(ctx, w.slot);
-            if !self.rechecking.contains(&w) {
+            let report = self.sync(ctx, w.slot);
+            if !report.pending && ctx.get(dev).covered_through(through) {
+                done = true;
                 break;
             }
             ctx.chain.mine_until(ctx.chain.now() + 10 * MINUTE);
@@ -2665,11 +2477,11 @@ impl<'p> Exec<'p> {
             self.sync(ctx, w.slot);
         }
         self.in_recheck.remove(&w);
-        if judge && self.rechecking.contains(&w) {
+        if judge && !done {
             self.violation(
                 ctx,
                 format!("{}'s Check swap history completes", w.name()),
-                "discovery was not complete a day after Check swap history".into(),
+                "recovery was not complete a day after Check swap history".into(),
             );
         }
     }
@@ -2688,7 +2500,8 @@ impl<'p> Exec<'p> {
         self.note(ctx, "oracle", "the world is stable from here");
         ctx.mine(3);
         // Liveness: within a day of chain time, past any lookup backoff, every wallet's
-        // discovery completes.
+        // recovery completes through the chain it had now.
+        let through = ctx.chain.tip();
         let started = ctx.chain.now();
         let slots: Vec<usize> = (0..4).filter(|s| self.slots[*s].is_some()).collect();
         let mut done: BTreeSet<usize> = BTreeSet::new();
@@ -2698,7 +2511,9 @@ impl<'p> Exec<'p> {
                     continue;
                 }
                 let report = self.sync(ctx, slot);
-                if !report.pending && report.problems.is_empty() {
+                let dev = self.slots[slot].expect("the device exists");
+                let covered = ctx.get(dev).covered_through(through);
+                if !report.pending && report.problems.is_empty() && covered {
                     done.insert(slot);
                 }
             }
@@ -2709,27 +2524,32 @@ impl<'p> Exec<'p> {
                 self.violation(
                     ctx,
                     format!(
-                        "{}'s discovery completes once the world is stable",
+                        "{}'s recovery completes once the world is stable",
                         NAMES[slot]
                     ),
                     "still pending after 26 hours of stable chain time".into(),
                 );
             }
         }
-        // Quiet: once a sync leaves nothing pending and makes no request (work a scan
-        // registers, such as a funding memo's key, may still cost one more), the next
-        // syncs make no directory request either.
+        // Quiet: once a sync leaves nothing pending and looks nothing up (work a scan
+        // registers, such as a funding memo's key, may still cost one more), the next syncs
+        // look nothing up and fetch no path or snapshot either. Recovery still reads the
+        // catalog, and each new bucket, on every run.
+        let busy = |report: &SyncReport| {
+            let req = Requests::of(&report.requests);
+            req.queries + req.witnesses + req.snapshots > 0
+        };
         for &slot in &slots {
             let mut quiet = 0;
             let mut requests = Vec::new();
             for _ in 0..8 {
                 ctx.mine(1);
                 let report = self.sync(ctx, slot);
-                if quiet > 0 && !report.requests.is_empty() {
+                if quiet > 0 && busy(&report) {
                     requests = report.requests.clone();
                     break;
                 }
-                if !report.pending && report.requests.is_empty() {
+                if !report.pending && !busy(&report) {
                     quiet += 1;
                     if quiet > 3 {
                         break;
@@ -2738,13 +2558,13 @@ impl<'p> Exec<'p> {
             }
             if quiet <= 3 {
                 let detail = if requests.is_empty() {
-                    "no sync left nothing pending without a request".to_string()
+                    "no sync left nothing pending without a lookup".to_string()
                 } else {
                     format!("after a quiet sync, a sync made {requests:?}")
                 };
                 self.violation(
                     ctx,
-                    format!("{}'s quiet syncs make no directory requests", NAMES[slot]),
+                    format!("{}'s quiet syncs look nothing up", NAMES[slot]),
                     detail,
                 );
             }
@@ -2777,15 +2597,6 @@ impl<'p> Exec<'p> {
                 "rewinds",
             );
         }
-        let passes: usize = self.passes.values().map(Vec::len).sum();
-        ctx.metric("completed discovery passes", passes as f64, "passes");
-        let fresh = self
-            .passes
-            .values()
-            .flatten()
-            .filter(|p| p.fresh && p.judged())
-            .count();
-        ctx.metric("fresh accounts' judged passes", fresh as f64, "passes");
         ctx.metric("one-time payments", self.pays.len() as f64, "payments");
     }
 
@@ -2876,47 +2687,17 @@ impl<'p> Exec<'p> {
         if h < self.births[&w] {
             return format!("before {}'s birthday {}", w.name(), self.births[&w]);
         }
-        let passes = self.passes.get(&w).map(Vec::as_slice).unwrap_or(&[]);
-        let judged: Vec<&Pass> = passes.iter().filter(|p| p.judged()).collect();
-        if self.plan.swaps[p.swap].wallet == w {
-            return "its own key, after a status that lets the key close or past the limit".into();
-        }
-        if judged.is_empty() {
-            return format!(
-                "{} has no first, recheck or replacement pass (a fresh account)",
-                w.name()
-            );
-        }
-        if judged.iter().all(|pass| pass.end < h) {
-            return format!(
-                "after every first, recheck or replacement pass of {} (last through {})",
-                w.name(),
-                judged.iter().map(|p| p.end).max().unwrap_or(0)
-            );
-        }
-        let reach = judged
-            .iter()
-            .map(|pass| {
-                self.reach(
-                    w.acct,
-                    p.key.refund,
-                    pass.end,
-                    pass.feed_until,
-                    ctx.near.feed_started,
-                )
-            })
-            .max()
-            .unwrap_or(0);
-        if p.key.index >= reach {
-            return format!("beyond the search's reach {reach}");
+        let window = self.window(w.acct, p.key.refund, ctx.near.feed_started);
+        if p.key.index >= window {
+            return format!("past the receiver window, which ends at {window}");
         }
         "no rule".into()
     }
 
     /// What the documented contract promises wallet `w` of payment `i`, and why, if
-    /// anything: found live by the wallet that quoted the key while it scans, found by a
-    /// completed first, Check swap history or replacement discovery pass whose publication
-    /// lists it, or found live in a restored incoming key's 24-hour watch.
+    /// anything: found live by the wallet that quoted the key while it scans, or found by
+    /// recovery once the world is stable, for a key in its receiver window or a refund key
+    /// whose funding memo the wallet scanned. Recovery never needs Check swap history.
     fn promise(&self, ctx: &Ctx, w: W, i: usize) -> Option<(Class, String)> {
         let p = &self.pays[i];
         let h = u32::from(p.mined.height);
@@ -2931,8 +2712,7 @@ impl<'p> Exec<'p> {
             let from = rt.funded_height.unwrap_or(rt.quoted_height);
             let limit = rt.deadline + COMPLETION_LIMIT_SECS - DAY;
             if h > from && t < limit && self.open_for(i) {
-                // Its own discovery may list the payment first (a fresh account runs a
-                // pass once issuance registers a seen key for a lookup).
+                // Its own recovery may list the payment first.
                 return Some((
                     Class::FoundAutomatically,
                     format!(
@@ -2943,79 +2723,27 @@ impl<'p> Exec<'p> {
                 ));
             }
         }
-        let passes = self.passes.get(&w).map(Vec::as_slice).unwrap_or(&[]);
-        for pass in passes.iter().filter(|p| p.judged()) {
-            if self.pass_promises(ctx, w, pass, i) {
-                let class = if pass.recheck {
-                    Class::FoundAfterRecheck
-                } else {
-                    Class::FoundAutomatically
-                };
-                return Some((
-                    class,
-                    format!(
-                        "{}'s {} discovery pass completed through {} and its search reaches {}",
-                        w.name(),
-                        pass.kind(),
-                        pass.end,
-                        p.key.label()
-                    ),
-                ));
-            }
-        }
-        // A refund key another device funded: the wallet recovers it from the funding memo
-        // and discovery looks it up in its next run (see `discover`), so a refund already
-        // on chain when the wallet first scanned past the memo is found a few syncs later.
-        if let Some(funded) = rt.funded_height.filter(|f| *f >= self.births[&w]) {
-            let tips = self
-                .synced_at
-                .get(&w.slot)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let first = tips.iter().position(|t| *t >= funded + 3);
-            let listed = first.is_some_and(|i| tips[i] >= h + 3 && tips.len() - i >= 3);
-            if p.key.refund && plan.wallet.slot != w.slot && listed {
-                return Some((
-                    Class::FoundAutomatically,
-                    format!(
-                        "{} first scanned past {}'s funding memo at {funded} after this refund, \
-                         and discovery looks up a key registered after it finished in its next run",
-                        w.name(),
-                        p.key.label()
-                    ),
-                ));
-            }
-        }
-        // A restored recent incoming key scans for a day after the first pass finds it.
-        let first = passes.iter().find(|p| p.first)?;
-        let reach = self.reach(
-            w.acct,
-            p.key.refund,
-            first.end,
-            first.feed_until,
-            ctx.near.feed_started,
-        );
-        let stale = self.plan.read_lag > RECENT_SET_MAX_AGE_SECS;
-        let recent = stale
-            || self.given.iter().any(|g| {
-                g.key == p.key
-                    && g.at > first.feed_until - RESTORE_WATCH_SECS + MARGIN
-                    && g.at <= first.feed_until
-            });
-        let watch_end = block_time(BlockHeight::from(first.end)) + RESTORE_WATCH_SECS - MARGIN;
-        if !p.key.refund
-            && plan.wallet.slot != w.slot
-            && h > first.end
-            && t < watch_end
-            && recent
-            && p.key.index < reach
-        {
+        let window = self.window(w.acct, p.key.refund, ctx.near.feed_started);
+        if p.key.index < window {
             return Some((
                 Class::FoundAutomatically,
                 format!(
-                    "NEAR was given {} within a day of {}'s first discovery pass, so the restored key scans for 24 hours",
+                    "{} is in {}'s receiver window, which ends at {window} once the seen set \
+                     and admitted payments grow it, so recovery finds it",
                     p.key.label(),
                     w.name()
+                ),
+            ));
+        }
+        // A refund key another device funded: the wallet recovers it from the funding memo
+        // and tests it against every bucket from then on.
+        if p.key.refund && rt.funded_height.is_some_and(|f| f >= self.births[&w]) {
+            return Some((
+                Class::FoundAutomatically,
+                format!(
+                    "{} scans {}'s funding memo, so recovery registers the key and finds it",
+                    w.name(),
+                    p.key.label()
                 ),
             ));
         }
@@ -3104,30 +2832,6 @@ fn notes(ctx: &Ctx, dev: Dev) -> Vec<Note> {
     .expect("notes")
     .collect::<Result<_, _>>()
     .expect("notes decode")
-}
-
-/// The end height and hash of the publication of the discovery pass `dev`'s account stored,
-/// if any. Read for a fresh account whose status is `None`, which means its work is
-/// complete, so a stored pass is a completed one.
-fn stored_pass(ctx: &Ctx, dev: Dev) -> Option<(u32, [u8; 32])> {
-    use rusqlite::OptionalExtension;
-    let device = ctx.get(dev);
-    let account = device.account.expose_uuid().as_bytes().to_vec();
-    device
-        .conn()
-        .query_row(
-            "SELECT d.publication_height, d.publication_hash
-             FROM ironwood_one_time_discovery d
-             JOIN accounts a ON a.id = d.account_id
-             WHERE a.uuid = ?1",
-            [account],
-            |row| {
-                let hash: Vec<u8> = row.get(1)?;
-                Ok((row.get(0)?, hash.try_into().expect("32-byte block hash")))
-            },
-        )
-        .optional()
-        .expect("the stored discovery pass")
 }
 
 /// The outputs directory lookups listed as payments in `dev`'s wallet file.

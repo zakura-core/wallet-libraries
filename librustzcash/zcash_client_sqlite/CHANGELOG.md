@@ -9,13 +9,14 @@ and this library adheres to Rust's notion of
 
 ### Added
 
-- One-time IVK discovery (with `orchard`): `WalletDb` implements the backend's discovery
-  methods and `get_one_time_scanning_keys_for_range`. A restored account's payments appear
-  as its restore scan covers them, and one found after the scan passed it once the scan
-  covers every later block. Issuance waits until a restored account's discovery has
-  registered every index its publication marks used, and a fresh account waits for none.
-- `wallet::init::migrations::ids::ONE_TIME_IVK_DISCOVERY`, the migration for discovery and
-  the spend journal.
+- One-time IVK lookups (with `orchard`): `WalletDb` implements the backend's restore
+  methods and `get_one_time_scanning_keys_for_range`. A payment a directory lookup finds
+  appears as the scan covers it, or, once the scan passed it, after the scan covers every
+  later block. Issuance waits until the account's receiver windows were checked against a
+  seen set, so it never issues an index another device gave out, whether the account was
+  restored or newly created.
+- `wallet::init::migrations::ids::ONE_TIME_IVK_DISCOVERY`, the migration for continuous
+  recovery and the spend journal.
 - One-time IVK directory coverage (with `orchard`): `WalletDb` implements the backend's
   `OneTimeIvkCoverageRead` and `OneTimeIvkCoverageWrite`. Each registered key keeps
   separate authenticated and issuance-blocking facts, a key outside its window (such as an
@@ -25,8 +26,8 @@ and this library adheres to Rust's notion of
   birthday owes the whole receiver set the newly eligible history and restarts every
   lookup from page zero. Seen hits grow the windows without a lookup, and any later
   window growth makes the seen check due again.
-- Refund memo recovery runs for every account with an Orchard viewing key, fresh accounts
-  included, after block storage, full transaction storage, Enhance PIR memo storage and
+- Refund memo recovery runs for every account with an Orchard viewing key after block
+  storage, full transaction storage, Enhance PIR memo storage and
   late admission. An authenticated memo now promotes its key even when its lookup was
   already queued.
 - A spend journal (with `orchard`): every block scan keeps every Ironwood nullifier each
@@ -57,18 +58,14 @@ and this library adheres to Rust's notion of
   map prunes Ironwood nullifiers like the other pools'. The migration drops the
   `ironwood_one_time_sweeps`, `ironwood_nullifier_scan_blocks` and
   `ironwood_one_time_spend_retention` tables, which released wallets hold empty.
-- Blocks scanned without one-time keys judge discovery's publications and turn the hints
-  they skip into late candidates. Builds without `orchard`, which cannot, also refuse blocks
-  while discovery waits for the scan or a payment candidate is pending.
-- `WalletDb::recheck_one_time_key_history` returns nothing. It ends the account's discovery
-  pass, so the next one checks every key against the directory's current filters and reads
-  each paid key's history again. Once discovery is complete, only this starts a pass. On a
-  fresh account, new swap addresses then wait for that pass.
-- A rewind repairs one-time IVK state in every build, not only with `orchard`: discovery
-  redoes what the rescan may change, and lowering an account's birthday reopens its
-  discovery. A key closed without scanning scans again from its first payment above the
-  rewind until that payment is confirmed again. An open key that started above the rewind
-  scans from the first rescanned block.
+- Blocks scanned without one-time keys judge the publications lookups read and turn the
+  hints they skip into late candidates. Builds without `orchard`, which cannot, also refuse
+  blocks while a lookup waits for the scan or a payment candidate is pending.
+- A rewind repairs one-time IVK state in every build, not only with `orchard`: lookups and
+  directory coverage redo what the rescan may change, and lowering an account's birthday
+  restarts its lookups. A closed refund key no longer reopens: recovery finds a replaced
+  refund again from the directory. An open key that started above the rewind scans from
+  the first rescanned block.
 
 - Operations that can queue transparent lookups now reject caller-owned SQL transactions
   without a wallet-owned session journal with `TransparentSessionTransactionRequired`.
@@ -91,6 +88,10 @@ and this library adheres to Rust's notion of
 
 ### Removed
 
+- `WalletDb::mark_one_time_account_fresh` and the `ironwood_one_time_fresh_accounts`
+  table: every account recovers alike. `WalletDb::recheck_one_time_key_history`: "Check
+  swap history" is `zakura_pir_receiver::check_history`, over
+  `OneTimeIvkCoverageWrite::restart_one_time_lookups`.
 - `WalletDb::set_enhance_pir_max_delay` and the session's in-memory query deadlines.
   No database migration is required.
 

@@ -73,9 +73,9 @@ use {
                     ambassador_impl_OneTimeIvkCoverageWrite,
                 },
                 restore::{
-                    DirectoryPayment, DiscoveryStatus, DiscoveryWork, EnumerationCursor,
-                    FilterCheck, OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite, PublicationEnd,
-                    ambassador_impl_OneTimeIvkRestoreRead, ambassador_impl_OneTimeIvkRestoreWrite,
+                    DirectoryPayment, DiscoveryWork, OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite,
+                    PublicationEnd, ambassador_impl_OneTimeIvkRestoreRead,
+                    ambassador_impl_OneTimeIvkRestoreWrite,
                 },
             },
             transparent_ledger::ChainPoint,
