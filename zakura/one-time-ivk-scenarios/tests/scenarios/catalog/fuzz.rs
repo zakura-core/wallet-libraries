@@ -38,7 +38,7 @@ use std::{
 };
 
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
-use zakura_one_time_ivk::swap::{COMPLETION_LIMIT_SECS, RESTORE_WATCH_SECS};
+use zakura_one_time_ivk::swap::{COMPLETION_LIMIT_SECS, REFUND_WATCH_SECS, RESTORE_WATCH_SECS};
 use zakura_one_time_ivk_scenarios::{Class, PaymentResult, zec};
 use zcash_client_sqlite::wallet::one_time_ivk::swap::RECEIVE_RECLAIM_SECONDS;
 use zcash_primitives::transaction::Transaction;
@@ -2926,17 +2926,27 @@ impl<'p> Exec<'p> {
         }
         let rt = &self.swaps[p.swap];
         let plan = self.plan.swaps[p.swap];
-        // Live: the quoting wallet scans its key until its statuses let it close.
+        // Live: the quoting wallet scans its key until its statuses let it close. A refund
+        // key scans only once funded, and stops a day past its deadline by the device's
+        // clock before scanning any backlog, so it finds only payments it scanned by then.
         if plan.wallet == w {
-            let from = rt.funded_height.unwrap_or(rt.quoted_height);
-            let limit = rt.deadline + COMPLETION_LIMIT_SECS - DAY;
-            if h > from && t < limit && self.open_for(i) {
+            let live = if p.key.refund {
+                let ends = rt.deadline + REFUND_WATCH_SECS - self.plan.skew.max(0) - MARGIN;
+                let scanned = self.synced_at.get(&w.slot).is_some_and(|tips| {
+                    tips.iter()
+                        .any(|&tip| tip >= h && block_time(BlockHeight::from(tip)) < ends)
+                });
+                rt.funded_height.is_some_and(|from| h > from) && t < ends && scanned
+            } else {
+                h > rt.quoted_height && t < rt.deadline + COMPLETION_LIMIT_SECS - DAY
+            };
+            if live && self.open_for(i) {
                 // Its own discovery may list the payment first (a fresh account runs a
                 // pass once issuance registers a seen key for a lookup).
                 return Some((
                     Class::FoundAutomatically,
                     format!(
-                        "{} quoted {} and scans it until a final status or 30 days past the deadline",
+                        "{} quoted {} and scans it until a final status or the key's limit",
                         w.name(),
                         p.key.label()
                     ),

@@ -7,7 +7,8 @@ mod memo;
 mod provider_read;
 
 pub use lifecycle::{
-    COMPLETION_LIMIT_SECS, Observation, OperationStatus, RESTORE_WATCH_SECS, ReceiptExpectation,
+    COMPLETION_LIMIT_SECS, Observation, OperationStatus, REFUND_WATCH_SECS, RESTORE_WATCH_SECS,
+    ReceiptExpectation,
 };
 pub use memo::{REFUND_MEMO_MAGIC, RefundMemo};
 pub use provider_read::{

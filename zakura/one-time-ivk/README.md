@@ -9,7 +9,8 @@ issuing live addresses.
 
 ## Wallet integration
 
-1. Reserve a purpose-specific index durably before exposing an address.
+1. Reserve a purpose-specific index durably, under the issuance rules below, and save
+   each request that exposes its address before the request leaves the device.
 2. Call `KeyId::new(purpose, index).derive(account_external_fvk)` and select
    `address_at(0u32, Scope::External)` for the receiver.
 3. Register that FVK for scanning and retain its purpose/index with received notes.
@@ -36,10 +37,32 @@ hardware accounts.
 
 - Crate root: `KeyId`, `Purpose`, and derivation.
 - `swap`: the refund memo, the completion limits (`RESTORE_WATCH_SECS`,
-  `COMPLETION_LIMIT_SECS`), and the provider-neutral lifecycle types
+  `COMPLETION_LIMIT_SECS`, `REFUND_WATCH_SECS`), and the provider-neutral lifecycle types
   (`Observation`, `OperationStatus`, `ReceiptExpectation`) that a provider
   adapter produces; `zakura-near-intents` normalizes NEAR Intents 1Click
   statuses.
+
+## Issuance
+
+Every device holding the seed must be able to find what it issued, so a wallet issues
+both purposes under one bound: never more than 30 indices past the highest index with
+evidence another device can reproduce, which is a hit in the swap provider's seen set,
+an accepted quote, a confirmed payment, or an authenticated payment before the birthday.
+Within the bound it takes the lowest fresh index. When none is fresh it reuses an
+abandoned index, one whose quote requests are all over and none of whose quotes was shown
+for funding, and otherwise it waits rather than pass the bound. An index whose quote was
+shown for funding, or that was paid, is never issued again.
+
+A request exposes its index once the wallet saves it, with its identity and an unknown
+outcome, before it leaves the device. An unknown outcome counts as possibly accepted, so
+reusing its index may let the provider link that unfunded quote with the next one.
+Reissuing an index retires its earlier requests, so a response that arrives later is
+refused and never shown for funding.
+
+A refund key scans only once its funding transaction is stored, and stops a day after
+the deposit deadline (`swap::REFUND_WATCH_SECS`) or once its swap settles, even before
+the wallet catches up. Later refunds are left to the receiver directory. The SQLite
+backend's `wallet::one_time_ivk::swap` documents the calls.
 
 ## Derivation
 

@@ -1,6 +1,7 @@
 //! ZEC-to-X swaps: the wallet funds NEAR's deposit with a refund memo on its Ironwood
 //! change, and NEAR's refunds come back to the swap's one-time refund key.
 
+use zakura_one_time_ivk::swap::REFUND_WATCH_SECS;
 use zakura_one_time_ivk_scenarios::Class;
 use zcash_protocol::consensus::BlockHeight;
 
@@ -17,7 +18,7 @@ const FUNDS: u64 = 3 * ZEC;
 /// The deposit it sends NEAR.
 const DEPOSIT: u64 = ZEC;
 
-const REFUND_OPEN: &str = "A refund key scans from its funding transaction while NEAR owes a refund: until the refund is received and confirmed 10 times, or 30 days after the deadline.";
+const REFUND_OPEN: &str = "A refund key scans from its funding transaction while NEAR owes a refund: until the refund is received and confirmed 10 times, or a day after the deadline (REFUND_WATCH_SECS).";
 const RESTORE_MEMO: &str = "A restore recovers the refund key from the refund memo on its funding transaction's Ironwood change, then looks it up in the receiver directory, which lists NEAR's zero-OVK refund.";
 
 pub fn all() -> Vec<Scenario> {
@@ -82,10 +83,12 @@ fn refund_once(delay: i64) -> Scenario {
         id: format!("B1-refund-after-{}", span(delay)),
         group: FUNDING,
         title: format!("NEAR refunds a ZEC-to-X swap {} after funding", span(delay)),
-        summary: "The deposit carries a refund memo naming the swap's one-time refund key. Shows that \
-            the funding wallet finds the refund while the key scans, that a refund after the 30-day \
-            limit relies on the paid-filter check, and that a restore recovers the key from the memo."
-            .into(),
+        summary:
+            "The deposit carries a refund memo naming the swap's one-time refund key. Shows that \
+            the funding wallet finds the refund while the key scans, that a refund more than a day \
+            past the deadline is left to the receiver directory, and that a restore recovers the \
+            key from the memo."
+                .into(),
         params: vec![("refund after funding".into(), span(delay))],
         slow: delay > 30 * DAY,
         run: Box::new(move |ctx| {
@@ -107,7 +110,8 @@ fn refund_once(delay: i64) -> Scenario {
             let b = ctx.device("B", SEED, f.birthday);
             ctx.sync(b);
             ctx.sync(b);
-            let within = delay < 30 * DAY;
+            // The quote's deadline is an hour out, and the key's watch ends a day after it.
+            let within = delay < HOUR + REFUND_WATCH_SECS;
             if !within {
                 ctx.check_swap_history(f.a);
             }
@@ -116,11 +120,18 @@ fn refund_once(delay: i64) -> Scenario {
             } else {
                 (
                     Class::FoundAfterRecheck,
-                    "The key closed unpaid 30 days after the deadline, and discovery never refreshes a closed key on its own, so Check swap history finds the refund.",
+                    "The key closed unpaid a day after the deadline, and discovery never refreshes a closed key on its own, so Check swap history finds the refund.",
                 )
             };
             ctx.expect(f.a, "refund", &f.key, &refund, class, why);
-            ctx.expect(b, "refund", &f.key, &refund, Class::FoundByDiscovery, RESTORE_MEMO);
+            ctx.expect(
+                b,
+                "refund",
+                &f.key,
+                &refund,
+                Class::FoundByDiscovery,
+                RESTORE_MEMO,
+            );
             ctx.check_same_balance(f.a, b);
             if delay == 30 * MINUTE {
                 ctx.spend_one_time_notes(f.a);

@@ -789,7 +789,8 @@ impl Device {
     pub fn finish_incoming(&mut self, request: &str, outcome: &OperationOutcome) {
         self.db
             .finish_receive_operation(self.account, request, outcome)
-            .expect("the outcome records");
+            .expect("the outcome records")
+            .expect("the request is current");
     }
 
     /// Starts the accepted quote `request` at the device's own clock, returning the
@@ -921,8 +922,8 @@ impl Device {
         })
     }
 
-    /// Quotes a ZEC-to-X swap: reserves the next refund key and binds NEAR's deposit
-    /// address to it, as Vizor does before showing the quote.
+    /// Quotes a ZEC-to-X swap: reserves a refund key, saves the request before it leaves
+    /// and binds NEAR's deposit address to it, as Vizor does before showing the quote.
     pub fn quote_refund(
         &mut self,
         chain: &Chain,
@@ -936,11 +937,17 @@ impl Device {
                 .expect("refund reservation")
         })?;
         let index = key.key_id().index();
-        let deposit = near.zec_deposit_address();
         let deadline = now + deadline_in;
+        let request = near.with_seen(self.feed_now(chain), |seen| {
+            self.db
+                .begin_refund_operation(self.account, index, deadline, now, Some(seen))
+                .expect("the request is saved")
+        })?;
+        let deposit = near.zec_deposit_address();
         self.db
-            .record_refund_operation(self.account, index, &deposit, deadline, now)
-            .expect("the refund operation records");
+            .record_refund_operation(self.account, &request, &deposit, deadline, now)
+            .expect("the refund operation records")
+            .expect("the request is current");
         let fvk = self.key(Purpose::Refund, index);
         near.give(receiver_of(&fvk), self.feed_now(chain), Role::Refund);
         Ok(RefundSwap {

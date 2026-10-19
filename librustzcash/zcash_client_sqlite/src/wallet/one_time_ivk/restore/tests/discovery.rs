@@ -1181,7 +1181,6 @@ fn a_pass_watches_a_recent_key_once_even_if_issuance_registered_it() {
         .to_raw_address_bytes();
     let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| *r == receiver).collect();
     let seen = ProviderSeen {
-        since: 0,
         until: clock_now(),
         contains: &contains,
     };

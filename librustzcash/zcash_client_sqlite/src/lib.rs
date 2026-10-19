@@ -2803,6 +2803,13 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
     ) -> Result<(), SqliteClientError> {
         self.transactionally(|wdb| wdb.store_scanned_blocks(from_state, blocks, Some(keys)))
     }
+
+    fn expire_refund_watches(&mut self) -> Result<(), SqliteClientError> {
+        let now = wallet::one_time_ivk::unix_now(&self.clock);
+        self.transactionally(|wdb| {
+            wallet::one_time_ivk::swap::expire_refund_watches(wdb.conn.0, None, now).map(|_| ())
+        })
+    }
 }
 
 #[cfg(feature = "orchard")]

@@ -49,31 +49,19 @@ fn prepare(st: &mut State, now: i64) -> OneTimeKey {
         .unwrap()
 }
 
-/// A seen set read at `now`, so fresh then, covering quotes begun from 0 to the slack
-/// before `now`.
-fn covering(now: i64) -> (i64, i64) {
-    (-SEEN_SLACK_SECONDS, now)
-}
-
-/// Prepares with a seen set read from `since` to `until` that holds `held`.
-fn try_prepare_seen(
-    st: &mut State,
-    now: i64,
-    (since, until): (i64, i64),
-    held: &[[u8; 43]],
-) -> Policy<OneTimeKey> {
+/// Prepares at `now` with a seen set read then that holds `held`.
+fn try_prepare_seen(st: &mut State, now: i64, held: &[[u8; 43]]) -> Policy<OneTimeKey> {
     let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
     let seen = ProviderSeen {
-        since,
-        until,
+        until: now,
         contains: &contains,
     };
     try_prepare(st, now, Some(&seen))
 }
 
 /// [`try_prepare_seen`], expecting a key.
-fn prepare_seen(st: &mut State, now: i64, read: (i64, i64), held: &[[u8; 43]]) -> OneTimeKey {
-    try_prepare_seen(st, now, read, held).unwrap().unwrap()
+fn prepare_seen(st: &mut State, now: i64, held: &[[u8; 43]]) -> OneTimeKey {
+    try_prepare_seen(st, now, held).unwrap().unwrap()
 }
 
 /// Begins operation request `req` on `key`'s reservation at `now` with `deadline`, with
@@ -102,11 +90,16 @@ fn begin(st: &mut State, key: &OneTimeKey, request: &str) -> Policy<()> {
     begin_at(st, key, request, NOW + 60, NOW)
 }
 
-/// Finishes `request` with outcome `out`.
-fn finish(st: &mut State, request: &str, out: &OperationOutcome) -> Result<(), SqliteClientError> {
+/// Finishes `request` with outcome `out`, returning the policy that refused it, if any.
+fn try_finish(st: &mut State, request: &str, out: &OperationOutcome) -> Policy<()> {
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
     db.finish_receive_operation(account, request, out)
+}
+
+/// [`try_finish`] on a request that was not retired.
+fn finish(st: &mut State, request: &str, out: &OperationOutcome) -> Result<(), SqliteClientError> {
+    try_finish(st, request, out).map(|finished| finished.unwrap())
 }
 
 /// Starts `request` at [`NOW`], returning its deposit or the policy that refused it.
@@ -216,8 +209,8 @@ fn holds_note(st: &State, key: KeyId) -> bool {
     unspent_keys(st, tip(st).height).contains(&Some(key))
 }
 
-/// Registers incoming `indices` as quoted and then abandoned addresses, which issuance
-/// reuses only when nothing else is left.
+/// Registers incoming `indices` as quoted and then abandoned addresses, with unknown
+/// outcomes, which issuance reuses only when nothing fresh is left.
 fn abandon_indices(st: &mut State, indices: std::ops::Range<u64>) {
     let account = st.test_account().unwrap().id();
     let from = tip(st).height + 1;
@@ -239,11 +232,11 @@ fn abandon_indices(st: &mut State, indices: std::ops::Range<u64>) {
     .unwrap();
 }
 
-/// Issues through `prepare_receive_reservation` at the tip, with a seen set read from
-/// `since` to `until` that holds the incoming addresses at `held`, if any.
-fn issue(st: &mut State, seen: Option<(i64, i64, &[u64])>) -> Result<u64, ReservationPolicy> {
+/// Issues through `prepare_receive_reservation` at the tip, with a seen set read at
+/// `until` that holds the incoming addresses at `held`, if any.
+fn issue(st: &mut State, seen: Option<(i64, &[u64])>) -> Result<u64, ReservationPolicy> {
     let held: Vec<[u8; 43]> = seen
-        .map_or(&[][..], |(_, _, held)| held)
+        .map_or(&[][..], |(_, held)| held)
         .iter()
         .map(|&index| {
             let fvk = derive(st, KeyId::new(Purpose::Receive, index));
@@ -251,8 +244,7 @@ fn issue(st: &mut State, seen: Option<(i64, i64, &[u64])>) -> Result<u64, Reserv
         })
         .collect();
     let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
-    let seen = seen.map(|(since, until, _)| ProviderSeen {
-        since,
+    let seen = seen.map(|(until, _)| ProviderSeen {
         until,
         contains: &contains,
     });
@@ -344,9 +336,9 @@ fn a_fast_clock_cannot_reclaim_before_the_deadline_by_block_time() {
 
 /// A fresh status reclaims an abandoned started reservation at once: its key stops
 /// scanning but keeps its quotes. A paid one is released instead, even when only
-/// scanning found the payment, and keeps scanning. Accepted quotes are always in the
-/// seen set, so none of these addresses is issued again, and they move the recovery gap
-/// rather than fill it.
+/// scanning found the payment, and keeps scanning. Their quotes were shown for funding,
+/// so none of these addresses is issued again, and accepted quotes move the bound rather
+/// than fill it.
 #[test]
 fn statuses_reclaim_abandoned_reservations_and_release_paid_ones() {
     let mut st = fixture();
@@ -378,26 +370,23 @@ fn statuses_reclaim_abandoned_reservations_and_release_paid_ones() {
         assert!(scanning_keys(&st).contains(&r.key_id()), "{:?}", r.key_id());
     }
     assert!(reap(&mut st, EXPIRED).is_empty());
-    let issued = prepare_seen(&mut st, EXPIRED, covering(EXPIRED), &[]);
+    let issued = prepare_seen(&mut st, EXPIRED, &[]);
     assert_eq!(issued.key_id().index(), RECEIVE_GAP_LIMIT);
 }
 
-/// A request whose answer was lost is reused, only when no fresh address is left, once a
-/// seen set covering it shows the provider never had the address. One the set holds is
-/// never issued again, even once a later set lacks it, and moves the gap. A quote within
-/// the slack of the set's start or read may be missing from it, as the clocks differ, so
-/// it counts as seen, but it does not move the gap. Without a set nothing is issued.
+/// A request whose answer was lost is possibly accepted, but its address is reused once
+/// its reservation is reclaimed and no fresh address is left, whether or not the seen set
+/// holds it, since this wallet's own request may have given it out. A set that holds it
+/// moves the bound instead, so a fresh address comes first. Without a set nothing is
+/// issued.
 #[test]
-fn lost_requests_are_reused_only_once_a_seen_set_shows_them_unseen() {
-    let limit = Err(ReservationPolicy::Limit);
+fn lost_requests_are_reused_when_no_fresh_address_is_left() {
     let cases = [
-        ("unchecked", Err(SeenUnavailable), 0),
-        ("held", Ok(RECEIVE_GAP_LIMIT), 1),
-        // The set covers the other abandoned quotes, so the lowest is reused at once.
-        ("stale", Ok(1), 0),
-        ("early", limit, 0),
+        ("unchecked", Err(SeenUnavailable)),
+        ("held", Ok(RECEIVE_GAP_LIMIT)),
+        ("unseen", Ok(0)),
     ];
-    for (case, next, reused) in cases {
+    for (case, next) in cases {
         let mut st = fixture();
         let lost = prepare(&mut st, NOW);
         begin(&mut st, &lost, "lost").unwrap().unwrap();
@@ -405,42 +394,13 @@ fn lost_requests_are_reused_only_once_a_seen_set_shows_them_unseen() {
         assert_eq!(reap(&mut st, now), [0]);
         abandon_indices(&mut st, 1..RECEIVE_GAP_LIMIT);
         let held = [lost.receiver().to_raw_address_bytes()];
-        // Without a set, or with one that holds it or does not cover its quote, the
-        // provider may have the address, so it is not reissued.
         let prepared = match case {
             "unchecked" => try_prepare(&mut st, now, None),
-            "held" => try_prepare_seen(&mut st, now, covering(now), &held),
-            "stale" => {
-                // The quote is within the slack before the set's read.
-                let sql = "UPDATE ironwood_one_time_operations SET begun_at = ?1
-                           WHERE request = 'lost'";
-                exec(st.wallet().conn(), sql, [now - SEEN_SLACK_SECONDS + 1]);
-                try_prepare_seen(&mut st, now, covering(now), &[])
-            }
-            _ => {
-                // This wallet's clock may be ahead of the provider's, so a set starting
-                // just before the window's quotes may lack them.
-                let sql = "UPDATE ironwood_one_time_operations SET begun_at = ?1";
-                exec(st.wallet().conn(), sql, [NOW]);
-                let read = (NOW - SEEN_SLACK_SECONDS + 1, now);
-                try_prepare_seen(&mut st, now, read, &[])
-            }
+            "held" => try_prepare_seen(&mut st, now, &held),
+            _ => try_prepare_seen(&mut st, now, &[]),
         };
-        let prepared = prepared.unwrap();
-        let index = prepared
-            .as_ref()
-            .map(|key| key.key_id().index())
-            .map_err(|p| *p);
+        let index = prepared.unwrap().map(|key| key.key_id().index());
         assert_eq!(index, next, "{case}");
-        let later = now + RECEIVE_RECLAIM_SECONDS;
-        if let Ok(next) = prepared {
-            begin(&mut st, &next, "lost-again").unwrap().unwrap();
-            assert_eq!(reap(&mut st, later), [next.key_id().index()]);
-        }
-        // A covering set that lacks the address shows the provider never had it, and the
-        // window holds no fresh address, so the lowest unseen abandoned one is reused.
-        let issued = prepare_seen(&mut st, later, covering(later), &[]);
-        assert_eq!(issued.key_id().index(), reused, "{case}");
     }
 }
 
@@ -509,11 +469,10 @@ fn a_started_reservation_needs_a_fresh_conclusive_status() {
 }
 
 /// After a restart the same draft is resumed, and a quote request the provider rejected
-/// keeps it until the requested deadline. That request still gave the provider the
-/// address, so the next swap then gets another, and the address is never reissued, even
-/// once a covering seen set lacks it and the window holds nothing else.
+/// keeps it until the requested deadline. The next swap then gets another address, and
+/// the rejected one is reissued only once no fresh one is left under the bound.
 #[test]
-fn a_rejected_quote_never_frees_its_address() {
+fn a_rejected_quote_frees_its_address_once_the_bound_forces_it() {
     let mut st = fixture();
     let r = prepare(&mut st, NOW);
     reopen(&mut st);
@@ -524,12 +483,12 @@ fn a_rejected_quote_never_frees_its_address() {
     assert_eq!(operation(&st, "too-low"), begun);
     assert_eq!(prepare(&mut st, NOW + 1).key_id(), r.key_id());
     chain_agrees(st.wallet().db(), NOW + 60);
-    let next = prepare_seen(&mut st, NOW + 60, covering(NOW + 60), &[]);
+    let next = prepare_seen(&mut st, NOW + 60, &[]);
     assert_eq!(next.key_id().index(), 1);
     assert!(!reserved(&st, &r));
-    abandon_indices(&mut st, 2..RECEIVE_GAP_LIMIT);
-    let issued = try_prepare_seen(&mut st, EXPIRED, covering(EXPIRED), &[]).unwrap();
-    assert_ne!(issued.map(|key| key.key_id()).ok(), Some(r.key_id()));
+    abandon_indices(&mut st, 1..RECEIVE_GAP_LIMIT);
+    let issued = prepare_seen(&mut st, EXPIRED, &[]);
+    assert_eq!(issued.key_id(), r.key_id());
 }
 
 /// A request finishes one way only: a rejected quote cannot later be accepted and
@@ -700,7 +659,7 @@ fn issuance_checks_addresses_past_the_lookahead_against_the_seen_set() {
     for held in [(0..=window).collect(), vec![window]] {
         let mut st = fixture();
         let account = st.test_account().unwrap().id();
-        let seen = Some((0, NOW, &held[..]));
+        let seen = Some((NOW, &held[..]));
         if held.len() > 1 {
             // The first window's hits wait for their lookups; the next pass registers the
             // address past it before issuing.
@@ -719,8 +678,9 @@ fn issuance_checks_addresses_past_the_lookahead_against_the_seen_set() {
     }
 }
 
-/// Restored addresses the provider saw move the gap and are never reused, even once
-/// every other address in the window was quoted and abandoned, nor is one accepted here.
+/// Restored addresses the provider saw move the bound and are never reused, nor is one
+/// whose quote was shown here, though every other address in the window was quoted and
+/// abandoned: the address the bound now allows comes first.
 #[test]
 fn issuance_skips_restored_addresses_the_provider_saw() {
     let mut st = undiscovered();
@@ -742,7 +702,7 @@ fn issuance_skips_restored_addresses_the_provider_saw() {
     quote(&mut st, &draft, "after-restore", true);
     report(&mut st, "after-restore", AwaitingDeposit, false, EXPIRED);
     assert!(!reserved(&st, &draft));
-    let issued = prepare_seen(&mut st, EXPIRED, covering(EXPIRED), &[]);
+    let issued = prepare_seen(&mut st, EXPIRED, &[]);
     assert_eq!(issued.key_id().index(), RECEIVE_GAP_LIMIT + 3);
 }
 
@@ -850,8 +810,7 @@ fn a_fresh_account_still_checks_the_seen_set() {
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
     db.mark_one_time_account_fresh(account).unwrap();
-    let (since, until) = covering(NOW);
-    assert_eq!(issue(&mut st, Some((since, until, &[0]))), Ok(1));
+    assert_eq!(issue(&mut st, Some((NOW, &[0]))), Ok(1));
     let db = st.wallet_mut().db_mut();
     db.mark_one_time_account_fresh(account).unwrap();
     let mut st = fixture();
@@ -1051,7 +1010,6 @@ fn refund_issuance_skips_addresses_the_provider_saw() {
         .to_raw_address_bytes()];
     let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
     let seen = ProviderSeen {
-        since: 0,
         until: NOW,
         contains: &contains,
     };
@@ -1064,13 +1022,20 @@ fn refund_issuance_skips_addresses_the_provider_saw() {
                WHERE k.purpose = 0 AND k.key_index = ?1";
     let seen_and_due: Vec<bool> = column(&db.conn, sql, [first.index().to_be_bytes()]);
     assert_eq!(seen_and_due, [true]);
+    // The reserved key was never exposed, so it is reused first.
+    let again = db.reserve_refund_key(account, NOW, through, Some(&empty_seen(NOW)));
+    assert_eq!(again.unwrap().unwrap().key_id().index(), 1);
+    let seen = empty_seen(NOW);
+    db.begin_refund_operation(account, 1, NOW + 60, NOW, Some(&seen))
+        .unwrap()
+        .unwrap();
     let next = db.reserve_refund_key(account, NOW, through, Some(&empty_seen(NOW)));
     assert_eq!(next.unwrap().unwrap().key_id().index(), 2);
 }
 
-/// A seen set that holds every receiver stops refund issuance with `Gap` after a bounded
-/// number of probes, keeping the keys it registered, so the next reservation continues past
-/// them instead of probing them again.
+/// A seen set that holds every receiver stops refund issuance with `Gap` once it probed
+/// every index the bound allows, keeping the keys it registered. They move the bound, so
+/// the next reservation continues past them instead of probing them again.
 #[test]
 fn refund_issuance_bounds_seen_set_probes() {
     let mut st = fixture();
@@ -1082,7 +1047,6 @@ fn refund_issuance_bounds_seen_set_probes() {
         vec![true; receivers.len()]
     };
     let everything = ProviderSeen {
-        since: 0,
         until: NOW,
         contains: &contains,
     };
@@ -1090,7 +1054,7 @@ fn refund_issuance_bounds_seen_set_probes() {
     let issued = db.reserve_refund_key(account, NOW, through, Some(&everything));
     assert!(matches!(issued.unwrap(), Err(Gap)));
     let held = probes.get();
-    assert_eq!(held, 100);
+    assert_eq!(held, RECEIVE_GAP_LIMIT);
     let sql = "SELECT COUNT(*) FROM ironwood_one_time_keys k
                JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id
                WHERE k.purpose = 0 AND k.provider_seen";
@@ -1098,7 +1062,6 @@ fn refund_issuance_bounds_seen_set_probes() {
 
     let nothing = |receivers: &[[u8; 43]]| vec![false; receivers.len()];
     let seen = ProviderSeen {
-        since: 0,
         until: NOW,
         contains: &nothing,
     };
@@ -1106,12 +1069,12 @@ fn refund_issuance_bounds_seen_set_probes() {
     assert_eq!(next.unwrap().unwrap().key_id().index(), held);
 }
 
-/// Quotes only assumed seen, whose outcome is unknown and which no seen set covers, keep
-/// their addresses from reissue but do not widen the gap, since a restore walks past only
-/// receipts, seen addresses and accepted quotes; an accepted quote widens it.
+/// Abandoned requests with unknown outcomes fill the bound without moving it, since a
+/// restore walks past only receipts, seen addresses and accepted quotes, so issuance
+/// reuses the lowest of them. An accepted quote moves the bound.
 #[test]
-fn only_accepted_quotes_widen_the_gap() {
-    for (accepted, issued) in [(false, Err(ReservationPolicy::Limit)), (true, Ok(30))] {
+fn only_accepted_quotes_move_the_bound() {
+    for (accepted, issued) in [(false, Ok(0)), (true, Ok(30))] {
         let mut st = fixture();
         abandon_indices(&mut st, 0..RECEIVE_GAP_LIMIT);
         if accepted {
@@ -1147,7 +1110,6 @@ fn single_address_seen_probes_reject_malformed_answers() {
             _ => vec![false; receivers.len()],
         };
         let seen = ProviderSeen {
-            since: 0,
             until: NOW,
             contains: &contains,
         };
@@ -1160,7 +1122,7 @@ fn single_address_seen_probes_reject_malformed_answers() {
         )));
 
         for _ in 0..RECEIVE_GAP_LIMIT {
-            let index = issue(&mut st, Some((0, NOW, &[])));
+            let index = issue(&mut st, Some((NOW, &[])));
             let key = KeyId::new(Purpose::Receive, index.unwrap());
             let key = get_key(st.wallet().db(), account, key).unwrap().unwrap();
             quote(
@@ -1197,7 +1159,6 @@ fn issuance_needs_a_fresh_seen_set() {
         let account = st.test_account().unwrap().id();
         let through = tip(&st).height;
         let seen = until.map(|until| ProviderSeen {
-            since: 0,
             until,
             contains: &holds_nothing,
         });
@@ -1248,7 +1209,6 @@ fn an_unquoted_draft_is_checked_before_its_first_quote() {
         let contains =
             |receivers: &[[u8; 43]]| receivers.iter().map(|x| held.contains(x)).collect();
         let holds = ProviderSeen {
-            since: 0,
             until: NOW,
             contains: &contains,
         };
@@ -1382,7 +1342,7 @@ fn a_reservation_without_a_floor_counts_every_request() {
         let held = [r.receiver().to_raw_address_bytes()];
         if case == "live" {
             chain_agrees(st.wallet().db(), NOW + 10);
-            let resumed = prepare_seen(&mut st, NOW + 10, covering(NOW + 10), &held);
+            let resumed = prepare_seen(&mut st, NOW + 10, &held);
             assert_eq!(resumed.key_id(), r.key_id());
             let edit = begin_seen(&mut st, &r, "edit", (NOW + 60, NOW + 10), None);
             edit.unwrap().unwrap();
@@ -1409,7 +1369,7 @@ fn a_reissued_address_ignores_its_earlier_requests() {
     let now = NOW + 60 + RECEIVE_RECLAIM_SECONDS;
     assert_eq!(reap(&mut st, now), [0]);
     abandon_indices(&mut st, 1..RECEIVE_GAP_LIMIT);
-    let reissued = prepare_seen(&mut st, now, covering(now), &[]);
+    let reissued = prepare_seen(&mut st, now, &[]);
     assert_eq!(reissued.key_id(), lost.key_id());
     let unchecked = try_prepare(&mut st, now, None);
     assert_eq!(refusal(unchecked), Some(SeenUnavailable));
@@ -1439,65 +1399,32 @@ fn finish_checks_the_deadline_against_the_real_request_time() {
     assert_eq!(operation(&st, "corrected").unwrap().3, Some(deadline));
 }
 
-/// A seen set covers a request by its real time. Here the clock ran a day fast when the
-/// address was reserved and was set back before the request, which the provider's feed
-/// started too late to see, so the address counts as seen and is not reissued.
+/// A reissued address is quoted though the seen set holds it, since this wallet's own
+/// earlier request may have given it out, and its earlier request stays retired: a late
+/// answer to it is refused and can never be started.
 #[test]
-fn coverage_uses_the_real_request_time() {
+fn a_reissued_address_is_quoted_though_the_seen_set_holds_it() {
     let mut st = fixture();
-    let lost = prepare(&mut st, NOW + DAY);
-    begin(&mut st, &lost, "lost").unwrap().unwrap();
-    let later = NOW + DAY + RECEIVE_RECLAIM_SECONDS;
-    assert_eq!(reap(&mut st, later), [0]);
-    abandon_indices(&mut st, 1..RECEIVE_GAP_LIMIT);
-    let reissued = try_prepare_seen(&mut st, later, (NOW, later), &[]);
-    assert_eq!(refusal(reissued), Some(ReservationPolicy::Limit));
-}
-
-/// A reissued address retired because another device quoted it keeps scanning until the
-/// completion limit after it was retired, though its earlier reservation's request ended
-/// long before, so a payment from that device's swap is still found. Retiring records one
-/// placeholder operation, which later checks do not repeat.
-#[test]
-fn a_retired_reissued_address_keeps_scanning() {
-    use zakura_one_time_ivk::swap::COMPLETION_LIMIT_SECS;
-    let mut st = fixture();
-    let account = st.test_account().unwrap().id();
     let lost = prepare(&mut st, NOW);
     begin(&mut st, &lost, "lost").unwrap().unwrap();
     let now = NOW + 60 + RECEIVE_RECLAIM_SECONDS;
     assert_eq!(reap(&mut st, now), [0]);
     abandon_indices(&mut st, 1..RECEIVE_GAP_LIMIT);
-    let key = prepare_seen(&mut st, now, covering(now), &[]);
+    let key = prepare_seen(&mut st, now, &[]);
     assert_eq!(key.key_id(), lost.key_id());
     let held = [key.receiver().to_raw_address_bytes()];
     let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
     let holds = ProviderSeen {
-        since: 0,
         until: now,
         contains: &contains,
     };
-    for request in ["other", "again"] {
-        let refused = begin_seen(&mut st, &key, request, (now + 60, now), Some(&holds));
-        assert_eq!(refusal(refused), Some(Stale));
-    }
-    assert!(!reserved(&st, &key));
-    let next = try_prepare(&mut st, now, Some(&holds)).unwrap().unwrap();
-    assert_ne!(next.key_id(), key.key_id());
-    let sql = "SELECT COUNT(*) FROM ironwood_one_time_operations WHERE request IS NULL";
-    assert_eq!(value::<i64>(st.wallet().conn(), sql, []), 1);
-    let through = tip(&st).height;
-    close_at(st.wallet_mut().db_mut(), account, now, through);
-    assert!(active_from(&st, key.key_id()).is_some());
-    pay(&mut st, key.full_viewing_key(), 10_000);
-    assert!(holds_note(&st, key.key_id()));
-    confirm(&mut st);
-    let limit = now + COMPLETION_LIMIT_SECS;
-    let through = tip(&st).height;
-    close_at(st.wallet_mut().db_mut(), account, limit - 1, through);
-    assert!(active_from(&st, key.key_id()).is_some());
-    close_at(st.wallet_mut().db_mut(), account, limit, through);
-    assert_eq!(active_from(&st, key.key_id()), None);
+    begin_seen(&mut st, &key, "again", (now + 60, now), Some(&holds))
+        .unwrap()
+        .unwrap();
+    assert!(reserved(&st, &key));
+    let late = try_finish(&mut st, "lost", &accepted("late", None, now + 60));
+    assert_eq!(refusal(late), Some(Stale));
+    assert_eq!(refusal(start_at(&mut st, "lost", now)), Some(Stale));
 }
 
 /// A draft never quoted here that idles past the cooldown is retired, not reclaimed, once
@@ -1513,7 +1440,6 @@ fn an_idle_draft_another_device_quoted_keeps_scanning() {
     let held = [draft.receiver().to_raw_address_bytes()];
     let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
     let holds = ProviderSeen {
-        since: 0,
         until: now,
         contains: &contains,
     };
@@ -1534,4 +1460,194 @@ fn an_idle_draft_another_device_quoted_keeps_scanning() {
     assert!(active_from(&st, draft.key_id()).is_some());
     close_at(st.wallet_mut().db_mut(), account, limit, through);
     assert_eq!(active_from(&st, draft.key_id()), None);
+}
+
+/// Reserves a refund key at `now`, with the chain agreeing and an empty seen set read then.
+fn reserve_refund_at(st: &mut State, now: i64) -> Policy<OneTimeKey> {
+    let account = st.test_account().unwrap().id();
+    let through = tip(st).height;
+    chain_agrees(st.wallet().db(), now);
+    let db = st.wallet_mut().db_mut();
+    db.reserve_refund_key(account, now, through, Some(&empty_seen(now)))
+}
+
+/// Begins a quote request on refund key `index` at `now`, asking for a deadline a minute
+/// later, with an empty seen set read then.
+fn begin_refund_at(st: &mut State, index: u64, now: i64) -> Policy<String> {
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet_mut().db_mut();
+    db.begin_refund_operation(account, index, now + 60, now, Some(&empty_seen(now)))
+}
+
+/// Records refund `request`'s accepted quote for `deposit` at `now`.
+fn record_refund(st: &mut State, request: &str, deposit: &str, now: i64) -> Policy<()> {
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet_mut().db_mut();
+    db.record_refund_operation(account, request, deposit, now + 60, now)
+}
+
+/// Reserves and quotes `count` refund keys at `now`, expecting `indices`, whose requests
+/// stay unanswered until their deadline a minute later.
+fn expose_refunds(st: &mut State, indices: std::ops::Range<u64>, now: i64) {
+    for index in indices {
+        let key = reserve_refund_at(st, now).unwrap().unwrap();
+        assert_eq!(key.key_id().index(), index);
+        begin_refund_at(st, index, now).unwrap().unwrap();
+    }
+}
+
+/// A transparent deposit address on the test network.
+fn deposit_address(st: &State, byte: u8) -> String {
+    p2pkh(byte).encode(st.network())
+}
+
+/// A quote shown for funding is never reissued, even once the bound forces reuse. Here
+/// incoming address 0 was started and refund key 0 recorded, and every other index the
+/// bound allows was abandoned, so issuance reuses index 1.
+#[test]
+fn a_quote_shown_for_funding_is_never_reissued() {
+    let mut st = fixture();
+    let shown = prepare(&mut st, NOW);
+    quote(&mut st, &shown, "shown", true);
+    report(&mut st, "shown", AwaitingDeposit, false, EXPIRED);
+    assert!(!reserved(&st, &shown));
+    // The accepted quote moved the bound past index 30.
+    abandon_indices(&mut st, 1..RECEIVE_GAP_LIMIT + 1);
+    assert_eq!(prepare_seen(&mut st, EXPIRED, &[]).key_id().index(), 1);
+
+    let mut st = fixture();
+    let deposit = deposit_address(&st, 7);
+    reserve_refund_at(&mut st, NOW).unwrap().unwrap();
+    let shown = begin_refund_at(&mut st, 0, NOW).unwrap().unwrap();
+    record_refund(&mut st, &shown, &deposit, NOW)
+        .unwrap()
+        .unwrap();
+    expose_refunds(&mut st, 1..RECEIVE_GAP_LIMIT + 1, NOW);
+    let reused = reserve_refund_at(&mut st, NOW + 60).unwrap().unwrap();
+    assert_eq!(reused.key_id().index(), 1);
+}
+
+/// A response to a request whose index was reissued is refused, so its quote is never
+/// shown: an incoming request finished or started late, or a refund request recorded
+/// late. The reissued index takes a new request.
+#[test]
+fn late_responses_to_a_reissued_index_are_refused() {
+    let mut st = fixture();
+    let old = prepare(&mut st, NOW);
+    begin(&mut st, &old, "old").unwrap().unwrap();
+    let now = NOW + 60 + RECEIVE_RECLAIM_SECONDS;
+    assert_eq!(reap(&mut st, now), [0]);
+    abandon_indices(&mut st, 1..RECEIVE_GAP_LIMIT);
+    let reissued = prepare_seen(&mut st, now, &[]);
+    assert_eq!(reissued.key_id(), old.key_id());
+    let late = try_finish(&mut st, "old", &accepted("late", None, now + 60));
+    assert_eq!(refusal(late), Some(Stale));
+    let late = try_finish(&mut st, "old", &OperationOutcome::Rejected);
+    assert_eq!(refusal(late), Some(Stale));
+    assert_eq!(refusal(start_at(&mut st, "old", now)), Some(Stale));
+    begin_at(&mut st, &reissued, "new", now + 60, now)
+        .unwrap()
+        .unwrap();
+    finish(&mut st, "new", &accepted("new", None, now + 60)).unwrap();
+    assert_eq!(
+        start_at(&mut st, "new", now).unwrap().unwrap().address,
+        "new"
+    );
+
+    let mut st = fixture();
+    let deposit = deposit_address(&st, 7);
+    reserve_refund_at(&mut st, NOW).unwrap().unwrap();
+    let old = begin_refund_at(&mut st, 0, NOW).unwrap().unwrap();
+    expose_refunds(&mut st, 1..RECEIVE_GAP_LIMIT, NOW);
+    let reissued = reserve_refund_at(&mut st, NOW + 60).unwrap().unwrap();
+    assert_eq!(reissued.key_id().index(), 0);
+    let late = record_refund(&mut st, &old, &deposit, NOW + 60);
+    assert_eq!(refusal(late), Some(Stale));
+    let new = begin_refund_at(&mut st, 0, NOW + 60).unwrap().unwrap();
+    record_refund(&mut st, &new, &deposit, NOW + 60)
+        .unwrap()
+        .unwrap();
+}
+
+/// A refund request survives a crash at each step, since the wallet keeps nothing about it
+/// outside the database. One that never left needs a fresh seen set, and its key was never
+/// exposed, so the next reservation returns it again. Once a request is saved, its outcome
+/// counts as unknown, whether the crash came before it was sent, after, or before its
+/// response was saved: its key is held until the request's deadline. A response saved
+/// later binds its key for good, and once the bound forces reuse of an unanswered key, a
+/// response arriving after that is refused.
+#[test]
+fn a_refund_request_survives_a_crash_at_each_step() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let deposit = deposit_address(&st, 7);
+    let draft = reserve_refund_at(&mut st, NOW).unwrap().unwrap();
+    let db = st.wallet_mut().db_mut();
+    let unchecked = db.begin_refund_operation(account, 0, NOW + 60, NOW, None);
+    assert_eq!(refusal(unchecked), Some(SeenUnavailable));
+    reopen(&mut st);
+    let again = reserve_refund_at(&mut st, NOW).unwrap().unwrap();
+    assert_eq!(again.key_id(), draft.key_id());
+    // Key 0's response never arrives, and key 1's arrives only after the crash.
+    let unanswered = begin_refund_at(&mut st, 0, NOW).unwrap().unwrap();
+    let next = reserve_refund_at(&mut st, NOW).unwrap().unwrap();
+    assert_eq!(next.key_id().index(), 1);
+    let answered = begin_refund_at(&mut st, 1, NOW).unwrap().unwrap();
+    let second = begin_refund_at(&mut st, 1, NOW);
+    assert_eq!(refusal(second), Some(Stale));
+    record_refund(&mut st, &answered, &deposit, NOW)
+        .unwrap()
+        .unwrap();
+    // The recorded quote moved the bound past index 31.
+    expose_refunds(&mut st, 2..RECEIVE_GAP_LIMIT + 2, NOW);
+    assert_eq!(
+        refusal(reserve_refund_at(&mut st, NOW)),
+        Some(ReservationPolicy::Limit)
+    );
+    let reused = reserve_refund_at(&mut st, NOW + 60).unwrap().unwrap();
+    assert_eq!(reused.key_id().index(), 0);
+    let other = deposit_address(&st, 8);
+    let late = record_refund(&mut st, &unanswered, &other, NOW + 60);
+    assert_eq!(refusal(late), Some(Stale));
+}
+
+/// Thirty requests that fail one after another never move issuance past the bound: once
+/// each is over, the next reservation reuses the lowest of them instead, for both
+/// purposes. Rejections and lost refund responses leave no evidence another device could
+/// follow.
+#[test]
+fn thirty_failed_requests_reuse_an_index_instead_of_passing_the_bound() {
+    let mut st = fixture();
+    let step = 60;
+    for i in 0..RECEIVE_GAP_LIMIT {
+        let now = NOW + step * i as i64;
+        chain_agrees(st.wallet().db(), now);
+        let r = prepare(&mut st, now);
+        assert_eq!(r.key_id().index(), i);
+        let request = format!("rejected-{i}");
+        begin_at(&mut st, &r, &request, now + step, now)
+            .unwrap()
+            .unwrap();
+        finish(&mut st, &request, &OperationOutcome::Rejected).unwrap();
+    }
+    let now = NOW + step * RECEIVE_GAP_LIMIT as i64;
+    chain_agrees(st.wallet().db(), now);
+    assert_eq!(prepare(&mut st, now).key_id().index(), 0);
+
+    let mut st = fixture();
+    for i in 0..RECEIVE_GAP_LIMIT {
+        let now = NOW + step * i as i64;
+        let key = reserve_refund_at(&mut st, now).unwrap().unwrap();
+        assert_eq!(key.key_id().index(), i);
+        begin_refund_at(&mut st, i, now).unwrap().unwrap();
+    }
+    let now = NOW + step * RECEIVE_GAP_LIMIT as i64;
+    assert_eq!(
+        reserve_refund_at(&mut st, now)
+            .unwrap()
+            .unwrap()
+            .key_id()
+            .index(),
+        0
+    );
 }

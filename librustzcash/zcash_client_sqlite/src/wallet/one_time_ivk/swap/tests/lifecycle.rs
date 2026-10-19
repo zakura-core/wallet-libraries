@@ -2,6 +2,7 @@ use super::*;
 use zakura_one_time_ivk::swap::{
     COMPLETION_LIMIT_SECS as LIMIT, Observation,
     OperationStatus::{Active, AwaitingDeposit, Terminal},
+    REFUND_WATCH_SECS,
     ReceiptExpectation::{None as NoReceipt, Positive, Unknown},
 };
 
@@ -23,6 +24,14 @@ fn refund_key(st: &mut State) -> OneTimeKey {
     let account = st.test_account().unwrap().id();
     let from = next_height(st);
     reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, from)
+}
+
+/// Issues the next incoming key without a reservation, trial-decrypted from
+/// [`next_height`], for the closing rules every key but a refund key follows.
+fn swap_key(st: &mut State) -> OneTimeKey {
+    let account = st.test_account().unwrap().id();
+    let from = next_height(st);
+    reserve_key(st.wallet_mut().db_mut(), account, Purpose::Receive, from)
 }
 
 /// Mines blocks until the latest receipt has the untrusted confirmations closing needs.
@@ -64,7 +73,7 @@ fn status(status: OperationStatus) -> Observation {
 fn observations_are_monotonic_and_a_seen_deposit_sticks() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
-    let key = refund_key(&mut st).key_id();
+    let key = swap_key(&mut st).key_id();
     let expect = |value| Terminal(Positive(Some(Zatoshis::const_from_u64(value))));
     // Each observation, its time, and the stored row afterwards.
     for (status, funded, at, row) in [
@@ -128,7 +137,7 @@ fn equal_time_observations_never_lower_the_expected_receipt() {
         for (first, second) in [(a, b), (b, a)] {
             let mut st = scanned_wallet();
             let account = st.test_account().unwrap().id();
-            let key = refund_key(&mut st).key_id();
+            let key = swap_key(&mut st).key_id();
             for observation in [first, second] {
                 let db = st.wallet_mut().db_mut();
                 observe(db, account, key, "swap", observation, 100).unwrap();
@@ -138,46 +147,12 @@ fn equal_time_observations_never_lower_the_expected_receipt() {
     }
 }
 
-/// A refund key whose deposit this wallet did not fund starts once the provider reports
-/// a refund owed or an inconclusive end, unless a newer status, answered first, reports
-/// none.
+/// A refund key whose deposit this wallet did not fund never starts scanning, whatever
+/// the provider reports, even with its history lookup pending. Only storing its funding
+/// transaction starts it, and the receiver directory recovers a refund from elsewhere.
 #[test]
-fn a_refund_owed_starts_an_unfunded_refund_key() {
-    for (owed, settled_first) in [
-        (Terminal(Positive(None)), false),
-        (Terminal(Positive(None)), true),
-        (Terminal(Unknown), false),
-    ] {
-        let mut st = scanned_wallet();
-        let account = st.test_account().unwrap().id();
-        let from = next_height(&st);
-        // Reserved as issuance does: it starts only when its funding transaction is stored.
-        let db = st.wallet_mut().db_mut();
-        let key = reserve_refund(db, account, from - 1);
-        let key = key.unwrap().unwrap().key_id();
-        observe(db, account, key, "deposit", Active, 100).unwrap();
-        let record = |db: &mut Db, s, at| {
-            let recorded = db.record_operation_status(account, "deposit", None, status(s), at);
-            recorded.unwrap()
-        };
-        assert!(record(db, Active, 100));
-        assert!(scanning_keys(&st).is_empty());
-        let db = st.wallet_mut().db_mut();
-        if settled_first {
-            assert!(record(db, Terminal(NoReceipt), 300));
-        }
-        assert!(record(db, owed, 200));
-        let expected = if settled_first { vec![] } else { vec![key] };
-        assert_eq!(scanning_keys(&st), expected, "{owed:?} {settled_first}");
-    }
-}
-
-/// A refund owed while the key's history lookup is pending starts the key at once, even
-/// when the provider no longer lists its address as recent: the lookup still covers the
-/// history before it.
-#[test]
-fn a_refund_owed_during_a_pending_lookup_starts_the_key() {
-    for owed in [Positive(None), Unknown] {
+fn no_status_starts_an_unfunded_refund_key() {
+    for owed in [Terminal(Positive(None)), Terminal(Unknown)] {
         let mut st = scanned_wallet();
         let account = st.test_account().unwrap().id();
         let key = KeyId::new(Purpose::Refund, 0);
@@ -187,7 +162,6 @@ fn a_refund_owed_during_a_pending_lookup_starts_the_key() {
         let contains = |r: &[[u8; 43]]| r.iter().map(|r| held.contains(r)).collect();
         let now = clock_now();
         let seen = ProviderSeen {
-            since: 0,
             until: now,
             contains: &contains,
         };
@@ -195,12 +169,25 @@ fn a_refund_owed_during_a_pending_lookup_starts_the_key() {
         // The provider saw the first refund address, so it awaits a lookup.
         let db = st.wallet_mut().db_mut();
         let issued = db.reserve_refund_key(account, now, through.height, Some(&seen));
-        assert_eq!(issued.unwrap().unwrap().key_id().index(), 1);
-        observe(db, account, key, "deposit", Active, 100).unwrap();
-        let recorded =
-            db.record_operation_status(account, "deposit", None, status(Terminal(owed)), 200);
-        assert!(recorded.unwrap());
-        assert_eq!(scanning_keys(&st), vec![key], "{owed:?}");
+        let issued = issued.unwrap().unwrap().key_id();
+        assert_eq!(issued.index(), 1);
+        for key in [key, issued] {
+            observe(
+                db,
+                account,
+                key,
+                &format!("deposit-{}", key.index()),
+                Active,
+                100,
+            )
+            .unwrap();
+        }
+        for key in [key, issued] {
+            let deposit = format!("deposit-{}", key.index());
+            let recorded = db.record_operation_status(account, &deposit, None, status(owed), 200);
+            assert!(recorded.unwrap());
+        }
+        assert!(scanning_keys(&st).is_empty(), "{owed:?}");
     }
 }
 
@@ -213,7 +200,7 @@ fn a_final_status_closes_a_key_and_an_inconclusive_one_waits_for_the_limit() {
         (Terminal(Unknown), Some(HOUR + DAY), LIMIT),
     ] {
         let mut st = scanned_wallet();
-        let key = refund_key(&mut st).key_id();
+        let key = swap_key(&mut st).key_id();
         observe_swap(&mut st, key, status, registered_at() + HOUR);
         if let Some(open_at) = open_at {
             assert_eq!(close(&mut st, registered_at() + open_at), 0);
@@ -236,7 +223,7 @@ fn a_final_status_closes_a_key_and_an_inconclusive_one_waits_for_the_limit() {
 fn expected_receipts_keep_a_key_open_until_received_and_confirmed() {
     for (expected, payments) in [(Some(150_000), &[100_000, 50_000][..]), (None, &[10_000])] {
         let mut st = scanned_wallet();
-        let key = refund_key(&mut st);
+        let key = swap_key(&mut st);
         let terminal = registered_at() + HOUR;
         let status = Terminal(Positive(expected.map(Zatoshis::const_from_u64)));
         observe_swap(&mut st, key.key_id(), status, terminal);
@@ -260,7 +247,7 @@ fn expected_receipts_keep_a_key_open_until_received_and_confirmed() {
 fn a_rewind_that_unmines_a_receipt_keeps_or_reopens_its_key() {
     for closed_first in [false, true] {
         let mut st = scanned_wallet();
-        let key = refund_key(&mut st);
+        let key = swap_key(&mut st);
         let terminal = registered_at() + HOUR;
         observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
         let height = pay(&mut st, key.full_viewing_key(), 10_000);
@@ -284,7 +271,7 @@ fn a_rewind_that_unmines_a_receipt_keeps_or_reopens_its_key() {
 #[test]
 fn a_rewind_reopens_a_closed_key_whose_receipt_it_leaves_unconfirmed() {
     let mut st = scanned_wallet();
-    let key = refund_key(&mut st);
+    let key = swap_key(&mut st);
     let terminal = registered_at() + HOUR;
     observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
     let height = pay(&mut st, key.full_viewing_key(), 10_000);
@@ -305,7 +292,7 @@ fn a_rewind_reopens_a_closed_key_whose_receipt_it_leaves_unconfirmed() {
 fn a_key_reopened_below_its_start_scans_from_the_rewind() {
     let mut st = scanned_wallet();
     st.generate_and_scan_empty_blocks_with_one_time_ivks(2);
-    let key = refund_key(&mut st);
+    let key = swap_key(&mut st);
     let terminal = registered_at() + HOUR;
     observe_swap(&mut st, key.key_id(), Terminal(Positive(None)), terminal);
     let height = pay(&mut st, key.full_viewing_key(), 10_000);
@@ -325,7 +312,7 @@ fn a_key_reopened_below_its_start_scans_from_the_rewind() {
 fn a_key_closes_once_its_last_operation_is_final() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
-    let key = refund_key(&mut st).key_id();
+    let key = swap_key(&mut st).key_id();
     let first = registered_at() + HOUR;
     let db = st.wallet_mut().db_mut();
     observe(db, account, key, "finished", Terminal(NoReceipt), first).unwrap();
@@ -350,7 +337,7 @@ fn the_limit_counts_from_the_latest_deadline_or_registration() {
     for (operations, limit) in [(&operations[..], later + LIMIT), (&[], registered + LIMIT)] {
         let mut st = scanned_wallet();
         let account = st.test_account().unwrap().id();
-        let key = refund_key(&mut st).key_id();
+        let key = swap_key(&mut st).key_id();
         for &(operation, s, deadline) in operations {
             let db = st.wallet_mut().db_mut();
             let operation = (operation, deadline);
@@ -367,7 +354,7 @@ fn the_limit_counts_from_the_latest_deadline_or_registration() {
 fn closing_needs_the_scanned_tip_and_the_earlier_of_clock_and_block_time() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
-    let key = refund_key(&mut st).key_id();
+    let key = swap_key(&mut st).key_id();
     let terminal = registered_at() + HOUR;
     let tip = st.wallet().chain_height().unwrap().unwrap();
     observe_swap(&mut st, key, Terminal(NoReceipt), terminal);
@@ -375,7 +362,7 @@ fn closing_needs_the_scanned_tip_and_the_earlier_of_clock_and_block_time() {
     let db = st.wallet_mut().db_mut();
     assert_eq!(close_at(db, account, terminal + DAY, tip + 1), 0);
     // Another key's activation queues a rescan of the tip.
-    reserve_key(db, account, Purpose::Refund, tip);
+    reserve_key(db, account, Purpose::Receive, tip);
     let ranges = st.wallet().suggest_scan_ranges().unwrap();
     assert!(ranges.iter().any(|r| r.block_range().contains(&tip)));
     assert_eq!(close(&mut st, terminal + DAY), 0);
@@ -471,6 +458,7 @@ fn underpaid_reservation(st: &mut State) -> (OneTimeKey, i64) {
     .unwrap()
     .unwrap();
     db.finish_receive_operation(account, "swap", &accepted("swap", None, deadline))
+        .unwrap()
         .unwrap();
     db.start_receive_operation(account, "swap", now)
         .unwrap()
@@ -562,15 +550,17 @@ fn closed_settled(st: &mut State, incoming: bool) -> i64 {
     at
 }
 
-/// Closes a key at its completion limit while its operation `swap` is still active,
-/// returning when: a refund key, or a started incoming reservation.
+/// Closes a key at its limit while its operation `swap` is still active, returning when: a
+/// refund key [`REFUND_WATCH_SECS`] after its deadline, or a started incoming reservation
+/// at its completion limit.
 fn closed_at_the_limit(st: &mut State, incoming: bool) -> i64 {
     let limit = if incoming {
         underpaid_reservation(st).1 + LIMIT
     } else {
+        // Its operation's deadline is its registration (see `observe`).
         let key = refund_key(st).key_id();
         observe_swap(st, key, Active, registered_at() + HOUR);
-        registered_at() + LIMIT
+        registered_at() + REFUND_WATCH_SECS
     };
     assert_eq!(close(st, limit), 1);
     limit
@@ -654,6 +644,7 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
         .unwrap()
         .unwrap();
         db.finish_receive_operation(account, request, &accepted(request, None, deadline))
+            .unwrap()
             .unwrap();
     }
     db.start_receive_operation(account, "accepted", now)
@@ -674,4 +665,74 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
             .unwrap();
     }
     assert_eq!(close(&mut st, released + DAY), 1);
+}
+
+/// A refund key stops scanning [`REFUND_WATCH_SECS`] after its deadline by the device
+/// clock, though a refund it received is still unconfirmed and the wallet has blocks to
+/// catch up on. The next scan closes it before choosing its keys, so the backlog is never
+/// scanned with it. A later refund in the backlog is left to the receiver directory.
+#[test]
+fn a_refund_watch_ends_before_the_backlog_is_scanned() {
+    use zcash_client_backend::data_api::one_time_ivk::OneTimeIvkWrite as _;
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key = refund_key(&mut st);
+    let deadline = registered_at() + HOUR;
+    let db = st.wallet_mut().db_mut();
+    let operation = ("swap", deadline);
+    observe_with(
+        db,
+        account,
+        key.key_id(),
+        operation,
+        status(owed(None)),
+        deadline,
+    )
+    .unwrap();
+    let received = pay(&mut st, key.full_viewing_key(), 10_000);
+    // The wallet goes offline while a later refund lands in blocks it has not scanned.
+    let recipient = IronwoodFvk(key.full_viewing_key().clone());
+    let value = Zatoshis::const_from_u64(20_000);
+    let (late, _, _) = st.generate_next_block(&recipient, AddressType::DefaultExternal, value);
+    for _ in 0..5 {
+        st.generate_empty_block();
+    }
+    let db = st.wallet_mut().db_mut();
+    let ends = deadline + REFUND_WATCH_SECS;
+    db.clock.tick(std::time::Duration::from_secs(
+        (ends - 1 - clock_now()) as u64,
+    ));
+    db.expire_refund_watches().unwrap();
+    assert_eq!(scanning_keys(&st), [key.key_id()]);
+    let db = st.wallet_mut().db_mut();
+    db.clock.tick(std::time::Duration::from_secs(1));
+    st.scan_cached_blocks_with_one_time_ivks(late, 6);
+    assert!(scanning_keys(&st).is_empty());
+    assert_eq!(unspent_keys(&st, late + 5), [Some(key.key_id())]);
+    let sql = "SELECT t.mined_height FROM ironwood_received_notes n
+               JOIN transactions t ON t.id_tx = n.transaction_id
+               WHERE n.one_time_key_id IS NOT NULL";
+    let mined: Vec<u32> = column(st.wallet().conn(), sql, []);
+    assert_eq!(mined, [u32::from(received)]);
+}
+
+/// A refund key whose operations settled closes at once, even before the wallet confirms
+/// a tip, while a pending receipt beyond what the provider promised does not hold it.
+#[test]
+fn a_settled_refund_closes_without_waiting_for_its_deadline() {
+    let mut st = scanned_wallet();
+    let key = refund_key(&mut st);
+    let at = registered_at() + HOUR;
+    observe_swap(&mut st, key.key_id(), owed(Some(10_000)), at);
+    pay(&mut st, key.full_viewing_key(), 10_000);
+    pay(&mut st, key.full_viewing_key(), 5_000);
+    // The first receipt has the untrusted confirmations, and the second one block fewer.
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(8);
+    assert_eq!(scanning_keys(&st), [key.key_id()]);
+    let account = st.test_account().unwrap().id();
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    // The network reports a block the wallet has not stored yet.
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(close_at(db, account, at, tip + 1), 1);
+    assert!(scanning_keys(&st).is_empty());
 }

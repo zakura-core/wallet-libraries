@@ -12,8 +12,14 @@ use zcash_protocol::value::Zatoshis;
 pub const RESTORE_WATCH_SECS: i64 = 24 * 60 * 60;
 
 /// Seconds after the quote deadline, or after registration for a key without
-/// operations, after which a key stops scanning whatever the provider reports.
+/// operations, after which an incoming key stops scanning whatever the provider reports.
 pub const COMPLETION_LIMIT_SECS: i64 = 30 * 24 * 60 * 60;
+
+/// Seconds after a refund operation's deposit deadline after which the wallet stops
+/// trial-decrypting with its refund key whatever the provider reports, by the device
+/// clock and before scanning any backlog. A later refund is found through the receiver
+/// directory instead. Like [`COMPLETION_LIMIT_SECS`], a wallet convention.
+pub const REFUND_WATCH_SECS: i64 = 24 * 60 * 60;
 
 /// The route adapter's interpretation of the expected Zcash receipt.
 /// Incoming source-chain refunds must not be interpreted as Zcash refunds.

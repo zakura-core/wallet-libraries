@@ -7,7 +7,7 @@
 //! | Fact | Column |
 //! |---|---|
 //! | Authenticated: this wallet reserved it, a funding memo with own-send evidence names it, or a payment to it was authenticated | `authenticated` |
-//! | Issuance-blocking: it was seen, quoted and accepted, named by a funding memo, or paid | `issuance_blocked` |
+//! | Issuance-blocking: a quote for it was shown for funding, a funding memo names it, it was paid, or the provider saw it without this wallet exposing it | `issuance_blocked` |
 //! | Bound-advancing: it moves the window and allocation | `advances_allocation` |
 //! | Locally watched: trial decryption is open | `active_from`, `closed_at` |
 //! | Paid | `used`, `paid_before_birthday` |

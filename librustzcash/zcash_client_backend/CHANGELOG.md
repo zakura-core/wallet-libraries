@@ -29,6 +29,11 @@ and this library adheres to Rust's notion of
   transaction a block scan recognized reveals, matched to a wallet note or not.
   `ScannedBlock::scanned_accounts` names the accounts whose ordinary internal keys scanned
   the block. A store uses them to journal spends.
+- `OneTimeIvkWrite::expire_refund_watches` (with `orchard`) stops trial decryption with each
+  refund key whose watch ended by the store's clock, a day past its deposit deadline or
+  once its swap settled, without catching up first. `chain::scan_cached_blocks_with_one_time_ivks`
+  calls it before choosing keys, so a wallet back from a long absence never scans its
+  backlog with an expired refund key.
 - `fees::orchard::InputView::is_one_time` (with `orchard`) marks a one-time-key input. It
   defaults to false. `data_api::error::Error::OneTimeSpendWithoutMarker` reports a one-time
   spend that lacks its marker output.

@@ -8,6 +8,9 @@
   minutes) and `PROVIDER_READ_CLOCK_SKEW_SECS` (1 minute): when a provider's
   set of given receivers, by the start of its last complete read, can rule a
   receiver out. Discovery's recent sets and issuance's seen sets share it.
+- Add `swap::REFUND_WATCH_SECS` (one day): how long after a refund operation's deposit
+  deadline a wallet keeps trial-decrypting with its refund key. `COMPLETION_LIMIT_SECS`
+  now applies to incoming keys only.
 
 ## [0.0.1-rc0] - 2026-10-14
 

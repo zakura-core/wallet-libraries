@@ -6,9 +6,10 @@
 //! continuous recovery from that directory, and `journal` keeps the Ironwood nullifiers of
 //! the wallet's own transactions. A registered key stays registered, closed or not.
 //!
-//! Issued keys scan from issuance, refund keys from their stored funding transaction,
-//! until they close. Keys a restore discovers have their history looked up, then are
-//! scanned for a restore watch only while a swap may still pay them (see
+//! Issued incoming keys scan from issuance, refund keys from their stored funding
+//! transaction, until they close. A refund key closes a day past its deadline at the
+//! latest. Keys a restore discovers have their history looked up, then are scanned for a
+//! restore watch only while a swap may still pay them (see
 //! [`WalletDb::close_finished_one_time_keys`]). A closed key keeps its notes.
 //! One-time-key notes carry no memo the wallet reads; only internal change carries the
 //! refund marker. So neither a directory nor private Enhance retrieval stores or fetches
@@ -22,6 +23,7 @@
 //! - [`WalletDb::close_finished_one_time_keys`] once sync reaches a tip it confirmed with
 //!   the network.
 //! - For an outgoing swap, [`WalletDb::reserve_refund_key`], then
+//!   [`WalletDb::begin_refund_operation`] just before the quote request leaves the device,
 //!   [`WalletDb::record_refund_operation`] when the quote arrives,
 //!   [`WalletDb::refund_funding_memo`] for the funding transaction and
 //!   [`swap::verify_refund_funding_proposal`] before signing.

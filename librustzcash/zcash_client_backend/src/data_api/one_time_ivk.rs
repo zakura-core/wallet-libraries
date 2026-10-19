@@ -69,4 +69,18 @@ pub trait OneTimeIvkWrite: WalletWrite + OneTimeIvkRead {
         blocks: Vec<ScannedBlock<<Self as WalletRead>::AccountId>>,
         keys: &[(<Self as WalletRead>::AccountId, KeyId)],
     ) -> Result<(), <Self as WalletRead>::Error>;
+
+    /// Stops trial decryption with each refund key whose watch is over by the store's
+    /// clock: every operation on it has a conclusive final status and confirmed receipts
+    /// cover what the provider promised, or
+    /// [`REFUND_WATCH_SECS`](zakura_one_time_ivk::swap::REFUND_WATCH_SECS) have passed since
+    /// its latest deposit deadline. Unconfirmed receipts do not hold a key open.
+    ///
+    /// Neither catch-up nor a scanned tip is needed, and
+    /// [`scan_cached_blocks_with_one_time_ivks`](super::chain::scan_cached_blocks_with_one_time_ivks)
+    /// calls this before it selects keys, so a wallet back after a long absence never
+    /// scans the backlog with an expired key. Storing the funding transaction again does
+    /// not reopen it. The key stays registered, so the store's directory recovery finds
+    /// any later or unconfirmed payment instead.
+    fn expire_refund_watches(&mut self) -> Result<(), <Self as WalletRead>::Error>;
 }

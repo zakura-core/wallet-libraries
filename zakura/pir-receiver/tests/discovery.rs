@@ -318,7 +318,6 @@ async fn issuance_skips_a_refund_address_in_the_fetched_seen_sets() {
     let seen = fetch_seen(ORIGIN, &directory, GENESIS).await.unwrap();
     let contains = |receivers: &[[u8; 43]]| seen.contains(receivers);
     let seen = ProviderSeen {
-        since: seen.since(),
         until: seen.until(),
         contains: &contains,
     };
@@ -391,7 +390,6 @@ async fn a_key_registered_after_the_pass_waits_for_a_newer_publication() {
     let seen = fetch_seen(ORIGIN, &seen, GENESIS).await.unwrap();
     let contains = |receivers: &[[u8; 43]]| seen.contains(receivers);
     let seen = ProviderSeen {
-        since: seen.since(),
         until: seen.until(),
         contains: &contains,
     };

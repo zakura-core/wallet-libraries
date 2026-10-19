@@ -660,7 +660,8 @@ where
 /// [`scan_cached_blocks`], also trial-decrypting with the wallet's one-time keys.
 ///
 /// The keys come from [`OneTimeIvkRead::get_one_time_scanning_keys_for_range`] for the
-/// `limit` blocks from `from_height`, and the blocks are
+/// `limit` blocks from `from_height`, once [`OneTimeIvkWrite::expire_refund_watches`] has
+/// closed the expired refund keys, and the blocks are
 /// stored with [`OneTimeIvkWrite::put_blocks_with_one_time_ivks`]. A wallet with open
 /// one-time keys must be scanned with this function rather than [`scan_cached_blocks`].
 ///
@@ -688,6 +689,7 @@ where
         .get_unified_full_viewing_keys()
         .map_err(Error::Wallet)?;
     let end = u32::from(from_height).saturating_add(u32::try_from(limit).unwrap_or(u32::MAX));
+    data_db.expire_refund_watches().map_err(Error::Wallet)?;
     let one_time_keys = data_db
         .get_one_time_scanning_keys_for_range(from_height..BlockHeight::from(end))
         .map_err(Error::Wallet)?;

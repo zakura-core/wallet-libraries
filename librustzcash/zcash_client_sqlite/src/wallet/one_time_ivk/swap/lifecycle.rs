@@ -1,7 +1,8 @@
 //! Provider observations and the rule that ends a key's trial decryption.
 use rusqlite::{Connection, named_params, params};
 use zakura_one_time_ivk::swap::{
-    COMPLETION_LIMIT_SECS, Observation, OperationStatus, RESTORE_WATCH_SECS, ReceiptExpectation,
+    COMPLETION_LIMIT_SECS, Observation, OperationStatus, REFUND_WATCH_SECS, RESTORE_WATCH_SECS,
+    ReceiptExpectation,
 };
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
@@ -15,6 +16,53 @@ use crate::{
     AccountUuid, error::SqliteClientError, wallet, wallet::common::tx_unexpired_condition,
 };
 
+/// SQL condition on `ironwood_one_time_keys k`: a refund key whose watch
+/// [`expire_refund_watches`] ends, rather than [`close_finished`]'s restore watch.
+fn refund_watch() -> String {
+    format!("(k.purpose = 0 AND NOT ({RESTORED}))")
+}
+
+/// Implements `OneTimeIvkWrite::expire_refund_watches` at `now`, the device clock in Unix
+/// seconds, for `account`'s keys or, without one, every account's, and returns how many
+/// closed.
+pub(crate) fn expire_refund_watches(
+    conn: &Connection,
+    account: Option<i64>,
+    now: i64,
+) -> Result<usize, SqliteClientError> {
+    let confirmed_below = wallet::chain_tip_height(conn)?.map(|tip| {
+        u32::from(tip)
+            .saturating_add(1)
+            .saturating_sub(ConfirmationsPolicy::default().untrusted().get())
+    });
+    Ok(conn.execute(
+        &format!(
+            "UPDATE ironwood_one_time_keys AS k SET closed_at = :now
+             WHERE {} AND k.active_from IS NOT NULL AND k.closed_at IS NULL
+               AND (:account IS NULL OR k.account_id = :account)
+               AND (:now >= COALESCE((SELECT MAX(o.deadline) FROM ironwood_one_time_operations o
+                       WHERE o.one_time_key_id = k.id), k.registered_at) + :watch
+                 OR (EXISTS(SELECT 1 FROM ironwood_one_time_operations o
+                         WHERE o.one_time_key_id = k.id)
+                   AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o
+                         WHERE o.one_time_key_id = k.id AND o.expectation IN (0, 3, 4))
+                   AND (SELECT COALESCE(SUM(n.value), 0) FROM ironwood_received_notes n
+                         JOIN transactions t ON t.id_tx = n.transaction_id
+                         WHERE n.one_time_key_id = k.id AND t.mined_height <= :confirmed_below)
+                     >= (SELECT COALESCE(SUM(COALESCE(o.expected_value, 1)), 0)
+                         FROM ironwood_one_time_operations o
+                         WHERE o.one_time_key_id = k.id AND o.expectation = 2)))",
+            refund_watch(),
+        ),
+        named_params![
+            ":now": now,
+            ":account": account,
+            ":watch": REFUND_WATCH_SECS,
+            ":confirmed_below": confirmed_below,
+        ],
+    )?)
+}
+
 /// See `WalletDb::close_finished_one_time_keys`.
 pub(in crate::wallet::one_time_ivk) fn close_finished<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
@@ -24,10 +72,11 @@ pub(in crate::wallet::one_time_ivk) fn close_finished<P: Parameters>(
     tip: BlockHeight,
 ) -> Result<usize, SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
+    let expired = expire_refund_watches(conn, Some(owner.0), now)?;
     if wallet::chain_tip_height(conn)? != Some(tip)
         || wallet::fully_scanned_height(conn)? != Some(tip)
     {
-        return Ok(0);
+        return Ok(expired);
     }
     reap(conn, params, account, now)?;
     let tip_time: i64 = conn.query_row(
@@ -64,8 +113,10 @@ pub(in crate::wallet::one_time_ivk) fn close_finished<P: Parameters>(
                 WHERE l.one_time_key_id = k.id),
             {STARTED}
          FROM ironwood_one_time_keys k
-         WHERE k.account_id = :account AND k.active_from IS NOT NULL AND k.closed_at IS NULL",
+         WHERE k.account_id = :account AND k.active_from IS NOT NULL AND k.closed_at IS NULL
+           AND NOT {refund_watch}",
         unexpired = tx_unexpired_condition("t"),
+        refund_watch = refund_watch(),
     ))?;
     let bounds = named_params![
         ":account": owner.0,
@@ -106,7 +157,7 @@ pub(in crate::wallet::one_time_ivk) fn close_finished<P: Parameters>(
             Ok((id, !pending_receipt && finished))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut closed = 0;
+    let mut closed = expired;
     for (id, finished) in finished {
         if finished {
             conn.execute(

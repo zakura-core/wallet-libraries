@@ -192,7 +192,7 @@ fn one_time_ivk_full_transaction_before_or_after_compact_scan() {
 /// retrieval as irrelevant. This guards the store's `get_one_time_transaction_keys`.
 #[test]
 fn closed_key_decrypts_its_externally_funded_transaction_after_reopen() {
-    use zakura_one_time_ivk::swap::COMPLETION_LIMIT_SECS;
+    use zakura_one_time_ivk::swap::REFUND_WATCH_SECS;
     let mut st = scanned_wallet();
     let network = *st.network();
     let account = st.test_account().unwrap().id();
@@ -204,7 +204,7 @@ fn closed_key_decrypts_its_externally_funded_transaction_after_reopen() {
         1
     );
     let tip = st.wallet().chain_height().unwrap().unwrap();
-    let now = clock_now() + COMPLETION_LIMIT_SECS;
+    let now = clock_now() + REFUND_WATCH_SECS;
     assert_eq!(close_at(st.wallet_mut().db_mut(), account, now, tip), 1);
     assert!(!scanning_keys(&st).contains(&key.key_id()));
     reopen(&mut st);
@@ -418,8 +418,7 @@ fn refund_funding_refuses_its_memo_on_orchard_change() {
     let db = st.wallet_mut().db_mut();
     let key = reserve_refund(db, account, tip).unwrap().unwrap();
     let index = key.key_id().index();
-    db.record_refund_operation(account, index, &deposit, now + 3_600, now)
-        .unwrap();
+    quote_refund(db, account, index, (&deposit, now + 3_600), now);
     let memo = db.refund_funding_memo(account, index, &deposit).unwrap();
     let strategy = SingleOutputChangeStrategy::<TestDb>::new(
         StandardFeeRule::Zip317,
@@ -455,17 +454,15 @@ fn a_refund_key_starts_scanning_when_its_matching_funding_transaction_is_stored(
     let now = clock_now();
     let [other, funded, stale] = [8, 7, 9].map(|byte| p2pkh(byte).encode(&network));
     let db = st.wallet_mut().db_mut();
-    let [unfunded, key] =
-        [0, 1].map(|_| reserve_refund(db, account, tip).unwrap().unwrap().key_id());
+    let unfunded = reserve_refund(db, account, tip).unwrap().unwrap().key_id();
+    quote_refund(db, account, unfunded.index(), (&other, now + 3_600), now);
+    let key = reserve_refund(db, account, tip).unwrap().unwrap().key_id();
     assert!(
         db.refund_funding_memo(account, key.index(), &funded)
             .is_err()
     );
-    db.record_refund_operation(account, unfunded.index(), &other, now + 3_600, now)
-        .unwrap();
-    db.record_refund_operation(account, key.index(), &funded, now + 3_600, now)
-        .unwrap();
-    let rebound = db.record_refund_operation(account, key.index(), &stale, now + 3_600, now);
+    let request = quote_refund(db, account, key.index(), (&funded, now + 3_600), now);
+    let rebound = db.record_refund_operation(account, &request, &stale, now + 3_600, now);
     assert!(rebound.is_err());
     let memos = [(unfunded, &other), (key, &funded)].map(|(key, deposit)| {
         db.refund_funding_memo(account, key.index(), deposit)
@@ -555,6 +552,41 @@ fn a_refund_key_starts_scanning_when_its_matching_funding_transaction_is_stored(
     set_memo(&st, Some(&stored));
     let next = reserve_refund(st.wallet_mut().db_mut(), account, mined);
     assert_eq!(next.unwrap().unwrap().key_id().index(), key.index() + 1);
+}
+
+/// Storing a refund key's funding transaction again, as a replay does, never reopens the
+/// watch that ended [`REFUND_WATCH_SECS`] after its deadline.
+///
+/// [`REFUND_WATCH_SECS`]: zakura_one_time_ivk::swap::REFUND_WATCH_SECS
+#[test]
+fn a_funding_replay_never_reopens_an_ended_refund_watch() {
+    use zakura_one_time_ivk::swap::REFUND_WATCH_SECS;
+    use zcash_client_backend::data_api::one_time_ivk::OneTimeIvkWrite as _;
+    let (mut st, _) = ironwood_funded_wallet();
+    let account = st.test_account().unwrap().id();
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    let now = clock_now();
+    let deposit = p2pkh(7).encode(st.network());
+    let db = st.wallet_mut().db_mut();
+    let key = reserve_refund(db, account, tip).unwrap().unwrap().key_id();
+    quote_refund(db, account, key.index(), (&deposit, now + 3_600), now);
+    let memo = db
+        .refund_funding_memo(account, key.index(), &deposit)
+        .unwrap();
+    let (_, txid) = try_send(&mut st, vec![payment(&p2pkh(7), 100_000, None)], &memo);
+    let txid = txid.unwrap();
+    assert_eq!(scanning_keys(&st), [key]);
+    let db = st.wallet_mut().db_mut();
+    let watch = u64::try_from(3_600 + REFUND_WATCH_SECS).unwrap();
+    db.clock.tick(std::time::Duration::from_secs(watch));
+    db.expire_refund_watches().unwrap();
+    assert!(scanning_keys(&st).is_empty());
+    let funding = st.wallet().get_transaction(txid).unwrap().unwrap();
+    tx(st.wallet_mut().db_mut(), |c, p| {
+        store::swap::start_funded_refund_keys(c, p, &funding)
+    })
+    .unwrap();
+    assert!(scanning_keys(&st).is_empty());
 }
 
 /// A restored account recovers a funding memo's refund key as soon as the scan stores the
@@ -710,9 +742,9 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
     }
 }
 
-/// A quote binds to a refund key reserved here that is still open, and the key to that
-/// quote's deposit alone; the key need not scan yet, since only its funding transaction
-/// starts it.
+/// A quote binds to a refund request begun on a key reserved here that is still open, and
+/// the key to that quote's deposit alone. The key need not scan yet, since only its
+/// funding transaction starts it.
 #[test]
 fn refund_quote_needs_an_open_reserved_refund_key_and_a_canonical_transparent_deposit() {
     let (mut st, _) = ironwood_funded_wallet();
@@ -726,28 +758,31 @@ fn refund_quote_needs_an_open_reserved_refund_key_and_a_canonical_transparent_de
     let tex = zcash_keys::address::Address::Tex([7; 20]).encode(&network);
     let padded = format!(" {deposit}");
     let db = st.wallet_mut().db_mut();
-    let mut record = |index, deposit: &str, deadline| {
-        db.record_refund_operation(account, index, deposit, deadline, now)
-    };
-    assert!(record(0, &deposit, now + 60).is_err());
-    for _ in 0..2 {
-        reserve_refund(db, account, tip).unwrap().unwrap();
-    }
-    let mut record = |index, deposit: &str, deadline| {
-        db.record_refund_operation(account, index, deposit, deadline, now)
+    let seen = empty_seen(now);
+    let begin = |db: &mut Db| db.begin_refund_operation(account, 0, now + 60, now, Some(&seen));
+    assert!(begin(db).is_err());
+    reserve_refund(db, account, tip).unwrap().unwrap();
+    let request = begin(db).unwrap().unwrap();
+    let record = |db: &mut Db, request: &str, deposit: &str, deadline| {
+        db.record_refund_operation(account, request, deposit, deadline, now)
     };
     for bad in [&own, &tex, &mainnet, &padded] {
-        assert!(record(0, bad, now + 60).is_err());
+        assert!(record(db, &request, bad, now + 60).is_err());
     }
-    assert!(record(0, &deposit, now).is_err());
+    assert!(record(db, &request, &deposit, now).is_err());
     for _ in 0..2 {
-        record(0, &deposit, now + 60).unwrap();
+        record(db, &request, &deposit, now + 60).unwrap().unwrap();
     }
-    assert!(record(1, &deposit, now + 60).is_err());
+    let next = reserve_refund(db, account, tip).unwrap().unwrap();
+    assert_eq!(next.key_id().index(), 1);
+    let seen = empty_seen(now);
+    let second = db.begin_refund_operation(account, 1, now + 60, now, Some(&seen));
+    let second = second.unwrap().unwrap();
+    assert!(record(db, &second, &deposit, now + 60).is_err());
     // The key is bound to its deposit, so another swap cannot share its refunds.
     let other = p2pkh(8).encode(&network);
     assert!(matches!(
-        record(0, &other, now + 60),
+        record(db, &request, &other, now + 60),
         Err(SqliteClientError::InvalidOneTimeIvkInput(_))
     ));
     assert!(db.refund_funding_memo(account, 0, &other).is_err());

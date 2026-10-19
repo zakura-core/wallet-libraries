@@ -338,10 +338,10 @@ fn activation_rescans_scanned_blocks_from_its_start_and_survives_reopen() {
     for closed in [false, true] {
         let mut st = ironwood_wallet();
         let account = st.test_account().unwrap().id();
-        let key = KeyId::new(Purpose::Refund, 0);
+        let key = KeyId::new(Purpose::Receive, 0);
         let (first, _) = st.generate_empty_block();
         if closed {
-            reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, first);
+            reserve_key(st.wallet_mut().db_mut(), account, Purpose::Receive, first);
         }
         st.scan_cached_blocks_with_one_time_ivks(first, 1);
         if closed {
@@ -357,7 +357,7 @@ fn activation_rescans_scanned_blocks_from_its_start_and_survives_reopen() {
         if closed {
             activate_key(db, account, key, paid);
         } else {
-            reserve_key(db, account, Purpose::Refund, paid);
+            reserve_key(db, account, Purpose::Receive, paid);
         }
         assert_eq!(queued(&st), vec![paid..paid + 2], "{closed}");
         let scanned = st.wallet().block_fully_scanned().unwrap();

@@ -1,12 +1,12 @@
 //! Issuance: which one-time addresses a wallet hands NEAR. Privacy rests on two rules:
-//! an address NEAR was given is never issued for another swap, and neither is one that
-//! was paid.
+//! an address whose quote was shown for funding, or that was paid or given to NEAR by
+//! another device, is never issued for another swap, and an address whose request failed
+//! is reused only once nothing fresh is left under the bound.
 
 use zakura_one_time_ivk::{Purpose, swap::PROVIDER_READ_MAX_AGE_SECS};
 use zakura_one_time_ivk_scenarios::Class;
 use zcash_client_sqlite::wallet::one_time_ivk::swap::{
-    OperationOutcome, RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS, ReceiveDeposit,
-    ReservationPolicy, SEEN_SLACK_SECONDS,
+    OperationOutcome, RECEIVE_GAP_LIMIT, ReceiveDeposit, ReservationPolicy,
 };
 
 use super::{ISSUANCE, Scenario, span};
@@ -22,7 +22,7 @@ const SEED: [u8; 32] = [0x33; 32];
 pub fn all() -> Vec<Scenario> {
     let mut scenarios = vec![
         incoming_indices_advance(),
-        rejected_quotes_hold_addresses_back(),
+        rejected_quotes_are_reused_within_the_bound(),
         refund_indices_across_restore(),
         unknown_outcomes_hit_the_limit(),
     ];
@@ -126,62 +126,43 @@ fn incoming_indices_advance() -> Scenario {
     }
 }
 
-/// Wallet A's quote requests are rejected until they fill the window, each swap attempt
-/// expiring before the next. Their deadlines and the reclaim grace pass, the app
-/// restarts, and NEAR's seen set covers the requests without holding any of them.
-/// Issuance must wait rather than reissue a rejected address.
-fn rejected_quotes_hold_addresses_back() -> Scenario {
+/// Wallet A's quote requests are rejected until they fill the bound, each swap attempt
+/// expiring before the next. NEAR's feed lists none of them, so nothing moved the bound,
+/// and the next quote reuses the lowest rejected address rather than passing it.
+fn rejected_quotes_are_reused_within_the_bound() -> Scenario {
     Scenario {
-        id: "A3-rejected-quote-holds-address-back".into(),
+        id: "A3-rejected-quotes-are-reused-within-the-bound".into(),
         group: ISSUANCE,
-        title: "Rejected quotes fill the window, and their addresses are never issued again".into(),
-        summary: "A rejected quote request still gave NEAR the address, so the address is never \
-            issued again. Once rejections fill the 30-index window, issuance waits, even after \
-            the deadlines and the reclaim grace pass, the app restarts, and NEAR's seen set \
-            covers the requests without holding them."
+        title:
+            "Rejected quotes fill the bound, and their addresses are reused rather than passing it"
+                .into(),
+        summary: "A rejected quote request leaves no record another device could follow, so it \
+            does not move the issuance bound. Once rejections fill the 30 addresses the bound \
+            allows, the next quote reuses the lowest of them, whose request is over, instead of \
+            issuing an address a restored device would never check."
             .into(),
         params: vec![("rejected quotes".into(), RECEIVE_GAP_LIMIT.to_string())],
         slow: false,
         run: Box::new(|ctx| {
             let a = wallet(ctx, "A");
             let mut rejected = Vec::new();
-            let refused = loop {
-                match request_quote(ctx, a, SHORT_QUOTE) {
-                    Ok((index, request)) => {
-                        ctx.finish_incoming(a, &request, &OperationOutcome::Rejected);
-                        rejected.push(index);
-                    }
-                    Err(policy) => break policy,
-                }
-                assert!(
-                    rejected.len() <= 2 * RECEIVE_GAP_LIMIT as usize,
-                    "issuance never waits"
-                );
+            for _ in 0..RECEIVE_GAP_LIMIT {
+                let (index, request) =
+                    request_quote(ctx, a, SHORT_QUOTE).expect("the request is saved");
+                ctx.finish_incoming(a, &request, &OperationOutcome::Rejected);
+                rejected.push(index);
                 ctx.mine(1);
                 ctx.sync(a);
-            };
-            let last_request = ctx.chain.now();
+            }
             ctx.log(
                 "A",
-                format!(
-                    "NEAR rejects {} quote requests, and its feed lists none of them; then issuance refuses: {refused:?}",
-                    rejected.len()
-                ),
+                format!("NEAR rejects {} quote requests", rejected.len()),
             );
             ctx.check(
                 "each rejection moves the next quote to a fresh address",
                 rejected == (0..RECEIVE_GAP_LIMIT).collect::<Vec<_>>(),
                 format!("rejected {rejected:?}"),
             );
-            ctx.check(
-                "issuance waits once rejections fill the window",
-                refused == ReservationPolicy::Limit,
-                format!("{refused:?}"),
-            );
-            ctx.wait(HOUR + RECEIVE_RECLAIM_SECONDS + HOUR);
-            ctx.restart(a);
-            ctx.mine(1);
-            ctx.sync(a);
             let now = ctx.chain.now();
             let held: Vec<u64> = rejected
                 .iter()
@@ -191,25 +172,18 @@ fn rejected_quotes_hold_addresses_back() -> Scenario {
                     ctx.near.seen(&receiver, now)
                 })
                 .collect();
-            let covered = ctx.near.read_until(now) - SEEN_SLACK_SECONDS > last_request;
             ctx.check(
-                "NEAR's seen set covers the rejected requests and holds none of them",
-                covered && held.is_empty(),
-                format!(
-                    "read until {} s after the last request, slack {SEEN_SLACK_SECONDS} s; holds {held:?}",
-                    ctx.near.read_until(now) - last_request
-                ),
+                "NEAR's seen set holds none of the rejected addresses",
+                held.is_empty(),
+                format!("holds {held:?}"),
             );
-            let after = ctx.prepare_incoming(a);
-            ctx.log(
-                "A",
-                format!("after the deadlines, the reclaim grace and a restart: {after:?}"),
-            );
+            let next = request_quote(ctx, a, SHORT_QUOTE).map(|(index, _)| index);
+            ctx.log("A", format!("the next quote: {next:?}"));
             ctx.check(
-                "issuance waits rather than reissue a rejected address",
-                after == Err(ReservationPolicy::Limit),
+                "the next quote reuses the lowest rejected address rather than passing the bound",
+                next == Ok(0),
                 format!(
-                    "{after:?}; ProviderSeen: an incoming address counts as seen if the provider rejected a quote for it, since the request still gave it the address"
+                    "{next:?}; swap issuance rules: with none fresh, issuance reuses an abandoned index"
                 ),
             );
         }),
@@ -266,9 +240,9 @@ fn unknown_outcomes_hit_the_limit() -> Scenario {
         title: "30 quote requests with unknown outcomes, then an outage ends".into(),
         summary:
             "A request whose outcome is unknown, such as a timeout, holds its address without \
-            moving the recovery gap. After 30 swap attempts with one each, each expiring before \
-            the next, issuance waits (Limit). Once their deadlines and the two-hour cooldown \
-            pass, the lowest is reissued, though NEAR may have seen it."
+            moving the issuance bound. After 30 swap attempts with one each, each expiring \
+            before the next, issuance waits (Limit). Once their deadlines and the two-hour \
+            cooldown pass, the lowest is reissued, though NEAR may have accepted it."
                 .into(),
         params: vec![("unknown outcomes".into(), "30".into())],
         slow: false,
@@ -292,67 +266,57 @@ fn unknown_outcomes_hit_the_limit() -> Scenario {
             ctx.sync(a);
             let after = ctx.prepare_incoming(a);
             ctx.log("A", format!("after the deadlines and cooldown: {after:?}"));
-            ctx.documented_gap(
+            ctx.check(
                 "an address from a request with an unknown outcome is reissued once nothing fresh is left",
                 after == Ok(0),
                 format!(
-                    "reserved {after:?}; reservations.rs: an address the provider was given without seeing it is reissued only when the gap rule leaves no fresh one"
+                    "reserved {after:?}; swap issuance rules: with none fresh, issuance reuses an abandoned index"
                 ),
             );
         }),
     }
 }
 
-/// Saves quote requests on `dev` that never reach NEAR, a block apart, each for a swap
-/// attempt that expires before the next, until issuance refuses one. Returns the indices
-/// issued and the refusal.
-fn requests_until_refused(ctx: &mut Ctx, dev: Dev) -> (Vec<u64>, ReservationPolicy) {
+/// Saves `count` quote requests on `dev` that never reach NEAR, a block apart, each for a
+/// swap attempt that expires before the next. Returns the indices issued, or the first
+/// refusal.
+fn requests(ctx: &mut Ctx, dev: Dev, count: u64) -> Result<Vec<u64>, ReservationPolicy> {
     let mut issued = Vec::new();
-    loop {
-        match request_quote(ctx, dev, SHORT_QUOTE) {
-            Ok((index, _)) => issued.push(index),
-            Err(policy) => return (issued, policy),
-        }
-        assert!(
-            issued.len() <= 2 * RECEIVE_GAP_LIMIT as usize,
-            "issuance never waits"
-        );
+    for _ in 0..count {
+        let (index, _) = request_quote(ctx, dev, SHORT_QUOTE)?;
+        issued.push(index);
         ctx.mine(1);
         ctx.sync(dev);
     }
-}
-
-/// Whether `issued` holds every index in `expected` exactly once, and nothing else.
-fn each_once(issued: &[u64], expected: std::ops::RangeInclusive<u64>) -> bool {
-    let mut sorted = issued.to_vec();
-    sorted.sort_unstable();
-    sorted == expected.collect::<Vec<_>>()
+    Ok(issued)
 }
 
 /// Wallet A sends a quote request for I0 that reaches NEAR, but its answer is lost, and
 /// the app restarts with NEAR's feed `lag` behind. Over the 15 minutes a seen set may
 /// lag, issuance waits until the feed catches up. A then saves quote requests that never
-/// reach NEAR until issuance waits. After the deadlines and cooldown, A goes through the
-/// window again, reusing only addresses NEAR never received.
+/// reach NEAR through the bound, and after the deadlines and cooldown does so again. Each
+/// time it reuses I0, which NEAR may have accepted, only once no address NEAR never
+/// received is left.
 fn lost_answer_near_saw(lag: i64) -> Scenario {
     let behind = lag > PROVIDER_READ_MAX_AGE_SECS;
     Scenario {
         id: format!("A4-lost-answer-near-saw-feed-{}-behind", span(lag)),
         group: ISSUANCE,
         title: format!(
-            "NEAR receives a quote request whose answer is lost, the app restarts, and later quotes fill the window; NEAR feed {} behind",
+            "NEAR receives a quote request whose answer is lost, the app restarts, and later quotes fill the bound; NEAR feed {} behind",
             span(lag)
         ),
-        summary: "A request whose answer was lost still gave NEAR the address. Once NEAR's seen \
-            set holds it, the address is never issued again. While the set is too far behind \
-            to show it, issuance waits. When later requests that never reached NEAR fill the \
-            30-index window, issuance waits, then reuses only those, never the address NEAR saw."
+        summary: "A request whose answer was lost may have been accepted, and NEAR's seen set \
+            holding its address moves the issuance bound. While the set is too far behind to \
+            show it, issuance waits. Later requests that never reached NEAR take every other \
+            address the bound allows first; the address NEAR saw is reused only after them, \
+            since reusing it may let NEAR link the two quotes."
             .into(),
         params: vec![
             ("feed read lag".into(), span(lag)),
             (
                 "later requests".into(),
-                "until issuance waits, twice".into(),
+                format!("{} twice", RECEIVE_GAP_LIMIT + 1),
             ),
         ],
         slow: false,
@@ -369,80 +333,40 @@ fn lost_answer_near_saw(lag: i64) -> Scenario {
             ctx.restart(a);
             ctx.mine(1);
             ctx.sync(a);
-            let (mut issued, mut refused) = requests_until_refused(ctx, a);
             if behind {
+                let refused = request_quote(ctx, a, SHORT_QUOTE).map(|(index, _)| index);
                 ctx.check(
                     "issuance waits while NEAR's seen set is too far behind to show I0",
-                    issued.is_empty() && refused == ReservationPolicy::SeenUnavailable,
+                    refused == Err(ReservationPolicy::SeenUnavailable),
                     format!(
-                        "issued {issued:?}, then {refused:?}; ReservationPolicy::SeenUnavailable: issuance needs a set read within the last 15 minutes"
+                        "{refused:?}; ReservationPolicy::SeenUnavailable: issuance needs a set read within the last 15 minutes"
                     ),
                 );
                 ctx.near.read_lag = MINUTE;
                 ctx.log("directory", "NEAR feed catches up: it trails by a minute");
                 ctx.mine(1);
                 ctx.sync(a);
-                (issued, refused) = requests_until_refused(ctx, a);
             }
-            ctx.log(
-                "A",
-                format!(
-                    "{} more quote requests, none reaching NEAR, then issuance refuses: {refused:?}",
-                    issued.len()
-                ),
-            );
-            // NEAR's set holds I0, which moves the gap one past it.
-            ctx.check(
-                format!(
-                    "the first pass issues I1 to I{RECEIVE_GAP_LIMIT} once each, then issuance waits"
-                ),
-                each_once(&issued, 1..=RECEIVE_GAP_LIMIT) && refused == ReservationPolicy::Limit,
-                format!("issued {issued:?}, then {refused:?}"),
-            );
-            ctx.wait(3 * HOUR);
-            ctx.sync(a);
-            let (again, refused_again) = requests_until_refused(ctx, a);
-            ctx.log(
-                "A",
-                format!(
-                    "after the deadlines and cooldown, {} more quote requests, then issuance refuses: {refused_again:?}",
-                    again.len()
-                ),
-            );
-            let expected = 1;
-            ctx.check(
-                format!("issuance resumes at I{expected}"),
-                again.first() == Some(&expected),
-                format!(
-                    "issued {again:?}; reservations.rs: an address the provider was given without seeing it is reissued only when the gap rule leaves no fresh one, and one the set holds moves the gap"
-                ),
-            );
-            ctx.check(
-                format!(
-                    "the second pass issues I1 to I{RECEIVE_GAP_LIMIT} once each, then issuance waits"
-                ),
-                each_once(&again, 1..=RECEIVE_GAP_LIMIT)
-                    && refused_again == ReservationPolicy::Limit,
-                format!("issued {again:?}, then {refused_again:?}"),
-            );
-            let given: Vec<u64> = again
-                .iter()
-                .copied()
-                .filter(|&i| {
-                    let receiver = receiver_of(&ctx.get(a).key(Purpose::Receive, i));
-                    ctx.near.was_given(&receiver)
-                })
-                .collect();
-            ctx.check(
-                "the second pass issues only addresses NEAR never received",
-                !again.is_empty() && given.is_empty(),
-                format!("issued {again:?}, NEAR received {given:?}"),
-            );
-            ctx.check(
-                format!("I{index}, which NEAR received, is never issued again"),
-                !issued.contains(&index) && !again.contains(&index),
-                format!("first pass {issued:?}, second pass {again:?}"),
-            );
+            // NEAR's set holds I0, which moves the bound one past it, and I0 is reused last.
+            let expected: Vec<u64> = (1..=RECEIVE_GAP_LIMIT).chain([index]).collect();
+            for pass in ["first", "second"] {
+                let issued = requests(ctx, a, RECEIVE_GAP_LIMIT + 1);
+                ctx.log(
+                    "A",
+                    format!("{pass} pass, quote requests none of which reach NEAR: {issued:?}"),
+                );
+                ctx.check(
+                    format!(
+                        "the {pass} pass takes I1 to I{RECEIVE_GAP_LIMIT}, which NEAR never received, before reusing I{index}"
+                    ),
+                    issued.as_ref() == Ok(&expected),
+                    format!(
+                        "issued {issued:?}; swap issuance rules: an abandoned index the seen set lacks is reused first"
+                    ),
+                );
+                ctx.wait(3 * HOUR);
+                ctx.sync(a);
+            }
         }),
     }
 }

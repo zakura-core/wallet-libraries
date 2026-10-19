@@ -528,10 +528,11 @@ CREATE INDEX idx_orchard_received_note_spends_transaction_id ON orchard_received
     transaction_id ASC
 )"#;
 
-/// Registered one-time keys, each with at most one incoming reservation. Empty lookahead
+/// Registered one-time keys, each with at most one open reservation. Empty lookahead
 /// entries do not advance allocation. `reservation_floor` is the highest operation ID on
-/// the key when its current reservation was made, so only later operations belong to it;
-/// it is NULL on a reservation made before the column existed. `pass_watch_height` is the
+/// the key when its current reservation was made, so only later operations belong to it
+/// and earlier requests are retired. It is NULL on a reservation made before the column
+/// existed. `pass_watch_height` is the
 /// end of the publication whose discovery pass gave the key its recent watch, so no later
 /// pass reopens it. A rewind keeps it: an open key keeps scanning from the rewind height,
 /// and the watch covered blocks after the publication, which a lower birthday does not

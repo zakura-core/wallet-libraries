@@ -14,8 +14,9 @@
 //! windows, directory coverage and seen check, historical obligations, and lookup target
 //! generations.
 //! A stored key is authenticated if this wallet reserved it or it was paid, and blocked if
-//! it was paid, seen, quoted and accepted, or is a refund key, which issuance never
-//! reissued. No account has coverage yet.
+//! it was paid, its quote was started, or it was seen and never quoted here (see
+//! `one_time_ivk::swap`'s issuance rules). Every refund key is blocked, since no request
+//! recorded whether one exposed it. No account has coverage yet.
 use std::collections::HashSet;
 
 use schemerz_rusqlite::RusqliteMigration;
@@ -157,10 +158,13 @@ impl RusqliteMigration for Migration {
             UPDATE ironwood_one_time_keys SET
                 authenticated = (reserved_at IS NOT NULL OR used = 1
                     OR (purpose = 0 AND advances_allocation = 1 AND provider_seen = 0)),
-                issuance_blocked = (purpose = 0 OR used = 1 OR provider_seen = 1
+                issuance_blocked = (purpose = 0 OR used = 1
                     OR EXISTS(SELECT 1 FROM ironwood_one_time_operations o
+                        WHERE o.one_time_key_id = ironwood_one_time_keys.id AND o.started = 1)
+                    OR (provider_seen = 1 AND NOT EXISTS(
+                        SELECT 1 FROM ironwood_one_time_operations o
                         WHERE o.one_time_key_id = ironwood_one_time_keys.id
-                          AND o.reference IS NOT NULL));
+                          AND o.request IS NOT NULL)));
             CREATE TABLE ironwood_one_time_recovery (
                 account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
                 generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
@@ -248,8 +252,9 @@ mod tests {
     /// reservation's request was begun before `reserved_at`, after the clock was set back.
     ///
     /// Each key gets the facts its row shows: one this wallet reserved or that was paid is
-    /// authenticated, and every refund key, and an incoming key seen, paid or quoted and
-    /// accepted, is blocked from issuance.
+    /// authenticated, and every refund key, and an incoming key paid, started, or seen and
+    /// never quoted here, is blocked from issuance. An accepted quote never started does
+    /// not block its address.
     #[test]
     fn existing_reservations_get_no_floor_and_their_facts() {
         let network = Network::TestNetwork;
@@ -306,13 +311,17 @@ mod tests {
                      (5, 1, 1, X'0000000000000002', zeroblob(43), 0, 1, 0, 0),
                      (6, 1, 1, X'0000000000000003', zeroblob(43), 0, 0, 0, 0),
                      (7, 1, 1, X'0000000000000004', zeroblob(43), 0, 1, 0, 1),
-                     (8, 1, 1, X'0000000000000005', zeroblob(43), 0, 1, 1, 0);
+                     (8, 1, 1, X'0000000000000005', zeroblob(43), 0, 1, 1, 0),
+                     (9, 1, 1, X'0000000000000006', zeroblob(43), 0, 1, 0, 0),
+                     (10, 1, 1, X'0000000000000007', zeroblob(43), 0, 1, 1, 0);
                  INSERT INTO ironwood_one_time_operations
                      (one_time_key_id, request, deadline, begun_at, observed_at)
                  VALUES (1, 'live', 400, 150, 150), (2, 'expired', 160, 100, 100);
                  INSERT INTO ironwood_one_time_operations
-                     (one_time_key_id, request, reference, deadline, begun_at)
-                 VALUES (5, 'accepted', 'deposit', 400, 100);",
+                     (one_time_key_id, request, reference, deadline, begun_at, started)
+                 VALUES (5, 'accepted', 'deposit', 400, 100, 0),
+                     (9, 'started', 'started', 400, 100, 1),
+                     (10, 'quoted', NULL, 400, 100, 0);",
             )
             .unwrap();
         let before = read(&db_data.conn);
@@ -343,10 +352,12 @@ mod tests {
                 (2, None, Some(100), true, false),
                 (3, None, None, true, true),
                 (4, None, None, false, true),
-                (5, None, None, false, true),
+                (5, None, None, false, false),
                 (6, None, None, false, false),
                 (7, None, None, true, true),
                 (8, None, None, false, true),
+                (9, None, None, false, true),
+                (10, None, None, false, false),
             ]
         );
     }

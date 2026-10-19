@@ -129,16 +129,13 @@ pub(super) fn reserve_in(
     from: BlockHeight,
     now: i64,
 ) -> Result<OneTimeKey, SqliteClientError> {
-    let index = if purpose == Purpose::Refund {
-        let seen = Some(&empty_seen(now));
-        store::swap::funding::next_refund_index(c, p, account, seen, now)?.unwrap()
-    } else {
-        let sql = "SELECT MAX(k.key_index) FROM ironwood_one_time_keys k
-                   JOIN accounts a ON a.id = k.account_id
-                   WHERE a.uuid = ?1 AND k.purpose = 1 AND k.advances_allocation = 1";
-        let last: Option<Vec<u8>> = c.query_row(sql, [account.0], |r| r.get(0))?;
-        last.map_or(Ok(0), |bytes| index_after(decode_index(bytes)?, 1))?
-    };
+    let sql = "SELECT MAX(k.key_index) FROM ironwood_one_time_keys k
+               JOIN accounts a ON a.id = k.account_id
+               WHERE a.uuid = ?1 AND k.purpose = ?2 AND k.advances_allocation = 1";
+    let code = purpose_code(purpose)?;
+    let last: Option<Vec<u8>> =
+        c.query_row(sql, rusqlite::params![account.0, code], |r| r.get(0))?;
+    let index = last.map_or(Ok(0), |bytes| index_after(decode_index(bytes)?, 1))?;
     let key = KeyId::new(purpose, index);
     register(c, p, account, key, from, true, Discovery::Scan, now).map(|(_, key)| key)
 }
@@ -192,11 +189,9 @@ pub(super) fn holds_nothing(receivers: &[[u8; 43]]) -> Vec<bool> {
     vec![false; receivers.len()]
 }
 
-/// A seen set read at `now` that holds nothing and covers no quote: fresh at `now`, yet
-/// every quote still counts as seen, as without a set.
+/// A seen set read at `now` that holds nothing, so fresh at `now`.
 pub(super) fn empty_seen(now: i64) -> ProviderSeen<'static> {
     ProviderSeen {
-        since: now,
         until: now,
         contains: &holds_nothing,
     }
@@ -213,6 +208,24 @@ pub(super) fn reserve_refund(
     db.reserve_refund_key(account, now, tip, Some(&empty_seen(now)))
 }
 
+/// Quotes refund key `index` at `now` with an empty seen set read then, and records its
+/// accepted `deposit` with `deadline`, as an app does before showing the quote. Returns
+/// the request.
+pub(super) fn quote_refund(
+    db: &mut Db,
+    account: AccountUuid,
+    index: u64,
+    (deposit, deadline): (&str, i64),
+    now: i64,
+) -> String {
+    let seen = empty_seen(now);
+    let request = db.begin_refund_operation(account, index, deadline, now, Some(&seen));
+    let request = request.unwrap().unwrap();
+    let recorded = db.record_refund_operation(account, &request, deposit, deadline, now);
+    recorded.unwrap().unwrap();
+    request
+}
+
 /// Reserves like `WalletDb::prepare_receive_reservation`, scanning a new key from `from`,
 /// without readiness checks, reaping or lookahead registration.
 pub(super) fn prepare_from(
@@ -225,7 +238,7 @@ pub(super) fn prepare_from(
     tx(db, |c, p| {
         if let Some(seen) = seen {
             let (owner, _) = account_key(c, p, account)?;
-            store::swap::reservations::record_seen(c, owner.0, seen)?;
+            store::swap::reservations::record_seen(c, owner.0, 1, seen)?;
         }
         store::swap::reservations::prepare(c, p, account, now, from, seen)
     })

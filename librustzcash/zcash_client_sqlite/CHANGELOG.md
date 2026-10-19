@@ -38,8 +38,30 @@ and this library adheres to Rust's notion of
   back until the next chain tip, shared by the wallet's database handles like
   `EnhancePirSession`. It is kept in memory only, with no new table or migration.
 
+- `WalletDb::begin_refund_operation` (with `orchard`) saves a refund quote request with an
+  unknown outcome before it leaves the device, and returns its identity.
+
 ### Changed
 
+- One-time IVK issuance follows one rule for incoming addresses and refund keys (see
+  `wallet::one_time_ivk::swap`): it never passes 30 indices beyond the highest one with a
+  seen hit, an accepted quote or a confirmed payment, takes the lowest fresh index, and
+  otherwise reuses an abandoned one, an index whose requests are over and none of whose
+  quotes was shown for funding, or waits with `ReservationPolicy::Limit`. Refund keys
+  were allocated above the highest one so far without a bound. A rejected incoming request
+  no longer keeps its address from ever being issued again. Reissuing an index retires
+  its earlier requests: `WalletDb::finish_receive_operation` and
+  `WalletDb::record_refund_operation` now return `ReservationPolicy::Stale` for a
+  retired request, and `WalletDb::start_receive_operation` refuses one.
+  `WalletDb::record_refund_operation` takes the request from
+  `WalletDb::begin_refund_operation` instead of the key index. `ProviderSeen::since` and
+  `SEEN_SLACK_SECONDS` are removed, since a quote's outcome, not the seen set's coverage,
+  decides whether its address can be reused.
+- A refund key stops trial decryption a day after its deposit deadline, rather than 30
+  days, or once its swap settled, by the device clock and before scanning any backlog,
+  and storing its funding transaction again does not reopen it. Unconfirmed receipts no
+  longer hold it open, since the key stays registered for directory recovery. No provider
+  status starts a refund key this wallet did not fund.
 - One-time IVK issuance fails closed without a fresh provider seen set.
   `WalletDb::prepare_receive_reservation`, `WalletDb::reserve_refund_key` (which now
   takes the caller's `now`) and a reservation's first `WalletDb::begin_receive_operation`
