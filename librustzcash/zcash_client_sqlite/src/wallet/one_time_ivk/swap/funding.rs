@@ -165,10 +165,6 @@ pub(in crate::wallet::one_time_ivk) fn record_operation<P: Parameters>(
     deadline: i64,
     now: i64,
 ) -> Result<Result<(), ReservationPolicy>, SqliteClientError> {
-    check_deposit(params, deposit)?;
-    if now < 0 || deadline <= now {
-        return Err(invalid("invalid refund operation deadline"));
-    }
     let id = operation(conn, account, request)?;
     let (key, refund): (i64, bool) = conn.query_row(
         "SELECT o.one_time_key_id, k.purpose = 0 FROM ironwood_one_time_operations o
@@ -179,8 +175,13 @@ pub(in crate::wallet::one_time_ivk) fn record_operation<P: Parameters>(
     if !refund {
         return Err(invalid("not a refund operation request"));
     }
+    // A retired request's late response is refused whatever it holds.
     if !current(conn, id)? {
         return Ok(Err(ReservationPolicy::Stale));
+    }
+    check_deposit(params, deposit)?;
+    if now < 0 || deadline <= now {
+        return Err(invalid("invalid refund operation deadline"));
     }
     let (elsewhere, rebound): (bool, bool) = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_operations

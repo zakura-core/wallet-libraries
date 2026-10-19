@@ -1479,11 +1479,17 @@ fn begin_refund_at(st: &mut State, index: u64, now: i64) -> Policy<String> {
     db.begin_refund_operation(account, index, now + 60, now, Some(&empty_seen(now)))
 }
 
-/// Records refund `request`'s accepted quote for `deposit` at `now`.
-fn record_refund(st: &mut State, request: &str, deposit: &str, now: i64) -> Policy<()> {
+/// Records, at `now`, the accepted quote for `deposit` that answers refund `request`, begun
+/// at `begun` (see [`begin_refund_at`]), with the deadline the request asked for.
+fn record_refund(
+    st: &mut State,
+    request: &str,
+    deposit: &str,
+    (begun, now): (i64, i64),
+) -> Policy<()> {
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
-    db.record_refund_operation(account, request, deposit, now + 60, now)
+    db.record_refund_operation(account, request, deposit, begun + 60, now)
 }
 
 /// Reserves and quotes `count` refund keys at `now`, expecting `indices`, whose requests
@@ -1519,7 +1525,7 @@ fn a_quote_shown_for_funding_is_never_reissued() {
     let deposit = deposit_address(&st, 7);
     reserve_refund_at(&mut st, NOW).unwrap().unwrap();
     let shown = begin_refund_at(&mut st, 0, NOW).unwrap().unwrap();
-    record_refund(&mut st, &shown, &deposit, NOW)
+    record_refund(&mut st, &shown, &deposit, (NOW, NOW))
         .unwrap()
         .unwrap();
     expose_refunds(&mut st, 1..RECEIVE_GAP_LIMIT + 1, NOW);
@@ -1561,10 +1567,11 @@ fn late_responses_to_a_reissued_index_are_refused() {
     expose_refunds(&mut st, 1..RECEIVE_GAP_LIMIT, NOW);
     let reissued = reserve_refund_at(&mut st, NOW + 60).unwrap().unwrap();
     assert_eq!(reissued.key_id().index(), 0);
-    let late = record_refund(&mut st, &old, &deposit, NOW + 60);
+    // The response carries the deadline the old request asked for, which has passed.
+    let late = record_refund(&mut st, &old, &deposit, (NOW, NOW + 60));
     assert_eq!(refusal(late), Some(Stale));
     let new = begin_refund_at(&mut st, 0, NOW + 60).unwrap().unwrap();
-    record_refund(&mut st, &new, &deposit, NOW + 60)
+    record_refund(&mut st, &new, &deposit, (NOW + 60, NOW + 60))
         .unwrap()
         .unwrap();
 }
@@ -1595,7 +1602,7 @@ fn a_refund_request_survives_a_crash_at_each_step() {
     let answered = begin_refund_at(&mut st, 1, NOW).unwrap().unwrap();
     let second = begin_refund_at(&mut st, 1, NOW);
     assert_eq!(refusal(second), Some(Stale));
-    record_refund(&mut st, &answered, &deposit, NOW)
+    record_refund(&mut st, &answered, &deposit, (NOW, NOW))
         .unwrap()
         .unwrap();
     // The recorded quote moved the bound past index 31.
@@ -1607,7 +1614,7 @@ fn a_refund_request_survives_a_crash_at_each_step() {
     let reused = reserve_refund_at(&mut st, NOW + 60).unwrap().unwrap();
     assert_eq!(reused.key_id().index(), 0);
     let other = deposit_address(&st, 8);
-    let late = record_refund(&mut st, &unanswered, &other, NOW + 60);
+    let late = record_refund(&mut st, &unanswered, &other, (NOW, NOW + 60));
     assert_eq!(refusal(late), Some(Stale));
 }
 
