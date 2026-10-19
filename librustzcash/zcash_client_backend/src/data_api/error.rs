@@ -13,7 +13,7 @@ use zcash_keys::address::UnifiedAddress;
 use zcash_primitives::transaction::builder;
 use zcash_protocol::{
     PoolType,
-    consensus::BlockHeight,
+    consensus::{BlockHeight, BranchId},
     value::{BalanceError, Zatoshis},
 };
 
@@ -134,6 +134,10 @@ pub enum Error<DataSourceError, CommitmentTreeError, SelectionError, FeeError, C
     /// Pass `None` to accept the canonical expiry.
     ExpiryHeightConflictsWithCanonicalCrossing { requested: BlockHeight },
 
+    /// The transaction would not be acceptable for sending at the current candidate height.
+    /// Rebuild it from a fresh proposal, then prove and sign it again.
+    Acceptance(AcceptanceError),
+
     /// An error occurred while working with PCZTs.
     #[cfg(feature = "pczt")]
     Pczt(PcztError),
@@ -194,6 +198,71 @@ impl<AccountId: Hash + Eq + Debug, E: error::Error + 'static> error::Error
         }
     }
 }
+
+/// Why a transaction is not acceptable for sending at a candidate block height.
+///
+/// These are the wallet's sending policy checks, described on
+/// [`validate_transaction_for_target`](crate::data_api::wallet::validate_transaction_for_target);
+/// they are not consensus validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AcceptanceError {
+    /// The transaction commits to a consensus branch other than the one active at the
+    /// candidate height, so its signatures cannot be mined.
+    ObsoleteConsensusBranch {
+        /// The consensus branch ID the transaction commits to.
+        declared: u32,
+        /// The consensus branch active at the candidate height.
+        current: BranchId,
+    },
+    /// The transaction version is not valid in the consensus branch active at the candidate
+    /// height.
+    UnsupportedVersion {
+        /// The transaction version number, without the overwintered flag.
+        version: u32,
+        /// The consensus branch active at the candidate height.
+        current: BranchId,
+    },
+    /// The transaction's nonzero expiry height is below the candidate height.
+    Expired {
+        expiry_height: BlockHeight,
+        target_height: BlockHeight,
+    },
+    /// The transaction's padded shielded bundles exceed an NU7 per-pool or combined block
+    /// budget, as reported by Common's budget check.
+    ShieldedBudget(&'static str),
+}
+
+impl fmt::Display for AcceptanceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AcceptanceError::ObsoleteConsensusBranch { declared, current } => write!(
+                f,
+                "The transaction commits to consensus branch {declared:#010x}, but {current:?} \
+                 is active at the candidate height; rebuild and re-sign it."
+            ),
+            AcceptanceError::UnsupportedVersion { version, current } => write!(
+                f,
+                "Transaction version {version} is not valid in {current:?}; rebuild it in a \
+                 supported format."
+            ),
+            AcceptanceError::Expired {
+                expiry_height,
+                target_height,
+            } => write!(
+                f,
+                "The transaction expires at height {expiry_height}, below the candidate height \
+                 {target_height}; rebuild and re-sign it."
+            ),
+            AcceptanceError::ShieldedBudget(reason) => write!(
+                f,
+                "The transaction's shielded bundles exceed the NU7 block budget: {reason}."
+            ),
+        }
+    }
+}
+
+impl error::Error for AcceptanceError {}
 
 /// Errors that can occur while working with PCZTs.
 #[cfg(feature = "pczt")]
@@ -362,6 +431,7 @@ where
                  minimum target height {min_target_height}; the transaction would already be \
                  expired at the earliest height at which it could be mined."
             ),
+            Error::Acceptance(e) => write!(f, "{e}"),
             #[cfg(feature = "pczt")]
             Error::Pczt(e) => write!(f, "PCZT error: {e}"),
         }
@@ -419,6 +489,7 @@ where
             Error::NoteSelection(e) => Some(e),
             Error::Proposal(e) => Some(e),
             Error::Builder(e) => Some(e),
+            Error::Acceptance(e) => Some(e),
             #[cfg(feature = "pczt")]
             Error::Pczt(e) => Some(e),
             _ => None,
@@ -432,6 +503,12 @@ impl error::Error for PcztError {}
 impl<DE, TE, SE, FE, CE, N> From<builder::Error<FE>> for Error<DE, TE, SE, FE, CE, N> {
     fn from(e: builder::Error<FE>) -> Self {
         Error::Builder(e)
+    }
+}
+
+impl<DE, TE, SE, FE, CE, N> From<AcceptanceError> for Error<DE, TE, SE, FE, CE, N> {
+    fn from(e: AcceptanceError) -> Self {
+        Error::Acceptance(e)
     }
 }
 

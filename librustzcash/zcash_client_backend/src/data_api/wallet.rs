@@ -48,7 +48,8 @@ use super::{InputSource, locking::lock_proposal_inputs};
 use crate::{
     data_api::{
         Account, MaxSpendMode, NoteCommitmentTree, SentTransaction, SentTransactionOutput,
-        WalletCommitmentTrees, WalletRead, WalletWrite, error::Error,
+        WalletCommitmentTrees, WalletRead, WalletWrite,
+        error::{AcceptanceError, Error},
         wallet::input_selection::propose_send_max,
     },
     decrypt_transaction,
@@ -121,6 +122,10 @@ use {
     zcash_protocol::{consensus::NetworkConstants, value::BalanceError},
 };
 
+mod acceptance;
+#[cfg(feature = "pczt")]
+pub use acceptance::validate_pczt_for_target;
+pub use acceptance::validate_transaction_for_target;
 pub mod input_selection;
 use input_selection::{
     GreedyInputSelector, GreedyInputSelectorError, InputSelector, InputSelectorError,
@@ -825,6 +830,56 @@ where
     Ok(proposal.with_proposed_version(proposed_version))
 }
 
+/// Rejects a saved proposal whose transactions would already be expired at
+/// `current_target`, before any proving or signing.
+///
+/// Each step's expiry is resolved as the builder will resolve it: the ZIP 318 rolling expiry
+/// for a canonical crossing, otherwise `expiry_override`, otherwise the default expiry from the
+/// proposal's own target height. The proposal's target is not moved, so a stale expiry is
+/// refused rather than extended. An expiry of zero disables expiry, and an expiry equal to
+/// `current_target` can still be mined.
+fn check_proposal_expiry<ParamsT, FeeRuleT, N>(
+    params: &ParamsT,
+    proposal: &Proposal<FeeRuleT, N>,
+    expiry_override: Option<BlockHeight>,
+    current_target: BlockHeight,
+) -> Result<(), AcceptanceError>
+where
+    ParamsT: consensus::Parameters,
+{
+    let target = proposal.min_target_height();
+    for step in proposal.steps() {
+        #[cfg(feature = "orchard")]
+        let canonical = step_is_canonical_crossing(params, step, target);
+        #[cfg(not(feature = "orchard"))]
+        let canonical = {
+            let _ = step;
+            false
+        };
+        let expiry_height = if canonical {
+            zcash_protocol::zip318::expiry_height(
+                &zcash_protocol::zip318::BlockSpacing::for_network(params),
+                target.into(),
+            )
+        } else {
+            expiry_override.unwrap_or_else(|| {
+                BlockHeight::from(target)
+                    + zcash_primitives::transaction::builder::default_tx_expiry_delta(
+                        params,
+                        target.into(),
+                    )
+            })
+        };
+        if expiry_height != consensus::H0 && expiry_height < current_target {
+            return Err(AcceptanceError::Expired {
+                expiry_height,
+                target_height: current_target,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Returns whether `step` must be built as a canonical ZIP 318 crossing: its Ironwood bundle was
 /// costed unpadded (see [`Step::is_built_as_canonical_crossing`]) and it pays the canonical fee
 /// at `target_height`.
@@ -1308,6 +1363,7 @@ where
             });
         }
     }
+    check_proposal_expiry(params, proposal, expiry_height, current_target)?;
 
     // The set of transparent `StepOutput`s available and unused from prior steps.
     // When a transparent `StepOutput` is created, it is added to the map. When it
@@ -2806,6 +2862,7 @@ where
         .ok_or(Error::ScanRequired)?
         + 1;
     proposal.validate_for_current_target(params, current_target)?;
+    check_proposal_expiry(params, proposal, expiry_height, current_target)?;
     let proposed_version = proposal.proposed_version();
 
     let build_state = build_proposed_transaction::<_, _, _, FeeRuleT, _, _>(
@@ -3381,7 +3438,8 @@ pub fn redact_pczt_for_batch_signer(pczt: &pczt::Pczt) -> pczt::Pczt {
         .finish()
 }
 
-/// Finalizes the given PCZT, and persists the transaction to the wallet database.
+/// Finalizes the given PCZT, and persists the transaction to the wallet database as a
+/// transaction to be sent.
 ///
 /// The PCZT should have been created via [`create_pczt_from_proposal`], which adds
 /// metadata necessary for the wallet backend.
@@ -3389,11 +3447,12 @@ pub fn redact_pczt_for_batch_signer(pczt: &pczt::Pczt) -> pczt::Pczt {
 /// Returns the transaction ID for the resulting transaction.
 ///
 /// `params` must identify this wallet's network. Synchronize the wallet's chain tip
-/// before calling: acceptance is checked at tip + 1 before cryptographic work.
-/// Obsolete branch authorization, expired transactions, and oversized NU7 bundles
-/// are rejected. Rebuild and re-sign stale transactions. For archival imports use
-/// [`extract_and_store_transaction_from_pczt_for_history`]. Applications own broadcast
-/// and must recheck against a fresh tip immediately before submission.
+/// before calling: the PCZT is checked with [`validate_pczt_for_target`] at tip + 1 before
+/// any cryptographic work, and a refusal is returned as [`Error::Acceptance`]. Rebuild and
+/// re-sign a refused transaction. On success the transaction is stored with
+/// [`WalletWrite::store_transactions_to_be_sent`], its inputs are marked spent, and their
+/// locks are released. Applications own broadcast and must recheck against a fresh tip
+/// immediately before submission, for example with [`validate_transaction_for_target`].
 ///
 /// - `sapling_vk` is optional to allow the caller to check whether a PCZT has Sapling
 ///   with [`pczt::roles::prover::Prover::requires_sapling_proofs`], and avoid downloading
@@ -3423,7 +3482,7 @@ where
         .ok_or(Error::ScanRequired)?
         + 1;
     validate_pczt_for_target(params, target, &pczt)?;
-    extract_and_store_transaction_from_pczt_for_history(
+    finalize_and_store_outgoing_pczt(
         wallet_db,
         pczt,
         sapling_vk,
@@ -3432,51 +3491,10 @@ where
     )
 }
 
-/// Checks branch authorization, expiry, version, and padded budgets before accepting a PCZT
-/// for sending. The caller must supply the candidate next height of a freshly synchronized
-/// chain; a stale local tip cannot detect a network upgrade it has not learned about.
+/// Finalizes, extracts and stores a PCZT already accepted for sending; see
+/// [`extract_and_store_transaction_from_pczt`] for the stored effects.
 #[cfg(feature = "pczt")]
-pub fn validate_pczt_for_target(
-    params: &impl consensus::Parameters,
-    target: BlockHeight,
-    pczt: &pczt::Pczt,
-) -> Result<(), PcztError> {
-    let expected = u32::from(consensus::BranchId::for_height(params, target));
-    if *pczt.global().consensus_branch_id() != expected {
-        return Err(PcztError::Invalid(
-            "Saved transaction authorization belongs to an obsolete consensus branch; rebuild and re-sign".into(),
-        ));
-    }
-    if params.is_nu_active(consensus::NetworkUpgrade::Nu7, target)
-        && !matches!(*pczt.global().tx_version(), 5 | 6)
-    {
-        return Err(PcztError::Invalid(
-            "Transaction version is invalid at NU7; rebuild in a supported format".into(),
-        ));
-    }
-    let expiry = *pczt.global().expiry_height();
-    if expiry != 0 && expiry < u32::from(target) {
-        return Err(PcztError::Invalid(
-            "Saved transaction has expired; rebuild and re-sign".into(),
-        ));
-    }
-    zcash_primitives::transaction::builder::check_shielded_budget(
-        params,
-        target,
-        pczt.sapling().spends().len(),
-        pczt.sapling().outputs().len(),
-        pczt.orchard().actions().len(),
-        pczt.ironwood().actions().len(),
-    )
-    .map_err(|e| PcztError::Invalid(e.into()))
-}
-
-/// Extracts and stores a historical or intentionally offline PCZT, without current-height
-/// acceptance checks. This is an archival operation and does not authorize broadcasting.
-/// Use [`extract_and_store_transaction_from_pczt`] when finalizing for sending, and recheck
-/// against a fresh chain tip immediately before application-owned broadcast.
-#[cfg(feature = "pczt")]
-pub fn extract_and_store_transaction_from_pczt_for_history<DbT, N>(
+fn finalize_and_store_outgoing_pczt<DbT, N>(
     wallet_db: &mut DbT,
     pczt: pczt::Pczt,
     sapling_vk: Option<(

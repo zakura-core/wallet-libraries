@@ -17,7 +17,7 @@ use zcash_client_backend::{
 };
 use zcash_primitives::transaction::{
     TxId,
-    builder::{DEFAULT_TX_EXPIRY_DELTA, NU7_DEFAULT_TX_EXPIRY_DELTA},
+    builder::{NU7_DEFAULT_TX_EXPIRY_DELTA, PRE_NU7_DEFAULT_TX_EXPIRY_DELTA},
     fees::zip317,
 };
 use zcash_protocol::{
@@ -1589,10 +1589,15 @@ mod nu7_expiry_tests {
                 _,
                 crate::ReceivedNoteId,
             >(st.wallet_mut(), &params, saved, None, None);
-        assert!(
-            matches!(result, Err(zcash_client_backend::data_api::error::Error::Pczt(
-            zcash_client_backend::data_api::error::PcztError::Invalid(reason))) if reason.contains("obsolete consensus branch"))
-        );
+        assert!(matches!(
+            result,
+            Err(zcash_client_backend::data_api::error::Error::Acceptance(
+                zcash_client_backend::data_api::error::AcceptanceError::ObsoleteConsensusBranch {
+                    current: BranchId::Nu7,
+                    ..
+                }
+            ))
+        ));
     }
 
     #[test]
@@ -1620,6 +1625,166 @@ mod nu7_expiry_tests {
         );
         let to = SaplingPoolTester::sk_default_address(&SaplingPoolTester::sk(&[7; 32]));
         st.propose_transfer_to(&to, Zatoshis::const_from_u64(10_000));
+    }
+
+    /// Funds a Sapling wallet, saves a transfer proposal, then advances the chain until the
+    /// proposal's default expiry (its target height plus 40 blocks before NU7) is exactly the
+    /// current candidate height. Yields the test state, the proposal and its target height.
+    macro_rules! wallet_with_proposal_at_its_default_expiry {
+        () => {{
+            use crate::testing::{BlockCache, db::TestDbFactory};
+            use zcash_client_backend::data_api::{
+                WalletRead,
+                testing::{
+                    TestBuilder,
+                    pool::{ShieldedPoolTester, dsl::TestDsl},
+                    sapling::SaplingPoolTester,
+                },
+            };
+            // Canopy activates long before the wallet's birthday, so ZIP 212 is fully enforced
+            // and Sapling outputs can be built into a PCZT.
+            let builder: TestDsl<TestBuilder<_, _>> = TestBuilder::new()
+                .with_network(zcash_protocol::local_consensus::LocalNetwork {
+                    canopy: Some(BlockHeight::from_u32(1)),
+                    ..TestBuilder::DEFAULT_NETWORK
+                })
+                .with_data_store_factory(TestDbFactory::default())
+                .with_block_cache(BlockCache::new())
+                .with_account_from_sapling_activation(zcash_primitives::block::BlockHash([0; 32]))
+                .into();
+            let mut st = builder.build::<SaplingPoolTester>();
+            st.add_a_single_note_checking_balance(Zatoshis::const_from_u64(60_000));
+            st.add_empty_blocks(1);
+            let to = SaplingPoolTester::sk_default_address(&SaplingPoolTester::sk(&[7; 32]));
+            let proposal = st.propose_transfer_to(&to, Zatoshis::const_from_u64(10_000));
+            let target = BlockHeight::from(proposal.min_target_height());
+            st.add_empty_blocks(40);
+            assert_eq!(
+                st.wallet().chain_height().unwrap(),
+                Some(target + 39),
+                "the default expiry is the current candidate height"
+            );
+            (st, proposal, target)
+        }};
+    }
+
+    #[test]
+    fn stale_saved_proposal_is_refused_before_building_and_stored_transaction_is_rechecked() {
+        use zcash_client_backend::data_api::{
+            WalletRead,
+            error::{AcceptanceError, Error},
+            wallet::{SpendingKeys, create_proposed_transactions, validate_transaction_for_target},
+        };
+        use zcash_client_backend::wallet::OvkPolicy;
+        let (mut st, proposal, target) = wallet_with_proposal_at_its_default_expiry!();
+        let params = st.network().clone();
+        let keys = SpendingKeys::from_unified_spending_key(st.get_account().usk().clone());
+        let mut create = |st: &mut _, expiry_height: Option<BlockHeight>| {
+            create_proposed_transactions::<
+                _,
+                _,
+                std::convert::Infallible,
+                _,
+                std::convert::Infallible,
+                _,
+            >(
+                st,
+                &params,
+                &::sapling::prover::mock::MockSpendProver,
+                &::sapling::prover::mock::MockOutputProver,
+                &keys,
+                OvkPolicy::Sender,
+                &proposal,
+                expiry_height,
+            )
+        };
+
+        // An override one block below the current candidate height is already expired, though
+        // it is not below the proposal's own target height.
+        let current = target + 40;
+        assert!(matches!(
+            create(st.wallet_mut(), Some(current - 1)),
+            Err(Error::Acceptance(AcceptanceError::Expired { expiry_height, target_height }))
+                if expiry_height == current - 1 && target_height == current
+        ));
+
+        // One block later the default expiry, computed from the proposal's target, has passed.
+        st.add_empty_blocks(1);
+        let current = target + 41;
+        assert!(matches!(
+            create(st.wallet_mut(), None),
+            Err(Error::Acceptance(AcceptanceError::Expired { expiry_height, target_height }))
+                if expiry_height == target + 40 && target_height == current
+        ));
+
+        // An override equal to the current candidate height can still be mined.
+        let txid = *create(st.wallet_mut(), Some(current)).unwrap().first();
+        let stored = st.wallet().get_transaction(txid).unwrap().unwrap();
+        assert_eq!(stored.expiry_height(), current);
+        assert_eq!(
+            validate_transaction_for_target(&params, current, &stored),
+            Ok(())
+        );
+        assert_eq!(
+            validate_transaction_for_target(&params, current + 1, &stored),
+            Err(AcceptanceError::Expired {
+                expiry_height: current,
+                target_height: current + 1,
+            })
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "pczt-tests")]
+    fn stale_saved_proposal_is_refused_before_building_a_pczt() {
+        use zcash_client_backend::data_api::{
+            error::{AcceptanceError, Error},
+            wallet::create_pczt_from_proposal,
+        };
+        use zcash_client_backend::wallet::OvkPolicy;
+        use zcash_primitives::transaction::builder::BundlePadding;
+        let (mut st, proposal, target) = wallet_with_proposal_at_its_default_expiry!();
+        let params = st.network().clone();
+        let account = st.get_account().id();
+        let mut create = |st: &mut _, expiry_height: Option<BlockHeight>| {
+            create_pczt_from_proposal::<
+                _,
+                _,
+                std::convert::Infallible,
+                _,
+                std::convert::Infallible,
+                _,
+            >(
+                st,
+                &params,
+                account,
+                OvkPolicy::Sender,
+                &proposal,
+                expiry_height,
+                BundlePadding::DEFAULT,
+            )
+        };
+
+        // The default expiry equals the current candidate height, so it can still be mined.
+        let current = target + 40;
+        let built = create(st.wallet_mut(), None).unwrap();
+        assert_eq!(*built.global().expiry_height(), u32::from(current));
+        assert!(matches!(
+            create(st.wallet_mut(), Some(current - 1)),
+            Err(Error::Acceptance(AcceptanceError::Expired { expiry_height, target_height }))
+                if expiry_height == current - 1 && target_height == current
+        ));
+
+        st.add_empty_blocks(1);
+        let current = target + 41;
+        assert!(matches!(
+            create(st.wallet_mut(), None),
+            Err(Error::Acceptance(AcceptanceError::Expired { expiry_height, target_height }))
+                if expiry_height == target + 40 && target_height == current
+        ));
+        // An expiry of zero still disables expiry.
+        let unexpiring = create(st.wallet_mut(), Some(BlockHeight::from_u32(0))).unwrap();
+        assert_eq!(*unexpiring.global().expiry_height(), 0);
     }
 
     #[test]
