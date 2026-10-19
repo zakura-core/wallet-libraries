@@ -179,6 +179,27 @@ impl<T: Transport> DirectoryClient<T> {
         Ok(paid)
     }
 
+    /// Downloads the cumulative paid set with `digest` from `/v1/receiver/paid/<digest>`, as
+    /// a wallet does for a snapshot it pinned from an earlier head, and checks that it was
+    /// built under `head`'s epoch on the same network. The publisher serves a superseded
+    /// set only for a while. The caller checks the boundary hashes against its own chain.
+    pub async fn fetch_pinned_paid(
+        origin: &str,
+        http: &T,
+        head: &CatalogHead,
+        digest: &Hash,
+    ) -> Result<PaidSet, Error> {
+        if *digest == head.paid {
+            return Self::fetch_paid(origin, http, head).await;
+        }
+        let bytes = fetch_object(origin, http, "paid", MAX_PAID_BYTES, digest).await?;
+        let paid = PaidSet::decode(&bytes)?;
+        if paid.genesis() != head.genesis || paid.epoch() != head.epoch {
+            return Err(Error::Malformed);
+        }
+        Ok(paid)
+    }
+
     /// Downloads the seen set `head` names from `/v1/receiver/seen/<digest>` and checks
     /// it with [`CatalogHead::check_seen`].
     pub async fn fetch_seen(origin: &str, http: &T, head: &CatalogHead) -> Result<SeenSet, Error> {

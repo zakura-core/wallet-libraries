@@ -22,6 +22,9 @@ and this library adheres to Rust's notion of
   receiver-set generation, which a newer cumulative snapshot can move past expired
   buckets, historical obligations bridged from a pinned cumulative snapshot, and lookups
   whose walks complete only their dispatched target and generation.
+  `one_time_recovery_status` reports progress apart from chain sync, `record_one_time_seen`
+  grows the windows from a seen set, `unpin_one_time_snapshot` lets a target start again
+  from a newer snapshot, and `restart_one_time_lookups` starts "Check swap history".
 - `WalletTx::ironwood_nullifiers` (with `orchard`) gives every Ironwood nullifier a
   transaction a block scan recognized reveals, matched to a wallet note or not.
   `ScannedBlock::scanned_accounts` names the accounts whose ordinary internal keys scanned

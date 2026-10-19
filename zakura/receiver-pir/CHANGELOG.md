@@ -7,7 +7,8 @@
 - The crate, moved from wallet-pir's `receiver-pir` at main 6703f263, over `zakura-pir-native`.
 - `transport::DirectoryClient::fetch_catalog`, `fetch_bucket_index`, `fetch_bucket`,
   `fetch_paid` and `fetch_seen` download the catalog head a manifest commits to and
-  the objects it names, from immutable routes by digest.
+  the objects it names, from immutable routes by digest. `fetch_pinned_paid` downloads a
+  cumulative paid set an earlier head named, which a wallet pinned.
 
 ### Changed
 

@@ -127,7 +127,7 @@ use {
                 coverage::{
                     CoverageOutcome, CoverageState, CoverageStep, CoverageTarget, DirectoryHistory,
                     LookupTicket, OneTimeIvkCoverageRead, OneTimeIvkCoverageWrite, ReceiverSet,
-                    Snapshot,
+                    RecoveryStatus, Snapshot,
                 },
                 restore::{
                     DirectoryPayment, DiscoveryStatus, DiscoveryWork, EnumerationCursor,
@@ -2900,6 +2900,14 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
     fn one_time_receiver_set(&self, account: AccountUuid) -> Result<ReceiverSet, Self::Error> {
         wallet::one_time_ivk::coverage::receiver_set(self.conn.borrow(), &self.params, account)
     }
+
+    /// See [`OneTimeIvkCoverageRead::one_time_recovery_status`].
+    fn one_time_recovery_status(
+        &self,
+        account: AccountUuid,
+    ) -> Result<Option<RecoveryStatus>, Self::Error> {
+        wallet::one_time_ivk::coverage::recovery_status(self.conn.borrow(), &self.params, account)
+    }
 }
 
 #[cfg(feature = "orchard")]
@@ -2957,6 +2965,50 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
     ) -> Result<bool, SqliteClientError> {
         self.transactionally(|wdb| {
             wallet::one_time_ivk::coverage::reset_history(wdb.conn.0, wdb.params, account, history)
+        })
+    }
+
+    /// See [`OneTimeIvkCoverageWrite::unpin_one_time_snapshot`].
+    fn unpin_one_time_snapshot(
+        &mut self,
+        account: AccountUuid,
+        target: CoverageTarget,
+        snapshot: Snapshot,
+    ) -> Result<bool, SqliteClientError> {
+        self.transactionally(|wdb| {
+            wallet::one_time_ivk::coverage::unpin(wdb.conn.0, wdb.params, account, target, snapshot)
+        })
+    }
+
+    /// See [`OneTimeIvkCoverageWrite::record_one_time_seen`]: the hits' registrations, the
+    /// windows they grow and the check commit together.
+    fn record_one_time_seen(
+        &mut self,
+        account: AccountUuid,
+        generation: u64,
+        hits: &[KeyId],
+        now: i64,
+    ) -> Result<bool, SqliteClientError> {
+        self.transactionally(|wdb| {
+            wallet::one_time_ivk::coverage::record_seen(
+                wdb.conn.0, wdb.params, account, generation, hits, now,
+            )
+        })
+    }
+
+    /// See [`OneTimeIvkCoverageWrite::restart_one_time_lookups`]: every restart commits
+    /// together.
+    fn restart_one_time_lookups(
+        &mut self,
+        account: AccountUuid,
+        found: &[KeyId],
+        cutoff: BlockHeight,
+        now: i64,
+    ) -> Result<(), SqliteClientError> {
+        self.transactionally(|wdb| {
+            wallet::one_time_ivk::coverage::restart_lookups(
+                wdb.conn.0, wdb.params, account, found, cutoff, now,
+            )
         })
     }
 

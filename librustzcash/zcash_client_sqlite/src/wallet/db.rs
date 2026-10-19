@@ -2116,8 +2116,8 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_DISCOVERY: &str =
 
 /// An account's directory coverage (see `one_time_ivk::coverage`): its receiver-set
 /// generation, each purpose's window extent and derivation progress, the history it
-/// follows, its frontier with the generation tested there, and the snapshot pinned to
-/// establish it.
+/// follows, its frontier with the generation tested there, the snapshot pinned to
+/// establish it, and when its windows were last checked against a seen set.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str =
     "CREATE TABLE ironwood_one_time_recovery (
                 account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
@@ -2136,6 +2136,7 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str =
                 bootstrap_height INTEGER CHECK (bootstrap_height BETWEEN 0 AND 4294967295),
                 bootstrap_hash BLOB CHECK (length(bootstrap_hash) = 32),
                 bootstrap_digest BLOB CHECK (length(bootstrap_digest) = 32),
+                seen_checked_at INTEGER,
                 CHECK ((catalog IS NULL) = (epoch IS NULL)),
                 CHECK ((frontier_height IS NULL) = (frontier_hash IS NULL)
                     AND (frontier_height IS NULL) = (tested_generation IS NULL)

@@ -153,9 +153,10 @@ pub(crate) fn truncate(
 }
 
 /// Reopens `account`'s discovery after a rewind lowered its birthday: the next pass checks
-/// every key again and every paid key's history from the start, since outcomes outside the
-/// old range no longer hold. The account is no longer treated as fresh. Its whole receiver
-/// set owes the history from the new birthday through its frontier.
+/// every key again, and every lookup restarts from page zero due through the target it
+/// had, since outcomes outside the old range no longer hold. The account is no longer
+/// treated as fresh. Its whole receiver set owes the history from the new birthday through
+/// its frontier.
 pub(crate) fn reopen_discovery(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
@@ -199,16 +200,7 @@ pub(crate) fn reopen_discovery(
         [account.0],
     )?;
     let keys = format!("SELECT id FROM ironwood_one_time_keys WHERE account_id = {owner}");
-    restart_cursor(conn, &keys, account.0)?;
-    // Until the next pass makes them due, no lookup runs.
-    conn.execute(
-        &format!(
-            "UPDATE ironwood_one_time_lookups SET cutoff_height = NULL, done_height = NULL
-             WHERE one_time_key_id IN ({keys})"
-        ),
-        [account.0],
-    )?;
-    Ok(())
+    restart_cursor(conn, &keys, account.0)
 }
 
 /// SQL assignments on `ironwood_one_time_lookups` that fence out every walk dispatched

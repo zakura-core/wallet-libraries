@@ -11,7 +11,8 @@
 //!
 //! It also adds the state of continuous directory recovery (see `one_time_ivk::coverage`):
 //! each key's `authenticated` and `issuance_blocked` facts, each account's receiver
-//! windows and directory coverage, historical obligations, and lookup target generations.
+//! windows, directory coverage and seen check, historical obligations, and lookup target
+//! generations.
 //! A stored key is authenticated if this wallet reserved it or it was paid, and blocked if
 //! it was paid, seen, quoted and accepted, or is a refund key, which issuance never
 //! reissued. No account has coverage yet.
@@ -177,6 +178,7 @@ impl RusqliteMigration for Migration {
                 bootstrap_height INTEGER CHECK (bootstrap_height BETWEEN 0 AND 4294967295),
                 bootstrap_hash BLOB CHECK (length(bootstrap_hash) = 32),
                 bootstrap_digest BLOB CHECK (length(bootstrap_digest) = 32),
+                seen_checked_at INTEGER,
                 CHECK ((catalog IS NULL) = (epoch IS NULL)),
                 CHECK ((frontier_height IS NULL) = (frontier_hash IS NULL)
                     AND (frontier_height IS NULL) = (tested_generation IS NULL)

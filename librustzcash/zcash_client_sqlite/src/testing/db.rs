@@ -69,7 +69,7 @@ use {
                 coverage::{
                     CoverageOutcome, CoverageState, CoverageStep, CoverageTarget, DirectoryHistory,
                     LookupTicket, OneTimeIvkCoverageRead, OneTimeIvkCoverageWrite, ReceiverSet,
-                    Snapshot, ambassador_impl_OneTimeIvkCoverageRead,
+                    RecoveryStatus, Snapshot, ambassador_impl_OneTimeIvkCoverageRead,
                     ambassador_impl_OneTimeIvkCoverageWrite,
                 },
                 restore::{

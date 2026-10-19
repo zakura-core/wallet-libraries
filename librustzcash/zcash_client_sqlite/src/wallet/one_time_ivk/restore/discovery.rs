@@ -117,34 +117,42 @@ pub(in crate::wallet::one_time_ivk) fn complete<P: Parameters>(
     params: &P,
     owner: crate::AccountRef,
 ) -> Result<bool, SqliteClientError> {
-    let start = restore_start(conn, params, owner)?;
-    let settled = |conn: &Connection| -> Result<bool, SqliteClientError> {
-        Ok(conn.query_row(
-            "SELECT NOT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
-                 JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
-                 WHERE k.account_id = ?1
-                   AND (l.cutoff_height IS NOT NULL OR l.done_height IS NULL))
-             AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery c
-                 JOIN ironwood_one_time_keys k ON k.id = c.one_time_key_id
-                 WHERE k.account_id = ?1)
-             AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_lookup_reads r
-                 JOIN ironwood_one_time_keys k ON k.id = r.one_time_key_id
-                 JOIN ironwood_one_time_publications p
-                   ON p.height = r.publication_height AND p.hash = r.publication_hash
-                 WHERE k.account_id = ?1 AND p.state != ?2
-                   AND NOT (p.state = ?3 AND p.height < ?4))",
-            params![owner.0, ACCEPTED, PROVISIONAL, u32::from(start)],
-            |r| r.get(0),
-        )?)
-    };
     // A fresh account has no restored history to discover, but once it starts a pass to
     // recheck a key it issued, that pass and its lookups must finish too.
     let Some(pass) = pass(conn, owner.0)? else {
-        return Ok(fresh(conn, owner.0)? && settled(conn)?);
+        return Ok(fresh(conn, owner.0)? && settled(conn, params, owner)?);
     };
-    let before_birthday = pass.publication.height < start;
+    let before_birthday = pass.publication.height < restore_start(conn, params, owner)?;
     let judged = pass.state == ACCEPTED || (pass.state == PROVISIONAL && before_birthday);
-    Ok(judged && pass.receive.1 && pass.refund.1 && settled(conn)?)
+    Ok(judged && pass.receive.1 && pass.refund.1 && settled(conn, params, owner)?)
+}
+
+/// Whether account `owner` has no lookup due or waiting for a pass, no payment it found
+/// waiting to be admitted, and no lookup cursor that read from a publication not matched
+/// against the wallet's chain, unless it ended before the birthday.
+pub(in crate::wallet::one_time_ivk) fn settled<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    owner: crate::AccountRef,
+) -> Result<bool, SqliteClientError> {
+    let start = restore_start(conn, params, owner)?;
+    Ok(conn.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
+             JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
+             WHERE k.account_id = ?1
+               AND (l.cutoff_height IS NOT NULL OR l.done_height IS NULL))
+         AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery c
+             JOIN ironwood_one_time_keys k ON k.id = c.one_time_key_id
+             WHERE k.account_id = ?1)
+         AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_lookup_reads r
+             JOIN ironwood_one_time_keys k ON k.id = r.one_time_key_id
+             JOIN ironwood_one_time_publications p
+               ON p.height = r.publication_height AND p.hash = r.publication_hash
+             WHERE k.account_id = ?1 AND p.state != ?2
+               AND NOT (p.state = ?3 AND p.height < ?4))",
+        params![owner.0, ACCEPTED, PROVISIONAL, u32::from(start)],
+        |r| r.get(0),
+    )?)
 }
 
 /// Whether `account` may be issued new swap addresses: it was declared fresh, or its pass
@@ -222,25 +230,7 @@ pub(crate) fn status<P: Parameters>(
     } else {
         vec![]
     };
-    let witnesses = conn
-        .prepare(
-            "SELECT k.purpose, k.key_index, p.position, substr(p.encrypted_note, 33, 32)
-             FROM ironwood_one_time_payment_recovery p
-             JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
-             JOIN ironwood_one_time_publications u
-               ON u.height = p.publication_height AND u.hash = p.publication_hash
-             WHERE k.account_id = ?1 AND p.scan_hint = 0 AND p.witness IS NULL
-               AND u.state != ?2
-             ORDER BY p.height, p.position",
-        )?
-        .query_and_then(params![owner.0, REJECTED], |r| {
-            Ok::<_, SqliteClientError>(WitnessRequest {
-                key: stored_key_id(r)?,
-                position: r.get(2)?,
-                cmx: r.get(3)?,
-            })
-        })?
-        .collect::<Result<_, _>>()?;
+    let witnesses = witness_requests(conn, owner.0)?;
     let closed = conn
         .prepare(
             "SELECT purpose, key_index, receiver FROM ironwood_one_time_keys
@@ -254,9 +244,7 @@ pub(crate) fn status<P: Parameters>(
             })
         })?
         .collect::<Result<_, _>>()?;
-    let witness_anchor_floor = scanned_tip(conn)?.map_or(BlockHeight::from(0), |tip| {
-        tip.height.saturating_sub(crate::PRUNING_DEPTH)
-    });
+    let witness_anchor_floor = witness_anchor_floor(conn)?;
     Ok(Some(DiscoveryStatus {
         publication: usable.map(|pass| pass.publication),
         complete,
@@ -265,6 +253,42 @@ pub(crate) fn status<P: Parameters>(
         lookups,
         witnesses,
         witness_anchor_floor,
+    }))
+}
+
+/// Account `owner`'s late candidates whose inclusion path is due, unless their publication
+/// was rejected.
+pub(in crate::wallet::one_time_ivk) fn witness_requests(
+    conn: &Connection,
+    owner: i64,
+) -> Result<Vec<WitnessRequest>, SqliteClientError> {
+    conn.prepare(
+        "SELECT k.purpose, k.key_index, p.position, substr(p.encrypted_note, 33, 32)
+         FROM ironwood_one_time_payment_recovery p
+         JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
+         JOIN ironwood_one_time_publications u
+           ON u.height = p.publication_height AND u.hash = p.publication_hash
+         WHERE k.account_id = ?1 AND p.scan_hint = 0 AND p.witness IS NULL
+           AND u.state != ?2
+         ORDER BY p.height, p.position",
+    )?
+    .query_and_then(params![owner, REJECTED], |r| {
+        Ok::<_, SqliteClientError>(WitnessRequest {
+            key: stored_key_id(r)?,
+            position: r.get(2)?,
+            cmx: r.get(3)?,
+        })
+    })?
+    .collect()
+}
+
+/// The lowest block a late candidate's inclusion path may be anchored at (see
+/// `DiscoveryStatus::witness_anchor_floor`).
+pub(in crate::wallet::one_time_ivk) fn witness_anchor_floor(
+    conn: &Connection,
+) -> Result<BlockHeight, SqliteClientError> {
+    Ok(scanned_tip(conn)?.map_or(BlockHeight::from(0), |tip| {
+        tip.height.saturating_sub(crate::PRUNING_DEPTH)
     }))
 }
 

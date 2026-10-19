@@ -2,8 +2,8 @@
 
 use zcash_client_backend::data_api::one_time_ivk::coverage::{
     CoverageOutcome, CoverageState, CoverageStep, CoverageTarget, DirectoryHistory, Obligation,
-    ObligationReceivers, OneTimeIvkCoverageRead as _, OneTimeIvkCoverageWrite as _, Snapshot,
-    Window,
+    ObligationReceivers, OneTimeIvkCoverageRead as _, OneTimeIvkCoverageWrite as _, RecoveryStatus,
+    Snapshot, Window,
 };
 
 use super::{WINDOW_FLOOR, generation};
@@ -871,4 +871,152 @@ fn a_rebootstrap_retires_the_obligations_it_covers() {
     assert_eq!(lookup(&st, sparse), Some((Some(u32::from(h1)), None, 0, 0)));
     let late = bucket(&st, h0 - 3, h0);
     assert_eq!(record(&mut st, account, owed, late, &[]).unwrap(), Stale);
+}
+
+/// `account`'s recovery status.
+fn status(st: &State, account: AccountUuid) -> RecoveryStatus {
+    let db = st.wallet().db();
+    db.one_time_recovery_status(account).unwrap().unwrap()
+}
+
+/// A seen hit registers as seen, blocks issuance and grows its window, but queues no
+/// lookup. The check counts as done only once a test of the whole, unchanged set finds
+/// nothing new, and any later growth clears it. A hit past its window is refused, so a
+/// false match cannot widen the window without bound.
+#[test]
+fn seen_hits_grow_the_window_until_a_check_is_stable() {
+    let (mut st, account) = prepared();
+    let now = clock_now();
+    let hit = KeyId::new(Purpose::Receive, 95);
+    let generation = frontier_generation(&st, account);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        !db.record_one_time_seen(account, generation, &[hit], now)
+            .unwrap()
+    );
+    assert_eq!(facts(&st, hit), (false, true, true));
+    assert_eq!(lookup(&st, hit), None);
+    let state = coverage(&st, account);
+    assert_eq!(state.windows[0].end, 95 + 31);
+    assert_eq!(status(&st, account).seen_checked_at, None);
+
+    let db = st.wallet_mut().db_mut();
+    let past = KeyId::new(Purpose::Receive, 95 + 31);
+    assert!(matches!(
+        db.record_one_time_seen(account, state.generation, &[past], now),
+        Err(SqliteClientError::InvalidOneTimeIvkInput(_))
+    ));
+    // Not derived yet, so not every receiver was tested.
+    assert!(
+        !db.record_one_time_seen(account, state.generation, &[], now)
+            .unwrap()
+    );
+    assert!(db.prepare_one_time_coverage(account, 1_000, now).unwrap());
+    assert!(
+        db.record_one_time_seen(account, state.generation, &[hit], now)
+            .unwrap()
+    );
+    assert_eq!(status(&st, account).seen_checked_at, Some(now));
+
+    let issued = KeyId::new(Purpose::Refund, 90);
+    let db = st.wallet_mut().db_mut();
+    tx(db, |c, p| {
+        register(
+            c,
+            p,
+            account,
+            issued,
+            start(),
+            true,
+            Discovery::Funding,
+            now,
+        )
+        .map(|_| ())
+    })
+    .unwrap();
+    assert_eq!(status(&st, account).seen_checked_at, None);
+}
+
+/// The current receiver-set generation of `account`.
+fn frontier_generation(st: &State, account: AccountUuid) -> u64 {
+    let CoverageTarget::Frontier { generation } = frontier(st, account) else {
+        unreachable!()
+    };
+    generation
+}
+
+/// Unpinning drops only the target's own pinned snapshot at its current generation, with
+/// an obligation's bridging from it, so the target starts again from a newer one.
+#[test]
+fn an_unpinned_snapshot_gives_way_to_a_newer_one() {
+    use CoverageOutcome::*;
+    let (mut st, account) = prepared();
+    let top = tip(&st).height;
+    let (old, newer) = (snapshot(&st, top - 6), snapshot(&st, top - 3));
+    let target = frontier(&st, account);
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(
+        db.pin_one_time_snapshot(account, target, old).unwrap(),
+        Some(old)
+    );
+    assert!(!db.unpin_one_time_snapshot(account, target, newer).unwrap());
+    let stale = CoverageTarget::Frontier {
+        generation: frontier_generation(&st, account) + 1,
+    };
+    let db = st.wallet_mut().db_mut();
+    assert!(!db.unpin_one_time_snapshot(account, stale, old).unwrap());
+    assert!(db.unpin_one_time_snapshot(account, target, old).unwrap());
+    assert_eq!(
+        db.pin_one_time_snapshot(account, target, newer).unwrap(),
+        Some(newer)
+    );
+    let recorded = record(&mut st, account, target, cumulative(newer), &[]);
+    assert_eq!(recorded.unwrap(), Recorded);
+
+    let sparse = KeyId::new(Purpose::Refund, 1_000_000);
+    register_sparse(&mut st, account, sparse).unwrap();
+    let id = coverage(&st, account).obligations[0].id;
+    let target = obligation(&st, account, id);
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(
+        db.pin_one_time_snapshot(account, target, old).unwrap(),
+        Some(old)
+    );
+    let tested = record(&mut st, account, target, cumulative(old), &[]);
+    assert_eq!(tested.unwrap(), Recorded);
+    assert_eq!(coverage(&st, account).obligations[0].bridged, Some(top - 6));
+    let db = st.wallet_mut().db_mut();
+    assert!(db.unpin_one_time_snapshot(account, target, old).unwrap());
+    let restarted = &coverage(&st, account).obligations[0];
+    assert_eq!((restarted.snapshot, restarted.bridged), (None, None));
+}
+
+/// Check swap history restarts every registered key's lookup from page zero, due through
+/// at least its cutoff, and registers each found receiver without allocating it.
+#[test]
+fn check_swap_history_restarts_every_lookup() {
+    let (mut st, account) = prepared();
+    let top = tip(&st).height;
+    let hit = KeyId::new(Purpose::Receive, 3);
+    bootstrap(&mut st, account, top - 6, &[hit]);
+    let now = clock_now();
+    let revision = publication_at(&st, top - 6);
+    let db = st.wallet_mut().db_mut();
+    let ticket = &db.dispatch_one_time_lookups(account, now).unwrap()[0];
+    assert!(
+        db.record_one_time_lookup_page(account, ticket, revision, 0, &[], true, now)
+            .unwrap()
+    );
+    assert!(status(&st, account).complete);
+
+    let found = KeyId::new(Purpose::Refund, 7);
+    let db = st.wallet_mut().db_mut();
+    db.restart_one_time_lookups(account, &[found], top - 2, now)
+        .unwrap();
+    let cutoff = u32::from(top - 2);
+    assert_eq!(lookup(&st, hit), Some((Some(cutoff), None, 0, 1)));
+    assert_eq!(lookup(&st, found), Some((Some(cutoff), None, 0, 1)));
+    assert_eq!(facts(&st, found), (false, false, false));
+    let status = status(&st, account);
+    assert_eq!((status.lookups, status.complete), (2, false));
 }

@@ -22,7 +22,9 @@ and this library adheres to Rust's notion of
   unauthenticated funding memo's) joins the receiver set alone, and receivers that join
   after the frontier owe its history in the same transaction. A rewind lowers the frontier
   and obligations to its floor and makes lookups done above it due again; lowering a
-  birthday owes the whole receiver set the newly eligible history.
+  birthday owes the whole receiver set the newly eligible history and restarts every
+  lookup from page zero. Seen hits grow the windows without a lookup, and any later
+  window growth makes the seen check due again.
 - Refund memo recovery runs for every account with an Orchard viewing key, fresh accounts
   included, after block storage, full transaction storage, Enhance PIR memo storage and
   late admission. An authenticated memo now promotes its key even when its lookup was

@@ -41,3 +41,7 @@ zcash_primitives.workspace = true
 [[test]]
 name = "discovery"
 required-features = ["wallet"]
+
+[[test]]
+name = "recovery"
+required-features = ["wallet"]

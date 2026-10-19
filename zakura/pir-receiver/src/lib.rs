@@ -15,19 +15,37 @@
 //! directory's answer is wrong, traffic to the wallet's other services can differ from an
 //! honest answer's, another route to the test above.
 //!
+//! Continuous recovery tests receivers locally against objects every wallet downloads
+//! alike on a common schedule: the catalog head, closed paid buckets, cumulative paid
+//! snapshots and the seen set. Those downloads reveal no membership, though one triggered
+//! by a window's growth reveals activity. A lookup after a bucket hit points to the
+//! receivers paid in that bucket, so repeated payments allow intersection.
+//!
 //! `fetch_seen` downloads the swap provider seen sets that a wallet checks before issuing
-//! a swap address. The `wallet` feature adds `discover`, which runs discovery for any
-//! wallet store that implements the backend's `OneTimeIvkRestoreWrite`. The caller
-//! supplies transports, which carry its route policy, cancellation and timeouts, and a
-//! `WriteLock` that serializes wallet writes with its other writers. Dropping a `discover`
-//! future at any await is safe: each wallet step commits on its own.
+//! a swap address. The `wallet` feature adds `recover` and `check_history`, which run
+//! continuous recovery for any wallet store that implements the backend's
+//! `OneTimeIvkCoverageWrite`, and `discover`, which runs the older discovery pass over its
+//! `OneTimeIvkRestoreWrite`. The caller supplies transports, which carry its route policy,
+//! cancellation and timeouts, and a `WriteLock` that serializes wallet writes with its
+//! other writers. Dropping any of these futures at any await is safe: each wallet step
+//! commits on its own.
 
 #[cfg(feature = "wallet")]
 mod discovery;
+#[cfg(feature = "wallet")]
+mod recovery;
 mod seen;
 #[cfg(feature = "wallet")]
-pub use discovery::{Discovered, Error, FIRST_WINDOW, GAP, KEYS_PER_RUN, WriteLock, discover};
+mod session;
+#[cfg(feature = "wallet")]
+pub use discovery::{Discovered, FIRST_WINDOW, GAP, KEYS_PER_RUN, discover};
+#[cfg(feature = "wallet")]
+pub use recovery::{
+    DERIVE_PER_RUN, Delay, OBJECTS_PER_RUN, Recovered, SEEN_REFRESH_SECS, check_history, recover,
+};
 pub use seen::{Seen, fetch_seen};
+#[cfg(feature = "wallet")]
+pub use session::{Error, WriteLock};
 
 pub use receiver_pir::{Error as DirectoryError, transport::Transport};
 /// The directory format and client underneath, for callers that need them directly.

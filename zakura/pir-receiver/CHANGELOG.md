@@ -9,6 +9,13 @@
   `one_time_ivk::restore::OneTimeIvkRestoreWrite`, with `Transport`, `WriteLock`,
   `Discovered`, `Error`, `FIRST_WINDOW`, `GAP`, `KEYS_PER_RUN` and `MAINNET_GENESIS`.
   `wallet` enables the backend's `orchard` feature.
+- `recover` and `check_history`, behind the `wallet` feature: continuous recovery of an
+  account's one-time keys from a directory's catalog, paid buckets, cumulative
+  snapshots and seen set, for any store implementing the backend's
+  `one_time_ivk::coverage::OneTimeIvkCoverageWrite`, and "Check swap history", which reads
+  every window receiver's history over PIR whatever the paid sets say. They return
+  `Recovered` and `Delay`, with `DERIVE_PER_RUN`, `OBJECTS_PER_RUN` and
+  `SEEN_REFRESH_SECS`.
 - `fetch_seen` and `Seen`: a publication's swap provider seen sets, which a wallet
   checks before issuing a swap address. They need no `wallet` feature.
 

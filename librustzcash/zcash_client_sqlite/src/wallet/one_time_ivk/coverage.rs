@@ -27,7 +27,8 @@ use zcash_client_backend::data_api::{
     one_time_ivk::{
         coverage::{
             CoverageOutcome, CoverageState, CoverageStep, CoverageTarget, DirectoryHistory,
-            LookupTicket, Obligation, ObligationReceivers, ReceiverSet, Snapshot, Window,
+            LookupTicket, Obligation, ObligationReceivers, ReceiverSet, RecoveryStatus, Snapshot,
+            Window,
         },
         restore::{DirectoryPayment, DiscoveryWork, PublicationEnd},
     },
@@ -38,8 +39,11 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
     Discovery, KeyId, Purpose, account_key, corrupt, decode_index, decode_purpose, invalid,
-    purpose_code, register, restore::discovery, restore::recovery, restore_start, stored_key_id,
-    swap::RECEIVE_GAP_LIMIT,
+    purpose_code, register,
+    restore::discovery,
+    restore::recovery,
+    restore_start, stored_key_id,
+    swap::{RECEIVE_GAP_LIMIT, reservations::record_provider_seen},
 };
 use crate::wallet::{
     self,
@@ -69,6 +73,7 @@ struct Recovery {
     history: Option<DirectoryHistory>,
     frontier: Option<(ChainPoint, u64)>,
     bootstrap: Option<Snapshot>,
+    seen_checked_at: Option<i64>,
 }
 
 impl Recovery {
@@ -92,12 +97,13 @@ fn recovery(conn: &Connection, owner: i64) -> Result<Recovery, SqliteClientError
         Option<([u8; 32], u64)>,
         Option<(u32, [u8; 32], u64)>,
         Option<(u32, [u8; 32], [u8; 32])>,
+        Option<i64>,
     );
     let stored: Option<Row> = conn
         .query_row(
             "SELECT generation, receive_end, receive_derived, refund_end, refund_derived,
                 catalog, epoch, frontier_height, frontier_hash, tested_generation,
-                bootstrap_height, bootstrap_hash, bootstrap_digest
+                bootstrap_height, bootstrap_hash, bootstrap_digest, seen_checked_at
              FROM ironwood_one_time_recovery WHERE account_id = ?1",
             [owner],
             |r| {
@@ -114,11 +120,13 @@ fn recovery(conn: &Connection, owner: i64) -> Result<Recovery, SqliteClientError
                     bootstrap
                         .map(|h| Ok::<_, rusqlite::Error>((h, r.get(11)?, r.get(12)?)))
                         .transpose()?,
+                    r.get(13)?,
                 ))
             },
         )
         .optional()?;
-    let (generation, ends, history, frontier, bootstrap) = stored.unwrap_or_default();
+    let (generation, ends, history, frontier, bootstrap, seen_checked_at) =
+        stored.unwrap_or_default();
     let point = |height: u32, hash: [u8; 32]| ChainPoint {
         height: BlockHeight::from(height),
         hash: BlockHash(hash),
@@ -143,11 +151,13 @@ fn recovery(conn: &Connection, owner: i64) -> Result<Recovery, SqliteClientError
             cutoff: point(h, hash),
             digest,
         }),
+        seen_checked_at,
     })
 }
 
 /// Grows account `owner`'s window of purpose code `purpose` to cover its keys that advance
-/// allocation (see the module docs), owing the indices it adds their history.
+/// allocation (see the module docs), owing the indices it adds their history. The indices
+/// it adds were never checked against a seen set, so the account's seen check is cleared.
 pub(super) fn grow_window(
     conn: &rusqlite::Transaction<'_>,
     owner: i64,
@@ -171,7 +181,8 @@ pub(super) fn grow_window(
         conn.execute(
             &format!(
                 "INSERT INTO ironwood_one_time_recovery (account_id, {column}) VALUES (?1, ?2)
-                 ON CONFLICT (account_id) DO UPDATE SET {column} = excluded.{column}"
+                 ON CONFLICT (account_id) DO UPDATE SET {column} = excluded.{column},
+                     seen_checked_at = NULL"
             ),
             params![owner, target],
         )?;
@@ -538,7 +549,9 @@ pub(crate) fn record<P: Parameters>(
             }
         }
         CoverageTarget::Obligation { id, .. } => {
-            let Some(found) = account_obligation(conn, owner.0, id)? else {
+            // An obligation's window receivers may not be derived yet.
+            let Some(found) = account_obligation(conn, owner.0, id)?.filter(|_| row.complete())
+            else {
                 return Ok(CoverageOutcome::Stale);
             };
             let continues = match (step.start, found.bridged) {
@@ -732,6 +745,166 @@ pub(crate) fn record_page<P: Parameters>(
         records,
         complete,
         now,
+    )
+}
+
+/// Implements `OneTimeIvkCoverageRead::one_time_recovery_status`.
+pub(crate) fn recovery_status<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    account: AccountUuid,
+) -> Result<Option<RecoveryStatus>, SqliteClientError> {
+    let Some(coverage) = state(conn, params, account)? else {
+        return Ok(None);
+    };
+    let (owner, _) = account_key(conn, params, account)?;
+    let lookups: usize = conn.query_row(
+        "SELECT COUNT(*) FROM ironwood_one_time_lookups l
+         JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
+         WHERE k.account_id = ?1 AND l.cutoff_height IS NOT NULL",
+        [owner.0],
+        |r| r.get(0),
+    )?;
+    let derived = coverage.windows.iter().all(|w| w.derived == w.end);
+    let complete = coverage.frontier.is_some()
+        && derived
+        && coverage.obligations.is_empty()
+        && discovery::settled(conn, params, owner)?;
+    Ok(Some(RecoveryStatus {
+        frontier: coverage.frontier.map(|(point, _)| point.height),
+        obligations: coverage.obligations.len(),
+        lookups,
+        witnesses: discovery::witness_requests(conn, owner.0)?,
+        witness_anchor_floor: discovery::witness_anchor_floor(conn)?,
+        seen_checked_at: recovery(conn, owner.0)?.seen_checked_at,
+        complete,
+    }))
+}
+
+/// Implements `OneTimeIvkCoverageWrite::unpin_one_time_snapshot`.
+pub(crate) fn unpin<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    account: AccountUuid,
+    target: CoverageTarget,
+    snapshot: Snapshot,
+) -> Result<bool, SqliteClientError> {
+    let (owner, _) = account_key(conn, params, account)?;
+    if generation(target) != recovery(conn, owner.0)?.generation {
+        return Ok(false);
+    }
+    let pinned = params![
+        owner.0,
+        u32::from(snapshot.cutoff.height),
+        snapshot.cutoff.hash.0,
+        snapshot.digest
+    ];
+    let dropped = match target {
+        CoverageTarget::Frontier { .. } => conn.execute(
+            "UPDATE ironwood_one_time_recovery
+             SET bootstrap_height = NULL, bootstrap_hash = NULL, bootstrap_digest = NULL
+             WHERE account_id = ?1 AND bootstrap_height = ?2 AND bootstrap_hash = ?3
+               AND bootstrap_digest = ?4",
+            pinned,
+        )?,
+        CoverageTarget::Obligation { id, .. } => conn.execute(
+            "UPDATE ironwood_one_time_obligations
+             SET cutoff_height = NULL, cutoff_hash = NULL, cutoff_digest = NULL,
+                 bridged_height = NULL
+             WHERE account_id = ?1 AND cutoff_height = ?2 AND cutoff_hash = ?3
+               AND cutoff_digest = ?4 AND id = ?5",
+            params![
+                owner.0,
+                u32::from(snapshot.cutoff.height),
+                snapshot.cutoff.hash.0,
+                snapshot.digest,
+                id
+            ],
+        )?,
+    };
+    Ok(dropped == 1)
+}
+
+/// Implements `OneTimeIvkCoverageWrite::record_one_time_seen`.
+pub(crate) fn record_seen<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    account: AccountUuid,
+    generation: u64,
+    hits: &[KeyId],
+    now: i64,
+) -> Result<bool, SqliteClientError> {
+    let (owner, _) = account_key(conn, params, account)?;
+    let before = recovery(conn, owner.0)?;
+    let start = restore_start(conn, params, owner)?;
+    for hit in hits {
+        purpose_code(hit.purpose())?;
+        // A sparse key never widens a window, however a seen set's false match lands.
+        if hit.index() >= before.window(hit.purpose()).end {
+            return Err(invalid("seen hit outside its window"));
+        }
+        let (id, _) = register(
+            conn,
+            params,
+            account,
+            *hit,
+            start,
+            true,
+            Discovery::Funding,
+            now,
+        )?;
+        record_provider_seen(conn, id)?;
+    }
+    let after = recovery(conn, owner.0)?;
+    let stable =
+        generation == before.generation && after.generation == generation && after.complete();
+    if stable {
+        conn.execute(
+            "UPDATE ironwood_one_time_recovery SET seen_checked_at = ?2 WHERE account_id = ?1",
+            params![owner.0, now],
+        )?;
+    }
+    Ok(stable)
+}
+
+/// Implements `OneTimeIvkCoverageWrite::restart_one_time_lookups`.
+pub(crate) fn restart_lookups<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    account: AccountUuid,
+    found: &[KeyId],
+    cutoff: BlockHeight,
+    now: i64,
+) -> Result<(), SqliteClientError> {
+    let (owner, _) = account_key(conn, params, account)?;
+    let start = restore_start(conn, params, owner)?;
+    for key in found {
+        if registered(conn, owner.0, *key)?.is_none() {
+            register(
+                conn,
+                params,
+                account,
+                *key,
+                start,
+                false,
+                Discovery::Funding,
+                now,
+            )?;
+        }
+    }
+    conn.execute(
+        "INSERT INTO ironwood_one_time_lookups (one_time_key_id, cutoff_height)
+         SELECT id, ?2 FROM ironwood_one_time_keys WHERE account_id = ?1 AND true
+         ON CONFLICT (one_time_key_id) DO UPDATE SET
+             cutoff_height = MAX(COALESCE(cutoff_height, 0), COALESCE(done_height, 0),
+                 excluded.cutoff_height),
+             attempts = 0, next_attempt_at = 0",
+        params![owner.0, u32::from(cutoff)],
+    )?;
+    restart_cursor(
+        conn,
+        "SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1",
+        owner.0,
     )
 }
 

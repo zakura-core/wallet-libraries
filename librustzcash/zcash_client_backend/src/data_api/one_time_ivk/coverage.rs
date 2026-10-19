@@ -24,7 +24,7 @@ use zcash_protocol::consensus::BlockHeight;
 
 use super::{
     OneTimeIvkRead, OneTimeIvkWrite,
-    restore::{DirectoryPayment, DiscoveryWork, LookupWork, PublicationEnd},
+    restore::{DirectoryPayment, DiscoveryWork, LookupWork, PublicationEnd, WitnessRequest},
 };
 use crate::data_api::{WalletRead, transparent_ledger::ChainPoint};
 
@@ -188,6 +188,31 @@ pub struct LookupTicket {
     pub generation: u64,
 }
 
+/// How far an account's recovery has come, for the app to show apart from chain sync.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryStatus {
+    /// The frontier, if established: how far the directory's paid sets were tested against
+    /// the whole receiver set.
+    pub frontier: Option<BlockHeight>,
+    /// Outstanding historical obligations.
+    pub obligations: usize,
+    /// Lookups not done through their target, due now or backed off.
+    pub lookups: usize,
+    /// Late candidates whose inclusion path is due.
+    pub witnesses: Vec<WitnessRequest>,
+    /// The lowest block a late candidate's inclusion path may be anchored at (see
+    /// [`DiscoveryStatus::witness_anchor_floor`](super::restore::DiscoveryStatus::witness_anchor_floor)).
+    pub witness_anchor_floor: BlockHeight,
+    /// When the windows last grew against a seen set until it held none of their
+    /// receivers it had not grown them for, in the caller's clock seconds (see
+    /// [`OneTimeIvkCoverageWrite::record_one_time_seen`]). Any later growth clears it.
+    pub seen_checked_at: Option<i64>,
+    /// Whether recovery is complete through the frontier: it is established, every window
+    /// receiver is derived, and no obligation, lookup or found payment is outstanding.
+    /// A lookup read from a publication the wallet has not judged yet is outstanding too.
+    pub complete: bool,
+}
+
 /// Reads of an account's directory coverage.
 #[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait OneTimeIvkCoverageRead: OneTimeIvkRead {
@@ -200,6 +225,12 @@ pub trait OneTimeIvkCoverageRead: OneTimeIvkRead {
 
     /// The account's receiver set, closed keys included.
     fn one_time_receiver_set(&self, account: Self::AccountId) -> Result<ReceiverSet, Self::Error>;
+
+    /// The account's recovery status, or `None` where [`Self::one_time_coverage`] is.
+    fn one_time_recovery_status(
+        &self,
+        account: Self::AccountId,
+    ) -> Result<Option<RecoveryStatus>, Self::Error>;
 }
 
 /// Writes of an account's directory coverage.
@@ -257,6 +288,48 @@ pub trait OneTimeIvkCoverageWrite: OneTimeIvkWrite + OneTimeIvkCoverageRead {
         account: <Self as WalletRead>::AccountId,
         history: DirectoryHistory,
     ) -> Result<bool, <Self as WalletRead>::Error>;
+
+    /// Drops `snapshot` if it is `target`'s pinned snapshot, with an obligation's bridging
+    /// from it, so the target starts again from a newer one, as when the directory no
+    /// longer serves it or no longer retains the buckets that continue it. Testing a
+    /// newer cumulative snapshot covers everything the old one did, so this leaves no
+    /// hole. Returns whether it dropped it: it does not if the target's generation is not
+    /// current.
+    fn unpin_one_time_snapshot(
+        &mut self,
+        account: <Self as WalletRead>::AccountId,
+        target: CoverageTarget,
+        snapshot: Snapshot,
+    ) -> Result<bool, <Self as WalletRead>::Error>;
+
+    /// Records that a seen set holds `hits`, receivers of the account's windows, which
+    /// were tested against it at receiver-set `generation`. Each hit's key registers as
+    /// seen: it advances allocation, growing its window, and is never issued again. A
+    /// hit queues no lookup. A hit outside its window is an error.
+    ///
+    /// Returns true, and records the check as of `now`
+    /// ([`RecoveryStatus::seen_checked_at`]), if the set is still that generation and
+    /// completely derived, so every window receiver was tested and none was added.
+    /// Otherwise the caller derives the new receivers and tests again.
+    fn record_one_time_seen(
+        &mut self,
+        account: <Self as WalletRead>::AccountId,
+        generation: u64,
+        hits: &[KeyId],
+        now: i64,
+    ) -> Result<bool, <Self as WalletRead>::Error>;
+
+    /// Starts "Check swap history": every registered key's lookup, and one for each of
+    /// `found` (receivers whose history the caller found nonempty without a filter),
+    /// restarts from page zero, due now through at least `cutoff`. A key in `found` that is
+    /// not registered registers without advancing allocation, as a coverage hit does.
+    fn restart_one_time_lookups(
+        &mut self,
+        account: <Self as WalletRead>::AccountId,
+        found: &[KeyId],
+        cutoff: BlockHeight,
+        now: i64,
+    ) -> Result<(), <Self as WalletRead>::Error>;
 
     /// Hands out the account's lookups due at `now`, recording each one's target and
     /// generation as dispatched, which supersedes an earlier ticket.

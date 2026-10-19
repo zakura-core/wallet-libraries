@@ -1,7 +1,14 @@
 # Receiver directory discovery
 
-A restored wallet finds payments to its one-time keys by checking candidate receivers
-against a receiver directory's public filters and looking the paid ones up over PIR.
+A wallet finds payments to its one-time keys by testing its receivers against a
+receiver directory's public paid sets and looking the paid ones up over PIR. With the
+`wallet` feature, `recover` runs one step of an account's continuous recovery on every
+sync and on a timer: it follows the directory's closed hourly paid buckets, bootstraps
+from cumulative snapshots, grows its receiver windows from the seen set, and looks hits
+up through the same paging, hints and late admission discovery uses. `check_history` is
+"Check swap history", which reads every window receiver's history whatever the paid sets
+say. Their rustdoc gives the cadence, the budgets and how failures delay recovery.
+
 `fetch_seen` downloads the swap provider seen sets that a wallet checks before issuing a
 swap address. With the `wallet` feature, `discover` runs one account's discovery for any
 wallet store that implements the backend's restore traits
@@ -20,8 +27,9 @@ Applications supply:
 - the wallet's consensus parameters, the network's genesis hash (`MAINNET_GENESIS` on
   mainnet) and the clock.
 
-`tests/discovery.rs` serves a directory in process through the receiver service's own
-routes and real PIR, and checks each of those rules against restored SQLite wallets.
+`tests/discovery.rs` and `tests/recovery.rs` serve a directory in process through the
+receiver service's own routes, recovery objects and real PIR, and check each of those
+rules against restored SQLite wallets.
 
 ## Validation
 
