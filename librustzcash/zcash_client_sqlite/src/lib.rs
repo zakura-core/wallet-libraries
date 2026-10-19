@@ -124,6 +124,11 @@ use {
         data_api::{
             one_time_ivk::{
                 OneTimeIvkRead, OneTimeIvkWrite,
+                coverage::{
+                    CoverageOutcome, CoverageState, CoverageStep, CoverageTarget, DirectoryHistory,
+                    LookupTicket, OneTimeIvkCoverageRead, OneTimeIvkCoverageWrite, ReceiverSet,
+                    Snapshot,
+                },
                 restore::{
                     DirectoryPayment, DiscoveryStatus, DiscoveryWork, EnumerationCursor,
                     FilterCheck, OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite, PublicationEnd,
@@ -2641,6 +2646,12 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         match result {
             EnhancePirBatchResult::Committed(_) => {
                 wallet::enhance_pir::retain_live_failures(&tx, &session)?;
+                // A retrieved memo can be a funding memo, recovered with the memo itself.
+                wallet::one_time_ivk::restore::recovery::recover_all(
+                    &tx,
+                    &self.params,
+                    wallet::one_time_ivk::unix_now(&self.clock),
+                )?;
                 tx.commit()?;
                 session.commit();
                 transparent_session.commit();
@@ -2866,6 +2877,103 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
             let sessions = wdb.one_time_sessions();
             wallet::one_time_ivk::restore::discovery::record_witness(
                 wdb.conn.0, wdb.params, &sessions, account, key, position, anchor, siblings, now,
+            )
+        })
+    }
+}
+
+#[cfg(feature = "orchard")]
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIvkCoverageRead
+    for WalletDb<C, P, CL, R>
+{
+    fn one_time_coverage(
+        &self,
+        account: AccountUuid,
+    ) -> Result<Option<CoverageState>, Self::Error> {
+        wallet::one_time_ivk::coverage::state(self.conn.borrow(), &self.params, account)
+    }
+
+    fn one_time_receiver_set(&self, account: AccountUuid) -> Result<ReceiverSet, Self::Error> {
+        wallet::one_time_ivk::coverage::receiver_set(self.conn.borrow(), &self.params, account)
+    }
+}
+
+#[cfg(feature = "orchard")]
+impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
+    OneTimeIvkCoverageWrite for WalletDb<C, P, CL, R>
+{
+    fn prepare_one_time_coverage(
+        &mut self,
+        account: AccountUuid,
+        budget: u32,
+        now: i64,
+    ) -> Result<bool, SqliteClientError> {
+        self.transactionally(|wdb| {
+            wallet::one_time_ivk::coverage::prepare(wdb.conn.0, wdb.params, account, budget, now)
+        })
+    }
+
+    fn pin_one_time_snapshot(
+        &mut self,
+        account: AccountUuid,
+        target: CoverageTarget,
+        snapshot: Snapshot,
+    ) -> Result<Option<Snapshot>, SqliteClientError> {
+        self.transactionally(|wdb| {
+            wallet::one_time_ivk::coverage::pin(wdb.conn.0, wdb.params, account, target, snapshot)
+        })
+    }
+
+    fn record_one_time_coverage(
+        &mut self,
+        account: AccountUuid,
+        target: CoverageTarget,
+        step: CoverageStep,
+        hits: &[KeyId],
+        now: i64,
+    ) -> Result<CoverageOutcome, SqliteClientError> {
+        self.transactionally(|wdb| {
+            wallet::one_time_ivk::coverage::record(
+                wdb.conn.0, wdb.params, account, target, step, hits, now,
+            )
+        })
+    }
+
+    fn reset_one_time_history(
+        &mut self,
+        account: AccountUuid,
+        history: DirectoryHistory,
+    ) -> Result<bool, SqliteClientError> {
+        self.transactionally(|wdb| {
+            wallet::one_time_ivk::coverage::reset_history(wdb.conn.0, wdb.params, account, history)
+        })
+    }
+
+    fn dispatch_one_time_lookups(
+        &mut self,
+        account: AccountUuid,
+        now: i64,
+    ) -> Result<Vec<LookupTicket>, SqliteClientError> {
+        self.transactionally(|wdb| {
+            wallet::one_time_ivk::coverage::dispatch(wdb.conn.0, wdb.params, account, now)
+        })
+    }
+
+    fn record_one_time_lookup_page(
+        &mut self,
+        account: AccountUuid,
+        ticket: &LookupTicket,
+        revision: PublicationEnd,
+        page: u32,
+        records: &[DirectoryPayment],
+        complete: bool,
+        now: i64,
+    ) -> Result<bool, SqliteClientError> {
+        self.transactionally(|wdb| {
+            let sessions = wdb.one_time_sessions();
+            wallet::one_time_ivk::coverage::record_page(
+                wdb.conn.0, wdb.params, &sessions, account, ticket, revision, page, records,
+                complete, now,
             )
         })
     }
@@ -3511,6 +3619,17 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
         }
         Ok(())
     }
+
+    /// Recovers the refund keys of every account's stored funding memos, after storing a
+    /// transaction that may hold one or authenticate one.
+    #[cfg(feature = "orchard")]
+    fn recover_one_time_memos(&self) -> Result<(), SqliteClientError> {
+        wallet::one_time_ivk::restore::recovery::recover_all(
+            self.conn.0,
+            &self.params,
+            wallet::one_time_ivk::unix_now(&self.clock),
+        )
+    }
 }
 
 impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
@@ -3807,7 +3926,10 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             self.gap_limits,
             chain_tip,
             d_tx,
-        )
+        )?;
+        #[cfg(feature = "orchard")]
+        self.recover_one_time_memos()?;
+        Ok(())
     }
 
     fn set_tx_trust(
@@ -5020,6 +5142,12 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             };
             store_decrypted_tx(self, &params, self.gap_limits, tip, d_tx)?;
         }
+        #[cfg(feature = "orchard")]
+        wallet::one_time_ivk::restore::recovery::recover_all(
+            self.conn.borrow(),
+            &params,
+            wallet::one_time_ivk::unix_now(&self.clock),
+        )?;
         Ok(())
     }
 }

@@ -1,9 +1,12 @@
 //! Recovery from authenticated wallet data, independent of the discovery transport.
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use zakura_one_time_ivk::swap::{REFUND_MEMO_MAGIC, RefundMemo};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
-use crate::wallet::one_time_ivk::{Discovery, KeyId, Purpose, account_key, invalid, register};
+use crate::wallet::one_time_ivk::{
+    Discovery, KeyId, Purpose, account_key, authenticate_key, block_issuance, invalid,
+    recovering_accounts, register,
+};
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 /// Implements `WalletDb::recheck_one_time_key_history`.
@@ -84,14 +87,30 @@ pub(in crate::wallet::one_time_ivk) fn refund_memos_pending(
     )?)
 }
 
+/// Runs [`recover_refund_memos`] for every account whose one-time keys are recovered, as
+/// storing a block, a full transaction or a retrieved memo does.
+pub(crate) fn recover_all<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    now: i64,
+) -> Result<(), SqliteClientError> {
+    for account in recovering_accounts(conn, params)? {
+        recover_refund_memos(conn, params, account, now)?;
+    }
+    Ok(())
+}
+
 /// Registers, for a lookup, the refund key of each confirmed internal funding memo, spent
 /// and zero-value ones included, whose own-send evidence (an input of the same account)
 /// authenticates it, unless a key already covers its block. A marked memo that does not
-/// decode is ignored.
+/// decode is ignored. Every memo's key is blocked from issuance, and one that is
+/// authenticated is promoted (see `one_time_ivk::coverage`), whether or not its history
+/// was already covered.
 ///
 /// A marker still lacking that evidence once scanning passed its block was funded before
 /// the birthday or is not this wallet's: its key is looked up without advancing
-/// allocation, so a forged record cannot exhaust the index space.
+/// allocation, so a forged record cannot exhaust the index space. It is sparse: it joins
+/// the receiver set alone and never widens a window.
 pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -131,26 +150,37 @@ pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
         let key_id = KeyId::new(Purpose::Refund, memo.index());
         // Storing the funding transaction already started a key scanned here (see
         // `start_funded_refund_keys`), and an earlier call queued any other.
-        let covered: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys k
-             WHERE k.account_id = ?1 AND k.purpose = 0 AND k.key_index = ?2
-               AND k.scan_from <= ?3 AND (k.active_from <= ?3 OR EXISTS(
-                 SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id)))",
-            params![account_ref.0, key_id.index().to_be_bytes(), height],
-            |row| row.get(0),
-        )?;
-        if !covered {
-            let from = BlockHeight::from(height);
-            register(
-                conn,
-                params,
-                account,
-                key_id,
-                from,
-                authenticated,
-                Discovery::Lookup,
-                now,
-            )?;
+        let covered: Option<i64> = conn
+            .query_row(
+                "SELECT k.id FROM ironwood_one_time_keys k
+                 WHERE k.account_id = ?1 AND k.purpose = 0 AND k.key_index = ?2
+                   AND k.scan_from <= ?3 AND (k.active_from <= ?3 OR EXISTS(
+                     SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id))",
+                params![account_ref.0, key_id.index().to_be_bytes(), height],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let id = match covered {
+            Some(id) => id,
+            None => {
+                let from = BlockHeight::from(height);
+                let lookup = Discovery::Lookup;
+                register(
+                    conn,
+                    params,
+                    account,
+                    key_id,
+                    from,
+                    authenticated,
+                    lookup,
+                    now,
+                )?
+                .0
+            }
+        };
+        block_issuance(conn, id)?;
+        if authenticated {
+            authenticate_key(conn, id)?;
         }
     }
     Ok(())

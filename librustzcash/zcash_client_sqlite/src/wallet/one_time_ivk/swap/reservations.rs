@@ -12,8 +12,9 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{RESERVED, ReservationPolicy, lifecycle::record};
 use crate::wallet::one_time_ivk::{
-    Discovery, KeyId, OneTimeKey, Purpose, account_key, activate, corrupt, decode_index,
-    index_after, invalid, key_by_id, register, restore::discovery, restore_start,
+    Discovery, KeyId, OneTimeKey, Purpose, account_key, activate, authenticate_key, block_issuance,
+    corrupt, coverage::advanced, decode_index, index_after, invalid, key_by_id, register,
+    restore::discovery, restore_start,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
@@ -220,7 +221,7 @@ fn release(conn: &Connection, key: i64, now: i64) -> Result<(), SqliteClientErro
 /// `WalletDb::close_finished_one_time_keys`), however earlier reservations' operations
 /// ended. The placeholder has no request, so no draft or reclaim rule counts it, and its
 /// empty deposit address matches no status. Retiring again adds no second placeholder.
-fn retire(conn: &Connection, key: i64, now: i64) -> Result<(), SqliteClientError> {
+fn retire(conn: &rusqlite::Transaction<'_>, key: i64, now: i64) -> Result<(), SqliteClientError> {
     record_provider_seen(conn, key)?;
     release(conn, key, now)?;
     conn.execute(
@@ -238,7 +239,7 @@ fn retire(conn: &Connection, key: i64, now: i64) -> Result<(), SqliteClientError
 /// exposed: refused without a `seen` set fresh at `now`, and retired (see [`retire`]) if
 /// the provider already has the address. Returns whether it can still be quoted.
 fn check_unquoted(
-    conn: &Connection,
+    conn: &rusqlite::Transaction<'_>,
     key: i64,
     receiver: &[u8; 43],
     provider_seen: bool,
@@ -524,6 +525,12 @@ pub(in crate::wallet::one_time_ivk) fn finish(
             if changed != 1 {
                 return Err(invalid("operation outcome changed"));
             }
+            let key = conn.query_row(
+                "SELECT one_time_key_id FROM ironwood_one_time_operations WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )?;
+            block_issuance(conn, key)?;
         }
         OperationOutcome::Rejected => {
             let changed = conn.execute(
@@ -775,6 +782,7 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
         Discovery::Scan,
         now,
     )?;
+    authenticate_key(conn, key)?;
     // Earlier reservations' requests stay below the floor (see [`LATEST_DEADLINE`]).
     conn.execute(
         "UPDATE ironwood_one_time_keys
@@ -788,7 +796,7 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
 
 /// Records which of `account`'s unseen incoming keys `seen` holds.
 pub(in crate::wallet::one_time_ivk) fn record_seen(
-    conn: &Connection,
+    conn: &rusqlite::Transaction<'_>,
     account: i64,
     seen: &ProviderSeen<'_>,
 ) -> Result<(), SqliteClientError> {
@@ -819,15 +827,15 @@ pub(in crate::wallet::one_time_ivk) fn record_seen(
 
 /// Records that a swap provider was given key `id`'s receiver. The key is never issued
 /// again; an incoming one, like a paid one, extends the restore walk and the gap (see
-/// [`recovery_end`]). Nothing clears this.
+/// [`recovery_end`]), and either widens its receiver window. Nothing clears this.
 pub(in crate::wallet::one_time_ivk) fn record_provider_seen(
-    conn: &Connection,
+    conn: &rusqlite::Transaction<'_>,
     id: i64,
 ) -> Result<(), SqliteClientError> {
     conn.execute(
         "UPDATE ironwood_one_time_keys
-         SET provider_seen = 1, advances_allocation = 1 WHERE id = ?1",
+         SET provider_seen = 1, advances_allocation = 1, issuance_blocked = 1 WHERE id = ?1",
         [id],
     )?;
-    Ok(())
+    advanced(conn, id)
 }

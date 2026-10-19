@@ -292,6 +292,9 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     assert!(pending(&st));
     decrypt_and_store_transaction_with_one_time_ivks(&network, st.wallet_mut(), &tx, Some(mined))
         .unwrap();
+    // Storing the full transaction recovers its memo's key at once.
+    assert_eq!(refund_keys(&st), [(7, u32::from(mined), true)]);
+    exec(st.wallet().conn(), "DELETE FROM ironwood_one_time_keys", []);
 
     // Changing the authenticated scope, or losing own-send evidence, makes the memo
     // ineligible. A marker still waiting for its evidence holds back refund issuance.
@@ -667,6 +670,14 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
             .collect();
         let db = st.wallet_mut().db_mut();
         db.apply_ironwood_enhance_records(&batch).unwrap();
+        // A memo stored over PIR recovers its key with no later block, and one left to
+        // the public path with the full transaction.
+        let public = flagged && !private;
+        let recovered = vec![(7, u32::from(mined), true)];
+        assert_eq!(
+            refund_keys(&st),
+            if public { vec![] } else { recovered.clone() }
+        );
 
         let memo_stored: bool = value(
             st.wallet().conn(),
@@ -675,7 +686,6 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
              WHERE t.txid = ?1 AND n.memo IS NOT NULL)",
             [txid.as_ref()],
         );
-        let public = flagged && !private;
         assert_eq!(memo_stored, !public, "flagged={flagged} private={private}");
         let work = st.wallet().db().transaction_enhancement_work().unwrap();
         assert_eq!(
@@ -693,8 +703,10 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
             )
             .unwrap();
         }
-        recover_memos(&mut st, restored);
-        assert_eq!(refund_keys(&st), [(7, u32::from(mined), true)]);
+        assert_eq!(refund_keys(&st), recovered);
+        assert!(
+            !store::restore::recovery::refund_memos_pending(st.wallet().conn(), restored).unwrap()
+        );
     }
 }
 
@@ -756,4 +768,144 @@ fn lookup_pending(db: &Db, account: AccountUuid) -> bool {
              WHERE a.uuid = ?1 AND l.done_height IS NULL)",
         [account.0],
     )
+}
+
+/// `(authenticated, issuance_blocked, advances_allocation)` of refund key `index`.
+fn refund_facts(st: &State, index: u64) -> (bool, bool, bool) {
+    let sql = "SELECT authenticated, issuance_blocked, advances_allocation
+               FROM ironwood_one_time_keys WHERE purpose = 0 AND key_index = ?1";
+    row(st.wallet().conn(), sql, [index.to_be_bytes()])
+}
+
+/// The first index past `account`'s refund window.
+fn refund_window_end(st: &State, account: AccountUuid) -> u64 {
+    use zcash_client_backend::data_api::one_time_ivk::coverage::OneTimeIvkCoverageRead as _;
+    let coverage = st
+        .wallet()
+        .db()
+        .one_time_coverage(account)
+        .unwrap()
+        .unwrap();
+    coverage.windows[1].end
+}
+
+/// A funding memo without own-send evidence names a sparse key: registered for a lookup and
+/// never issued, but neither authenticated nor widening the refund window, however far its
+/// index. Once the evidence appears, recovery promotes the key although its lookup is
+/// already queued, and the window grows past it. Here the memo arrives without passing a
+/// storage hook, as an older build may have stored it, so preparing coverage finds it.
+#[test]
+fn an_unauthenticated_memo_key_stays_sparse_until_promoted() {
+    use zcash_client_backend::data_api::one_time_ivk::coverage::{
+        OneTimeIvkCoverageRead as _, OneTimeIvkCoverageWrite as _,
+    };
+    let (mut st, first) = ironwood_funded_wallet();
+    let account = st.test_account().cloned().unwrap();
+    let index = 1_000_000;
+    let memo = refund_memo(index);
+    let pays = vec![payment(&p2pkh(7), 100_000, None)];
+    let (_, _, mined) = send(&mut st, pays, &memo);
+    let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
+    let _old_wallet = st.reset();
+    let (restored, _) = st
+        .wallet_mut()
+        .create_account("restored", &seed, account.birthday(), None)
+        .unwrap();
+    st.wallet_mut().update_chain_tip(mined).unwrap();
+    let blocks = u32::from(mined) - u32::from(first) + 1;
+    st.scan_cached_blocks_with_one_time_ivks(first, blocks as usize);
+    assert!(refund_keys(&st).is_empty());
+    let conn = st.wallet().conn();
+    let sql = "SELECT ironwood_received_note_id, transaction_id FROM ironwood_received_note_spends";
+    let spends: Vec<(i64, i64)> = rows(conn, sql, []);
+    exec(conn, "DELETE FROM ironwood_received_note_spends", []);
+    let sql = "UPDATE ironwood_received_notes SET memo = ?1
+               WHERE recipient_key_scope = 1 AND memo IS NULL";
+    exec(conn, sql, [memo.as_slice()]);
+
+    let db = st.wallet_mut().db_mut();
+    db.prepare_one_time_coverage(restored, 0, clock_now())
+        .unwrap();
+    let registered = vec![(index, u32::from(mined), true)];
+    assert_eq!(refund_keys(&st), registered);
+    assert_eq!(refund_facts(&st, index), (false, true, false));
+    assert_eq!(
+        refund_window_end(&st, restored),
+        store::coverage::WINDOW_FLOOR
+    );
+    let set = st.wallet().db().one_time_receiver_set(restored).unwrap();
+    let key = KeyId::new(Purpose::Refund, index);
+    assert!(set.receivers.iter().any(|work| work.key == key));
+
+    let sql = "INSERT INTO ironwood_received_note_spends VALUES (?1, ?2)";
+    for spend in spends {
+        exec(st.wallet().conn(), sql, spend);
+    }
+    let db = st.wallet_mut().db_mut();
+    db.prepare_one_time_coverage(restored, 0, clock_now())
+        .unwrap();
+    assert_eq!(refund_keys(&st), registered);
+    assert_eq!(refund_facts(&st, index), (true, true, true));
+    assert_eq!(refund_window_end(&st, restored), index + 31);
+}
+
+/// A fresh account, which has no discovery to run, still recovers a funding memo another
+/// device of its seed wrote as soon as the scan stores the funding block.
+#[test]
+fn a_fresh_account_recovers_a_funding_memo_once_its_block_is_stored() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet_mut().db_mut();
+    db.mark_one_time_account_fresh(account).unwrap();
+    let fvk = parent(&st);
+    pay(&mut st, &fvk, 1_000_000);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(5);
+    let pays = vec![payment(&p2pkh(7), 100_000, None)];
+    let (_, _, mined) = send(&mut st, pays, &refund_memo(4));
+    let sql = "SELECT COUNT(*) FROM ironwood_one_time_discovery";
+    assert_eq!(value::<u32>(st.wallet().conn(), sql, []), 0);
+    assert_eq!(refund_keys(&st), [(4, u32::from(mined), true)]);
+    assert_eq!(refund_facts(&st, 4), (true, true, true));
+}
+
+/// An account without an Orchard viewing key has no one-time keys to recover, and the
+/// wallet's other accounts still store blocks and recover their memos.
+#[test]
+fn an_account_without_orchard_keys_does_not_stop_block_storage() {
+    use zcash_client_backend::data_api::{
+        Account as _, AccountPurpose, one_time_ivk::coverage::OneTimeIvkCoverageRead as _,
+    };
+    use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
+    let mut st = ironwood_wallet();
+    let network = *st.network();
+    let birthday = st.test_account().unwrap().birthday().clone();
+    let usk = UnifiedSpendingKey::from_seed(&network, &[0x42; 32], zip32::AccountId::ZERO).unwrap();
+    let ufvk = usk.to_unified_full_viewing_key();
+    let sapling = UnifiedFullViewingKey::new(
+        #[cfg(feature = "transparent-inputs")]
+        None,
+        ufvk.sapling().cloned(),
+        None,
+    )
+    .unwrap();
+    let other = st
+        .wallet_mut()
+        .import_account_ufvk(
+            "sapling",
+            &sapling,
+            &birthday,
+            AccountPurpose::ViewOnly,
+            None,
+        )
+        .unwrap();
+    let fvk = parent(&st);
+    pay(&mut st, &fvk, 1_000_000);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(5);
+    let pays = vec![payment(&p2pkh(7), 100_000, None)];
+    let (_, _, mined) = send(&mut st, pays, &refund_memo(4));
+    assert_eq!(refund_keys(&st), [(4, u32::from(mined), true)]);
+    assert_eq!(
+        st.wallet().db().one_time_coverage(other.id()).unwrap(),
+        None
+    );
 }

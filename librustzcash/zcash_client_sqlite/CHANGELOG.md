@@ -16,6 +16,17 @@ and this library adheres to Rust's notion of
   registered every index its publication marks used, and a fresh account waits for none.
 - `wallet::init::migrations::ids::ONE_TIME_IVK_DISCOVERY`, the migration for discovery and
   the spend journal.
+- One-time IVK directory coverage (with `orchard`): `WalletDb` implements the backend's
+  `OneTimeIvkCoverageRead` and `OneTimeIvkCoverageWrite`. Each registered key keeps
+  separate authenticated and issuance-blocking facts, a key outside its window (such as an
+  unauthenticated funding memo's) joins the receiver set alone, and receivers that join
+  after the frontier owe its history in the same transaction. A rewind lowers the frontier
+  and obligations to its floor and makes lookups done above it due again; lowering a
+  birthday owes the whole receiver set the newly eligible history.
+- Refund memo recovery runs for every account with an Orchard viewing key, fresh accounts
+  included, after block storage, full transaction storage, Enhance PIR memo storage and
+  late admission. An authenticated memo now promotes its key even when its lookup was
+  already queued.
 - A spend journal (with `orchard`): every block scan keeps every Ironwood nullifier each
   recognized transaction reveals, matched to a wallet note or not, and records which blocks
   it covered for each account. A rewind drops the entries and coverage

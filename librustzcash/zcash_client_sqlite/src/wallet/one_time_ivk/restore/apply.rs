@@ -13,7 +13,7 @@ use zcash_protocol::{
 };
 
 use super::{PendingPayment, payments::authenticate};
-use crate::wallet::one_time_ivk::{KeyId, corrupt};
+use crate::wallet::one_time_ivk::{KeyId, corrupt, coverage::advanced};
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 /// The handle state that storing a note's transaction routes its enhancement with.
@@ -165,9 +165,12 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     if before_birthday {
         conn.execute(
             "UPDATE ironwood_one_time_keys
-             SET advances_allocation = 1, used = 1, paid_before_birthday = 1 WHERE id = ?1",
+             SET advances_allocation = 1, used = 1, paid_before_birthday = 1,
+                 authenticated = 1, issuance_blocked = 1
+             WHERE id = ?1",
             [key_ref],
         )?;
+        advanced(conn, key_ref)?;
         dequeue()?;
         return Ok(Admission::Admitted);
     }

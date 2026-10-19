@@ -237,6 +237,55 @@ fn a_spent_late_payment_is_admitted_spent_through_the_journal() {
     assert_eq!(one_time_notes(&st), [(100_000, true)]);
 }
 
+/// A funding memo on the change of a transaction that spent a late payment has no own-send
+/// evidence until the payment is admitted, so its key starts sparse. Admitting the payment
+/// spent supplies the evidence, and the key is promoted with no later block.
+#[test]
+fn admitting_a_spent_late_payment_promotes_its_funding_memo() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    let note = candidate
+        .encrypted_note
+        .decrypt(&parent(&st), key8())
+        .unwrap();
+    let spender = IronwoodFvk(parent(&st));
+    let (height, _) = st.generate_next_block_spending(
+        &spender,
+        (*note.nullifier(), Zatoshis::const_from_u64(100_000)),
+        unified(foreign_receiver()),
+        Zatoshis::const_from_u64(20_000),
+    );
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(2);
+    let memo = zcash_protocol::memo::MemoBytes::from_bytes(
+        &zakura_one_time_ivk::swap::RefundMemo::new(3).encode(),
+    )
+    .unwrap();
+    let sql = "UPDATE ironwood_received_notes SET memo = ?1 WHERE recipient_key_scope = 1";
+    exec(st.wallet().conn(), sql, [memo.as_slice()]);
+    let publication = discover(&mut st, account, &[paid(key8())]);
+    let refund = KeyId::new(Purpose::Refund, 3);
+    let facts = |st: &State| -> (bool, bool) {
+        let sql = "SELECT authenticated, advances_allocation FROM ironwood_one_time_keys
+                   WHERE purpose = 0 AND key_index = ?1";
+        row(st.wallet().conn(), sql, [refund.index().to_be_bytes()])
+    };
+    assert_eq!(facts(&st), (false, false));
+
+    let db = st.wallet_mut().db_mut();
+    assert!(look_up(
+        db,
+        account,
+        key8(),
+        publication,
+        std::slice::from_ref(&candidate)
+    ));
+    send_witness(&mut st, key8(), &candidate);
+    assert_eq!(one_time_notes(&st), [(100_000, true)]);
+    assert_eq!(facts(&st), (true, true));
+}
+
 /// A late payment whose sibling leaf the wallet already holds unpruned is admitted with
 /// that sibling intact. Here the sibling is the funder's change after it, its block's last
 /// leaf, which the wallet keeps as a reference once a later scan starts after that block.

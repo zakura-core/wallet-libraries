@@ -17,8 +17,8 @@ use super::{
     reservations::{fresh_seen, record_provider_seen},
 };
 use crate::wallet::one_time_ivk::{
-    Discovery, KeyId, OneTimeKey, Purpose, account_key, activate, decode_index, index_after,
-    invalid, register,
+    Discovery, KeyId, OneTimeKey, Purpose, account_key, activate, authenticate_key, block_issuance,
+    decode_index, index_after, invalid, register,
     restore::{discovery, recovery},
     restore_start,
 };
@@ -51,7 +51,7 @@ pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
         Err(policy) => return Ok(Err(policy)),
     };
     let key = KeyId::new(Purpose::Refund, index);
-    let (_, key) = register(
+    let (id, key) = register(
         conn,
         params,
         account,
@@ -61,6 +61,7 @@ pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
         Discovery::Funding,
         now,
     )?;
+    authenticate_key(conn, id)?;
     Ok(Ok(key))
 }
 
@@ -189,7 +190,7 @@ pub(in crate::wallet::one_time_ivk) fn record_operation<P: Parameters>(
             params![key, deposit, deadline, now],
         )?;
     }
-    Ok(())
+    block_issuance(conn, key)
 }
 
 /// Refund key `key`'s operation for `deposit`, if recorded.

@@ -8,6 +8,13 @@
 //! and floors are dropped; `nullifier_map` keeps its rows until ordinary pruning. Existing
 //! reservations get no operation floor, so every operation on their keys counts as theirs.
 //! No key has a pass's recent watch, since no pass ran.
+//!
+//! It also adds the state of continuous directory recovery (see `one_time_ivk::coverage`):
+//! each key's `authenticated` and `issuance_blocked` facts, each account's receiver
+//! windows and directory coverage, historical obligations, and lookup target generations.
+//! A stored key is authenticated if this wallet reserved it or it was paid, and blocked if
+//! it was paid, seen, quoted and accepted, or is a refund key, which issuance never
+//! reissued. No account has coverage yet.
 use std::collections::HashSet;
 
 use schemerz_rusqlite::RusqliteMigration;
@@ -62,9 +69,13 @@ impl RusqliteMigration for Migration {
                 last_height INTEGER CHECK (last_height BETWEEN 0 AND 4294967295),
                 attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
                 next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+                dispatched_cutoff INTEGER CHECK (dispatched_cutoff BETWEEN 0 AND 4294967295),
+                dispatched_generation INTEGER,
                 CHECK ((applied = 0) = (last_position IS NULL)
                     AND (last_position IS NULL) = (last_nullifier IS NULL)
-                    AND (last_position IS NULL) = (last_height IS NULL))
+                    AND (last_position IS NULL) = (last_height IS NULL)),
+                CHECK ((dispatched_cutoff IS NULL) = (dispatched_generation IS NULL))
             );
             CREATE TABLE ironwood_one_time_lookup_reads (
                 one_time_key_id INTEGER NOT NULL
@@ -137,7 +148,70 @@ impl RusqliteMigration for Migration {
             ALTER TABLE ironwood_one_time_keys ADD COLUMN reservation_floor INTEGER;
 
             ALTER TABLE ironwood_one_time_keys ADD COLUMN pass_watch_height INTEGER
-                CHECK (pass_watch_height BETWEEN 0 AND 4294967295);",
+                CHECK (pass_watch_height BETWEEN 0 AND 4294967295);
+            ALTER TABLE ironwood_one_time_keys ADD COLUMN authenticated INTEGER NOT NULL DEFAULT 0
+                CHECK (authenticated IN (0, 1));
+            ALTER TABLE ironwood_one_time_keys ADD COLUMN issuance_blocked INTEGER NOT NULL
+                DEFAULT 0 CHECK (issuance_blocked IN (0, 1));
+            UPDATE ironwood_one_time_keys SET
+                authenticated = (reserved_at IS NOT NULL OR used = 1
+                    OR (purpose = 0 AND advances_allocation = 1 AND provider_seen = 0)),
+                issuance_blocked = (purpose = 0 OR used = 1 OR provider_seen = 1
+                    OR EXISTS(SELECT 1 FROM ironwood_one_time_operations o
+                        WHERE o.one_time_key_id = ironwood_one_time_keys.id
+                          AND o.reference IS NOT NULL));
+            CREATE TABLE ironwood_one_time_recovery (
+                account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+                generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+                receive_end INTEGER NOT NULL DEFAULT 0 CHECK (receive_end >= 0),
+                receive_derived INTEGER NOT NULL DEFAULT 0
+                    CHECK (receive_derived BETWEEN 0 AND receive_end),
+                refund_end INTEGER NOT NULL DEFAULT 0 CHECK (refund_end >= 0),
+                refund_derived INTEGER NOT NULL DEFAULT 0
+                    CHECK (refund_derived BETWEEN 0 AND refund_end),
+                catalog BLOB CHECK (length(catalog) = 32),
+                epoch INTEGER CHECK (epoch >= 0),
+                frontier_height INTEGER CHECK (frontier_height BETWEEN 0 AND 4294967295),
+                frontier_hash BLOB CHECK (length(frontier_hash) = 32),
+                tested_generation INTEGER,
+                bootstrap_height INTEGER CHECK (bootstrap_height BETWEEN 0 AND 4294967295),
+                bootstrap_hash BLOB CHECK (length(bootstrap_hash) = 32),
+                bootstrap_digest BLOB CHECK (length(bootstrap_digest) = 32),
+                CHECK ((catalog IS NULL) = (epoch IS NULL)),
+                CHECK ((frontier_height IS NULL) = (frontier_hash IS NULL)
+                    AND (frontier_height IS NULL) = (tested_generation IS NULL)
+                    AND (frontier_height IS NULL OR catalog IS NOT NULL)),
+                CHECK ((bootstrap_height IS NULL) = (bootstrap_hash IS NULL)
+                    AND (bootstrap_height IS NULL) = (bootstrap_digest IS NULL))
+            );
+            CREATE TABLE ironwood_one_time_receiver_cache (
+                account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                purpose INTEGER NOT NULL CHECK (purpose BETWEEN 0 AND 255),
+                key_index BLOB NOT NULL CHECK (typeof(key_index) = 'blob' AND length(key_index) = 8),
+                receiver BLOB NOT NULL CHECK (typeof(receiver) = 'blob' AND length(receiver) = 43),
+                PRIMARY KEY (account_id, purpose, key_index)
+            );
+            CREATE TABLE ironwood_one_time_obligations (
+                id INTEGER PRIMARY KEY,
+                account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                purpose INTEGER NOT NULL CHECK (purpose BETWEEN 0 AND 255),
+                one_time_key_id INTEGER REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
+                range_start INTEGER CHECK (range_start >= 0),
+                range_end INTEGER CHECK (range_end > range_start),
+                lower_height INTEGER NOT NULL CHECK (lower_height BETWEEN 0 AND 4294967295),
+                through_height INTEGER NOT NULL CHECK (through_height BETWEEN 0 AND 4294967295),
+                cutoff_height INTEGER CHECK (cutoff_height BETWEEN 0 AND 4294967295),
+                cutoff_hash BLOB CHECK (length(cutoff_hash) = 32),
+                cutoff_digest BLOB CHECK (length(cutoff_digest) = 32),
+                bridged_height INTEGER CHECK (bridged_height BETWEEN 0 AND 4294967295),
+                CHECK ((one_time_key_id IS NULL) = (range_start IS NOT NULL)
+                    AND (range_start IS NULL) = (range_end IS NULL)),
+                CHECK ((cutoff_height IS NULL) = (cutoff_hash IS NULL)
+                    AND (cutoff_height IS NULL) = (cutoff_digest IS NULL)
+                    AND (bridged_height IS NULL OR cutoff_height IS NOT NULL))
+            );
+            CREATE INDEX idx_ironwood_one_time_obligations_account
+                ON ironwood_one_time_obligations(account_id);",
         )?;
         Ok(())
     }
@@ -170,8 +244,12 @@ mod tests {
     /// reservations get no floor, so every request on a key belongs to its reservation
     /// (see `one_time_ivk::swap::reservations`, whose tests cover the behavior). Here one
     /// reservation's request was begun before `reserved_at`, after the clock was set back.
+    ///
+    /// Each key gets the facts its row shows: one this wallet reserved or that was paid is
+    /// authenticated, and every refund key, and an incoming key seen, paid or quoted and
+    /// accepted, is blocked from issuance.
     #[test]
-    fn existing_reservations_get_no_floor() {
+    fn existing_reservations_get_no_floor_and_their_facts() {
         let network = Network::TestNetwork;
         let data_file = NamedTempFile::new().unwrap();
         let mut db_data =
@@ -218,9 +296,21 @@ mod tests {
                       advances_allocation, registered_at, reserved_at, active_from)
                  VALUES (1, 1, 1, X'0000000000000000', zeroblob(43), 0, 1, 100, 200, 0),
                      (2, 1, 1, X'0000000000000001', zeroblob(43), 0, 1, 100, 100, 0);
+                 INSERT INTO ironwood_one_time_keys
+                     (id, account_id, purpose, key_index, receiver, scan_from,
+                      advances_allocation, provider_seen, used)
+                 VALUES (3, 1, 0, X'0000000000000000', zeroblob(43), 0, 1, 0, 0),
+                     (4, 1, 0, X'0000000000000001', zeroblob(43), 0, 1, 1, 0),
+                     (5, 1, 1, X'0000000000000002', zeroblob(43), 0, 1, 0, 0),
+                     (6, 1, 1, X'0000000000000003', zeroblob(43), 0, 0, 0, 0),
+                     (7, 1, 1, X'0000000000000004', zeroblob(43), 0, 1, 0, 1),
+                     (8, 1, 1, X'0000000000000005', zeroblob(43), 0, 1, 1, 0);
                  INSERT INTO ironwood_one_time_operations
                      (one_time_key_id, request, deadline, begun_at, observed_at)
-                 VALUES (1, 'live', 400, 150, 150), (2, 'expired', 160, 100, 100);",
+                 VALUES (1, 'live', 400, 150, 150), (2, 'expired', 160, 100, 100);
+                 INSERT INTO ironwood_one_time_operations
+                     (one_time_key_id, request, reference, deadline, begun_at)
+                 VALUES (5, 'accepted', 'deposit', 400, 100);",
             )
             .unwrap();
         let before = read(&db_data.conn);
@@ -229,16 +319,33 @@ mod tests {
             .init_or_migrate_to(&mut db_data, &[MIGRATION_ID])
             .unwrap();
         assert_eq!(read(&db_data.conn), before);
-        let floors: Vec<(i64, Option<i64>, i64)> = db_data
+        /// A key's ID, floor, reservation time and whether it is authenticated and blocked.
+        type Key = (i64, Option<i64>, Option<i64>, bool, bool);
+        let keys: Vec<Key> = db_data
             .conn
             .prepare(
-                "SELECT id, reservation_floor, reserved_at FROM ironwood_one_time_keys ORDER BY id",
+                "SELECT id, reservation_floor, reserved_at, authenticated, issuance_blocked
+                 FROM ironwood_one_time_keys ORDER BY id",
             )
             .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(floors, [(1, None, 200), (2, None, 100)]);
+        assert_eq!(
+            keys,
+            [
+                (1, None, Some(200), true, false),
+                (2, None, Some(100), true, false),
+                (3, None, None, true, true),
+                (4, None, None, false, true),
+                (5, None, None, false, true),
+                (6, None, None, false, false),
+                (7, None, None, true, true),
+                (8, None, None, false, true),
+            ]
+        );
     }
 }

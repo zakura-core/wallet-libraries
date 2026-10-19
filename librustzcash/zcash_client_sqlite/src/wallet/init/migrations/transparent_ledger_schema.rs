@@ -240,16 +240,20 @@ mod tests {
                 .is_empty()
         );
         // Transparent txid enhancement tables start empty for a wallet without ledger-origin or
-        // route-2 transactions, discovery for a wallet that has started none, and the spend
-        // journal for a wallet that has scanned nothing since. Discovery replaced the empty
-        // restore sweep and retention tables, unless an interrupted upgrade stopped before it.
+        // route-2 transactions, discovery and directory coverage for a wallet that has started
+        // none, and the spend journal for a wallet that has scanned nothing since. Discovery
+        // replaced the empty restore sweep and retention tables, unless an interrupted upgrade
+        // stopped before it.
         for table in [
             "ironwood_journal_coverage",
             "ironwood_nullifier_scan_blocks",
             "ironwood_one_time_discovery",
             "ironwood_one_time_lookup_reads",
             "ironwood_one_time_lookups",
+            "ironwood_one_time_obligations",
             "ironwood_one_time_publications",
+            "ironwood_one_time_receiver_cache",
+            "ironwood_one_time_recovery",
             "ironwood_one_time_spend_retention",
             "ironwood_one_time_sweeps",
             "ironwood_spend_journal",

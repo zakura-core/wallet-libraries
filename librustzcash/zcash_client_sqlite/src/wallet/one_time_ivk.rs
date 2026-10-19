@@ -2,8 +2,9 @@
 //!
 //! This module holds the key registry, scanning, spending and the storage guards.
 //! [`swap`] issues keys for swaps and closes them from provider status, `restore` discovers
-//! the keys a restored seed used through a receiver directory, and `journal` keeps the
-//! Ironwood nullifiers of the wallet's own transactions.
+//! the keys a restored seed used through a receiver directory, `coverage` keeps the state of
+//! continuous recovery from that directory, and `journal` keeps the Ironwood nullifiers of
+//! the wallet's own transactions. A registered key stays registered, closed or not.
 //!
 //! Issued keys scan from issuance, refund keys from their stored funding transaction,
 //! until they close. Keys a restore discovers have their history looked up, then are
@@ -32,8 +33,12 @@
 //!   restored account's discovery, and [`WalletDb::recheck_one_time_key_history`] when the
 //!   user asks to recheck swaps.
 //!
+//! Storing blocks, a full transaction or a memo retrieved over Enhance PIR, and admitting a
+//! late payment, recovers the refund keys of every account's stored funding memos.
+//!
 //! [`OneTimeIvkRestoreWrite`]: zcash_client_backend::data_api::one_time_ivk::restore::OneTimeIvkRestoreWrite
 
+pub(crate) mod coverage;
 pub(crate) mod journal;
 pub(crate) mod restore;
 pub mod swap;
@@ -184,6 +189,25 @@ pub(crate) fn scanning_keys_for_range<P: Parameters>(
     })
 }
 
+/// The accounts whose one-time keys are recovered: those with an Orchard viewing key,
+/// once Ironwood is active.
+pub(crate) fn recovering_accounts<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+) -> Result<Vec<AccountUuid>, SqliteClientError> {
+    if params
+        .activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+        .is_none()
+    {
+        return Ok(vec![]);
+    }
+    Ok(super::get_unified_full_viewing_keys(conn, params)?
+        .into_iter()
+        .filter(|(_, ufvk)| ufvk.orchard().is_some())
+        .map(|(account, _)| account)
+        .collect())
+}
+
 /// The scanning keys `keys` returns for each account with an Orchard viewing key.
 fn keys_by_account<P: Parameters>(
     conn: &Connection,
@@ -257,12 +281,19 @@ fn check_receiver(stored: Vec<u8>, fvk: &FullViewingKey) -> Result<(), SqliteCli
 
 /// The key identity of a registry row selecting purpose and key_index first.
 fn stored_key_id(row: &rusqlite::Row<'_>) -> Result<KeyId, SqliteClientError> {
-    let purpose = match row.get::<_, u8>(0)? {
-        0 => Purpose::Refund,
-        1 => Purpose::Receive,
-        _ => return Err(corrupt("unsupported one-time key purpose")),
-    };
-    Ok(KeyId::new(purpose, decode_index(row.get(1)?)?))
+    Ok(KeyId::new(
+        decode_purpose(row.get(0)?)?,
+        decode_index(row.get(1)?)?,
+    ))
+}
+
+/// The purpose stored as `code` (see [`purpose_code`]).
+fn decode_purpose(code: u8) -> Result<Purpose, SqliteClientError> {
+    match code {
+        0 => Ok(Purpose::Refund),
+        1 => Ok(Purpose::Receive),
+        _ => Err(corrupt("unsupported one-time key purpose")),
+    }
 }
 
 /// `account`'s database reference and the Orchard FVK its one-time keys derive from.
@@ -347,6 +378,13 @@ fn register<P: Parameters>(
         .full_viewing_key()
         .address_at(0u32, Scope::External)
         .to_raw_address_bytes();
+    let purpose = purpose_code(key_id.purpose())?;
+    let existed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys
+         WHERE account_id = ?1 AND purpose = ?2 AND key_index = ?3)",
+        rusqlite::params![account_ref.0, purpose, key_id.index().to_be_bytes()],
+        |row| row.get(0),
+    )?;
     // Repeated recovery can widen required history or promote a lookahead key. It must
     // never forget a reservation, narrow history, or replace a receiver.
     let (id, stored_from, active_from): (i64, u32, Option<u32>) = conn
@@ -363,7 +401,7 @@ fn register<P: Parameters>(
          RETURNING id, scan_from, active_from",
             named_params![
                 ":account": account_ref.0,
-                ":purpose": purpose_code(key_id.purpose())?,
+                ":purpose": purpose,
                 ":index": &key_id.index().to_be_bytes(),
                 ":receiver": &receiver,
                 ":scan_from": u32::from(scan_from),
@@ -374,6 +412,12 @@ fn register<P: Parameters>(
         )
         .optional()?
         .ok_or_else(|| corrupt("stored one-time key receiver does not match its key"))?;
+    if advances_allocation {
+        coverage::grow_window(conn, account_ref.0, purpose)?;
+    }
+    if !existed {
+        coverage::enter_set(conn, account_ref.0, id, key_id)?;
+    }
     match discovery {
         Discovery::Scan => {
             activate(conn, id, scan_from)?;
@@ -582,10 +626,10 @@ pub(super) fn received_note_key<
 }
 
 /// Binds stored note `note` to registered key `key`, which makes the key's index used: it
-/// advances allocation and is never issued again. This commits with the note, so a
-/// restart cannot allocate the paid address again.
+/// is authenticated, advances allocation and is never issued again. This commits with the
+/// note, so a restart cannot allocate the paid address again.
 pub(super) fn bind_received_note(
-    conn: &Connection,
+    conn: &rusqlite::Transaction<'_>,
     key: i64,
     note: i64,
 ) -> Result<(), SqliteClientError> {
@@ -594,8 +638,34 @@ pub(super) fn bind_received_note(
         rusqlite::params![key, note],
     )?;
     conn.execute(
-        "UPDATE ironwood_one_time_keys SET advances_allocation = 1, used = 1 WHERE id = ?1",
+        "UPDATE ironwood_one_time_keys
+         SET advances_allocation = 1, used = 1, authenticated = 1, issuance_blocked = 1
+         WHERE id = ?1",
         [key],
+    )?;
+    coverage::advanced(conn, key)
+}
+
+/// Records that key `id` was issued by this wallet's seed, as its own reservation or an
+/// authenticated funding memo shows, so it advances allocation.
+fn authenticate_key(conn: &rusqlite::Transaction<'_>, id: i64) -> Result<(), SqliteClientError> {
+    let promoted = conn.execute(
+        "UPDATE ironwood_one_time_keys SET authenticated = 1, advances_allocation = 1
+         WHERE id = ?1 AND (authenticated = 0 OR advances_allocation = 0)",
+        [id],
+    )?;
+    if promoted > 0 {
+        coverage::advanced(conn, id)?;
+    }
+    Ok(())
+}
+
+/// Records that key `id`'s index was given out or used, so it is never issued again.
+fn block_issuance(conn: &Connection, id: i64) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE ironwood_one_time_keys SET issuance_blocked = 1
+         WHERE id = ?1 AND issuance_blocked = 0",
+        [id],
     )?;
     Ok(())
 }

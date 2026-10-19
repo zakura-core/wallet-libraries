@@ -5,7 +5,7 @@
 pub(crate) mod apply;
 pub(crate) mod discovery;
 pub(super) mod payments;
-pub(super) mod recovery;
+pub(crate) mod recovery;
 
 use payments::PendingPayment;
 

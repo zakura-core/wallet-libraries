@@ -7,7 +7,7 @@
 //! [`scan_cached_blocks_with_one_time_ivks`](super::chain::scan_cached_blocks_with_one_time_ivks)
 //! and [`decrypt_and_store_transaction_with_one_time_ivks`], which try its open keys
 //! alongside the account keys. Recovering keys from the seed after a restore is a
-//! separate protocol, in [`restore`].
+//! separate protocol, in [`restore`], and [`coverage`] keeps continuous recovery's state.
 //!
 //! [`decrypt_and_store_transaction_with_one_time_ivks`]: super::wallet::decrypt_and_store_transaction_with_one_time_ivks
 
@@ -21,6 +21,7 @@ use ambassador::delegatable_trait;
 use super::{ScannedBlock, WalletRead, WalletWrite, chain::ChainState};
 use crate::scanning::one_time_ivk::OneTimeScanningKey;
 
+pub mod coverage;
 pub mod restore;
 
 /// One-time IVK reads: the keys to scan and decrypt with.

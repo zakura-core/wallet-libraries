@@ -7,7 +7,7 @@ use zcash_client_backend::data_api::one_time_ivk::restore::{
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
-use crate::wallet::one_time_ivk::{KeyId, account_key, invalid, key_ref};
+use crate::wallet::one_time_ivk::{KeyId, account_key, block_issuance, invalid, key_ref};
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 /// A directory payment awaiting inclusion and spend checks; its metadata is unchecked.
@@ -113,7 +113,7 @@ pub(in crate::wallet::one_time_ivk) fn pending_payment(
 
 /// Authenticates and queues one candidate from the directory revision ending at
 /// `publication`, idempotently and without crediting it: a scan hint if `hint`, else a
-/// late candidate.
+/// late candidate. Its key is never issued again.
 pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -147,6 +147,7 @@ pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
             Err(invalid("conflicting directory payment identity"))
         };
     }
+    block_issuance(conn, id)?;
     conn.execute(
         "INSERT INTO ironwood_one_time_payment_recovery (
             one_time_key_id, txid, action_index, height, block_hash, tx_index, position,

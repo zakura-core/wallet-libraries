@@ -535,7 +535,9 @@ CREATE INDEX idx_orchard_received_note_spends_transaction_id ON orchard_received
 /// end of the publication whose discovery pass gave the key its recent watch, so no later
 /// pass reopens it. A rewind keeps it: an open key keeps scanning from the rewind height,
 /// and the watch covered blocks after the publication, which a lower birthday does not
-/// change.
+/// change. `authenticated` and `issuance_blocked` are facts directory coverage keeps
+/// apart from allocation (see `one_time_ivk::coverage`). A key is never deleted apart from
+/// its account.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_KEYS: &str = "CREATE TABLE ironwood_one_time_keys (
                 id INTEGER PRIMARY KEY,
                 account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -555,6 +557,10 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_KEYS: &str = "CREATE TABLE ironwood_one
                 closed_at INTEGER,
                 reservation_floor INTEGER,
                 pass_watch_height INTEGER CHECK (pass_watch_height BETWEEN 0 AND 4294967295),
+                authenticated INTEGER NOT NULL DEFAULT 0
+                    CHECK (authenticated IN (0, 1)),
+                issuance_blocked INTEGER NOT NULL
+                    DEFAULT 0 CHECK (issuance_blocked IN (0, 1)),
                 UNIQUE (account_id, purpose, key_index)
             )";
 
@@ -2044,6 +2050,9 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_OPERATIONS: &str = "CREATE TABLE ironwo
 /// A key's directory lookup: due while `cutoff_height` is set, and done through
 /// `done_height`. `applied` records are applied, the last of them at `last_position` in block
 /// `last_height` with Action nullifier `last_nullifier` (see `one_time_ivk::restore`).
+/// `generation` rises with each restart that fences out walks in flight, and
+/// `dispatched_*` is the target and generation of the walk handed out last (see
+/// `one_time_ivk::coverage`).
 pub(super) const TABLE_IRONWOOD_ONE_TIME_LOOKUPS: &str = "CREATE TABLE ironwood_one_time_lookups (
                 one_time_key_id INTEGER PRIMARY KEY REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
                 cutoff_height INTEGER CHECK (cutoff_height BETWEEN 0 AND 4294967295),
@@ -2054,9 +2063,13 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_LOOKUPS: &str = "CREATE TABLE ironwood_
                 last_height INTEGER CHECK (last_height BETWEEN 0 AND 4294967295),
                 attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
                 next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+                dispatched_cutoff INTEGER CHECK (dispatched_cutoff BETWEEN 0 AND 4294967295),
+                dispatched_generation INTEGER,
                 CHECK ((applied = 0) = (last_position IS NULL)
                     AND (last_position IS NULL) = (last_nullifier IS NULL)
-                    AND (last_position IS NULL) = (last_height IS NULL))
+                    AND (last_position IS NULL) = (last_height IS NULL)),
+                CHECK ((dispatched_cutoff IS NULL) = (dispatched_generation IS NULL))
             )";
 
 /// A directory revision a lookup's cursor read records from (see
@@ -2100,6 +2113,75 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_DISCOVERY: &str =
                 FOREIGN KEY (publication_height, publication_hash)
                     REFERENCES ironwood_one_time_publications(height, hash)
             )";
+
+/// An account's directory coverage (see `one_time_ivk::coverage`): its receiver-set
+/// generation, each purpose's window extent and derivation progress, the history it
+/// follows, its frontier with the generation tested there, and the snapshot pinned to
+/// establish it.
+pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str =
+    "CREATE TABLE ironwood_one_time_recovery (
+                account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+                generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+                receive_end INTEGER NOT NULL DEFAULT 0 CHECK (receive_end >= 0),
+                receive_derived INTEGER NOT NULL DEFAULT 0
+                    CHECK (receive_derived BETWEEN 0 AND receive_end),
+                refund_end INTEGER NOT NULL DEFAULT 0 CHECK (refund_end >= 0),
+                refund_derived INTEGER NOT NULL DEFAULT 0
+                    CHECK (refund_derived BETWEEN 0 AND refund_end),
+                catalog BLOB CHECK (length(catalog) = 32),
+                epoch INTEGER CHECK (epoch >= 0),
+                frontier_height INTEGER CHECK (frontier_height BETWEEN 0 AND 4294967295),
+                frontier_hash BLOB CHECK (length(frontier_hash) = 32),
+                tested_generation INTEGER,
+                bootstrap_height INTEGER CHECK (bootstrap_height BETWEEN 0 AND 4294967295),
+                bootstrap_hash BLOB CHECK (length(bootstrap_hash) = 32),
+                bootstrap_digest BLOB CHECK (length(bootstrap_digest) = 32),
+                CHECK ((catalog IS NULL) = (epoch IS NULL)),
+                CHECK ((frontier_height IS NULL) = (frontier_hash IS NULL)
+                    AND (frontier_height IS NULL) = (tested_generation IS NULL)
+                    AND (frontier_height IS NULL OR catalog IS NOT NULL)),
+                CHECK ((bootstrap_height IS NULL) = (bootstrap_hash IS NULL)
+                    AND (bootstrap_height IS NULL) = (bootstrap_digest IS NULL))
+            )";
+
+/// Derived receivers of a window index no key is registered at (see
+/// `one_time_ivk::coverage`). Rebuildable from the account's viewing key.
+pub(super) const TABLE_IRONWOOD_ONE_TIME_RECEIVER_CACHE: &str =
+    "CREATE TABLE ironwood_one_time_receiver_cache (
+                account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                purpose INTEGER NOT NULL CHECK (purpose BETWEEN 0 AND 255),
+                key_index BLOB NOT NULL CHECK (typeof(key_index) = 'blob' AND length(key_index) = 8),
+                receiver BLOB NOT NULL CHECK (typeof(receiver) = 'blob' AND length(receiver) = 43),
+                PRIMARY KEY (account_id, purpose, key_index)
+            )";
+
+/// History a key or a window range owes from `lower_height` through `through_height`,
+/// with the cumulative snapshot it pinned and how far it has bridged (see
+/// `one_time_ivk::coverage`).
+pub(super) const TABLE_IRONWOOD_ONE_TIME_OBLIGATIONS: &str =
+    "CREATE TABLE ironwood_one_time_obligations (
+                id INTEGER PRIMARY KEY,
+                account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                purpose INTEGER NOT NULL CHECK (purpose BETWEEN 0 AND 255),
+                one_time_key_id INTEGER REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
+                range_start INTEGER CHECK (range_start >= 0),
+                range_end INTEGER CHECK (range_end > range_start),
+                lower_height INTEGER NOT NULL CHECK (lower_height BETWEEN 0 AND 4294967295),
+                through_height INTEGER NOT NULL CHECK (through_height BETWEEN 0 AND 4294967295),
+                cutoff_height INTEGER CHECK (cutoff_height BETWEEN 0 AND 4294967295),
+                cutoff_hash BLOB CHECK (length(cutoff_hash) = 32),
+                cutoff_digest BLOB CHECK (length(cutoff_digest) = 32),
+                bridged_height INTEGER CHECK (bridged_height BETWEEN 0 AND 4294967295),
+                CHECK ((one_time_key_id IS NULL) = (range_start IS NOT NULL)
+                    AND (range_start IS NULL) = (range_end IS NULL)),
+                CHECK ((cutoff_height IS NULL) = (cutoff_hash IS NULL)
+                    AND (cutoff_height IS NULL) = (cutoff_digest IS NULL)
+                    AND (bridged_height IS NULL OR cutoff_height IS NOT NULL))
+            )";
+
+pub(super) const INDEX_IRONWOOD_ONE_TIME_OBLIGATIONS_ACCOUNT: &str =
+    "CREATE INDEX idx_ironwood_one_time_obligations_account
+                ON ironwood_one_time_obligations(account_id)";
 
 /// Accounts whose seed has no one-time key history to restore (see
 /// `WalletDb::mark_one_time_account_fresh`).

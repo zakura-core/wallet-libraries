@@ -38,6 +38,13 @@ Ironwood nullifier of the wallet's own transactions, then says whether it was sp
 Until then the payment adds nothing to balance. `zakura-pir-receiver` runs discovery
 against a receiver directory.
 
+`WalletDb` also implements `OneTimeIvkCoverageRead` and `OneTimeIvkCoverageWrite`, the
+state of continuous recovery from a directory's paid buckets: every registered key and a
+window of each purpose's indices, the frontier the directory has covered for them, the
+history still owed to receivers that joined later, and lookup targets fenced by
+generation. Each write commits with the work it creates, and a rewind keeps only the
+coverage its floor supports.
+
 ## License
 
 Licensed under either of

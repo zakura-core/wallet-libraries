@@ -31,10 +31,13 @@ use super::{
     recovery::recover_refund_memos,
 };
 use crate::wallet::one_time_ivk::{
-    Discovery, KeyId, Purpose, account_key, activate, corrupt, index_after, key_ref, register,
-    restore_start, stored_key_id, swap::reservations::record_provider_seen,
+    Discovery, KeyId, Purpose, account_key, activate, block_issuance, corrupt, index_after,
+    key_ref, recovering_accounts, register, restore_start, stored_key_id,
+    swap::reservations::record_provider_seen,
 };
-use crate::wallet::one_time_rewind::{ACCEPTED, PROVISIONAL, REJECTED, restart_cursor};
+use crate::wallet::one_time_rewind::{
+    ACCEPTED, PROVISIONAL, REJECTED, restart_cursor, restart_walk,
+};
 use crate::{
     AccountUuid,
     error::SqliteClientError,
@@ -207,27 +210,14 @@ pub(crate) fn status<P: Parameters>(
             .map_err(|_| corrupt("invalid stored receiver"))
     };
     let lookups = if usable.is_some() {
-        conn.prepare(
-            "SELECT k.purpose, k.key_index, k.receiver, l.cutoff_height, l.applied,
-                l.last_position, l.last_nullifier
+        conn.prepare(&format!(
+            "SELECT {LOOKUP_COLUMNS}
              FROM ironwood_one_time_lookups l
              JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
              WHERE k.account_id = ?1 AND l.cutoff_height IS NOT NULL AND l.next_attempt_at <= ?2
              ORDER BY l.next_attempt_at, k.id",
-        )?
-        .query_and_then(params![owner.0, now], |r| {
-            Ok::<_, SqliteClientError>(LookupWork {
-                work: DiscoveryWork {
-                    key: stored_key_id(r)?,
-                    receiver: receiver(r)?,
-                },
-                cutoff: BlockHeight::from(r.get::<_, u32>(3)?),
-                applied: r.get(4)?,
-                last: r
-                    .get::<_, Option<u64>>(5)?
-                    .zip(r.get::<_, Option<[u8; 32]>>(6)?),
-            })
-        })?
+        ))?
+        .query_and_then(params![owner.0, now], lookup_work)?
         .collect::<Result<_, _>>()?
     } else {
         vec![]
@@ -276,6 +266,31 @@ pub(crate) fn status<P: Parameters>(
         witnesses,
         witness_anchor_floor,
     }))
+}
+
+/// The columns of key `k` and its lookup `l` that [`lookup_work`] reads.
+pub(in crate::wallet::one_time_ivk) const LOOKUP_COLUMNS: &str =
+    "k.purpose, k.key_index, k.receiver, l.cutoff_height, l.applied, l.last_position,
+    l.last_nullifier";
+
+/// The due lookup of a row selecting [`LOOKUP_COLUMNS`] first.
+pub(in crate::wallet::one_time_ivk) fn lookup_work(
+    r: &rusqlite::Row<'_>,
+) -> Result<LookupWork, SqliteClientError> {
+    Ok(LookupWork {
+        work: DiscoveryWork {
+            key: stored_key_id(r)?,
+            receiver: r
+                .get::<_, Vec<u8>>(2)?
+                .try_into()
+                .map_err(|_| corrupt("invalid stored receiver"))?,
+        },
+        cutoff: BlockHeight::from(r.get::<_, u32>(3)?),
+        applied: r.get(4)?,
+        last: r
+            .get::<_, Option<u64>>(5)?
+            .zip(r.get::<_, Option<[u8; 32]>>(6)?),
+    })
 }
 
 /// Implements `OneTimeIvkRestoreRead::one_time_receivers`.
@@ -432,6 +447,8 @@ pub(crate) fn record_filter_checks<P: Parameters>(
         )?;
         if allocates {
             record_provider_seen(conn, id)?;
+        } else if used {
+            block_issuance(conn, id)?;
         }
         if check.paid && in_range {
             // A later pass reads a paid key's history again only if the key has no known
@@ -511,7 +528,6 @@ pub(crate) fn record_lookup<P: Parameters>(
     complete: bool,
     now: i64,
 ) -> Result<bool, SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
     let id = key_ref(conn, account, key)?;
     let cursor: Option<(Option<u32>, u32)> = conn
         .query_row(
@@ -524,6 +540,39 @@ pub(crate) fn record_lookup<P: Parameters>(
     let Some((Some(cutoff), applied)) = cursor else {
         return Ok(false);
     };
+    apply_page(
+        conn,
+        params,
+        sessions,
+        account,
+        (key, id),
+        (cutoff, applied),
+        revision,
+        page,
+        records,
+        complete,
+        now,
+    )
+}
+
+/// Applies a lookup page for `key`, registry ID `id`, as `record_lookup` describes, against
+/// `cutoff`, with `applied` records already applied. Completing the walk marks the lookup
+/// done through `cutoff`, and leaves a target widened past it due.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::wallet::one_time_ivk) fn apply_page<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    sessions: &Sessions<'_>,
+    account: AccountUuid,
+    (key, id): (KeyId, i64),
+    (cutoff, applied): (u32, u32),
+    revision: PublicationEnd,
+    page: u32,
+    records: &[DirectoryPayment],
+    complete: bool,
+    now: i64,
+) -> Result<bool, SqliteClientError> {
+    let (owner, _) = account_key(conn, params, account)?;
     // A revision ending below the cutoff cannot show the history through it.
     if (page != applied && page != 0) || u32::from(revision.height) < cutoff {
         return Ok(false);
@@ -532,7 +581,7 @@ pub(crate) fn record_lookup<P: Parameters>(
         return Ok(false);
     }
     if page == 0 && applied > 0 {
-        restart_cursor(conn, "?1", id)?;
+        restart_walk(conn, id)?;
     }
     let start = restore_start(conn, params, owner)?;
     conn.execute_batch("SAVEPOINT lookup_page")?;
@@ -606,10 +655,12 @@ pub(crate) fn record_lookup<P: Parameters>(
     if complete {
         conn.execute(
             "UPDATE ironwood_one_time_lookups
-             SET done_height = cutoff_height, cutoff_height = NULL, attempts = 0,
+             SET done_height = ?2,
+                 cutoff_height = CASE WHEN cutoff_height > ?2 THEN cutoff_height END,
+                 dispatched_cutoff = NULL, dispatched_generation = NULL, attempts = 0,
                  next_attempt_at = 0
              WHERE one_time_key_id = ?1",
-            [id],
+            params![id, cutoff],
         )?;
         if pass(conn, owner.0)?.is_some_and(|pass| pass.state == ACCEPTED) {
             close_looked_up(conn, owner.0)?;
@@ -684,7 +735,8 @@ pub(crate) fn record_witness<P: Parameters>(
 
 /// Runs after the scan stores `range`, with one-time keys `keys` if it used them: judges
 /// the publications ending in it, settles its hints, recovers refund keys from newly
-/// stored funding memos at `now`, and admits the late candidates the scan now covers.
+/// stored funding memos at `now`, and admits the late candidates the scan now covers, for
+/// every account whose one-time keys are recovered.
 pub(crate) fn after_blocks_stored<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -707,14 +759,7 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
         judge(conn, BlockHeight::from(height))?;
     }
     check_hints(conn, keys.unwrap_or(&[]), range, now)?;
-    let accounts: Vec<AccountUuid> = conn
-        .prepare(
-            "SELECT a.uuid FROM ironwood_one_time_discovery d
-             JOIN accounts a ON a.id = d.account_id",
-        )?
-        .query_map([], |r| r.get(0).map(AccountUuid))?
-        .collect::<Result<_, _>>()?;
-    for account in accounts {
+    for account in recovering_accounts(conn, params)? {
         recover_refund_memos(conn, params, account, now)?;
         admit(conn, params, sessions, account, now)?;
     }
@@ -882,7 +927,9 @@ fn check_hints(
 }
 
 /// Admits `account`'s late candidates that have an inclusion path, whose publication matched
-/// the wallet's chain, and that the scan now covers (see `apply::apply_payment`).
+/// the wallet's chain, and that the scan now covers (see `apply::apply_payment`). A note
+/// admitted spent can be a funding transaction's own-send evidence, so the account's
+/// funding memos are recovered again after any admission.
 pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -918,6 +965,7 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
             ))
         })?
         .collect::<Result<_, _>>()?;
+    let mut admitted = false;
     for (id, key, txid, action, witness, anchor_height, anchor_hash) in waiting {
         let Some(candidate) = pending_payment(conn, txid, action)? else {
             continue;
@@ -946,7 +994,8 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
             None => Admission::StaleWitness,
         };
         match admission {
-            Admission::Admitted | Admission::Waiting => {}
+            Admission::Admitted => admitted = true,
+            Admission::Waiting => {}
             Admission::Uncovered => rescan_uncovered(conn, owner.0, candidate.height, through)?,
             Admission::StaleWitness => {
                 conn.execute(
@@ -966,6 +1015,9 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
                 defer(conn, id, now)?;
             }
         }
+    }
+    if admitted {
+        recover_refund_memos(conn, params, account, now)?;
     }
     Ok(())
 }
