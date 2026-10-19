@@ -6,7 +6,20 @@ ownership or spendability.
 
 - `record`: the 285-byte payment record, re-exported from
   `zakura-receiver-crypto::wire` with cryptography disabled.
-- `filter`: the labeled receiver filters a publication commits to.
+- `filter`: the labeled receiver filters a publication commits to, which the
+  current discovery pass reads.
+- `paid`: paid sets, the receivers paid in a closed interval `(start, end]`. One
+  type serves fixed 48-block buckets and cumulative sets over any interval. Each
+  binds the network, its boundary block hashes and the payment-history epoch, with
+  a salt that depends only on the network and the boundary hashes.
+- `seen`: the monotone seen set of receivers swap provider feeds reported. Values
+  are fixed 32-bit hashes under a salt fixed per network, so membership never
+  shrinks across unions, re-encodings or publications.
+- `catalog`: the catalog head a manifest commits to, naming the epoch, the
+  retained buckets and the digests of the cumulative paid set, the seen set and the
+  bucket index, which maps each retained bucket's start height to its digest.
+  Every object is immutable, addressed by digest and strictly decoded within size
+  limits.
 - `snapshot`: publication manifests and their revision, row placement, snapshot
   construction and validation, continuation-page rules, and row lookup.
 

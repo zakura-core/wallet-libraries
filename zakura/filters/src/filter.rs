@@ -69,18 +69,52 @@ impl<'a, W: Write> GcsFilterWriter<'a, W> {
         mapped.sort_unstable();
 
         // write number of elements as varint
-        let mut wrote = write_compact_size(self.writer, mapped.len() as u64)?;
-
-        // write out deltas of sorted values into a Golomb-Rice coded bit stream
-        let mut writer = BitStreamWriter::new(self.writer);
-        let mut last = 0;
-        for data in mapped {
-            wrote += self.filter.golomb_rice_encode(&mut writer, data - last)?;
-            last = data;
-        }
-        wrote += writer.flush()?;
-        Ok(wrote)
+        let wrote = write_compact_size(self.writer, mapped.len() as u64)?;
+        Ok(wrote + write_rice_deltas(self.writer, &mapped, self.filter.p)?)
     }
+}
+
+/// Writes the Golomb-Rice codes with parameter `p` of the differences between
+/// consecutive `sorted` values, the first taken from zero, then zero bits to the next
+/// byte. Returns the number of bytes written.
+///
+/// `sorted` must be ascending and `p` at most 63; the encoding has no count or
+/// terminator, so readers must know how many values follow. Write failures are
+/// propagated and may leave partial output.
+pub fn write_rice_deltas<W: Write>(
+    writer: &mut W,
+    sorted: &[u64],
+    p: u8,
+) -> Result<usize, io::Error> {
+    let mut writer = BitStreamWriter::new(writer);
+    let mut wrote = 0;
+    let mut last = 0;
+    for &data in sorted {
+        wrote += golomb_rice_encode(&mut writer, data - last, p)?;
+        last = data;
+    }
+    Ok(wrote + writer.flush()?)
+}
+
+/// Golomb-Rice encodes a number `n` to a bit stream (parameter 2^p).
+fn golomb_rice_encode<W>(
+    writer: &mut BitStreamWriter<'_, W>,
+    n: u64,
+    p: u8,
+) -> Result<usize, io::Error>
+where
+    W: Write,
+{
+    let mut wrote = 0;
+    let mut q = n >> p;
+    while q > 0 {
+        let nbits = cmp::min(q, 64);
+        wrote += writer.write(!0u64, nbits as u8)?;
+        q -= nbits;
+    }
+    wrote += writer.write(0, 1)?;
+    wrote += writer.write(n, p)?;
+    Ok(wrote)
 }
 
 /// Golomb Coded Set Filter.
@@ -94,27 +128,6 @@ impl GcsFilter {
     /// Creates a new [`GcsFilter`].
     fn new(k0: u64, k1: u64, p: u8) -> GcsFilter {
         GcsFilter { k0, k1, p }
-    }
-
-    /// Golomb-Rice encodes a number `n` to a bit stream (parameter 2^k).
-    fn golomb_rice_encode<W>(
-        &self,
-        writer: &mut BitStreamWriter<'_, W>,
-        n: u64,
-    ) -> Result<usize, io::Error>
-    where
-        W: Write,
-    {
-        let mut wrote = 0;
-        let mut q = n >> self.p;
-        while q > 0 {
-            let nbits = cmp::min(q, 64);
-            wrote += writer.write(!0u64, nbits as u8)?;
-            q -= nbits;
-        }
-        wrote += writer.write(0, 1)?;
-        wrote += writer.write(n, self.p)?;
-        Ok(wrote)
     }
 
     /// Hashes an arbitrary slice with siphash using parameters of this filter.

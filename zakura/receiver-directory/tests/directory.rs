@@ -59,6 +59,9 @@ fn manifests_refuse_unknown_fields_and_bind_every_field() {
     let mut other = s.manifest.clone();
     other.records += 1;
     assert_ne!(other.revision().unwrap(), s.manifest.revision().unwrap());
+    let mut catalog = s.manifest.clone();
+    catalog.catalog_sha256[0] ^= 1;
+    assert_ne!(catalog.revision().unwrap(), s.manifest.revision().unwrap());
 }
 
 #[test]

@@ -2,7 +2,12 @@
 use crate::{
     public_bytes, response_bytes, AcceptedCoverage, Client, Error, Manifest, MAX_MANIFEST_BYTES,
 };
-use receiver_directory::{RawRecord, ReceiverBytes};
+use receiver_directory::{
+    catalog::{BucketIndex, CatalogHead, MAX_CATALOG_BYTES, MAX_INDEX_BYTES},
+    paid::{PaidSet, MAX_BUCKET_BYTES, MAX_PAID_BYTES},
+    seen::{SeenSet, MAX_SEEN_BYTES},
+    Hash, RawRecord, ReceiverBytes,
+};
 use sha2::{Digest, Sha256};
 
 /// Hosts supply their route policy, cancellation, and timeout for every request.
@@ -106,6 +111,77 @@ impl<T: Transport> DirectoryClient<T> {
         Ok(filters)
     }
 
+    /// Downloads the catalog head `manifest` commits to, identical for every wallet,
+    /// from `/v1/receiver/catalog/<digest>`. Fails with
+    /// [`receiver_directory::Error::Coverage`] if it names another network.
+    pub async fn fetch_catalog(
+        origin: &str,
+        http: &T,
+        manifest: &Manifest,
+    ) -> Result<CatalogHead, Error> {
+        let digest = manifest.directory.catalog_sha256;
+        let bytes = fetch_object(origin, http, "catalog", MAX_CATALOG_BYTES, &digest).await?;
+        let head = CatalogHead::decode(&bytes)?;
+        if head.genesis != manifest.directory.genesis {
+            return Err(receiver_directory::Error::Coverage.into());
+        }
+        Ok(head)
+    }
+
+    /// Downloads the bucket index `head` names from `/v1/receiver/bucket-index/<digest>`
+    /// and checks it with [`CatalogHead::check_index`].
+    pub async fn fetch_bucket_index(
+        origin: &str,
+        http: &T,
+        head: &CatalogHead,
+    ) -> Result<BucketIndex, Error> {
+        let bytes =
+            fetch_object(origin, http, "bucket-index", MAX_INDEX_BYTES, &head.index).await?;
+        let index = BucketIndex::decode(&bytes)?;
+        head.check_index(&index)?;
+        Ok(index)
+    }
+
+    /// Downloads the bucket starting at `start` from `/v1/receiver/bucket/<start>/<digest>`,
+    /// with the digest `index` lists, and checks it with [`CatalogHead::check_bucket`]. A
+    /// start `index` does not list fails with [`receiver_directory::Error::Coverage`].
+    /// The caller checks the boundary hashes against its own chain.
+    pub async fn fetch_bucket(
+        origin: &str,
+        http: &T,
+        head: &CatalogHead,
+        index: &BucketIndex,
+        start: u32,
+    ) -> Result<PaidSet, Error> {
+        let digest = index
+            .get(start)
+            .ok_or(receiver_directory::Error::Coverage)?;
+        let route = format!("bucket/{start}");
+        let bytes = fetch_object(origin, http, &route, MAX_BUCKET_BYTES, &digest).await?;
+        let bucket = PaidSet::decode(&bytes)?;
+        head.check_bucket(index, &bucket)?;
+        Ok(bucket)
+    }
+
+    /// Downloads the cumulative paid set `head` names from `/v1/receiver/paid/<digest>`
+    /// and checks it with [`CatalogHead::check_paid`]. The caller checks the boundary
+    /// hashes against its own chain.
+    pub async fn fetch_paid(origin: &str, http: &T, head: &CatalogHead) -> Result<PaidSet, Error> {
+        let bytes = fetch_object(origin, http, "paid", MAX_PAID_BYTES, &head.paid).await?;
+        let paid = PaidSet::decode(&bytes)?;
+        head.check_paid(&paid)?;
+        Ok(paid)
+    }
+
+    /// Downloads the seen set `head` names from `/v1/receiver/seen/<digest>` and checks
+    /// it with [`CatalogHead::check_seen`].
+    pub async fn fetch_seen(origin: &str, http: &T, head: &CatalogHead) -> Result<SeenSet, Error> {
+        let bytes = fetch_object(origin, http, "seen", MAX_SEEN_BYTES, &head.seen).await?;
+        let seen = SeenSet::decode(&bytes)?;
+        head.check_seen(&seen)?;
+        Ok(seen)
+    }
+
     /// The session manifest.
     pub fn manifest(&self) -> &Manifest {
         self.client.manifest()
@@ -143,4 +219,25 @@ impl<T: Transport> DirectoryClient<T> {
             .await?;
         self.client.decode(query, &body)
     }
+}
+
+/// GETs the immutable object at `<origin>/v1/receiver/<route>/<digest>`, the same bytes
+/// for every wallet, failing unless it has at most `limit` bytes and SHA-256 `digest`.
+async fn fetch_object<T: Transport>(
+    origin: &str,
+    http: &T,
+    route: &str,
+    limit: usize,
+    digest: &Hash,
+) -> Result<Vec<u8>, Error> {
+    let url = format!(
+        "{}/v1/receiver/{route}/{}",
+        origin.trim_end_matches('/'),
+        hex::encode(digest)
+    );
+    let bytes = http.get(&url, limit).await?;
+    if bytes.len() > limit || Hash::from(Sha256::digest(&bytes)) != *digest {
+        return Err(Error::Malformed);
+    }
+    Ok(bytes)
 }

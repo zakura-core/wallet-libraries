@@ -1,7 +1,8 @@
 # zakura-filters
 
 The byte codec shared by transparent activity filters and receiver-directory filters.
-It contains a Golomb-coded set writer, a bit reader, and canonical CompactSize
+It contains a Golomb-coded set writer, the Golomb-Rice delta coding it uses (also
+for callers that hash their own values), a bit reader, and canonical CompactSize
 integer encoding/decoding. It does not interpret scripts, addresses, transactions,
 chain identities, or publication metadata.
 

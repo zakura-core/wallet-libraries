@@ -171,6 +171,7 @@ impl Directory {
             data_sha256: [0; 32],
             filters: Vec::new(),
             filters_sha256: [0; 32],
+            catalog_sha256: [0; 32],
         };
         // The publisher validated every record before writing its row slot.
         let raw: Vec<RawRecord> = records

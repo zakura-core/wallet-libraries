@@ -313,6 +313,7 @@ fn publish(
         data_sha256: [0; 32],
         filters: Vec::new(),
         filters_sha256: [0; 32],
+        catalog_sha256: [0; 32],
     };
     let snapshot = Snapshot::build(manifest, &records, provider).unwrap();
     let positions = records

@@ -3,8 +3,12 @@
 //! This crate places, stores and parses records structurally; it checks no
 //! cryptography. Callers validate receivers, Action fields and inclusion proofs at
 //! their trust boundaries.
+pub mod catalog;
 pub mod filter;
+mod object;
+pub mod paid;
 pub mod record;
+pub mod seen;
 pub mod snapshot;
 
 pub use record::{Payment, RawRecord, ReceiverBytes, RECORD_BYTES};

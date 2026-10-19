@@ -42,6 +42,7 @@ pub fn manifest(rows: u32) -> Manifest {
             until_unix: None,
         }],
         filters_sha256: [0; 32],
+        catalog_sha256: [0; 32],
     }
 }
 

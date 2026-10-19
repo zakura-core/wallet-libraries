@@ -109,7 +109,7 @@ fn the_protocol_reproduces_its_pinned_bytes() {
         ("row index", "2600"),
         (
             "session",
-            "1ff67e1b137866eed28623586925a7e258af335857854f38909f915f410e8945",
+            "72d684cb2d20632be1aef622e648651ac6ddf0b5a82a95025d148c42656c2c50",
         ),
         (
             "public",
@@ -117,11 +117,11 @@ fn the_protocol_reproduces_its_pinned_bytes() {
         ),
         (
             "request",
-            "37c8a73cdd1f943da9ff2e202133d960bcd063af91626d5574c866f81114ef66",
+            "07bd12b32e4b4ec9b556d44eb3aa27b60853a13f4f35ed15817bc3b23ced39c6",
         ),
         (
             "response",
-            "9c52cf1169e5fc4dc6bcb5c4d3e99ebb906977a6f13260bccdd1d03cd0b4572c",
+            "70f553ad9cd0eb3d29c55930b5a380ad7912597e066e7a2c169ffddb775fd1a5",
         ),
         (
             "row",

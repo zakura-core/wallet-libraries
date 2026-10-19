@@ -52,6 +52,9 @@ pub struct Manifest {
     pub filters: Vec<FilterSet>,
     /// Commits to the publication's [`Filters`] file.
     pub filters_sha256: Hash,
+    /// Commits to the publication's [`CatalogHead`](crate::catalog::CatalogHead), by
+    /// its digest.
+    pub catalog_sha256: Hash,
 }
 
 /// One labeled set in a publication's [`Filters`] file; see [`crate::filter`].
@@ -135,10 +138,10 @@ impl Manifest {
         Ok(())
     }
 
-    /// Bind row data, coverage, network, geometry and filters into one immutable
-    /// revision: a domain-separated SHA-256 of every field at fixed width, with strings
-    /// and the set list length-prefixed and each optional value tagged, as Enhance and
-    /// Status hash their manifests.
+    /// Bind row data, coverage, network, geometry, filters and catalog into one
+    /// immutable revision: a domain-separated SHA-256 of every field at fixed width,
+    /// with strings and the set list length-prefixed and each optional value tagged, as
+    /// Enhance and Status hash their manifests.
     pub fn revision(&self) -> Result<Hash, Error> {
         self.validate()?;
         let mut h = Sha256::new();
@@ -174,6 +177,7 @@ impl Manifest {
             }
         }
         h.update(self.filters_sha256);
+        h.update(self.catalog_sha256);
         Ok(h.finalize().into())
     }
 
