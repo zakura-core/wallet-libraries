@@ -15,7 +15,7 @@ use super::{
     lifecycle::record,
     reservations::{
         LATEST_DEADLINE, check_unquoted, current, fresh_seen, issuance_end, next_index, operation,
-        receiver_bytes, record_seen, reserve_index,
+        receiver_bytes, record_seen, reserve_index, scanned_empty,
     },
 };
 use crate::wallet::one_time_ivk::{
@@ -135,6 +135,10 @@ pub(in crate::wallet::one_time_ivk) fn begin(
     }
     if index >= issuance_end(conn, owner, 0)? {
         return Ok(Err(ReservationPolicy::Gap));
+    }
+    let exposed:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM ironwood_one_time_operations WHERE one_time_key_id=?1 AND request IS NOT NULL)",[key],|r|r.get(0))?;
+    if exposed && !scanned_empty(conn, key)? {
+        return Ok(Err(ReservationPolicy::Coverage));
     }
     // Until its funding transaction is stored, the operation expects no receipt, and it
     // has no observation, so storing that transaction records it active.

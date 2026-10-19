@@ -1457,6 +1457,7 @@ fn reserve_refund_at(st: &mut State, now: i64) -> Policy<OneTimeKey> {
 fn begin_refund_at(st: &mut State, index: u64, now: i64) -> Policy<String> {
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
+    db.prepare_one_time_recovery(account, 1024, now).unwrap();
     db.begin_refund_operation(account, index, now + 60, now, Some(&empty_seen(now)))
 }
 
@@ -1772,4 +1773,24 @@ fn a_refund_key_with_an_empty_filter_match_is_issued_and_funded() {
             .refund_funding_memo(account, 0, &deposit)
             .is_ok()
     );
+}
+
+/// Expired refund requests wait for filter history, including a new tip between reserve and expose.
+#[test]
+fn refund_reuse_requires_filter_coverage_at_reservation_and_exposure() {
+    let mut st = undiscovered();
+    let account = st.test_account().unwrap().id();
+    see_at(st.wallet_mut().db_mut(), account, &[], NOW);
+    expose_refunds(&mut st, 0..RECEIVE_GAP_LIMIT, NOW);
+    let now = NOW + 61;
+    assert_eq!(refusal(reserve_refund_at(&mut st, now)), Some(Coverage));
+    settle_empty_filters(st.wallet_mut().db_mut(), account, now);
+    let key = reserve_refund_at(&mut st, now).unwrap().unwrap();
+    assert_eq!(key.key_id().index(), 0);
+    let (height, _) = st.generate_empty_block();
+    st.wallet_mut().update_chain_tip(height).unwrap();
+    assert_eq!(refusal(begin_refund_at(&mut st, 0, now)), Some(Coverage));
+    st.scan_cached_blocks_with_one_time_ivks(height, 1);
+    settle_empty_filters(st.wallet_mut().db_mut(), account, now);
+    assert!(begin_refund_at(&mut st, 0, now).unwrap().is_ok());
 }

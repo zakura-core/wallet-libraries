@@ -123,7 +123,10 @@ pub(in crate::wallet::one_time_ivk) const STARTED: &str =
     WHERE o.one_time_key_id = k.id AND o.started = 1)";
 
 /// Reuse requires current historical filters and no known payment or pending candidate.
-fn scanned_empty(conn: &Connection, key: i64) -> Result<bool, SqliteClientError> {
+pub(in crate::wallet::one_time_ivk) fn scanned_empty(
+    conn: &Connection,
+    key: i64,
+) -> Result<bool, SqliteClientError> {
     let tip = wallet::chain_tip_height(conn)?.map(u32::from);
     Ok(conn.query_row("SELECT k.used=0 AND r.enabled=1 AND r.needs_prepare=0 AND r.archive IS NOT NULL
         AND v.next_height>?2
@@ -742,6 +745,7 @@ pub(in crate::wallet::one_time_ivk) fn next_index<P: Parameters>(
     let mut abandoned = [None, None];
     let mut fresh = None;
     let mut widened = false;
+    let mut uncovered = false;
     for index in 0..end {
         if conn.query_row("SELECT EXISTS(SELECT 1 FROM ironwood_block_matches WHERE account_id=?1 AND purpose=?2 AND key_index=?3)",params![a.0,code,index.to_be_bytes()],|r|r.get::<_,bool>(0))? {continue;}
 
@@ -801,15 +805,20 @@ pub(in crate::wallet::one_time_ivk) fn next_index<P: Parameters>(
             fresh = Some(index);
             break;
         }
+        if !scanned_empty(conn, key_ref(conn, account, KeyId::new(purpose, index))?)? {
+            uncovered = true;
+            continue;
+        }
         abandoned[usize::from(held)].get_or_insert(index);
     }
     if fresh.is_none() && widened {
         return Ok(Err(ReservationPolicy::Gap));
     }
-    Ok(fresh
-        .or(abandoned[0])
-        .or(abandoned[1])
-        .ok_or(ReservationPolicy::Limit))
+    Ok(fresh.or(abandoned[0]).or(abandoned[1]).ok_or(if uncovered {
+        ReservationPolicy::Coverage
+    } else {
+        ReservationPolicy::Limit
+    }))
 }
 
 /// Reserves `key_id`, which [`next_index`] chose, as this wallet's, registering it with
