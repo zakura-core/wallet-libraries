@@ -75,6 +75,10 @@ pub enum CoverageTarget {
     Obligation {
         /// The obligation's ID (see [`Obligation::id`]).
         id: u64,
+        /// The account's receiver-set generation when the caller read the obligation
+        /// (see [`CoverageState::generation`]), which fences out work a rewind or a
+        /// history change made stale.
+        generation: u64,
     },
 }
 
@@ -83,8 +87,9 @@ pub enum CoverageTarget {
 pub enum CoverageOutcome {
     /// The step and its hits' lookups were recorded.
     Recorded,
-    /// The receiver set or the obligation changed since the caller read it, or the set's
-    /// window receivers are not all derived yet: read again and test again.
+    /// The receiver set's generation changed since the caller read it, the obligation is
+    /// gone, or the set's window receivers are not all derived yet: read again and test
+    /// again.
     Stale,
     /// The wallet has not stored the step's last block, so it cannot check the step
     /// against its chain yet.
@@ -211,7 +216,8 @@ pub trait OneTimeIvkCoverageWrite: OneTimeIvkWrite + OneTimeIvkCoverageRead {
 
     /// Pins `snapshot` for `target` unless one is pinned already, and returns the pinned
     /// snapshot. The frontier takes one only until it is established, and an obligation
-    /// only until its snapshot is tested. Otherwise this returns `None`.
+    /// only until its snapshot is tested. Otherwise, or if the target's generation is not
+    /// current, this returns `None` and pins nothing.
     fn pin_one_time_snapshot(
         &mut self,
         account: <Self as WalletRead>::AccountId,
@@ -222,8 +228,9 @@ pub trait OneTimeIvkCoverageWrite: OneTimeIvkWrite + OneTimeIvkCoverageRead {
     /// Records that `step` was tested against `target`'s receivers, which matched only
     /// `hits`, and makes each hit's lookup due through the step's end, unless the key is
     /// open and scanned from before the step. A hit outside the target's receivers is an
-    /// error, and a hit's index never becomes allocated or issued. A cumulative step
-    /// must be the snapshot pinned for the target. A frontier's first step is its pinned
+    /// error, and a hit's index never becomes allocated or issued. A cumulative step must
+    /// be the snapshot pinned for the target, and the target's generation must be
+    /// current. A frontier's first step is its pinned
     /// snapshot, which sets the history it follows. Each later one is a bucket starting at
     /// or below the frontier and ending above it, tested against the current, completely
     /// derived receiver set. An obligation tests its snapshot, then buckets that continue

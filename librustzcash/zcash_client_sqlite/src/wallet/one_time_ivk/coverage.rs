@@ -370,9 +370,12 @@ pub(crate) fn pin<P: Parameters>(
     snapshot: Snapshot,
 ) -> Result<Option<Snapshot>, SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
+    let row = recovery(conn, owner.0)?;
+    if generation(target) != row.generation {
+        return Ok(None);
+    }
     let pinned = match target {
         CoverageTarget::Frontier { .. } => {
-            let row = recovery(conn, owner.0)?;
             if row.frontier.is_some() {
                 return Ok(None);
             }
@@ -395,7 +398,7 @@ pub(crate) fn pin<P: Parameters>(
             )?;
             snapshot
         }
-        CoverageTarget::Obligation { id } => {
+        CoverageTarget::Obligation { id, .. } => {
             let Some(found) = account_obligation(conn, owner.0, id)? else {
                 return Ok(None);
             };
@@ -419,6 +422,15 @@ pub(crate) fn pin<P: Parameters>(
         }
     };
     Ok(Some(pinned))
+}
+
+/// The receiver-set generation `target` was read at.
+fn generation(target: CoverageTarget) -> u64 {
+    match target {
+        CoverageTarget::Frontier { generation } | CoverageTarget::Obligation { generation, .. } => {
+            generation
+        }
+    }
 }
 
 /// Account `owner`'s obligation `id`, if it is still outstanding.
@@ -467,9 +479,12 @@ pub(crate) fn record<P: Parameters>(
     let pinned = |snapshot: Option<Snapshot>| {
         snapshot.is_some_and(|s| s.cutoff == step.end && s.digest == step.digest)
     };
+    if generation(target) != row.generation {
+        return Ok(CoverageOutcome::Stale);
+    }
     match target {
         CoverageTarget::Frontier { generation } => {
-            if generation != row.generation || !row.complete() {
+            if !row.complete() {
                 return Ok(CoverageOutcome::Stale);
             }
             let continues = match (step.start, row.frontier) {
@@ -506,7 +521,7 @@ pub(crate) fn record<P: Parameters>(
                 ],
             )?;
         }
-        CoverageTarget::Obligation { id } => {
+        CoverageTarget::Obligation { id, .. } => {
             let Some(found) = account_obligation(conn, owner.0, id)? else {
                 return Ok(CoverageOutcome::Stale);
             };

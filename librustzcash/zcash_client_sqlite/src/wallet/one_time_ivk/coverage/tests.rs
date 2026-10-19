@@ -76,6 +76,14 @@ fn frontier(st: &State, account: AccountUuid) -> CoverageTarget {
     }
 }
 
+/// The target of `account`'s obligation `id` at its current receiver-set generation.
+fn obligation(st: &State, account: AccountUuid, id: u64) -> CoverageTarget {
+    let CoverageTarget::Frontier { generation } = frontier(st, account) else {
+        unreachable!()
+    };
+    CoverageTarget::Obligation { id, generation }
+}
+
 /// Records `step` against `target` with `hits`, at the test clock's time.
 fn record(
     st: &mut State,
@@ -409,7 +417,7 @@ fn an_obligation_bridges_from_its_pinned_snapshot_to_its_frontier() {
     let sparse = KeyId::new(Purpose::Refund, 1_000_000);
     register_sparse(&mut st, account, sparse).unwrap();
     let id = coverage(&st, account).obligations[0].id;
-    let target = CoverageTarget::Obligation { id };
+    let target = obligation(&st, account, id);
     let early = bucket(&st, h0 - 5, h0);
     assert_eq!(
         record(&mut st, account, target, early, &[]).unwrap(),
@@ -532,12 +540,8 @@ fn a_rewind_keeps_the_coverage_its_floor_supports() {
     }
     let obligations = coverage(&st, account).obligations;
     let (first, second) = (
-        CoverageTarget::Obligation {
-            id: obligations[0].id,
-        },
-        CoverageTarget::Obligation {
-            id: obligations[1].id,
-        },
+        obligation(&st, account, obligations[0].id),
+        obligation(&st, account, obligations[1].id),
     );
     let (below, above) = (snapshot(&st, h0), snapshot(&st, top - 2));
     let db = st.wallet_mut().db_mut();
@@ -676,4 +680,43 @@ fn lowering_the_birthday_owes_every_receiver_its_history() {
             (window(Purpose::Receive), top - 6),
         ]
     );
+}
+
+/// A snapshot fetched before a rewind or a history change pins nothing afterwards, for the
+/// frontier or an obligation, so it cannot wedge recovery on a stale snapshot.
+#[test]
+fn a_delayed_pin_is_fenced_out() {
+    let (mut st, account) = prepared();
+    let top = tip(&st).height;
+    let early = frontier(&st, account);
+    let db = st.wallet_mut().db_mut();
+    tx(db, |c, _| one_time_rewind::truncate(c, top - 1)).unwrap();
+    let delayed = snapshot(&st, top - 3);
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(
+        db.pin_one_time_snapshot(account, early, delayed).unwrap(),
+        None
+    );
+    assert_eq!(coverage(&st, account).bootstrap, None);
+
+    bootstrap(&mut st, account, top - 6, &[]);
+    register_sparse(&mut st, account, KeyId::new(Purpose::Refund, 1_000_000)).unwrap();
+    let id = coverage(&st, account).obligations[0].id;
+    let before_rewind = obligation(&st, account, id);
+    let db = st.wallet_mut().db_mut();
+    tx(db, |c, _| one_time_rewind::truncate(c, top - 1)).unwrap();
+    let pinned = db.pin_one_time_snapshot(account, before_rewind, delayed);
+    assert_eq!(pinned.unwrap(), None);
+    assert_eq!(coverage(&st, account).obligations[0].snapshot, None);
+
+    let before_reset = frontier(&st, account);
+    let newer = DirectoryHistory {
+        epoch: 2,
+        ..HISTORY
+    };
+    let db = st.wallet_mut().db_mut();
+    assert!(db.reset_one_time_history(account, newer).unwrap());
+    let pinned = db.pin_one_time_snapshot(account, before_reset, delayed);
+    assert_eq!(pinned.unwrap(), None);
+    assert_eq!(coverage(&st, account).bootstrap, None);
 }
