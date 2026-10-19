@@ -202,6 +202,17 @@ pub(super) fn advanced(conn: &rusqlite::Transaction<'_>, id: i64) -> Result<(), 
     grow_window(conn, owner, purpose)
 }
 
+/// The first index past account `owner`'s window of purpose code `purpose`, which covers
+/// at least [`WINDOW_FLOOR`] indices before any key advances allocation.
+pub(super) fn window_end(
+    conn: &Connection,
+    owner: i64,
+    purpose: u8,
+) -> Result<u64, SqliteClientError> {
+    let window = recovery(conn, owner)?.window(decode_purpose(purpose)?);
+    Ok(window.end.max(WINDOW_FLOOR))
+}
+
 /// Adds newly registered key `id`, `key` of account `owner`, to the receiver set alone if
 /// its window does not cover it.
 pub(super) fn enter_set(

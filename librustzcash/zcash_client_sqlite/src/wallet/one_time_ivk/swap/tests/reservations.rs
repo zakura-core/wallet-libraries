@@ -1611,6 +1611,44 @@ fn a_refund_request_survives_a_crash_at_each_step() {
     assert_eq!(refusal(late), Some(Stale));
 }
 
+/// A seen hit on a sparse refund key, one an unauthenticated funding memo named far past
+/// the window, blocks only that key: it moves neither the bound nor the window, so once
+/// requests in progress hold every index the bound allows, issuance waits.
+#[test]
+fn a_seen_hit_on_a_sparse_refund_key_moves_nothing() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let sparse = KeyId::new(Purpose::Refund, 1_000_000);
+    let from = tip(&st).height;
+    tx(st.wallet_mut().db_mut(), |c, p| {
+        register(c, p, account, sparse, from, false, Discovery::Lookup, NOW)
+    })
+    .unwrap();
+    let held = [derive(&st, sparse)
+        .address_at(0u32, Scope::External)
+        .to_raw_address_bytes()];
+    let contains = |receivers: &[[u8; 43]]| receivers.iter().map(|r| held.contains(r)).collect();
+    let seen = ProviderSeen {
+        until: NOW,
+        contains: &contains,
+    };
+    let through = tip(&st).height;
+    chain_agrees(st.wallet().db(), NOW);
+    let db = st.wallet_mut().db_mut();
+    let issued = db.reserve_refund_key(account, NOW, through, Some(&seen));
+    assert_eq!(issued.unwrap().unwrap().key_id().index(), 0);
+    let sql = "SELECT provider_seen, advances_allocation, issuance_blocked
+               FROM ironwood_one_time_keys WHERE purpose = 0 AND key_index = ?1";
+    let facts: (bool, bool, bool) = row(&db.conn, sql, [sparse.index().to_be_bytes()]);
+    assert_eq!(facts, (false, false, true));
+    begin_refund_at(&mut st, 0, NOW).unwrap().unwrap();
+    expose_refunds(&mut st, 1..RECEIVE_GAP_LIMIT, NOW);
+    assert_eq!(
+        refusal(reserve_refund_at(&mut st, NOW)),
+        Some(ReservationPolicy::Limit)
+    );
+}
+
 /// Thirty requests that fail one after another never move issuance past the bound: once
 /// each is over, the next reservation reuses the lowest of them instead, for both
 /// purposes. Rejections and lost refund responses leave no evidence another device could

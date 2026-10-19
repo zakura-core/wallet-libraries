@@ -9,8 +9,10 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 use super::{CURRENT, RESERVED, ReservationPolicy, lifecycle::record};
 use crate::wallet::one_time_ivk::{
     Discovery, KeyId, OneTimeKey, Purpose, account_key, authenticate_key, block_issuance, corrupt,
-    coverage::advanced, decode_index, index_after, invalid, key_by_id, purpose_code, register,
-    restore::discovery, restore_start,
+    coverage::{self, advanced},
+    decode_index, index_after, invalid, key_by_id, purpose_code, register,
+    restore::discovery,
+    restore_start,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
@@ -839,33 +841,44 @@ pub(in crate::wallet::one_time_ivk) fn reserve_index<P: Parameters>(
     Ok(registered)
 }
 
-/// Records which of `account`'s unseen keys of purpose code `purpose` `seen` holds.
+/// Records which of `account`'s unseen keys of purpose code `purpose` `seen` holds (see
+/// [`record_provider_seen`]). A hit on an unauthenticated key outside the receiver window,
+/// such as one a forged funding memo names, only blocks its issuance: it is sparse, so a
+/// false match must not move the bound or the window to it.
 pub(in crate::wallet::one_time_ivk) fn record_seen(
     conn: &rusqlite::Transaction<'_>,
     account: i64,
     purpose: u8,
     seen: &ProviderSeen<'_>,
 ) -> Result<(), SqliteClientError> {
+    let end = coverage::window_end(conn, account, purpose)?;
     let mut stmt = conn.prepare(
-        "SELECT k.id, k.receiver FROM ironwood_one_time_keys k
+        "SELECT k.id, k.receiver, k.authenticated = 0 AND k.key_index >= ?3
+         FROM ironwood_one_time_keys k
          WHERE k.account_id = ?1 AND k.purpose = ?2 AND k.provider_seen = 0",
     )?;
     let keys = stmt
-        .query_map(params![account, purpose], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+        .query_map(params![account, purpose, end.to_be_bytes()], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, bool>(2)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let receivers = keys
         .iter()
-        .map(|(_, receiver)| receiver_bytes(receiver))
+        .map(|(_, receiver, _)| receiver_bytes(receiver))
         .collect::<Result<Vec<_>, _>>()?;
     let hits = (seen.contains)(&receivers);
     if hits.len() != keys.len() {
         return Err(wrong_answer_count());
     }
-    for ((id, _), hit) in keys.iter().zip(hits) {
-        if hit {
-            record_provider_seen(conn, *id)?;
+    for (&(id, _, sparse), hit) in keys.iter().zip(hits) {
+        match (hit, sparse) {
+            (true, true) => block_issuance(conn, id)?,
+            (true, false) => record_provider_seen(conn, id)?,
+            (false, _) => {}
         }
     }
     Ok(())
