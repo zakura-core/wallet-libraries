@@ -225,6 +225,13 @@ fn main() {
             let account = db.get_account_ids().unwrap()[0];
             // A fresh account has no discovery to run.
             assert_eq!(db.one_time_discovery(account, now).unwrap(), None);
+            use zcash_client_backend::data_api::one_time_ivk::recovery::OneTimeRecoveryWrite;
+            use zcash_client_sqlite::wallet::one_time_ivk::swap::ReservationPolicy;
+            assert!(matches!(
+                db.start_receive_operation(account, request, now).unwrap(),
+                Err(ReservationPolicy::Gap)
+            ));
+            db.set_one_time_recovery_enabled(account, true).unwrap();
             let deposit = db
                 .start_receive_operation(account, request, now)
                 .unwrap()
