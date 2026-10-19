@@ -471,6 +471,41 @@ fn block_recovery_watch_receipts_confirmations_and_repair() {
             .len(),
         1
     );
+    // A receipt learned outside compact scanning cannot certify its sibling outputs.
+    let db = st.wallet_mut().db_mut();
+    let receipt_hash: [u8; 32] = db
+        .conn
+        .query_row(
+            "SELECT hash FROM ironwood_key_scans WHERE height=?1",
+            [u32::from(second)],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "DELETE FROM ironwood_key_scans WHERE height=?1",
+            [u32::from(second)],
+        )
+        .unwrap();
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    assert_eq!(
+        st.wallet()
+            .db()
+            .one_time_local_watch_keys(range.clone(), 50)
+            .unwrap()
+            .len(),
+        1
+    );
+    st.wallet_mut()
+        .db_mut()
+        .transactionally(|db| {
+            scanned(
+                db.conn.0,
+                &[(account, key)],
+                &[(second, BlockHash(receipt_hash))],
+            )
+        })
+        .unwrap();
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     assert!(
         st.wallet()

@@ -521,6 +521,9 @@ pub(crate) fn close_local_watches(
         AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id=k.id AND o.expectation NOT IN(1,2))
         AND EXISTS(SELECT 1 FROM ironwood_key_scans s WHERE s.one_time_key_id=k.id AND s.height=?1 AND s.hash=?2)
         AND EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t ON t.id_tx=n.transaction_id WHERE n.one_time_key_id=k.id AND t.mined_height<=?3)
+        AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t ON t.id_tx=n.transaction_id
+            WHERE n.one_time_key_id=k.id AND NOT EXISTS(SELECT 1 FROM ironwood_key_scans s JOIN blocks b ON b.height=s.height AND b.hash=s.hash
+                WHERE s.one_time_key_id=k.id AND s.height=t.mined_height))
         AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t ON t.id_tx=n.transaction_id WHERE n.one_time_key_id=k.id AND (t.mined_height IS NULL OR t.mined_height>?3))")?
         .query_map(params![u32::from(block.0),block.1.0,confirmed], |r| r.get::<_,i64>(0))?
         .collect::<Result<Vec<_>,_>>()?;
