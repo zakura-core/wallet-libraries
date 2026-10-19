@@ -9,13 +9,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::Deserialize;
-use serde_json::json;
+use crate::chain::{Amount, Hash as TxHash, OutPoint, Transaction, Utxo};
 
-use crate::chain::{Amount, Block, Hash as TxHash, Input, OutPoint, Transaction, Utxo};
-
+use crate::NodeError;
 use crate::fee::{self, OutputCache};
-use crate::{Network, NodeClient, NodeError};
 
 /// Previous transactions requested per JSON-RPC batch.
 pub const PREVOUT_BATCH: usize = 256;
@@ -46,6 +43,7 @@ pub struct EnhanceBlock {
 }
 
 /// Spent-output resolution shared across blocks: a bounded cache and counters.
+#[cfg_attr(not(feature = "rpc"), allow(dead_code))]
 pub struct Prevouts {
     cache: Mutex<OutputCache>,
     counts: PrevoutCounters,
@@ -88,202 +86,214 @@ impl Prevouts {
     }
 }
 
-#[derive(Deserialize)]
-struct VerboseBlock {
-    trees: BlockTrees,
-}
+/// The node reads, for hosts with the `rpc` client.
+#[cfg(feature = "rpc")]
+mod rpc {
+    use super::*;
+    use crate::chain::{Block, Input};
+    use crate::{Network, NodeClient};
+    use serde::Deserialize;
+    use serde_json::json;
 
-#[derive(Deserialize)]
-struct BlockTrees {
-    ironwood: Option<TreeSize>,
-}
-
-#[derive(Deserialize)]
-struct TreeSize {
-    size: u64,
-}
-
-impl NodeClient {
-    /// The node's Ironwood tree size after the block at `height`.
-    pub async fn tree_size(&self, height: u64) -> Result<u64, NodeError> {
-        self.tree_size_at(height.to_string(), height).await
+    #[derive(Deserialize)]
+    struct VerboseBlock {
+        trees: BlockTrees,
     }
 
-    /// Read by block identity when another read already selected that block.
-    async fn tree_size_at(&self, block: String, height: u64) -> Result<u64, NodeError> {
-        let block: VerboseBlock = self.call("getblock", json!([block, 2])).await?;
-        block
-            .trees
-            .ironwood
-            .map(|tree| tree.size)
-            .ok_or(NodeError::MissingTreeSize(height))
+    #[derive(Deserialize)]
+    struct BlockTrees {
+        ironwood: Option<TreeSize>,
     }
 
-    /// A mainnet block's Enhance actions and the Ironwood tree size after that
-    /// same block, read by hash so a height reorg cannot mix two blocks.
-    /// This method uses mainnet activation rules; Testnet backfill is unsupported.
-    ///
-    /// Fails, rather than publishing an absent or partial fee, when a spent
-    /// output cannot be resolved; the caller retries the block later.
-    pub async fn enhance_block(
-        &self,
-        height: u64,
-        prevouts: &Prevouts,
-    ) -> Result<EnhanceBlock, NodeError> {
-        let (hash, actions) = self.enhance_actions(height, prevouts).await?;
-        let tree_size = if height >= u64::from(Network::Mainnet.ironwood_activation()) {
-            self.tree_size_at(crate::hash::display(&hash), height)
-                .await?
-        } else {
-            0
-        };
-        Ok(EnhanceBlock {
-            height,
-            hash,
-            actions,
-            tree_size,
-        })
+    #[derive(Deserialize)]
+    struct TreeSize {
+        size: u64,
     }
 
-    /// The block's hash (protocol byte order) and Enhance actions, without the tree
-    /// size.
-    pub async fn enhance_actions(
-        &self,
-        height: u64,
-        prevouts: &Prevouts,
-    ) -> Result<([u8; 32], Vec<EnhanceAction>), NodeError> {
-        let raw = self.raw_block(height.to_string()).await?;
-        let block = Block::zcash_deserialize(raw.as_slice())
-            .map_err(|error| NodeError::Block(error.to_string()))?;
-        let actions = self.block_actions(&block, prevouts).await?;
-        Ok((block.hash().0, actions))
-    }
+    impl NodeClient {
+        /// The node's Ironwood tree size after the block at `height`.
+        pub async fn tree_size(&self, height: u64) -> Result<u64, NodeError> {
+            self.tree_size_at(height.to_string(), height).await
+        }
 
-    /// Actions of every Ironwood action in block order.
-    ///
-    /// Spent outputs are resolved only for non-coinbase transactions with
-    /// Ironwood actions and transparent inputs: from this block, then the
-    /// cross-block cache, then one batched `getrawtransaction` per 256 missing
-    /// transactions. A block without such a transaction issues no extra RPC.
-    async fn block_actions(
-        &self,
-        block: &Block,
-        prevouts: &Prevouts,
-    ) -> Result<Vec<EnhanceAction>, NodeError> {
-        let wanted: Vec<OutPoint> = block
-            .transactions
-            .iter()
-            .filter(|tx| tx.ironwood_actions().next().is_some() && fee::needs_prevouts(tx))
-            .flat_map(|tx| tx.inputs().iter().filter_map(Input::outpoint))
-            .collect();
-        let mut values: HashMap<OutPoint, Amount> = HashMap::new();
-        if !wanted.is_empty() {
-            let in_block: HashMap<_, _> = block
+        /// Read by block identity when another read already selected that block.
+        async fn tree_size_at(&self, block: String, height: u64) -> Result<u64, NodeError> {
+            let block: VerboseBlock = self.call("getblock", json!([block, 2])).await?;
+            block
+                .trees
+                .ironwood
+                .map(|tree| tree.size)
+                .ok_or(NodeError::MissingTreeSize(height))
+        }
+
+        /// A mainnet block's Enhance actions and the Ironwood tree size after that
+        /// same block, read by hash so a height reorg cannot mix two blocks.
+        /// This method uses mainnet activation rules; Testnet backfill is unsupported.
+        ///
+        /// Fails, rather than publishing an absent or partial fee, when a spent
+        /// output cannot be resolved; the caller retries the block later.
+        pub async fn enhance_block(
+            &self,
+            height: u64,
+            prevouts: &Prevouts,
+        ) -> Result<EnhanceBlock, NodeError> {
+            let (hash, actions) = self.enhance_actions(height, prevouts).await?;
+            let tree_size = if height >= u64::from(Network::Mainnet.ironwood_activation()) {
+                self.tree_size_at(crate::hash::display(&hash), height)
+                    .await?
+            } else {
+                0
+            };
+            Ok(EnhanceBlock {
+                height,
+                hash,
+                actions,
+                tree_size,
+            })
+        }
+
+        /// The block's hash (protocol byte order) and Enhance actions, without the tree
+        /// size.
+        pub async fn enhance_actions(
+            &self,
+            height: u64,
+            prevouts: &Prevouts,
+        ) -> Result<([u8; 32], Vec<EnhanceAction>), NodeError> {
+            let raw = self.raw_block(height.to_string()).await?;
+            let block = Block::zcash_deserialize(raw.as_slice())
+                .map_err(|error| NodeError::Block(error.to_string()))?;
+            let actions = self.block_actions(&block, prevouts).await?;
+            Ok((block.hash().0, actions))
+        }
+
+        /// Actions of every Ironwood action in block order.
+        ///
+        /// Spent outputs are resolved only for non-coinbase transactions with
+        /// Ironwood actions and transparent inputs: from this block, then the
+        /// cross-block cache, then one batched `getrawtransaction` per 256 missing
+        /// transactions. A block without such a transaction issues no extra RPC.
+        async fn block_actions(
+            &self,
+            block: &Block,
+            prevouts: &Prevouts,
+        ) -> Result<Vec<EnhanceAction>, NodeError> {
+            let wanted: Vec<OutPoint> = block
                 .transactions
                 .iter()
-                .map(|tx| (tx.hash(), tx.as_ref()))
+                .filter(|tx| tx.ironwood_actions().next().is_some() && fee::needs_prevouts(tx))
+                .flat_map(|tx| tx.inputs().iter().filter_map(Input::outpoint))
                 .collect();
-            let mut missing = Vec::new();
-            let mut requested = std::collections::HashSet::new();
-            {
-                let cache = prevouts.cache.lock().expect("prevout cache");
-                for outpoint in &wanted {
-                    if let Some(tx) = in_block.get(&outpoint.hash) {
-                        values.insert(*outpoint, output_value(outpoint, tx.outputs())?);
-                        prevouts
-                            .counts
-                            .same_block_hits
-                            .fetch_add(1, Ordering::Relaxed);
-                    } else if let Some(value) = cache.get(outpoint) {
-                        values.insert(*outpoint, value);
-                        prevouts.counts.cache_hits.fetch_add(1, Ordering::Relaxed);
-                    } else if requested.insert(outpoint.hash) {
-                        missing.push(outpoint.hash);
-                    }
-                }
-            }
-            for chunk in missing.chunks(PREVOUT_BATCH) {
-                let fetched = self.transactions(chunk).await?;
-                prevouts.counts.batches.fetch_add(1, Ordering::Relaxed);
-                prevouts
-                    .counts
-                    .fetched_transactions
-                    .fetch_add(fetched.len() as u64, Ordering::Relaxed);
-                let mut cache = prevouts.cache.lock().expect("prevout cache");
-                for tx in &fetched {
-                    for outpoint in wanted.iter().filter(|o| o.hash == tx.hash()) {
-                        values.insert(*outpoint, output_value(outpoint, tx.outputs())?);
-                    }
-                    cache.insert_transaction(tx);
-                }
-            }
-        }
-        let mut actions = Vec::new();
-        for transaction in &block.transactions {
-            let utxos = transaction
-                .inputs()
-                .iter()
-                .filter_map(Input::outpoint)
-                .filter_map(|o| values.get(&o).map(|v| (o, fee::spent_output(*v))))
-                .collect();
-            actions.extend(transaction_actions(transaction, &utxos)?);
-        }
-        let mut cache = prevouts.cache.lock().expect("prevout cache");
-        for transaction in &block.transactions {
-            cache.insert_transaction(transaction);
-        }
-        Ok(actions)
-    }
-
-    /// Protocol-order hashes of `heights`, in JSON-RPC 2.0 batches.
-    pub async fn block_hashes(&self, heights: &[u64]) -> Result<Vec<[u8; 32]>, NodeError> {
-        let mut hashes = Vec::with_capacity(heights.len());
-        for chunk in heights.chunks(PREVOUT_BATCH) {
-            for entry in self
-                .batch::<String>("getblockhash", chunk.iter().map(|h| json!([h])).collect())
-                .await?
-            {
-                let displayed = entry.map_err(|(code, message)| NodeError::Rpc(code, message))?;
-                hashes.push(crate::hash::parse_display(&displayed)?);
-            }
-        }
-        Ok(hashes)
-    }
-
-    /// Transactions by id in one JSON-RPC 2.0 batch, each identity verified.
-    ///
-    /// A transaction the node does not have (-5) is an error, never an
-    /// absent input value.
-    async fn transactions(&self, txids: &[TxHash]) -> Result<Vec<Transaction>, NodeError> {
-        let entries = self
-            .batch::<String>(
-                "getrawtransaction",
-                txids
+            let mut values: HashMap<OutPoint, Amount> = HashMap::new();
+            if !wanted.is_empty() {
+                let in_block: HashMap<_, _> = block
+                    .transactions
                     .iter()
-                    .map(|txid| json!([txid.to_string(), 0]))
-                    .collect(),
-            )
-            .await?;
-        txids
-            .iter()
-            .zip(entries)
-            .map(|(txid, entry)| {
-                let raw_hex = entry.map_err(|(code, message)| match code {
-                    -5 => NodeError::MissingTransaction(txid.to_string()),
-                    _ => NodeError::Rpc(code, message),
-                })?;
-                let raw = hex::decode(raw_hex)?;
-                let tx = Transaction::zcash_deserialize(raw.as_slice())
-                    .map_err(|error| NodeError::Transaction(txid.to_string(), error.to_string()))?;
-                if tx.hash() != *txid {
-                    return Err(NodeError::Transaction(
-                        txid.to_string(),
-                        "returned transaction identity differs".into(),
-                    ));
+                    .map(|tx| (tx.hash(), tx.as_ref()))
+                    .collect();
+                let mut missing = Vec::new();
+                let mut requested = std::collections::HashSet::new();
+                {
+                    let cache = prevouts.cache.lock().expect("prevout cache");
+                    for outpoint in &wanted {
+                        if let Some(tx) = in_block.get(&outpoint.hash) {
+                            values.insert(*outpoint, output_value(outpoint, tx.outputs())?);
+                            prevouts
+                                .counts
+                                .same_block_hits
+                                .fetch_add(1, Ordering::Relaxed);
+                        } else if let Some(value) = cache.get(outpoint) {
+                            values.insert(*outpoint, value);
+                            prevouts.counts.cache_hits.fetch_add(1, Ordering::Relaxed);
+                        } else if requested.insert(outpoint.hash) {
+                            missing.push(outpoint.hash);
+                        }
+                    }
                 }
-                Ok(tx)
-            })
-            .collect()
+                for chunk in missing.chunks(PREVOUT_BATCH) {
+                    let fetched = self.transactions(chunk).await?;
+                    prevouts.counts.batches.fetch_add(1, Ordering::Relaxed);
+                    prevouts
+                        .counts
+                        .fetched_transactions
+                        .fetch_add(fetched.len() as u64, Ordering::Relaxed);
+                    let mut cache = prevouts.cache.lock().expect("prevout cache");
+                    for tx in &fetched {
+                        for outpoint in wanted.iter().filter(|o| o.hash == tx.hash()) {
+                            values.insert(*outpoint, output_value(outpoint, tx.outputs())?);
+                        }
+                        cache.insert_transaction(tx);
+                    }
+                }
+            }
+            let mut actions = Vec::new();
+            for transaction in &block.transactions {
+                let utxos = transaction
+                    .inputs()
+                    .iter()
+                    .filter_map(Input::outpoint)
+                    .filter_map(|o| values.get(&o).map(|v| (o, fee::spent_output(*v))))
+                    .collect();
+                actions.extend(transaction_actions(transaction, &utxos)?);
+            }
+            let mut cache = prevouts.cache.lock().expect("prevout cache");
+            for transaction in &block.transactions {
+                cache.insert_transaction(transaction);
+            }
+            Ok(actions)
+        }
+
+        /// Protocol-order hashes of `heights`, in JSON-RPC 2.0 batches.
+        pub async fn block_hashes(&self, heights: &[u64]) -> Result<Vec<[u8; 32]>, NodeError> {
+            let mut hashes = Vec::with_capacity(heights.len());
+            for chunk in heights.chunks(PREVOUT_BATCH) {
+                for entry in self
+                    .batch::<String>("getblockhash", chunk.iter().map(|h| json!([h])).collect())
+                    .await?
+                {
+                    let displayed =
+                        entry.map_err(|(code, message)| NodeError::Rpc(code, message))?;
+                    hashes.push(crate::hash::parse_display(&displayed)?);
+                }
+            }
+            Ok(hashes)
+        }
+
+        /// Transactions by id in one JSON-RPC 2.0 batch, each identity verified.
+        ///
+        /// A transaction the node does not have (-5) is an error, never an
+        /// absent input value.
+        async fn transactions(&self, txids: &[TxHash]) -> Result<Vec<Transaction>, NodeError> {
+            let entries = self
+                .batch::<String>(
+                    "getrawtransaction",
+                    txids
+                        .iter()
+                        .map(|txid| json!([txid.to_string(), 0]))
+                        .collect(),
+                )
+                .await?;
+            txids
+                .iter()
+                .zip(entries)
+                .map(|(txid, entry)| {
+                    let raw_hex = entry.map_err(|(code, message)| match code {
+                        -5 => NodeError::MissingTransaction(txid.to_string()),
+                        _ => NodeError::Rpc(code, message),
+                    })?;
+                    let raw = hex::decode(raw_hex)?;
+                    let tx = Transaction::zcash_deserialize(raw.as_slice()).map_err(|error| {
+                        NodeError::Transaction(txid.to_string(), error.to_string())
+                    })?;
+                    if tx.hash() != *txid {
+                        return Err(NodeError::Transaction(
+                            txid.to_string(),
+                            "returned transaction identity differs".into(),
+                        ));
+                    }
+                    Ok(tx)
+                })
+                .collect()
+        }
     }
 }
 
@@ -348,6 +358,7 @@ fn transaction_actions(
         .collect())
 }
 
+#[cfg(feature = "rpc")]
 fn output_value(
     outpoint: &OutPoint,
     outputs: &[crate::chain::Output],

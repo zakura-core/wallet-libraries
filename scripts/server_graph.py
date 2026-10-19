@@ -103,6 +103,30 @@ def rpc_dependency_problems(graph, node_packages):
 
 
 
+# Runtime and HTTP stacks that only the `rpc` client and the HTTP node double add.
+TRANSPORT_PACKAGES = {"tokio", "reqwest", "axum", "hyper", "hyper-util", "h2", "tower"}
+
+
+def transport_dependency_problems(graph, kind):
+    """A consumer without `rpc` must resolve no runtime or HTTP package, transitively."""
+    packages = {package["id"]: package for package in graph["packages"]}
+    nodes = {node["id"]: node for node in graph["resolve"]["nodes"]}
+    pending = [graph["resolve"]["root"]]
+    visited = set()
+    errors = []
+    while pending:
+        package_id = pending.pop()
+        if package_id in visited:
+            continue
+        visited.add(package_id)
+        if packages[package_id]["name"] in TRANSPORT_PACKAGES:
+            errors.append(f"{kind}: decoding consumer resolves runtime/HTTP package {packages[package_id]['name']}")
+        for dependency in nodes[package_id]["deps"]:
+            if any(kind_["kind"] != "dev" for kind_ in dependency["dep_kinds"]):
+                pending.append(dependency["pkg"])
+    return errors
+
+
 def product_dependency_problems(graph, product):
     """A fresh product consumer must not activate another adapter or receiver recovery."""
     adapters = [p for p in graph["packages"] if p["name"] == "zakura-server-chain"]
@@ -144,7 +168,7 @@ def main():
         for kind, dependency, source in (
             ("wallet", f'zakura-receiver-crypto = {{ path = "{ROOT / "zakura/receiver-crypto"}" }}',
              'fn main() { let _ = zakura_receiver_crypto::RECORD_BYTES; }\n'),
-            ("server-production", f'zakura-server-chain = {{ path = "{workspace}" }}',
+            ("server-production", f'zakura-server-chain = {{ path = "{workspace}", features = ["rpc"] }}',
              'fn main() { let _ = zakura_server_chain::NodeClient::new("http://127.0.0.1:1".into(), None); }\n'),
             ("server-fixtures", f'zakura-server-chain = {{ path = "{workspace}", default-features = false, features = ["testing"] }}',
              'fn main() { let _ = zakura_server_chain::testing::Tx::from_bytes; }\n'),
@@ -163,7 +187,7 @@ fn main() {
     }
 }
 '''),
-            ("server", f'zakura-server-chain = {{ path = "{workspace}", features = ["testing", "transparent", "enhance", "status", "receiver"] }}',
+            ("server", f'zakura-server-chain = {{ path = "{workspace}", features = ["testing-node", "transparent", "enhance", "status", "receiver"] }}',
              '''use zakura_server_chain::{Network, NodeClient, NodeError, receiver::ReceiverBlock, enhance::EnhanceBlock, status::StatusBlock};
 use zakura_server_chain::transparent::{CompactBlock, Fee, TransparentBlock};
 fn public_results(receiver: ReceiverBlock, enhance: EnhanceBlock, status: StatusBlock, transparent: TransparentBlock, compact: CompactBlock) {
@@ -192,6 +216,8 @@ fn main() {
                 errors.extend(rpc_dependency_problems(fresh, nodes))
             if kind in {"server-production", "server-fixtures"}:
                 errors.extend(product_dependency_problems(fresh, None))
+            if kind == "server-fixtures":
+                errors.extend(transport_dependency_problems(fresh, kind))
             if not errors:
                 subprocess.run(["cargo", "check", "--locked", "--manifest-path", str(consumer / "Cargo.toml")], cwd=ROOT, check=True)
         product_types = {"transparent": "TransparentBlock", "enhance": "EnhanceBlock",
@@ -214,6 +240,9 @@ fn main() {
                 errors.extend(product_dependency_problems(fresh, product))
                 if not testing:
                     errors.extend(rpc_dependency_problems(fresh, nodes))
+                # Product cores consume decoded values: neither the product
+                # interpretation nor its fixtures may pull a runtime or HTTP stack.
+                errors.extend(transport_dependency_problems(fresh, "product-" + product + ("-testing" if testing else "")))
                 if not errors:
                     subprocess.run(["cargo", "check", "--locked", "--manifest-path", str(consumer / "Cargo.toml")], cwd=ROOT, check=True)
         # Each mutually exclusive facade backend must remain free of both

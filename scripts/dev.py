@@ -45,8 +45,10 @@ CONFIGS = {
     "receiver-pir-server": (["-p", "zakura-receiver-pir"], ["server"]),
     "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
     # Node readers retain their separate workspace and lockfile.
-    "server-rpc": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing", "transparent", "enhance", "status", "receiver"]),
-    "server": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing", "rocksdb", "enhance", "status", "receiver"]),
+    # Decoding and fixtures alone: what PIR product cores compile, without a runtime or HTTP.
+    "server-decoding": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing", "transparent", "enhance", "status", "receiver"]),
+    "server-rpc": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing-node", "transparent", "enhance", "status", "receiver"]),
+    "server": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing-node", "rocksdb", "enhance", "status", "receiver"]),
     # Role lanes cover formats and server-only helpers independently.
     "pir-protocol": (["-p", "zakura-pir-protocol"], ["enhance", "status", "transparent-inputs", "native", "http-endpoint"]),
     "pir-server": (["-p", "zakura-pir-server-core", "-p", "zakura-pir-publisher", "-p", "zakura-pir-query-server"], ["enhance", "status", "transparent"]),
