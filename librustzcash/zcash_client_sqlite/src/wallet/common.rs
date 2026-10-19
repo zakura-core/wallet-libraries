@@ -116,8 +116,8 @@ pub(crate) fn expiry_delta_sql(
     nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
     height: &str,
 ) -> String {
-    nu7_activation_height.map_or_else(|| DEFAULT_TX_EXPIRY_DELTA.to_string(), |activation| {
-        format!("CASE WHEN {height} >= {} THEN {NU7_DEFAULT_TX_EXPIRY_DELTA} ELSE {DEFAULT_TX_EXPIRY_DELTA} END", u32::from(activation))
+    nu7_activation_height.map_or_else(|| PRE_NU7_DEFAULT_TX_EXPIRY_DELTA.to_string(), |activation| {
+        format!("CASE WHEN {height} >= {} THEN {NU7_DEFAULT_TX_EXPIRY_DELTA} ELSE {PRE_NU7_DEFAULT_TX_EXPIRY_DELTA} END", u32::from(activation))
     })
 }
 

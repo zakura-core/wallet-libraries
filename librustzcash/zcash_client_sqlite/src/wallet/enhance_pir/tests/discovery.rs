@@ -22,7 +22,7 @@ use zcash_client_backend::{
     proto::compact_formats::{CompactBlock, CompactOrchardAction, CompactTx},
 };
 use zcash_note_encryption::Domain;
-use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
+use zcash_primitives::transaction::builder::PRE_NU7_DEFAULT_TX_EXPIRY_DELTA;
 
 /// A real V3 encrypted action and its matching PIR record, including authentic OVK ciphertext.
 fn encrypted_action(
@@ -2612,7 +2612,7 @@ fn pir_expiry_does_not_pin_notes_across_reorg_or_reopen_completed_work() {
             .db_mut()
             .truncate_to_height(send.funding_height)
             .unwrap();
-        for _ in 0..=DEFAULT_TX_EXPIRY_DELTA {
+        for _ in 0..=PRE_NU7_DEFAULT_TX_EXPIRY_DELTA {
             let (height, _) = send.st.generate_empty_block();
             send.st.scan_cached_blocks(height, 1);
         }

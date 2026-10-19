@@ -119,8 +119,8 @@ class PublishingTests(unittest.TestCase):
                      for directory in workspace["members"]]
         members = {package["name"] for package in manifests if package.get("publish") is not False}
         self.assertEqual({p["name"] for p in packages}, members)
-        # Git dependencies still need their exact registry versions before
-        # publication; the Common family now resolves directly from crates.io.
+        # The facade pins the complete Common family. Publication must wait for
+        # those exact registry versions when development uses a git revision.
         facade = release.tomllib.loads((release.ROOT / "wallet-lib/Cargo.toml").read_text())
         common_prerequisites = sorted({
             (dependency["package"], dependency["version"].removeprefix("="))
