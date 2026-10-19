@@ -13,16 +13,15 @@
 //!
 //! Which scripts become filter elements and events, and how display records are
 //! encoded, is the PIR services' business; this module only reads the chain.
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use crate::chain::Block;
-use serde_json::json;
 
 use crate::chain::{Hash as TxHash, Transaction};
 use crate::chain::{Input as ChainInput, OutPoint, Utxo};
 
-use crate::{NodeClient, NodeError};
+use crate::NodeError;
 
 mod compact;
 #[cfg(feature = "rocksdb")]
@@ -417,6 +416,7 @@ pub(crate) fn extract(
 /// Entries are keyed by outpoint, and a txid commits to its outputs, so an entry
 /// stays correct across reorganizations; a reorganized-out transaction is only a
 /// wasted entry. Eviction removes whole transactions; the budget counts outputs.
+#[cfg_attr(not(feature = "rpc"), allow(dead_code))]
 pub struct OutputCache {
     outputs: HashMap<OutPoint, crate::chain::Output>,
     order: VecDeque<(TxHash, u32)>,
@@ -436,6 +436,7 @@ impl OutputCache {
         }
     }
 
+    #[cfg_attr(not(feature = "rpc"), allow(dead_code))]
     fn insert_transaction(&mut self, transaction: &Transaction) {
         let txid = transaction.hash();
         let outputs = transaction.outputs();
@@ -475,6 +476,7 @@ impl OutputCache {
         }
     }
 
+    #[cfg_attr(not(feature = "rpc"), allow(dead_code))]
     fn get(&self, outpoint: &OutPoint) -> Option<&crate::chain::Output> {
         self.outputs.get(outpoint)
     }
@@ -490,223 +492,236 @@ impl OutputCache {
     }
 }
 
-/// Resolves spent outputs from an [`OutputCache`], then from the node one
-/// transaction at a time, blocking on `runtime`.
-struct RpcPreviousOutputs<'a> {
-    client: &'a NodeClient,
-    runtime: tokio::runtime::Handle,
-    cache: &'a mut OutputCache,
-    lookups: u64,
-    cache_hits: u64,
-}
+/// The node reads, for hosts with the `rpc` client.
+#[cfg(feature = "rpc")]
+mod rpc {
+    use super::*;
+    use crate::NodeClient;
+    use serde_json::json;
+    use std::collections::HashSet;
 
-impl PreviousOutputs for RpcPreviousOutputs<'_> {
-    fn previous_output(&mut self, txid: [u8; 32], index: u32) -> Result<Option<Output>, BoxError> {
-        let outpoint = OutPoint {
-            hash: TxHash(txid),
-            index,
-        };
-        if let Some(output) = self.cache.get(&outpoint) {
-            self.cache_hits += 1;
-            return Ok(Some(Output {
-                value: u64::from(output.value),
-                script: output.lock_script.as_raw_bytes().to_vec(),
-            }));
-        }
-        self.lookups += 1;
-        let found = self
-            .runtime
-            .block_on(self.client.transparent_transactions(&[txid]))?
-            .pop()
-            .flatten();
-        let Some(transaction) = found else {
-            return Ok(None);
-        };
-        self.cache.insert_transaction(&transaction);
-        let output = transaction.outputs().get(index as usize).map(|o| Output {
-            value: u64::from(o.value),
-            script: o.lock_script.as_raw_bytes().to_vec(),
-        });
-        if output.is_none() {
-            tracing::warn!(
-                outpoint = %label(&outpoint),
-                outputs = transaction.outputs().len(),
-                "previous transaction has no output at this index"
-            );
-        }
-        Ok(output)
-    }
-}
-
-impl NodeClient {
-    /// The block at `height`, from its raw serialization.
-    pub async fn fetch_block(&self, height: u64) -> Result<FetchedBlock, NodeError> {
-        FetchedBlock::from_bytes(&self.raw_block(height.to_string()).await?)
+    /// Resolves spent outputs from an [`OutputCache`], then from the node one
+    /// transaction at a time, blocking on `runtime`.
+    struct RpcPreviousOutputs<'a> {
+        client: &'a NodeClient,
+        runtime: tokio::runtime::Handle,
+        cache: &'a mut OutputCache,
+        lookups: u64,
+        cache_hits: u64,
     }
 
-    /// `fetched`'s transparent parts at `height`, resolving spent outputs from the
-    /// block itself, then `cache`, then the node in batches of [`PREVOUT_BATCH`].
-    /// The block's own transactions enter the cache first, so a later block spending
-    /// them needs no lookup.
-    pub async fn transparent_block(
-        &self,
-        height: u64,
-        fetched: FetchedBlock,
-        cache: &mut OutputCache,
-    ) -> Result<TransparentBlock, ExtractError> {
-        let event_height = u32::try_from(height).map_err(|_| ExtractError::Height(height))?;
-        for transaction in &fetched.0.transactions {
-            cache.insert_transaction(transaction);
-        }
-        let batched = self.prefetch(cache, &fetched.0.transactions).await?;
-        let runtime = tokio::runtime::Handle::current();
-        let client = self.clone();
-        let block = fetched.clone();
-        // Extraction is synchronous and may block on straggler lookups, so it must
-        // not run on an async worker thread. Cancelling this future while the
-        // extraction runs loses the moved cache's entries, not its budget.
-        let capacity = cache.capacity;
-        let mut owned = std::mem::replace(cache, OutputCache::new(capacity));
-        let (result, lookups, cache_hits, owned) = tokio::task::spawn_blocking(move || {
-            let mut previous = RpcPreviousOutputs {
-                client: &client,
-                runtime,
-                cache: &mut owned,
-                lookups: 0,
-                cache_hits: 0,
+    impl PreviousOutputs for RpcPreviousOutputs<'_> {
+        fn previous_output(
+            &mut self,
+            txid: [u8; 32],
+            index: u32,
+        ) -> Result<Option<Output>, BoxError> {
+            let outpoint = OutPoint {
+                hash: TxHash(txid),
+                index,
             };
-            let result = extract(&block.0.transactions, &mut previous, event_height);
-            let counts = (previous.lookups, previous.cache_hits);
-            (result, counts.0, counts.1, owned)
-        })
-        .await
-        .map_err(|e| ExtractError::Metadata(e.to_string()))?;
-        *cache = owned;
-        Ok(TransparentBlock {
-            height: event_height,
-            hash: fetched.hash(),
-            parent: fetched.parent(),
-            transactions: result?,
-            // The pre-pass did the fetching; stragglers are counted with it.
-            lookups: lookups + batched,
-            cache_hits,
-        })
+            if let Some(output) = self.cache.get(&outpoint) {
+                self.cache_hits += 1;
+                return Ok(Some(Output {
+                    value: u64::from(output.value),
+                    script: output.lock_script.as_raw_bytes().to_vec(),
+                }));
+            }
+            self.lookups += 1;
+            let found = self
+                .runtime
+                .block_on(self.client.transparent_transactions(&[txid]))?
+                .pop()
+                .flatten();
+            let Some(transaction) = found else {
+                return Ok(None);
+            };
+            self.cache.insert_transaction(&transaction);
+            let output = transaction.outputs().get(index as usize).map(|o| Output {
+                value: u64::from(o.value),
+                script: o.lock_script.as_raw_bytes().to_vec(),
+            });
+            if output.is_none() {
+                tracing::warn!(
+                    outpoint = %label(&outpoint),
+                    outputs = transaction.outputs().len(),
+                    "previous transaction has no output at this index"
+                );
+            }
+            Ok(output)
+        }
     }
 
-    /// Fetches, in batches, every transaction `transactions` spend from that is not
-    /// in `cache`, and caches it. Returns how many it fetched.
-    async fn prefetch(
-        &self,
-        cache: &mut OutputCache,
-        transactions: &[Arc<Transaction>],
-    ) -> Result<u64, NodeError> {
-        let mut wanted = Vec::new();
-        let mut seen = HashSet::new();
-        for transaction in transactions {
-            for input in transaction.inputs() {
-                let ChainInput::PrevOut { outpoint, .. } = input else {
-                    continue;
-                };
-                if cache.get(outpoint).is_some() || !seen.insert(outpoint.hash) {
-                    continue;
-                }
-                wanted.push(outpoint.hash.0);
-            }
+    impl NodeClient {
+        /// The block at `height`, from its raw serialization.
+        pub async fn fetch_block(&self, height: u64) -> Result<FetchedBlock, NodeError> {
+            FetchedBlock::from_bytes(&self.raw_block(height.to_string()).await?)
         }
-        let mut fetched = 0u64;
-        for chunk in wanted.chunks(PREVOUT_BATCH) {
-            for transaction in self
-                .transparent_transactions(chunk)
-                .await?
-                .into_iter()
-                .flatten()
-            {
-                cache.insert_transaction(&transaction);
-                fetched += 1;
-            }
-        }
-        Ok(fetched)
-    }
 
-    /// Transactions by protocol-order ID in one JSON-RPC 2.0 batch, each identity
-    /// verified, `None` where the node does not have one (-5).
-    async fn transparent_transactions(
-        &self,
-        txids: &[[u8; 32]],
-    ) -> Result<Vec<Option<Transaction>>, NodeError> {
-        let entries = self
-            .batch::<String>(
-                "getrawtransaction",
-                txids
-                    .iter()
-                    .map(|txid| json!([crate::hash::display(txid), 0]))
-                    .collect(),
-            )
-            .await?;
-        txids
-            .iter()
-            .zip(entries)
-            .map(|(txid, entry)| {
-                let displayed = crate::hash::display(txid);
-                let raw_hex = match entry {
-                    Ok(raw) => raw,
-                    // "No information available about transaction".
-                    Err((-5, _)) => return Ok(None),
-                    Err((code, message)) => return Err(NodeError::Rpc(code, message)),
+        /// `fetched`'s transparent parts at `height`, resolving spent outputs from the
+        /// block itself, then `cache`, then the node in batches of [`PREVOUT_BATCH`].
+        /// The block's own transactions enter the cache first, so a later block spending
+        /// them needs no lookup.
+        pub async fn transparent_block(
+            &self,
+            height: u64,
+            fetched: FetchedBlock,
+            cache: &mut OutputCache,
+        ) -> Result<TransparentBlock, ExtractError> {
+            let event_height = u32::try_from(height).map_err(|_| ExtractError::Height(height))?;
+            for transaction in &fetched.0.transactions {
+                cache.insert_transaction(transaction);
+            }
+            let batched = self.prefetch(cache, &fetched.0.transactions).await?;
+            let runtime = tokio::runtime::Handle::current();
+            let client = self.clone();
+            let block = fetched.clone();
+            // Extraction is synchronous and may block on straggler lookups, so it must
+            // not run on an async worker thread. Cancelling this future while the
+            // extraction runs loses the moved cache's entries, not its budget.
+            let capacity = cache.capacity;
+            let mut owned = std::mem::replace(cache, OutputCache::new(capacity));
+            let (result, lookups, cache_hits, owned) = tokio::task::spawn_blocking(move || {
+                let mut previous = RpcPreviousOutputs {
+                    client: &client,
+                    runtime,
+                    cache: &mut owned,
+                    lookups: 0,
+                    cache_hits: 0,
                 };
-                let raw = hex::decode(raw_hex)?;
-                let transaction =
-                    Transaction::zcash_deserialize(raw.as_slice()).map_err(|error| {
-                        NodeError::Transaction(displayed.clone(), error.to_string())
-                    })?;
-                if transaction.hash().0 != *txid {
-                    return Err(NodeError::Transaction(
-                        displayed,
-                        "returned transaction identity differs".into(),
-                    ));
-                }
-                Ok(Some(transaction))
+                let result = extract(&block.0.transactions, &mut previous, event_height);
+                let counts = (previous.lookups, previous.cache_hits);
+                (result, counts.0, counts.1, owned)
             })
-            .collect()
-    }
-
-    /// Whether the node has the transaction `txid` (protocol byte order), checking
-    /// the identity of what it returns.
-    pub async fn has_transaction(&self, txid: [u8; 32]) -> Result<bool, NodeError> {
-        Ok(self
-            .transparent_transactions(&[txid])
-            .await?
-            .pop()
-            .flatten()
-            .is_some())
-    }
-
-    /// One JSON-RPC call whose result is returned as raw JSON, for tools that
-    /// deliberately read the node's verbose answers instead of this crate's parser.
-    pub async fn call_value(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, NodeError> {
-        self.call(method, params).await
-    }
-
-    /// Several JSON-RPC calls in one JSON-RPC 2.0 batch, results positional and raw.
-    /// A call answered with an RPC error fails the whole batch, since a positional
-    /// hole would be indistinguishable from a null result.
-    pub async fn call_batch_values(
-        &self,
-        calls: &[(&str, serde_json::Value)],
-    ) -> Result<Vec<serde_json::Value>, NodeError> {
-        let mut results = Vec::with_capacity(calls.len());
-        let requests: Vec<serde_json::Value> = calls
-            .iter()
-            .map(|(method, params)| json!({"method": method, "params": params}))
-            .collect();
-        for entry in self.batch_mixed(requests).await? {
-            results.push(entry.map_err(|(code, message)| NodeError::Rpc(code, message))?);
+            .await
+            .map_err(|e| ExtractError::Metadata(e.to_string()))?;
+            *cache = owned;
+            Ok(TransparentBlock {
+                height: event_height,
+                hash: fetched.hash(),
+                parent: fetched.parent(),
+                transactions: result?,
+                // The pre-pass did the fetching; stragglers are counted with it.
+                lookups: lookups + batched,
+                cache_hits,
+            })
         }
-        Ok(results)
+
+        /// Fetches, in batches, every transaction `transactions` spend from that is not
+        /// in `cache`, and caches it. Returns how many it fetched.
+        async fn prefetch(
+            &self,
+            cache: &mut OutputCache,
+            transactions: &[Arc<Transaction>],
+        ) -> Result<u64, NodeError> {
+            let mut wanted = Vec::new();
+            let mut seen = HashSet::new();
+            for transaction in transactions {
+                for input in transaction.inputs() {
+                    let ChainInput::PrevOut { outpoint, .. } = input else {
+                        continue;
+                    };
+                    if cache.get(outpoint).is_some() || !seen.insert(outpoint.hash) {
+                        continue;
+                    }
+                    wanted.push(outpoint.hash.0);
+                }
+            }
+            let mut fetched = 0u64;
+            for chunk in wanted.chunks(PREVOUT_BATCH) {
+                for transaction in self
+                    .transparent_transactions(chunk)
+                    .await?
+                    .into_iter()
+                    .flatten()
+                {
+                    cache.insert_transaction(&transaction);
+                    fetched += 1;
+                }
+            }
+            Ok(fetched)
+        }
+
+        /// Transactions by protocol-order ID in one JSON-RPC 2.0 batch, each identity
+        /// verified, `None` where the node does not have one (-5).
+        async fn transparent_transactions(
+            &self,
+            txids: &[[u8; 32]],
+        ) -> Result<Vec<Option<Transaction>>, NodeError> {
+            let entries = self
+                .batch::<String>(
+                    "getrawtransaction",
+                    txids
+                        .iter()
+                        .map(|txid| json!([crate::hash::display(txid), 0]))
+                        .collect(),
+                )
+                .await?;
+            txids
+                .iter()
+                .zip(entries)
+                .map(|(txid, entry)| {
+                    let displayed = crate::hash::display(txid);
+                    let raw_hex = match entry {
+                        Ok(raw) => raw,
+                        // "No information available about transaction".
+                        Err((-5, _)) => return Ok(None),
+                        Err((code, message)) => return Err(NodeError::Rpc(code, message)),
+                    };
+                    let raw = hex::decode(raw_hex)?;
+                    let transaction =
+                        Transaction::zcash_deserialize(raw.as_slice()).map_err(|error| {
+                            NodeError::Transaction(displayed.clone(), error.to_string())
+                        })?;
+                    if transaction.hash().0 != *txid {
+                        return Err(NodeError::Transaction(
+                            displayed,
+                            "returned transaction identity differs".into(),
+                        ));
+                    }
+                    Ok(Some(transaction))
+                })
+                .collect()
+        }
+
+        /// Whether the node has the transaction `txid` (protocol byte order), checking
+        /// the identity of what it returns.
+        pub async fn has_transaction(&self, txid: [u8; 32]) -> Result<bool, NodeError> {
+            Ok(self
+                .transparent_transactions(&[txid])
+                .await?
+                .pop()
+                .flatten()
+                .is_some())
+        }
+
+        /// One JSON-RPC call whose result is returned as raw JSON, for tools that
+        /// deliberately read the node's verbose answers instead of this crate's parser.
+        pub async fn call_value(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<serde_json::Value, NodeError> {
+            self.call(method, params).await
+        }
+
+        /// Several JSON-RPC calls in one JSON-RPC 2.0 batch, results positional and raw.
+        /// A call answered with an RPC error fails the whole batch, since a positional
+        /// hole would be indistinguishable from a null result.
+        pub async fn call_batch_values(
+            &self,
+            calls: &[(&str, serde_json::Value)],
+        ) -> Result<Vec<serde_json::Value>, NodeError> {
+            let mut results = Vec::with_capacity(calls.len());
+            let requests: Vec<serde_json::Value> = calls
+                .iter()
+                .map(|(method, params)| json!({"method": method, "params": params}))
+                .collect();
+            for entry in self.batch_mixed(requests).await? {
+                results.push(entry.map_err(|(code, message)| NodeError::Rpc(code, message))?);
+            }
+            Ok(results)
+        }
     }
 }
 
@@ -991,9 +1006,10 @@ mod tests {
 
     /// Dropping a block read while its extraction waits on a straggler lookup
     /// leaves the caller's cache with the budget it was given.
-    #[cfg(feature = "testing")]
+    #[cfg(feature = "testing-node")]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_cancelled_block_read_keeps_the_cache_budget() {
+        use crate::NodeClient;
         use crate::testing::{self, SharedChain};
         let chain = SharedChain::default();
         let (url, _) = testing::serve_chain(chain.clone()).await;

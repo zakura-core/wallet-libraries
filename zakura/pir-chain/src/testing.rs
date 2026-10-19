@@ -6,11 +6,6 @@
 //! independent of the code under test. Block envelopes have zero roots and invalid
 //! proof-of-work: the reads under test trust consensus to the node, so they neither
 //! check nor need them. Proofs and signatures are not valid either.
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
-use axum::{Json, Router, extract::State, http::HeaderMap, http::StatusCode, routing::post};
-use serde_json::{Value, json};
 use zakura_chain::amount::Amount;
 use zakura_chain::block::{Block, Height};
 use zakura_chain::serialization::{ZcashDeserialize, ZcashSerialize};
@@ -303,235 +298,249 @@ pub fn block(transactions: &[Tx], nonce: u8) -> (String, String) {
     )
 }
 
-/// Fault injected into JSON-RPC 2.0 batch responses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BatchFault {
-    None,
-    /// Answer the batch with one error object.
-    WholeBatchError,
-    /// Drop the last entry.
-    Short,
-    /// Repeat the first id.
-    DuplicateId,
-    /// Echo an id past the batch.
-    OutOfRangeId,
-    /// Answer every transaction with this RPC error code.
-    EntryError(i64),
-    /// Return a different transaction than requested.
-    WrongTransaction,
-}
+#[cfg(feature = "testing-node")]
+pub use node::*;
 
-/// A JSON-RPC node double's chain.
-#[derive(Default)]
-pub struct Chain {
-    /// Height to (raw block hex, display hash, Ironwood tree size after it).
-    pub blocks: HashMap<u64, (String, String, u64)>,
-    pub tip: u64,
-    /// Display txid to raw transaction hex.
-    pub transactions: HashMap<String, String>,
-    pub fault: Option<BatchFault>,
-    /// Heights whose `getblock` is held until released.
-    pub hold: Option<u64>,
-    /// While set, a request asking for transactions after this many
-    /// `getrawtransaction` entries were answered is held until it is cleared.
-    pub hold_lookup: Option<usize>,
-    /// Requests held by `hold_lookup` so far.
-    pub held_lookups: usize,
-    /// Method names in request order; a batch records each entry.
-    pub calls: Vec<String>,
-    /// Count of HTTP requests that were batches.
-    pub batches: usize,
-    /// `getblock` requests as (height, verbosity).
-    pub getblocks: Vec<(u64, u64)>,
-}
+/// A JSON-RPC node double serving these fixtures over HTTP.
+#[cfg(feature = "testing-node")]
+mod node {
+    use super::*;
+    use axum::{Json, Router, extract::State, http::HeaderMap, http::StatusCode, routing::post};
+    use serde_json::{Value, json};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
-impl Chain {
-    pub fn add_transaction(&mut self, transaction: &Tx) {
-        self.transactions
-            .insert(transaction.txid_display(), transaction.raw_hex());
+    /// Fault injected into JSON-RPC 2.0 batch responses.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum BatchFault {
+        None,
+        /// Answer the batch with one error object.
+        WholeBatchError,
+        /// Drop the last entry.
+        Short,
+        /// Repeat the first id.
+        DuplicateId,
+        /// Echo an id past the batch.
+        OutOfRangeId,
+        /// Answer every transaction with this RPC error code.
+        EntryError(i64),
+        /// Return a different transaction than requested.
+        WrongTransaction,
     }
 
-    /// Appends a block at `height` holding `transactions`. Returns its display hash.
-    pub fn push_block(&mut self, height: u64, transactions: &[Tx], nonce: u8) -> String {
-        let previous = self.blocks.get(&(height - 1)).map_or(0, |block| block.2);
-        let actions: u64 = transactions.iter().map(Tx::ironwood_actions).sum();
-        let (raw, hash) = block(transactions, nonce);
-        for transaction in transactions {
-            self.add_transaction(transaction);
+    /// A JSON-RPC node double's chain.
+    #[derive(Default)]
+    pub struct Chain {
+        /// Height to (raw block hex, display hash, Ironwood tree size after it).
+        pub blocks: HashMap<u64, (String, String, u64)>,
+        pub tip: u64,
+        /// Display txid to raw transaction hex.
+        pub transactions: HashMap<String, String>,
+        pub fault: Option<BatchFault>,
+        /// Heights whose `getblock` is held until released.
+        pub hold: Option<u64>,
+        /// While set, a request asking for transactions after this many
+        /// `getrawtransaction` entries were answered is held until it is cleared.
+        pub hold_lookup: Option<usize>,
+        /// Requests held by `hold_lookup` so far.
+        pub held_lookups: usize,
+        /// Method names in request order; a batch records each entry.
+        pub calls: Vec<String>,
+        /// Count of HTTP requests that were batches.
+        pub batches: usize,
+        /// `getblock` requests as (height, verbosity).
+        pub getblocks: Vec<(u64, u64)>,
+    }
+
+    impl Chain {
+        pub fn add_transaction(&mut self, transaction: &Tx) {
+            self.transactions
+                .insert(transaction.txid_display(), transaction.raw_hex());
         }
-        self.blocks
-            .insert(height, (raw, hash.clone(), previous + actions));
-        self.tip = self.tip.max(height);
-        hash
+
+        /// Appends a block at `height` holding `transactions`. Returns its display hash.
+        pub fn push_block(&mut self, height: u64, transactions: &[Tx], nonce: u8) -> String {
+            let previous = self.blocks.get(&(height - 1)).map_or(0, |block| block.2);
+            let actions: u64 = transactions.iter().map(Tx::ironwood_actions).sum();
+            let (raw, hash) = block(transactions, nonce);
+            for transaction in transactions {
+                self.add_transaction(transaction);
+            }
+            self.blocks
+                .insert(height, (raw, hash.clone(), previous + actions));
+            self.tip = self.tip.max(height);
+            hash
+        }
+
+        pub fn count(&self, method: &str) -> usize {
+            self.calls.iter().filter(|call| *call == method).count()
+        }
     }
 
-    pub fn count(&self, method: &str) -> usize {
-        self.calls.iter().filter(|call| *call == method).count()
-    }
-}
+    pub type SharedChain = Arc<Mutex<Chain>>;
 
-pub type SharedChain = Arc<Mutex<Chain>>;
-
-fn answer(chain: &mut Chain, request: &Value) -> Value {
-    let method = request["method"].as_str().unwrap().to_string();
-    chain.calls.push(method.clone());
-    let id = request["id"].clone();
-    let error = |code: i64, message: &str| json!({"result": null, "error": {"code": code, "message": message}, "id": id});
-    let height = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
-            .unwrap()
-    };
-    let result = match method.as_str() {
-        "getblockcount" => json!(chain.tip),
-        "getblockhash" => match chain.blocks.get(&height(&request["params"][0])) {
-            Some(block) => json!(block.1),
-            None => return error(-8, "Block height out of range"),
-        },
-        "getblock" => {
-            let selected = &request["params"][0];
-            let requested = selected
+    fn answer(chain: &mut Chain, request: &Value) -> Value {
+        let method = request["method"].as_str().unwrap().to_string();
+        chain.calls.push(method.clone());
+        let id = request["id"].clone();
+        let error = |code: i64, message: &str| json!({"result": null, "error": {"code": code, "message": message}, "id": id});
+        let height = |value: &Value| {
+            value
                 .as_u64()
-                .or_else(|| selected.as_str().and_then(|s| s.parse().ok()))
-                .or_else(|| {
-                    chain.blocks.iter().find_map(|(height, block)| {
-                        (selected.as_str() == Some(block.1.as_str())).then_some(*height)
-                    })
-                });
-            let Some(requested) = requested else {
-                return error(-5, "Block hash not found");
-            };
-            let verbosity = request["params"][1].as_u64().unwrap();
-            chain.getblocks.push((requested, verbosity));
-            let Some(block) = chain.blocks.get(&requested) else {
-                return error(-8, "Block height out of range");
-            };
-            match verbosity {
-                0 => json!(block.0),
-                2 => json!({"trees": {"ironwood": {"size": block.2}}}),
-                _ => panic!("unexpected verbosity"),
-            }
-        }
-        "getrawtransaction" => {
-            assert_eq!(request["params"][1], 0);
-            if let Some(BatchFault::EntryError(code)) = chain.fault {
-                return error(code, "injected");
-            }
-            if chain.fault == Some(BatchFault::WrongTransaction) {
-                json!(chain.transactions.values().next().unwrap())
-            } else {
-                match chain
-                    .transactions
-                    .get(request["params"][0].as_str().unwrap())
-                {
-                    Some(raw) => json!(raw),
-                    None => return error(-5, "No such mempool or main chain transaction"),
+                .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+                .unwrap()
+        };
+        let result = match method.as_str() {
+            "getblockcount" => json!(chain.tip),
+            "getblockhash" => match chain.blocks.get(&height(&request["params"][0])) {
+                Some(block) => json!(block.1),
+                None => return error(-8, "Block height out of range"),
+            },
+            "getblock" => {
+                let selected = &request["params"][0];
+                let requested = selected
+                    .as_u64()
+                    .or_else(|| selected.as_str().and_then(|s| s.parse().ok()))
+                    .or_else(|| {
+                        chain.blocks.iter().find_map(|(height, block)| {
+                            (selected.as_str() == Some(block.1.as_str())).then_some(*height)
+                        })
+                    });
+                let Some(requested) = requested else {
+                    return error(-5, "Block hash not found");
+                };
+                let verbosity = request["params"][1].as_u64().unwrap();
+                chain.getblocks.push((requested, verbosity));
+                let Some(block) = chain.blocks.get(&requested) else {
+                    return error(-8, "Block height out of range");
+                };
+                match verbosity {
+                    0 => json!(block.0),
+                    2 => json!({"trees": {"ironwood": {"size": block.2}}}),
+                    _ => panic!("unexpected verbosity"),
                 }
             }
-        }
-        other => panic!("unexpected RPC method {other}"),
-    };
-    json!({"result": result, "error": null, "id": id})
-}
-
-/// The public, test-only credential the node double accepts; see [`cookie`].
-const TEST_AUTHORIZATION: &str = "Basic dGVzdDp0ZXN0";
-
-async fn handle(
-    State(chain): State<SharedChain>,
-    headers: HeaderMap,
-    Json(request): Json<Value>,
-) -> Result<Json<Value>, StatusCode> {
-    if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some(TEST_AUTHORIZATION) {
-        return Err(StatusCode::UNAUTHORIZED);
+            "getrawtransaction" => {
+                assert_eq!(request["params"][1], 0);
+                if let Some(BatchFault::EntryError(code)) = chain.fault {
+                    return error(code, "injected");
+                }
+                if chain.fault == Some(BatchFault::WrongTransaction) {
+                    json!(chain.transactions.values().next().unwrap())
+                } else {
+                    match chain
+                        .transactions
+                        .get(request["params"][0].as_str().unwrap())
+                    {
+                        Some(raw) => json!(raw),
+                        None => return error(-5, "No such mempool or main chain transaction"),
+                    }
+                }
+            }
+            other => panic!("unexpected RPC method {other}"),
+        };
+        json!({"result": result, "error": null, "id": id})
     }
-    let hold = chain.lock().unwrap().hold;
-    if let (Some(hold), Some("getblock")) = (hold, request["method"].as_str())
-        && request["params"][0].as_str() == Some(hold.to_string().as_str())
-    {
-        while chain.lock().unwrap().hold == Some(hold) {
+
+    /// The public, test-only credential the node double accepts; see [`cookie`].
+    const TEST_AUTHORIZATION: &str = "Basic dGVzdDp0ZXN0";
+
+    async fn handle(
+        State(chain): State<SharedChain>,
+        headers: HeaderMap,
+        Json(request): Json<Value>,
+    ) -> Result<Json<Value>, StatusCode> {
+        if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some(TEST_AUTHORIZATION) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        let hold = chain.lock().unwrap().hold;
+        if let (Some(hold), Some("getblock")) = (hold, request["method"].as_str())
+            && request["params"][0].as_str() == Some(hold.to_string().as_str())
+        {
+            while chain.lock().unwrap().hold == Some(hold) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+        let lookup = |request: &Value| request["method"].as_str() == Some("getrawtransaction");
+        let asks = match &request {
+            Value::Array(requests) => requests.iter().any(lookup),
+            request => lookup(request),
+        };
+        let held = {
+            let mut chain = chain.lock().unwrap();
+            let held = asks && chain.hold_lookup == Some(chain.count("getrawtransaction"));
+            chain.held_lookups += usize::from(held);
+            held
+        };
+        while held && chain.lock().unwrap().hold_lookup.is_some() {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-    }
-    let lookup = |request: &Value| request["method"].as_str() == Some("getrawtransaction");
-    let asks = match &request {
-        Value::Array(requests) => requests.iter().any(lookup),
-        request => lookup(request),
-    };
-    let held = {
         let mut chain = chain.lock().unwrap();
-        let held = asks && chain.hold_lookup == Some(chain.count("getrawtransaction"));
-        chain.held_lookups += usize::from(held);
-        held
-    };
-    while held && chain.lock().unwrap().hold_lookup.is_some() {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    let mut chain = chain.lock().unwrap();
-    let Value::Array(requests) = request else {
-        assert_eq!(
-            request["jsonrpc"], "1.0",
-            "single calls stay on JSON-RPC 1.0"
-        );
-        return Ok(Json(answer(&mut chain, &request)));
-    };
-    chain.batches += 1;
-    let mut answers = Vec::new();
-    for request in &requests {
-        // The node rejects JSON-RPC 1.0 batches.
-        assert_eq!(request["jsonrpc"], "2.0");
-        answers.push(answer(&mut chain, request));
-    }
-    // Responses may arrive in any order; the client places them by id.
-    answers.reverse();
-    match chain.fault.unwrap_or(BatchFault::None) {
-        BatchFault::WholeBatchError => {
-            return Ok(Json(
-                json!({"result": null, "error": {"code": -32600, "message": "batch refused"}, "id": null}),
-            ));
+        let Value::Array(requests) = request else {
+            assert_eq!(
+                request["jsonrpc"], "1.0",
+                "single calls stay on JSON-RPC 1.0"
+            );
+            return Ok(Json(answer(&mut chain, &request)));
+        };
+        chain.batches += 1;
+        let mut answers = Vec::new();
+        for request in &requests {
+            // The node rejects JSON-RPC 1.0 batches.
+            assert_eq!(request["jsonrpc"], "2.0");
+            answers.push(answer(&mut chain, request));
         }
-        BatchFault::Short => {
-            answers.pop();
+        // Responses may arrive in any order; the client places them by id.
+        answers.reverse();
+        match chain.fault.unwrap_or(BatchFault::None) {
+            BatchFault::WholeBatchError => {
+                return Ok(Json(
+                    json!({"result": null, "error": {"code": -32600, "message": "batch refused"}, "id": null}),
+                ));
+            }
+            BatchFault::Short => {
+                answers.pop();
+            }
+            BatchFault::DuplicateId => {
+                let id = answers[0]["id"].clone();
+                answers.last_mut().unwrap()["id"] = id;
+            }
+            BatchFault::OutOfRangeId => answers[0]["id"] = json!(requests.len()),
+            _ => {}
         }
-        BatchFault::DuplicateId => {
-            let id = answers[0]["id"].clone();
-            answers.last_mut().unwrap()["id"] = id;
-        }
-        BatchFault::OutOfRangeId => answers[0]["id"] = json!(requests.len()),
-        _ => {}
+        Ok(Json(Value::Array(answers)))
     }
-    Ok(Json(Value::Array(answers)))
-}
 
-/// Serves `chain` as a JSON-RPC node at the returned URL.
-pub async fn serve_chain(chain: SharedChain) -> (String, tokio::task::JoinHandle<()>) {
-    serve(Router::new().route("/", post(handle)).with_state(chain)).await
-}
+    /// Serves `chain` as a JSON-RPC node at the returned URL.
+    pub async fn serve_chain(chain: SharedChain) -> (String, tokio::task::JoinHandle<()>) {
+        serve(Router::new().route("/", post(handle)).with_state(chain)).await
+    }
 
-/// Serves `router` on a local port at the returned URL.
-pub async fn serve(router: Router) -> (String, tokio::task::JoinHandle<()>) {
-    let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let origin = format!("http://{}", socket.local_addr().unwrap());
-    (
-        origin,
-        tokio::spawn(async move {
-            axum::serve(socket, router).await.unwrap();
-        }),
-    )
-}
+    /// Serves `router` on a local port at the returned URL.
+    pub async fn serve(router: Router) -> (String, tokio::task::JoinHandle<()>) {
+        let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", socket.local_addr().unwrap());
+        (
+            origin,
+            tokio::spawn(async move {
+                axum::serve(socket, router).await.unwrap();
+            }),
+        )
+    }
 
-/// Writes a cookie file holding the public test credential into `dir`.
-pub fn cookie(dir: &std::path::Path) -> std::path::PathBuf {
-    let path = dir.join("cookie");
-    std::fs::write(&path, "test:test").unwrap();
-    path
+    /// Writes a cookie file holding the public test credential into `dir`.
+    pub fn cookie(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("cookie");
+        std::fs::write(&path, "test:test").unwrap();
+        path
+    }
 }
 
 /// Receiver directory blocks around the public zero-OVK refund.
 #[cfg(feature = "receiver")]
 pub mod receiver {
     use super::*;
+    use std::sync::Arc;
 
     /// A block holding a coinbase transaction with the refund's Ironwood Action,
     /// whose recipient the directory excludes, then the refund itself. Its header

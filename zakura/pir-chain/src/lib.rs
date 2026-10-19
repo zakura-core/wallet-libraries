@@ -14,6 +14,11 @@
 //! amounts and positions, never a node type. The services map these onto their own
 //! protocol records, so they need no node or Common dependency of their own.
 //!
+//! Decoding and interpretation are synchronous and need no runtime or HTTP stack.
+//! The `rpc` feature adds the node JSON-RPC client ([`NodeClient`] and each
+//! product's asynchronous reads), for service hosts and tools; product cores take
+//! the decoded values without it.
+//!
 //! This crate is server-only: it lives in its own `zakura/pir-chain` workspace
 //! and is never part of a wallet build.
 #![forbid(unsafe_code)]
@@ -21,10 +26,12 @@
 mod chain;
 #[cfg(feature = "enhance")]
 pub mod enhance;
+mod error;
 mod fee;
 pub mod hash;
 #[cfg(feature = "receiver")]
 pub mod receiver;
+#[cfg(feature = "rpc")]
 pub mod rpc;
 #[cfg(feature = "status")]
 pub mod status;
@@ -33,12 +40,14 @@ pub mod testing;
 #[cfg(feature = "transparent")]
 pub mod transparent;
 
+pub use error::NodeError;
 pub use fee::{DEFAULT_CACHE_OUTPUTS, FeeError};
-pub use rpc::{NodeClient, NodeError};
+#[cfg(feature = "rpc")]
+pub use rpc::NodeClient;
 
 /// A Zakura network for genesis identity and explicit activation-height queries.
 /// The receiver backfill and combined Enhance block reader currently apply mainnet
-/// activation rules only; selecting this enum does not configure a [`NodeClient`].
+/// activation rules only; selecting this enum does not configure a node client.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Network {
     Mainnet,

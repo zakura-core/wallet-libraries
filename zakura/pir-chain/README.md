@@ -7,7 +7,13 @@ uses the published Common wallet primitives to decode transactions and calculate
 transaction IDs, with default features disabled to avoid wallet builders and
 proving circuits. It does not compile Zakura node packages or RocksDB.
 
-- `rpc`: the node JSON-RPC client. `NodeClient::new` rereads a cookie file on every
+Decoding and chain interpretation (block and transaction decoding, the product
+values below and `NodeError`) are synchronous and resolve no runtime or HTTP stack.
+Product cores enable only their product feature (and `testing` in tests); hosts
+and tools that read a node add `rpc`.
+
+- `rpc` (feature): the node JSON-RPC client and each product's asynchronous reads,
+  with Reqwest and Tokio. `NodeClient::new` rereads a cookie file on every
   request and bounds every response; `NodeClient::from_cookie_file` reads it once.
   Nodes rank by tip on a checked network. Every request has a 120-second total
   deadline, including connection establishment and streaming the response body.
@@ -39,8 +45,11 @@ proving circuits. It does not compile Zakura node packages or RocksDB.
   an error. Its errors carry only this crate's types. Its `zakura-state` revision
   must match the running node's format.
 - `testing` (feature): enables the pinned node chain crate for independent synthetic
-  fixtures. Production decoding still uses Common. Synthetic transactions, block envelopes and a JSON-RPC node
-  double built with the node's own encoders, for service tests.
+  fixtures. Production decoding still uses Common. Synthetic transactions and block
+  envelopes built with the node's own encoders, for service tests, without a
+  runtime or HTTP stack.
+- `testing-node` (feature): adds `rpc` and a JSON-RPC node double serving those
+  fixtures over HTTP, for host and tool tests of the node reads.
 
 Receiver backfill and the combined Enhance block reader currently use mainnet
 activation rules. `Network::Testnet` provides explicit identity/height queries; it

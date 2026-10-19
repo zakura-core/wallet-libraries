@@ -10,28 +10,34 @@ repository.workspace = true
 readme = "README.md"
 
 [features]
-# Consumers select the adapter they use; transport and hash helpers stay shared.
+# Consumers select the adapter they use. Decoding and chain interpretation need no
+# runtime or HTTP stack; only `rpc` and the HTTP node double add them.
 default = []
 transparent = []
 enhance = []
 status = []
 receiver = ["dep:zakura-receiver-crypto"]
+## The node JSON-RPC client and its asynchronous reads, for service hosts and tools.
+rpc = ["dep:reqwest", "dep:tokio"]
 ## Synthetic chain fixtures for service tests: raw blocks and transactions built
 ## with the node's own encoders.
-testing = ["dep:axum", "dep:zakura-chain", "tokio/net", "tokio/time"]
+testing = ["dep:zakura-chain"]
+## A JSON-RPC node double serving `testing` fixtures over HTTP, for host and tool
+## tests of the `rpc` reads.
+testing-node = ["testing", "rpc", "dep:axum", "tokio/net", "tokio/time"]
 ## Reading the node's RocksDB directly, as a secondary instance; see
 ## `transparent::state`.
-rocksdb = ["transparent", "dep:zakura-state", "dep:zakura-chain"]
+rocksdb = ["transparent", "dep:zakura-state", "dep:zakura-chain", "dep:tokio"]
 
 [dependencies]
 axum = { version = "0.7", optional = true }
 hex = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
-tokio = { version = "1", features = ["rt", "macros", "sync"] }
+tokio = { version = "1", features = ["rt", "macros", "sync"], optional = true }
 zakura-chain = { workspace = true, optional = true }
 sha2 = "0.10"
 zcash_script = "0.6"
@@ -54,23 +60,23 @@ zakura-test.workspace = true
 
 [[test]]
 name = "enhance"
-required-features = ["testing", "enhance"]
+required-features = ["testing-node", "enhance"]
 
 [[test]]
 name = "receiver"
-required-features = ["testing", "receiver"]
+required-features = ["testing-node", "receiver"]
 
 [[test]]
 name = "status"
-required-features = ["testing", "status"]
+required-features = ["testing-node", "status"]
 
 [[test]]
 name = "transparent"
-required-features = ["testing", "transparent"]
+required-features = ["testing-node", "transparent"]
 
 [[test]]
 name = "state"
-required-features = ["testing", "rocksdb"]
+required-features = ["testing-node", "rocksdb"]
 
 # Server-only adapters between Zakura node data and the PIR services.
 #
