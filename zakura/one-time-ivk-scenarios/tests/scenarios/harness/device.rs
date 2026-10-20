@@ -11,7 +11,7 @@ use secrecy::SecretVec;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 use zakura_one_time_ivk::{KeyId, Purpose};
-use zakura_pir_receiver::{lookup, publication, witnesses};
+use zakura_pir_receiver::{DirectoryError, lookup, publication, witness};
 use zcash_client_backend::{
     data_api::{
         AccountBirthday, TransactionStatus, WalletCommitmentTrees, WalletRead as _,
@@ -22,7 +22,7 @@ use zcash_client_backend::{
         scanning::ScanPriority,
         status::{TransactionStatusMode, TransactionStatusRead as _},
         testing::TestRng,
-        transparent_ledger::{ChainPoint, TransparentLedgerMode},
+        transparent_ledger::TransparentLedgerMode,
         wallet::{
             ConfirmationsPolicy, SpendingKeys, create_proposed_transactions,
             decrypt_and_store_transaction,
@@ -182,7 +182,7 @@ impl Device {
         let manifest = DirectoryClient::fetch_manifest(ORIGIN, &directory)
             .await
             .unwrap();
-        let end = manifest.directory.end_height.into();
+        let end = manifest.payments.directory.end_height.into();
         let hash = self.db.get_block_hash(end).unwrap().unwrap();
         DirectoryClient::connect_manifest(
             ORIGIN,
@@ -199,10 +199,9 @@ impl Device {
         .unwrap()
     }
 
-    /// Completes the real encrypted lookup/proof pipeline, preserving database boundaries.
+    /// Completes the real encrypted lookup and witness pipeline, preserving database
+    /// boundaries. A witness bound to another session is read again under this one.
     pub async fn drain(&mut self, chain: &Chain, client: &DirectoryClient<&Directory>) {
-        let publication = publication(client.manifest()).unwrap();
-        let mut proofs = None;
         for _ in 0..256 {
             self.assert_no_stall();
             let state = self.status(chain);
@@ -214,29 +213,25 @@ impl Device {
                         .unwrap()
                 );
             } else if let Some(request) = state.witnesses.first() {
-                if proofs.is_none() {
-                    proofs = Some(witnesses(client).await.unwrap());
+                match witness(client, request).await {
+                    Ok(answer) => assert!(
+                        self.db
+                            .record_one_time_witness(
+                                self.account,
+                                state.token,
+                                *request,
+                                &answer,
+                                chain.now()
+                            )
+                            .unwrap()
+                    ),
+                    Err(DirectoryError::Revision) => assert!(
+                        self.db
+                            .refresh_one_time_witness(self.account, state.token, *request)
+                            .unwrap()
+                    ),
+                    Err(e) => panic!("witness query failed: {e}"),
                 }
-                let path = proofs
-                    .as_ref()
-                    .unwrap()
-                    .path(request.position, request.cmx)
-                    .unwrap();
-                assert!(
-                    self.db
-                        .record_one_time_witness(
-                            self.account,
-                            state.token,
-                            *request,
-                            ChainPoint {
-                                height: publication.end.height,
-                                hash: zcash_primitives::block::BlockHash(publication.end.hash)
-                            },
-                            path,
-                            chain.now()
-                        )
-                        .unwrap()
-                );
             } else {
                 return;
             }
@@ -247,7 +242,7 @@ impl Device {
     /// Captures direct catch-up obligations and runs them against one compatible session.
     pub async fn recover(&mut self, chain: &Chain, directory: &Directory) {
         let client = self.connect(directory).await;
-        let publication = publication(client.manifest()).unwrap();
+        let publication = publication(client.publication()).unwrap();
         assert!(
             self.db
                 .begin_one_time_recovery(self.account, publication, true)

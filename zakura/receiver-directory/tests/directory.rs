@@ -14,14 +14,16 @@ fn row<'a>(s: &'a Snapshot, r: &ReceiverBytes, page: u32) -> &'a [u8] {
 fn wire_layout_and_strict_empty_slots() {
     let r = record(0, 1);
     let b = r.encode().unwrap();
-    assert_eq!(b.len(), 285);
+    assert_eq!(b.len(), 289);
+    assert_eq!(SLOTS, 14, "the witness ordinal keeps 14 records per row");
     assert_eq!(&b[129..137], &200u64.to_le_bytes());
+    assert_eq!(&b[285..289], &0u32.to_le_bytes());
     assert_eq!(RawRecord::decode(&b).unwrap(), Some(r));
     assert!(RawRecord::decode(&[0; RECORD_BYTES]).unwrap().is_none());
     let mut corrupt = [0; RECORD_BYTES];
-    corrupt[284] = 1;
+    corrupt[288] = 1;
     assert!(RawRecord::decode(&corrupt).is_err());
-    assert!(RawRecord::decode(&b[..284]).is_err());
+    assert!(RawRecord::decode(&b[..288]).is_err());
 }
 
 /// The directory parses structure only. Cryptographically invalid receiver and
@@ -276,6 +278,7 @@ fn records_share_no_output_or_position() {
     let mut b = record(0, 1);
     b.receiver = other_receiver();
     (b.payment.txid, b.payment.tx_index, b.payment.position) = ([9; 32], 9, 210);
+    b.ordinal = 2;
     let records = [a0.clone(), a1, b];
     let valid = Snapshot::build(manifest(8), &records).unwrap();
     valid.validate().unwrap();
@@ -311,6 +314,7 @@ fn supplied_publications_are_validated_record_by_record() {
     let mut b = record(0, 1);
     b.receiver = other_receiver();
     (b.payment.txid, b.payment.tx_index, b.payment.position) = ([9; 32], 9, 210);
+    b.ordinal = 2;
     let valid = Snapshot::build(manifest(8), &[a0.clone(), a1.clone(), b.clone()]).unwrap();
     valid.validate().unwrap();
     Snapshot::build(manifest(8), &[])
@@ -390,6 +394,7 @@ fn spread(receivers: &[ReceiverBytes], pages: u32) -> Vec<RawRecord> {
                 r.payment.txid[..4].copy_from_slice(&index.to_le_bytes());
                 r.payment.tx_index = index + 1;
                 r.payment.position = 200 + u64::from(index);
+                r.ordinal = index;
                 r
             })
         })
@@ -529,4 +534,36 @@ fn corrections_change_publication_identity() {
     let mut json = serde_json::to_value(&first.manifest).unwrap();
     json.as_object_mut().unwrap().remove("history_revision");
     assert!(serde_json::from_value::<receiver_directory::snapshot::Manifest>(json).is_err());
+}
+
+/// Witness ordinals rank a table's records by note position, so the payment table's
+/// identity fixes its companion mapping. Builds and supplied tables refuse any other.
+#[test]
+fn ordinals_rank_records_by_position() {
+    use receiver_directory::snapshot::assign_ordinals;
+    let mut b = record(0, 1);
+    b.receiver = other_receiver();
+    (b.payment.txid, b.payment.tx_index, b.payment.position) = ([9; 32], 9, 201);
+    let mut records = vec![record(0, 2), record(1, 2), b];
+    records[0].payment.position = 205;
+    records[1].payment.position = 206;
+    assert!(matches!(
+        Snapshot::build(manifest(8), &records),
+        Err(Error::Malformed)
+    ));
+    assign_ordinals(&mut records);
+    assert_eq!(
+        records.iter().map(|r| r.ordinal).collect::<Vec<_>>(),
+        [1, 2, 0]
+    );
+    let valid = Snapshot::build(manifest(8), &records).unwrap();
+    valid.validate().unwrap();
+    for (from, to) in [(0, 0), (2, 3)] {
+        let mut swapped = records[from].clone();
+        swapped.ordinal = to;
+        let mut s = valid.clone();
+        put(&mut s, slot_of(&valid, &records[from]), Some(&swapped));
+        rehash(&mut s);
+        assert!(matches!(s.validate(), Err(Error::Malformed)), "{from} {to}");
+    }
 }

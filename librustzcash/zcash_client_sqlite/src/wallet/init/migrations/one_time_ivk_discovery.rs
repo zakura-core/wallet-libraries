@@ -107,7 +107,7 @@ impl RusqliteMigration for Migration {
                 target_height INTEGER CHECK (target_height BETWEEN 0 AND 4294967295),
                 reasons INTEGER NOT NULL DEFAULT 0 CHECK (reasons BETWEEN 0 AND 3),
                 done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295),
-                last_record BLOB CHECK (length(last_record) = 285),
+                last_record BLOB CHECK (length(last_record) = 289),
                 read_complete INTEGER NOT NULL DEFAULT 0 CHECK (read_complete IN (0, 1)),
                 attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
                 next_attempt_at INTEGER NOT NULL DEFAULT 0
@@ -121,12 +121,20 @@ impl RusqliteMigration for Migration {
                 tx_index INTEGER NOT NULL CHECK (tx_index BETWEEN 0 AND 65535),
                 position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 4294967295),
                 encrypted_note BLOB NOT NULL CHECK (length(encrypted_note) = 148),
-                witness BLOB CHECK (length(witness) = 1024),
+                payments BLOB CHECK (length(payments) = 32),
+                witnesses BLOB CHECK (length(witnesses) = 32),
+                ordinal INTEGER CHECK (ordinal BETWEEN 0 AND 4294967295),
+                witness BLOB CHECK (length(witness) = 512),
                 witness_height INTEGER CHECK (witness_height BETWEEN 0 AND 4294967295),
                 witness_hash BLOB CHECK (length(witness_hash) = 32),
+                witness_size INTEGER CHECK (witness_size BETWEEN 0 AND 4294967296),
                 PRIMARY KEY (txid, action_index),
-                CHECK ((witness IS NULL) = (witness_height IS NULL)
-                    AND (witness IS NULL) = (witness_hash IS NULL))
+                CHECK ((payments IS NULL) = (ordinal IS NULL)
+                    AND (payments IS NULL) = (witnesses IS NULL)),
+                CHECK ((witness IS NULL OR payments IS NOT NULL)
+                    AND (witness IS NULL) = (witness_height IS NULL)
+                    AND (witness IS NULL) = (witness_hash IS NULL)
+                    AND (witness IS NULL) = (witness_size IS NULL))
             );
             CREATE TABLE IF NOT EXISTS ironwood_spend_journal (
                 block_height INTEGER NOT NULL CHECK (block_height BETWEEN 0 AND 4294967295),

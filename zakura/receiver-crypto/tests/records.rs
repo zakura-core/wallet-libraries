@@ -60,6 +60,7 @@ fn wire_layout_and_strict_empty_slots() {
     assert_eq!(&b[53..57], &101u32.to_le_bytes());
     assert_eq!(&b[129..137], &200u64.to_le_bytes());
     assert_eq!(&b[233..285], &[8; 52]);
+    assert_eq!(&b[285..289], &3u32.to_le_bytes());
     let raw = zakura_receiver_crypto::wire::RawRecord::decode(&b)
         .unwrap()
         .unwrap();
@@ -67,9 +68,9 @@ fn wire_layout_and_strict_empty_slots() {
     assert_eq!(Record::decode(&b).unwrap(), Some(r));
     assert!(Record::decode(&[0; RECORD_BYTES]).unwrap().is_none());
     let mut corrupt = [0; RECORD_BYTES];
-    corrupt[284] = 1;
+    corrupt[288] = 1;
     assert_eq!(Record::decode(&corrupt), Err(Error::Malformed));
-    assert_eq!(Record::decode(&b[..284]), Err(Error::Malformed));
+    assert_eq!(Record::decode(&b[..288]), Err(Error::Malformed));
     let mut trailing = b.to_vec();
     trailing.push(0);
     assert_eq!(Record::decode(&trailing), Err(Error::Malformed));

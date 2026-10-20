@@ -169,6 +169,7 @@ impl Snapshot {
         let mut sorted: Vec<_> = records.iter().collect();
         sorted.sort_by_key(|r| (r.receiver, r.page));
         check_pages(sorted.iter().map(|&r| PageMeta::from(r)))?;
+        check_ordinals(records.iter().map(PageMeta::from))?;
         for record in sorted {
             validate_location(&manifest, record)?;
             let row = placement.row(&record.receiver, record.page);
@@ -204,6 +205,7 @@ impl Snapshot {
         if pages.len() as u64 != m.records {
             return Err(Error::Malformed);
         }
+        check_ordinals(pages.iter().copied())?;
         pages.sort_unstable_by_key(|p| (p.receiver, p.page));
         check_pages(pages.iter().copied())?;
         Ok(())
@@ -223,6 +225,7 @@ struct PageMeta {
     height: u32,
     tx_index: u32,
     block_hash: Hash,
+    ordinal: u32,
 }
 
 impl From<&RawRecord> for PageMeta {
@@ -238,6 +241,7 @@ impl From<&RawRecord> for PageMeta {
             height: r.payment.height,
             tx_index: r.payment.tx_index,
             block_hash: r.payment.block_hash,
+            ordinal: r.ordinal,
         }
     }
 }
@@ -302,6 +306,34 @@ fn check_pages(sorted: impl IntoIterator<Item = PageMeta>) -> Result<(), Error> 
     Ok(())
 }
 
+/// Sets each record's witness ordinal to the rank of its note position, the canonical
+/// mapping [`Snapshot::build`] requires. Positions are unique in a valid table.
+pub fn assign_ordinals(records: &mut [RawRecord]) {
+    let mut order: Vec<usize> = (0..records.len()).collect();
+    order.sort_by_key(|&i| records[i].payment.position);
+    for (ordinal, i) in order.into_iter().enumerate() {
+        records[i].ordinal = ordinal as u32;
+    }
+}
+
+/// Checks that ordinals rank the records by note position, so a payment table's identity
+/// fixes its companion witness mapping (see [`assign_ordinals`]).
+fn check_ordinals(records: impl IntoIterator<Item = PageMeta>) -> Result<(), Error> {
+    let mut ranked: Vec<(u64, u32)> = records
+        .into_iter()
+        .map(|r| (r.position, r.ordinal))
+        .collect();
+    ranked.sort_unstable();
+    if ranked
+        .iter()
+        .enumerate()
+        .any(|(rank, (_, ordinal))| *ordinal as usize != rank)
+    {
+        return Err(Error::Malformed);
+    }
+    Ok(())
+}
+
 /// Rejects a record whose payment lies outside the manifest's blocks or positions, or
 /// in a coinbase transaction, which the directory excludes.
 fn validate_location(m: &Manifest, r: &RawRecord) -> Result<(), Error> {
@@ -360,6 +392,7 @@ fn row_records(
             validate_location(m, &record)?;
             // A receiver cannot have more pages than the publication has records.
             if u64::from(record.total) > m.records
+                || u64::from(record.ordinal) >= m.records
                 || placement.row(&record.receiver, record.page) != row
             {
                 return Err(Error::Malformed);

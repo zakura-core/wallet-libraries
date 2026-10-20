@@ -74,6 +74,8 @@ pub struct Record {
     pub page: u32,
     pub total: u32,
     pub payment: Payment,
+    /// The payment's companion witness slot; see [`crate::wire::RawRecord::ordinal`].
+    pub ordinal: u32,
 }
 
 impl Record {
@@ -98,6 +100,7 @@ impl Record {
                 ephemeral_key: p.ephemeral_key,
                 ciphertext_prefix: p.ciphertext_prefix,
             },
+            ordinal: self.ordinal,
         }
         .encode()
         .map_err(|_| Error::Malformed)
@@ -126,6 +129,7 @@ impl Record {
                 ephemeral_key: p.ephemeral_key,
                 ciphertext_prefix: p.ciphertext_prefix,
             },
+            ordinal: raw.ordinal,
         };
         record.payment.check()?;
         Ok(Some(record))

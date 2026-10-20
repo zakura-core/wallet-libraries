@@ -1,22 +1,22 @@
 //! Bounded network steps. Wallet queue mutations happen after these futures complete.
 use crate::{DirectoryError, Transport, checked};
-use receiver_pir::{Manifest, transport::DirectoryClient};
-use zakura_receiver_crypto::{
-    Receiver,
-    witness::{Publication, WitnessSnapshot},
-};
+use receiver_pir::{Publication, transport::DirectoryClient};
+use zakura_receiver_crypto::Receiver;
 use zcash_client_backend::data_api::one_time_ivk::restore::{
     LookupPage, LookupWork, PublicationEnd, RECOVERY_PAGE_LIMIT, RecoveryPublication,
+    WitnessAnswer, WitnessRequest,
 };
 use zcash_protocol::consensus::BlockHeight;
 
 /// Converts validated session metadata to the wallet's locally checked frontier.
 /// The caller must still check network/activation coverage when opening the session.
-pub fn publication(manifest: &Manifest) -> Result<RecoveryPublication, DirectoryError> {
-    manifest.validate()?;
+pub fn publication(publication: &Publication) -> Result<RecoveryPublication, DirectoryError> {
+    publication.validate()?;
+    let manifest = &publication.payments;
     let directory = &manifest.directory;
     Ok(RecoveryPublication {
         id: manifest.id()?,
+        witnesses: publication.witnesses.id()?,
         history_revision: directory.history_revision,
         start_height: BlockHeight::from(directory.start_height),
         end: PublicationEnd {
@@ -33,7 +33,7 @@ pub async fn lookup<T: Transport>(
     client: &DirectoryClient<T>,
     work: &LookupWork,
 ) -> Result<LookupPage, DirectoryError> {
-    let publication = publication(client.manifest())?;
+    let publication = publication(client.publication())?;
     if publication.history_revision != work.token.history_revision
         || publication.end.height < work.through
     {
@@ -95,22 +95,29 @@ pub async fn lookup<T: Transport>(
     Ok(result)
 }
 
-/// Downloads and validates the common proof file once for an immutable session.
-/// The file is shared by all receivers. Its paths still require the wallet's chain checks.
-pub async fn witnesses<T: Transport>(
+/// Reads one candidate's companion witness payload with one PIR query, with no database
+/// handle or wallet lock. A request bound to another payment or witness session is
+/// [`DirectoryError::Revision`]: the wallet must re-read the payment under this session
+/// (see `refresh_one_time_witness`) rather than reinterpret its ordinal.
+pub async fn witness<T: Transport>(
     client: &DirectoryClient<T>,
-) -> Result<WitnessSnapshot, DirectoryError> {
-    let manifest = client.manifest();
-    let directory = &manifest.directory;
-    let publication = Publication {
-        genesis: directory.genesis,
-        directory_revision: directory.revision()?,
-        end_height: directory.end_height,
-        end_hash: directory.end_hash,
-        start_position: directory.start_position,
-        end_position: directory.end_position,
-        records: directory.records,
-    };
-    let bytes = client.witnesses().await?;
-    WitnessSnapshot::decode(&bytes, &publication).map_err(checked)
+    request: &WitnessRequest,
+) -> Result<WitnessAnswer, DirectoryError> {
+    let publication = client.publication();
+    if publication.payments.id()? != request.payments
+        || publication.witnesses.id()? != request.witnesses
+    {
+        return Err(DirectoryError::Revision);
+    }
+    let table = &publication.witnesses.table;
+    Ok(WitnessAnswer {
+        payments: request.payments,
+        revision: publication.witnesses.id()?,
+        context: PublicationEnd {
+            height: table.tree_height.into(),
+            hash: table.tree_hash,
+            tree_size: table.tree_size,
+        },
+        payload: client.witness(request.ordinal).await?,
+    })
 }

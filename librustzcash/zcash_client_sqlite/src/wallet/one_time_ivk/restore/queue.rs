@@ -5,7 +5,8 @@ use zcash_client_backend::data_api::scanning::ScanPriority;
 use zcash_client_backend::data_api::{
     one_time_ivk::restore::{
         DirectoryRecord, DiscoveryWork, LookupPage, LookupWork, ManualProgress, RECEIVE_GAP,
-        RECOVERY_PAGE_LIMIT, RecoveryPublication, RecoveryStatus, RecoveryToken, WitnessRequest,
+        RECOVERY_PAGE_LIMIT, RecoveryPublication, RecoveryStatus, RecoveryToken, WitnessAnswer,
+        WitnessRequest, decode_witness_payload,
     },
     transparent_ledger::ChainPoint,
 };
@@ -13,8 +14,8 @@ use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
 use super::{
-    apply::{Admission, Sessions, apply_payment, merkle_path},
-    payments::{authenticate, directory_candidate, pending_payment, queue_payment},
+    apply::{Admission, Sessions, WitnessPath, apply_payment},
+    payments::{PendingPayment, authenticate, directory_candidate, pending_payment, queue_payment},
     recovery::recover_refund_memos,
 };
 use crate::wallet::one_time_ivk::{
@@ -61,6 +62,57 @@ fn known_receipt(
     Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
         ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = ?1 AND t.txid = ?2 AND n.action_index = ?3)",
         params![key, txid.as_ref(), action], |r| r.get(0))?)
+}
+
+/// Whether this exact output is already admitted and mined where the directory places it,
+/// so reading its history again needs no new witness query.
+fn admitted(
+    conn: &Connection,
+    key: i64,
+    candidate: &PendingPayment,
+) -> Result<bool, SqliteClientError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
+        ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = ?1 AND t.txid = ?2
+            AND n.action_index = ?3 AND t.mined_height = ?4 AND n.commitment_tree_position = ?5)",
+        params![
+            key,
+            candidate.txid.as_ref(),
+            candidate.action_index,
+            u32::from(candidate.height),
+            candidate.position
+        ],
+        |r| r.get(0),
+    )?)
+}
+
+/// Drops a candidate's session binding and witness and reads its key's history again, so a
+/// current session binds a fresh ordinal; an ordinal is never reinterpreted under another
+/// session. The candidate stays pending, never an empty answer. The lookup keeps its reasons,
+/// so a refresh never turns manual-only work automatic. `retry_at` backs off a witness the
+/// wallet itself found unusable.
+fn refresh_witness(
+    conn: &Connection,
+    key: i64,
+    txid: TxId,
+    action: u32,
+    height: BlockHeight,
+    retry_at: i64,
+) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE ironwood_one_time_payment_recovery SET payments = NULL, ordinal = NULL,
+        witnesses = NULL, witness = NULL, witness_height = NULL, witness_hash = NULL,
+        witness_size = NULL WHERE txid = ?1 AND action_index = ?2",
+        params![txid.as_ref(), action],
+    )?;
+    conn.execute("INSERT INTO ironwood_one_time_lookups(one_time_key_id, target_height, reasons, next_attempt_at)
+        VALUES (?1, ?2, ?3, ?4) ON CONFLICT(one_time_key_id) DO UPDATE SET
+        target_height = MAX(COALESCE(target_height, 0), excluded.target_height),
+        reasons = CASE WHEN reasons = 0 THEN excluded.reasons ELSE reasons END,
+        last_record = NULL, read_complete = 0, attempts = 0,
+        next_attempt_at = excluded.next_attempt_at",
+        params![key, u32::from(height), AUTOMATIC, retry_at])?;
+    Ok(())
 }
 
 /// Allows disabled accounts to repair only keys with an already-owned unmined receipt.
@@ -779,16 +831,17 @@ pub(crate) fn status<P: Parameters>(
                 receiver: r.get::<_, Vec<u8>>(2)?.try_into().map_err(|_| corrupt("invalid receiver"))? },
             through: BlockHeight::from(r.get::<_, u32>(3)?), last: decode_record(r.get(4)?)?
         }))?.collect::<Result<_, _>>()?;
-    status.witnesses = conn.prepare("SELECT k.purpose, k.key_index, p.position, substr(p.encrypted_note, 33, 32)
+    status.witnesses = conn.prepare("SELECT k.purpose, k.key_index, p.position, substr(p.encrypted_note, 33, 32),
+            p.payments, p.witnesses, p.ordinal
         FROM ironwood_one_time_payment_recovery p JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
-        WHERE k.account_id = ?1 AND p.witness IS NULL
+        WHERE k.account_id = ?1 AND p.witness IS NULL AND p.payments IS NOT NULL
         AND (?2 OR EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t ON t.id_tx = n.transaction_id
             WHERE n.one_time_key_id = k.id AND t.txid = p.txid AND n.action_index = p.action_index AND t.mined_height IS NULL))
-        AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id AND l.reasons != 0
-            AND l.next_attempt_at <= ?3)
+        AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id AND l.reasons != 0)
         ORDER BY p.height, p.position LIMIT 64")?
-        .query_and_then(params![owner.0, enabled, now], |r| Ok::<_, SqliteClientError>(WitnessRequest {
-            key: stored_key_id(r)?, position: r.get(2)?, cmx: r.get(3)?
+        .query_and_then(params![owner.0, enabled], |r| Ok::<_, SqliteClientError>(WitnessRequest {
+            key: stored_key_id(r)?, position: r.get(2)?, cmx: r.get(3)?, payments: r.get(4)?,
+            witnesses: r.get(5)?, ordinal: r.get(6)?
         }))?.collect::<Result<_, _>>()?;
     Ok(status)
 }
@@ -885,8 +938,21 @@ pub(crate) fn record_lookup<P: Parameters>(
     let discovery_enabled = token(conn, owner.0)?.0;
     for record in &page.records {
         let candidate = directory_candidate(&record.payment).expect("validated above");
-        if discovery_enabled || known_receipt(conn, id, candidate.txid, candidate.action_index)? {
-            queue_payment(conn, params, account, work.work.key, &candidate)?;
+        if (discovery_enabled || known_receipt(conn, id, candidate.txid, candidate.action_index)?)
+            && !admitted(conn, id, &candidate)?
+        {
+            queue_payment(
+                conn,
+                params,
+                account,
+                work.work.key,
+                &candidate,
+                (
+                    page.publication.id,
+                    page.publication.witnesses,
+                    record.ordinal,
+                ),
+            )?;
         }
     }
     let last = previous
@@ -896,10 +962,31 @@ pub(crate) fn record_lookup<P: Parameters>(
                 .map_err(|_| invalid("invalid cursor"))
         })
         .transpose()?;
-    conn.execute("UPDATE ironwood_one_time_lookups SET last_record = ?2, read_complete = ?3,
-        done_height = CASE WHEN NOT ?6 THEN NULL WHEN ?5 THEN ?4 ELSE done_height END, attempts = 0, next_attempt_at = 0 WHERE one_time_key_id = ?1",
-        params![id, last, page.complete && u32::from(page.publication.end.height) >= target,
-            u32::from(page.publication.end.height), page.complete, discovery_enabled])?;
+    // A candidate this history did not bind again still lacks a usable witness, so the read
+    // cannot settle the key: it is read again later rather than completing.
+    let unbound: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery
+         WHERE one_time_key_id = ?1 AND payments IS NULL)",
+        [id],
+        |r| r.get(0),
+    )?;
+    let reread = page.complete && unbound;
+    conn.execute(
+        "UPDATE ironwood_one_time_lookups SET last_record = CASE WHEN ?7 THEN NULL ELSE ?2 END,
+        read_complete = ?3 AND NOT ?7,
+        done_height = CASE WHEN NOT ?6 THEN NULL WHEN ?5 THEN ?4 ELSE done_height END, attempts = 0,
+        next_attempt_at = CASE WHEN ?7 THEN ?8 ELSE 0 END WHERE one_time_key_id = ?1",
+        params![
+            id,
+            last,
+            page.complete && u32::from(page.publication.end.height) >= target,
+            u32::from(page.publication.end.height),
+            page.complete,
+            discovery_enabled,
+            reread,
+            now.saturating_add(60)
+        ],
+    )?;
     admit(conn, params, sessions, account, now)?;
     progress(conn, params, account)?;
     Ok(true)
@@ -941,7 +1028,54 @@ pub(crate) fn defer(
     Ok(())
 }
 
-/// Attaches a proof under the same account fence, then applies ordinary inclusion and spend checks.
+/// The candidate `request` names, if it still waits for a witness under the same binding
+/// and `captured` is current. Disabled accounts reach only already-owned unmined receipts.
+fn requested(
+    conn: &Connection,
+    owner: i64,
+    key: i64,
+    captured: RecoveryToken,
+    request: &WitnessRequest,
+) -> Result<Option<(TxId, u32, BlockHeight)>, SqliteClientError> {
+    let (enabled, current) = token(conn, owner)?;
+    if current != captured {
+        return Ok(None);
+    }
+    let found: Option<(Vec<u8>, u32, u32)> = conn
+        .query_row(
+            "SELECT p.txid, p.action_index, p.height
+        FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = ?1 AND p.position = ?2
+            AND substr(p.encrypted_note, 33, 32) = ?3 AND p.payments = ?4 AND p.ordinal = ?5
+            AND p.witnesses = ?7 AND p.witness IS NULL AND (?6 OR EXISTS(SELECT 1 FROM transactions t
+                JOIN ironwood_received_notes n ON n.transaction_id = t.id_tx
+                WHERE t.txid = p.txid AND n.one_time_key_id = p.one_time_key_id
+                    AND n.action_index = p.action_index AND t.mined_height IS NULL))",
+            params![
+                key,
+                request.position,
+                request.cmx,
+                request.payments,
+                request.ordinal,
+                enabled,
+                request.witnesses
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    found
+        .map(|(txid, action, height)| {
+            Ok((
+                TxId::from_bytes(txid.try_into().map_err(|_| corrupt("invalid txid"))?),
+                action,
+                BlockHeight::from(height),
+            ))
+        })
+        .transpose()
+}
+
+/// Attaches a witness under the same account fence and session binding, then applies
+/// ordinary inclusion and spend checks. A malformed payload is refused, never stored.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn record_witness<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -949,31 +1083,70 @@ pub(crate) fn record_witness<P: Parameters>(
     account: AccountUuid,
     captured: RecoveryToken,
     request: WitnessRequest,
-    anchor: ChainPoint,
-    siblings: [[u8; 32]; 32],
+    answer: &WitnessAnswer,
     now: i64,
 ) -> Result<bool, SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
-    let (enabled, current) = token(conn, owner.0)?;
-    if current != captured {
+    if token(conn, owner.0)?.1 != captured {
         return Ok(false);
     }
     let id = key_ref(conn, account, request.key)?;
-    if !enabled {
-        let known: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
-            JOIN transactions t ON t.txid = p.txid JOIN ironwood_received_notes n ON n.transaction_id = t.id_tx
-            WHERE p.one_time_key_id = ?1 AND p.position = ?2 AND substr(p.encrypted_note, 33, 32) = ?3
-                AND n.one_time_key_id = p.one_time_key_id AND n.action_index = p.action_index AND t.mined_height IS NULL)",
-            params![id, request.position, request.cmx], |r| r.get(0))?;
-        if !known {
-            return Ok(false);
-        }
+    // An answer from another companion, even for the same payment session, needs the
+    // payment read again first (see `refresh`).
+    if answer.payments != request.payments || answer.revision != request.witnesses {
+        return Ok(false);
     }
-    conn.execute("UPDATE ironwood_one_time_payment_recovery SET witness = ?3, witness_height = ?4, witness_hash = ?5
-        WHERE one_time_key_id = ?1 AND position = ?2 AND substr(encrypted_note, 33, 32) = ?6",
-        params![id, request.position, siblings.concat(), u32::from(anchor.height), anchor.hash.0, request.cmx])?;
+    if decode_witness_payload(
+        &answer.payload,
+        u64::from(request.position),
+        answer.context.tree_size,
+    )
+    .is_err()
+    {
+        return Err(invalid("malformed witness payload"));
+    }
+    if requested(conn, owner.0, id, captured, &request)?.is_some() {
+        conn.execute(
+            "UPDATE ironwood_one_time_payment_recovery SET witness = ?6,
+            witness_height = ?8, witness_hash = ?9, witness_size = ?10
+            WHERE one_time_key_id = ?1 AND position = ?2 AND substr(encrypted_note, 33, 32) = ?3
+                AND payments = ?4 AND ordinal = ?5 AND witnesses = ?7 AND witness IS NULL",
+            params![
+                id,
+                request.position,
+                request.cmx,
+                request.payments,
+                request.ordinal,
+                answer.payload.as_slice(),
+                answer.revision,
+                u32::from(answer.context.height),
+                answer.context.hash,
+                answer.context.tree_size
+            ],
+        )?;
+    } else if !token(conn, owner.0)?.0 {
+        return Ok(false);
+    }
     admit(conn, params, sessions, account, now)?;
     progress(conn, params, account)?;
+    Ok(true)
+}
+
+/// Re-reads the history of a candidate whose session can no longer answer its witness
+/// request, keeping the candidate pending. False if the request is stale.
+pub(crate) fn refresh<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    account: AccountUuid,
+    captured: RecoveryToken,
+    request: WitnessRequest,
+) -> Result<bool, SqliteClientError> {
+    let (owner, _) = account_key(conn, params, account)?;
+    let id = key_ref(conn, account, request.key)?;
+    let Some((txid, action, height)) = requested(conn, owner.0, id, captured, &request)? else {
+        return Ok(false);
+    };
+    refresh_witness(conn, id, txid, action, height, 0)?;
     Ok(true)
 }
 
@@ -1014,10 +1187,11 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
         return Ok(());
     };
     let (owner, _) = account_key(conn, params, account)?;
-    let waiting: Vec<(i64, KeyId, TxId, u32, Vec<u8>, u32, [u8; 32])> = conn
+    #[allow(clippy::type_complexity)]
+    let waiting: Vec<(i64, KeyId, TxId, u32, Vec<u8>, u32, [u8; 32], u64)> = conn
         .prepare(
             "SELECT k.purpose, k.key_index, k.id, p.txid, p.action_index, p.witness,
-                 p.witness_height, p.witness_hash
+                 p.witness_height, p.witness_hash, p.witness_size
              FROM ironwood_one_time_payment_recovery p
              JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
              WHERE k.account_id = ?1 AND p.witness IS NOT NULL
@@ -1034,57 +1208,45 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
                 r.get(5)?,
                 r.get(6)?,
                 r.get(7)?,
+                r.get(8)?,
             ))
         })?
         .collect::<Result<_, _>>()?;
-    for (id, key, txid, action, witness, anchor_height, anchor_hash) in waiting {
+    for (id, key, txid, action, witness, height, hash, tree_size) in waiting {
         if !token(conn, owner.0)?.0 && !known_receipt(conn, id, txid, action)? {
             continue;
         }
         let Some(candidate) = pending_payment(conn, txid, action)? else {
             continue;
         };
-        let anchor = ChainPoint {
-            height: BlockHeight::from(anchor_height),
-            hash: BlockHash(anchor_hash),
-        };
-        // A stored witness is the path's 32 sibling hashes.
-        let (chunks, rest) = witness.as_chunks::<32>();
-        let path = <[[u8; 32]; 32]>::try_from(chunks)
-            .ok()
-            .filter(|_| rest.is_empty())
-            .and_then(|siblings| merkle_path(candidate.position, siblings));
-        let admission = match path {
-            Some(path) => apply_payment(
-                conn,
-                sessions,
-                params,
-                account,
-                key,
-                &candidate,
-                through,
-                (anchor, &path),
-            )?,
-            None => Admission::StaleWitness,
-        };
+        let admission = apply_payment(
+            conn,
+            sessions,
+            params,
+            account,
+            key,
+            &candidate,
+            through,
+            WitnessPath {
+                payload: &witness,
+                context: ChainPoint {
+                    height: BlockHeight::from(height),
+                    hash: BlockHash(hash),
+                },
+                tree_size,
+            },
+        )?;
         match admission {
             Admission::Admitted | Admission::Waiting => {}
             Admission::Uncovered => rescan_uncovered(conn, owner.0, candidate.height, through)?,
-            Admission::StaleWitness => {
-                conn.execute(
-                    "UPDATE ironwood_one_time_payment_recovery
-                     SET witness = NULL, witness_height = NULL, witness_hash = NULL
-                     WHERE txid = ?1 AND action_index = ?2",
-                    params![txid.as_ref(), action],
-                )?;
-                // A path fetched again at once is usually built and checked against the
-                // same trees, so it backs off rather than costing a lookup every step.
-                conn.execute(
-                    "UPDATE ironwood_one_time_lookups SET next_attempt_at = ?2
-                     WHERE one_time_key_id = ?1",
-                    params![id, now.saturating_add(60)],
-                )?;
-            }
+            Admission::StaleWitness => refresh_witness(
+                conn,
+                id,
+                txid,
+                action,
+                candidate.height,
+                now.saturating_add(60),
+            )?,
             Admission::Rejected => {
                 conn.execute(
                     "DELETE FROM ironwood_one_time_payment_recovery

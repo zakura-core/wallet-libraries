@@ -5,9 +5,9 @@
 //! The codec has no dependencies and is available with default features disabled.
 //!
 //! The default `crypto` feature adds validated `Receiver`, `Record` and `Payment`
-//! APIs, authenticated zero-OVK receiver recovery, and inclusion proof construction
-//! and verification. These checks must finish before a caller accepts a payment;
-//! a proof root must additionally match the caller's independently accepted chain.
+//! APIs, authenticated zero-OVK receiver recovery, and lower inclusion path construction
+//! for companion witness tables. These checks must finish before a caller accepts a
+//! payment; a path must additionally reach the caller's independently accepted root.
 #![forbid(unsafe_code)]
 
 #[cfg(feature = "crypto")]
@@ -36,10 +36,10 @@ pub enum Error {
     /// Bytes that are not a valid encoding, address, field element or proof.
     #[error("malformed receiver directory data")]
     Malformed,
-    /// A proof that does not cover the requested publication, position or records.
+    /// A position outside the commitments a path is built from.
     #[error("receiver directory coverage is incomplete or uses a different anchor")]
     Coverage,
-    /// A proof file over [`witness::MAX_WITNESS_BYTES`].
+    /// More commitments than one Ironwood shard holds.
     #[error("receiver directory witness limit exceeded")]
     Capacity,
 }

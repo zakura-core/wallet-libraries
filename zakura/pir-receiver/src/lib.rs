@@ -9,12 +9,12 @@
 #[cfg(feature = "wallet")]
 mod discovery;
 #[cfg(feature = "wallet")]
-pub use discovery::{lookup, publication, witnesses};
+pub use discovery::{lookup, publication, witness};
 
 pub use receiver_pir::{Error as DirectoryError, transport::Transport};
 /// The directory format and client underneath, for callers that need them directly.
-/// They parse records and witness files structurally only: records from
-/// `DirectoryClient::page` and the bytes from `DirectoryClient::witnesses` are
+/// They parse records and witness payloads structurally only: records from
+/// `DirectoryClient::page` and payloads from `DirectoryClient::witness` are
 /// unchecked. Commit them through the wallet recovery queue before crediting funds.
 pub use {receiver_directory, receiver_pir};
 

@@ -4,7 +4,7 @@ use zcash_client_backend::data_api::chain::scan_cached_blocks;
 
 use super::{scanning::DuringScan, *};
 use crate::wallet::one_time_ivk::restore::tests::discovery::{
-    key8, late_fixture, one_time_notes, siblings, witness_at,
+    key8, late_fixture, one_time_notes, request_for, witness_answer,
 };
 
 /// The journal's entries as `(height, tx_index, txid)`.
@@ -222,7 +222,8 @@ fn deleting_an_account_drops_its_exclusive_journal_entries() {
 fn a_note_admitted_during_a_batch_is_spent_by_it() {
     let (mut st, candidate, _) = late_fixture();
     let account = st.test_account().unwrap().id();
-    let (anchor, path) = (tip(&st), witness_at(&st, candidate.position));
+    let request = request_for(&st, key8(), &candidate);
+    let answer = witness_answer(&st, &request, tip(&st).height);
     let prior = st.latest_cached_block().unwrap().chain_state().clone();
     let note = candidate
         .encrypted_note
@@ -248,15 +249,8 @@ fn a_note_admitted_during_a_batch_is_spent_by_it() {
             db.record_one_time_witness(
                 account,
                 db.one_time_recovery(account, clock_now()).unwrap().token,
-                zcash_client_backend::data_api::one_time_ivk::restore::WitnessRequest {
-                    key: key8(),
-                    position: candidate.position,
-                    cmx: candidate.encrypted_note.to_bytes()[32..64]
-                        .try_into()
-                        .unwrap(),
-                },
-                anchor,
-                siblings(&path),
+                request,
+                &answer,
                 clock_now(),
             )
             .unwrap();

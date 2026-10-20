@@ -4,11 +4,17 @@ Receiver directory publications: the canonical layout a receiver PIR service
 publishes and a wallet looks up. A match is a candidate, never proof of
 ownership or spendability.
 
-- `record`: the 285-byte payment record, re-exported from
+- `record`: the 289-byte payment record, re-exported from
   `zakura-receiver-crypto::wire` with cryptography disabled.
 - `blocks`: bounded rolling GCS hints, separate from full payment history.
 - `snapshot`: publication manifests and their revision, row placement, snapshot
-  construction and validation, continuation-page rules, and row lookup.
+  construction and validation, continuation-page rules, and row lookup. Each record's
+  witness ordinal is the rank of its note position (`assign_ordinals`), so a payment
+  table's identity fixes its companion mapping.
+- `witness`: companion witness tables. Ordinal `o` lives in row `o / 8`, slot `o % 8`.
+  The manifest binds the payment table's revision, one payload per record and the
+  construction tree, so a witness-only replacement keeps the payment table and its
+  ordinals, and a replaced payment table needs a new companion.
 
 This crate parses structure only. Callers validate receivers, Action fields and
 inclusion proofs at their trust boundaries with `zakura-receiver-crypto`.
@@ -27,4 +33,4 @@ The batch binds the captured revision and requested range, and checks parent lin
 
 PIR manifests require `history_revision`, the operator correction generation also advertised by rolling hints. It is bound into the immutable publication/session identity. Clients must retain the required generation with unfinished work and reject answers from an older generation, even when block heights and hashes match. Reorgs still use chain hashes.
 
-Snapshots contain only the manifest and payment rows. Aggregate `paid`, provider `seen` and `recent` sets and the `IWFLT1` envelope are removed. This is an incompatible change to the unlaunched format. It does not prune PIR history or change row placement.
+Snapshots contain only the manifest and payment rows; witnesses live in the companion table. Aggregate `paid`, provider `seen` and `recent` sets and the `IWFLT1` envelope are removed. This is an incompatible change to the unlaunched format. It does not prune PIR history or change row placement.

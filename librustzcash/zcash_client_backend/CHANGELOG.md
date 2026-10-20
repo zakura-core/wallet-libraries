@@ -10,6 +10,7 @@ and this library adheres to Rust's notion of
 ### Changed
 
 - Replace the one-time-key restore traits and broad block/transaction scanning APIs with bounded PIR queue records and cancellation tokens. Ordinary sync uses account keys. Private payment recovery retains targeted note authentication, identity and spending support.
+- `one_time_ivk::restore::WitnessRequest` names the payment session, its companion witness session and the witness ordinal a candidate was read under, and `WitnessAnswer` carries one companion witness payload with its revision and construction tree. The common witness file is gone.
 
 ## [0.1.0-rc9.2] - 2026-10-20
 

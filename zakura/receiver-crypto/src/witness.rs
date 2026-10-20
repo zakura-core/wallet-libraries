@@ -1,15 +1,15 @@
-//! Common inclusion proofs for one publication. Every wallet downloads the same bytes.
-//! Proofs authenticate inclusion only against a root independently accepted by the wallet.
-use crate::{Error, Hash};
-use incrementalmerkletree::Hashable;
-use orchard::{
-    note::ExtractedNoteCommitment,
-    tree::{MerkleHashOrchard, MerklePath},
+//! Lower inclusion paths for companion witness tables.
+//!
+//! A payload holds a payment's siblings inside its Ironwood shard of `2^16` leaves, supplied
+//! only where they are complete at the payload's construction tree size (see
+//! [`crate::wire::supplied`]). Paths authenticate inclusion only against a root the wallet
+//! accepted from its own chain, never against a root the service supplies.
+use crate::{
+    Error, Hash,
+    wire::{LOWER_LEVELS, PAYLOAD_BYTES, encode_payload},
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-
-mod cache;
-pub use cache::WitnessCache;
+use incrementalmerkletree::Hashable;
+use orchard::{note::ExtractedNoteCommitment, tree::MerkleHashOrchard};
 
 /// Combine two canonical note-tree nodes at a level counted from the leaves.
 ///
@@ -39,224 +39,112 @@ pub fn empty_root(height: u8) -> Result<Hash, Error> {
     Ok(MerkleHashOrchard::empty_root(height.into()).to_bytes())
 }
 
-const HEADER: usize = 152;
-const NODE: usize = 37;
-/// Bound allocations before parsing an untrusted common snapshot.
-pub const MAX_WITNESS_BYTES: usize = 64 * 1024 * 1024;
-const MAGIC: &[u8; 8] = b"IWPROOF1";
-/// Leaves in a full depth-32 note commitment tree.
-const TREE_SIZE: u64 = 1 << 32;
+/// Leaves in one Ironwood shard.
+pub const SHARD_LEAVES: u64 = 1 << LOWER_LEVELS;
 
-/// The publication a proof file binds to: the fields of a receiver directory manifest
-/// that a proof commits to or is checked against. The caller validates the manifest
-/// these come from, and computes its revision, with the receiver protocol package;
-/// this crate does not interpret manifests.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Publication {
-    /// The network's genesis block hash.
-    pub genesis: Hash,
-    /// The manifest's revision, which commits to every manifest field.
-    pub directory_revision: Hash,
-    /// The publication's last covered height and its block hash.
-    pub end_height: u32,
-    pub end_hash: Hash,
-    /// The first and one past the last note position the publication covers.
-    pub start_position: u64,
-    pub end_position: u64,
-    /// The records the publication holds, each at its own note position.
-    pub records: u64,
+/// The complete nodes of one Ironwood shard's commitments, from which every payment in it
+/// gets its lower path. Appending leaves only adds nodes, so a publisher extends the filling
+/// shard incrementally and keeps completed shards' paths final. About 64 bytes per leaf.
+pub struct ShardPaths {
+    shard: u32,
+    /// `levels[l]` holds the shard's complete subtree roots at level `l`, left to right.
+    levels: Vec<Vec<MerkleHashOrchard>>,
 }
 
-impl Publication {
-    /// Refuse coverage no manifest can declare: a span that runs backwards or past the
-    /// tree, or more records than covered positions.
-    fn validate(&self) -> Result<(), Error> {
-        if self.start_position > self.end_position
-            || self.end_position > TREE_SIZE
-            || self.records > self.end_position - self.start_position
-        {
-            return Err(Error::Malformed);
-        }
-        Ok(())
-    }
-}
-
-/// Sibling nodes for every payment position in one publication, bound to its revision.
-pub struct WitnessSnapshot {
-    genesis: Hash,
-    directory_revision: Hash,
-    height: u32,
-    block_hash: Hash,
-    tree_size: u64,
-    root: Hash,
-    nodes: BTreeMap<(u8, u32), MerkleHashOrchard>,
-}
-
-impl WitnessSnapshot {
-    /// Build from every commitment since the pool's empty tree, including coinbase.
-    pub fn build(
-        publication: &Publication,
-        commitments: &[Hash],
-        positions: &BTreeSet<u32>,
-    ) -> Result<Self, Error> {
-        WitnessCache::default().build(publication, commitments, positions)
-    }
-
-    /// The file's tree root. Like every path, it is untrusted until checked against the
-    /// wallet's own chain.
-    pub fn root(&self) -> Hash {
-        self.root
-    }
-
-    /// A snapshot of `nodes` under `root` at `publication`'s end.
-    fn from_nodes(
-        publication: &Publication,
-        root: Hash,
-        nodes: BTreeMap<(u8, u32), MerkleHashOrchard>,
-    ) -> Self {
+impl ShardPaths {
+    /// An empty Ironwood shard `shard`, which starts at position `shard << 16`.
+    pub fn new(shard: u32) -> Self {
         Self {
-            genesis: publication.genesis,
-            directory_revision: publication.directory_revision,
-            height: publication.end_height,
-            block_hash: publication.end_hash,
-            tree_size: publication.end_position,
-            root,
-            nodes,
+            shard,
+            levels: vec![Vec::new(); usize::from(LOWER_LEVELS) + 1],
         }
     }
 
-    /// Serialize as the `IWPROOF1` file that every wallet downloads.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(HEADER + NODE * self.nodes.len());
-        out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&self.genesis);
-        out.extend_from_slice(&self.directory_revision);
-        out.extend_from_slice(&self.height.to_le_bytes());
-        out.extend_from_slice(&self.block_hash);
-        out.extend_from_slice(&self.tree_size.to_le_bytes());
-        out.extend_from_slice(&self.root);
-        out.extend_from_slice(&(self.nodes.len() as u32).to_le_bytes());
-        for ((level, index), hash) in &self.nodes {
-            out.push(*level);
-            out.extend_from_slice(&index.to_le_bytes());
-            out.extend_from_slice(&hash.to_bytes());
+    /// Appends the shard's next commitments in chain order. Fails without changing the
+    /// shard for a noncanonical commitment or more than [`SHARD_LEAVES`] leaves in total.
+    pub fn extend(&mut self, commitments: &[Hash]) -> Result<(), Error> {
+        if self.levels[0].len() as u64 + commitments.len() as u64 > SHARD_LEAVES {
+            return Err(Error::Capacity);
         }
-        out
-    }
-
-    /// Binds the proof file to one directory publication. Its root is still untrusted.
-    pub fn decode(bytes: &[u8], publication: &Publication) -> Result<Self, Error> {
-        publication.validate()?;
-        if bytes.len() < HEADER || bytes.len() > MAX_WITNESS_BYTES || &bytes[..8] != MAGIC {
-            return Err(Error::Malformed);
-        }
-        let count = u32::from_le_bytes(bytes[148..152].try_into().unwrap()) as usize;
-        if count != (bytes.len() - HEADER) / NODE || !(bytes.len() - HEADER).is_multiple_of(NODE) {
-            return Err(Error::Malformed);
-        }
-        let mut result = Self {
-            genesis: bytes[8..40].try_into().unwrap(),
-            directory_revision: bytes[40..72].try_into().unwrap(),
-            height: u32::from_le_bytes(bytes[72..76].try_into().unwrap()),
-            block_hash: bytes[76..108].try_into().unwrap(),
-            tree_size: u64::from_le_bytes(bytes[108..116].try_into().unwrap()),
-            root: bytes[116..148].try_into().unwrap(),
-            nodes: BTreeMap::new(),
-        };
-        if result.genesis != publication.genesis
-            || result.directory_revision != publication.directory_revision
-            || result.height != publication.end_height
-            || result.block_hash != publication.end_hash
-            || result.tree_size != publication.end_position
-        {
-            return Err(Error::Coverage);
-        }
-        let mut previous = None;
-        for node in bytes[HEADER..].as_chunks::<NODE>().0 {
-            let key = (node[0], u32::from_le_bytes(node[1..5].try_into().unwrap()));
-            if key.0 >= 32
-                || (u64::from(key.1) << key.0) >= result.tree_size
-                || previous.is_some_and(|p| p >= key)
-            {
-                return Err(Error::Malformed);
+        let leaves = commitments
+            .iter()
+            .map(|cmx| {
+                Option::<ExtractedNoteCommitment>::from(ExtractedNoteCommitment::from_bytes(cmx))
+                    .map(|c| MerkleHashOrchard::from_cmx(&c))
+                    .ok_or(Error::Malformed)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.levels[0].extend(leaves);
+        for level in 0..usize::from(LOWER_LEVELS) {
+            let (lower, upper) = self.levels.split_at_mut(level + 1);
+            let (children, parents) = (&lower[level], &mut upper[0]);
+            while children.len() >= 2 * (parents.len() + 1) {
+                let i = parents.len() * 2;
+                parents.push(MerkleHashOrchard::combine(
+                    (level as u8).into(),
+                    &children[i],
+                    &children[i + 1],
+                ));
             }
-            let hash = Option::<MerkleHashOrchard>::from(MerkleHashOrchard::from_bytes(
-                node[5..37].try_into().unwrap(),
-            ))
-            .ok_or(Error::Malformed)?;
-            result.nodes.insert(key, hash);
-            previous = Some(key);
-        }
-        Ok(result)
-    }
-
-    /// Returns a path bound to the requested commitment. The caller must additionally
-    /// verify it against local chain state, never just against this file's root.
-    pub fn path(&self, position: u32, cmx: Hash) -> Result<[[u8; 32]; 32], Error> {
-        let path = self.siblings(position)?;
-        if MerklePath::from_parts(position, path)
-            .root(leaf(cmx)?)
-            .to_bytes()
-            != self.root
-        {
-            return Err(Error::Malformed);
-        }
-        Ok(path.map(|h| h.to_bytes()))
-    }
-
-    /// Checks [`Self::path`] for every `(position, cmx)` in order, failing as the first
-    /// failing call would. An ancestor that already reached the root with the same
-    /// value is not hashed again, so leaves that share subtrees share that work.
-    pub fn check_paths(&self, leaves: impl IntoIterator<Item = (u32, Hash)>) -> Result<(), Error> {
-        let mut verified = HashMap::<(u8, u32), MerkleHashOrchard>::new();
-        let mut visited = Vec::with_capacity(32);
-        for (position, cmx) in leaves {
-            let path = self.siblings(position)?;
-            let mut node = MerkleHashOrchard::from_cmx(&leaf(cmx)?);
-            visited.clear();
-            let mut depth = 0;
-            while depth < 32 {
-                let key = (depth, position >> depth);
-                if verified.get(&key) == Some(&node) {
-                    break;
-                }
-                visited.push((key, node));
-                let sibling = &path[depth as usize];
-                node = if key.1 & 1 == 0 {
-                    MerkleHashOrchard::combine(depth.into(), &node, sibling)
-                } else {
-                    MerkleHashOrchard::combine(depth.into(), sibling, &node)
-                };
-                depth += 1;
-            }
-            if depth == 32 && node.to_bytes() != self.root {
-                return Err(Error::Malformed);
-            }
-            verified.extend(visited.drain(..));
         }
         Ok(())
     }
 
-    /// The sibling of each of `position`'s ancestors, failing with [`Error::Coverage`]
-    /// for a position outside the tree or a sibling missing from the file.
-    fn siblings(&self, position: u32) -> Result<[MerkleHashOrchard; 32], Error> {
-        if u64::from(position) >= self.tree_size {
-            return Err(Error::Coverage);
-        }
-        let mut path = [MerkleHashOrchard::empty_leaf(); 32];
-        for depth in 0..32u8 {
-            let index = (position >> depth) ^ 1;
-            path[depth as usize] = if (u64::from(index) << depth) >= self.tree_size {
-                MerkleHashOrchard::empty_root(depth.into())
-            } else {
-                *self.nodes.get(&(depth, index)).ok_or(Error::Coverage)?
-            };
-        }
-        Ok(path)
+    /// The global tree size these leaves describe: the shard's start plus its leaves.
+    pub fn tree_size(&self) -> u64 {
+        (u64::from(self.shard) << LOWER_LEVELS) + self.levels[0].len() as u64
+    }
+
+    /// The full shard's root once all [`SHARD_LEAVES`] leaves are present.
+    pub fn root(&self) -> Option<Hash> {
+        self.levels[usize::from(LOWER_LEVELS)]
+            .first()
+            .map(|h| h.to_bytes())
+    }
+
+    /// The encoded lower path of `position` at [`Self::tree_size`], supplying exactly its
+    /// complete siblings. [`Error::Coverage`] for a position outside these leaves.
+    pub fn payload(&self, position: u64) -> Result<[u8; PAYLOAD_BYTES], Error> {
+        let start = u64::from(self.shard) << LOWER_LEVELS;
+        let local = position
+            .checked_sub(start)
+            .filter(|local| *local < self.levels[0].len() as u64)
+            .ok_or(Error::Coverage)?;
+        let siblings = std::array::from_fn(|level| {
+            self.levels[level]
+                .get(((local >> level) ^ 1) as usize)
+                .map(|h| h.to_bytes())
+        });
+        encode_payload(&siblings, position, self.tree_size()).map_err(|_| Error::Malformed)
     }
 }
 
-/// The commitment `cmx`, failing with [`Error::Malformed`] when it is not a field element.
-fn leaf(cmx: Hash) -> Result<ExtractedNoteCommitment, Error> {
-    Option::from(ExtractedNoteCommitment::from_bytes(&cmx)).ok_or(Error::Malformed)
+/// The lower paths of `positions`, in order, in a tree of exactly `commitments`, rebuilding
+/// each referenced Ironwood shard. Publishers that keep shards between publications extend
+/// [`ShardPaths`] instead. [`Error::Coverage`] for a position outside the tree.
+pub fn payloads(
+    commitments: &[Hash],
+    positions: &[u64],
+) -> Result<Vec<[u8; PAYLOAD_BYTES]>, Error> {
+    let mut shards = std::collections::BTreeMap::new();
+    positions
+        .iter()
+        .map(|&position| {
+            if position >= commitments.len() as u64 {
+                return Err(Error::Coverage);
+            }
+            let shard = position >> LOWER_LEVELS;
+            let paths = match shards.entry(shard) {
+                std::collections::btree_map::Entry::Occupied(found) => found.into_mut(),
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    let start = (shard << LOWER_LEVELS) as usize;
+                    let end = commitments.len().min(start + SHARD_LEAVES as usize);
+                    let mut paths = ShardPaths::new(shard as u32);
+                    paths.extend(&commitments[start..end])?;
+                    slot.insert(paths)
+                }
+            };
+            paths.payload(position)
+        })
+        .collect()
 }

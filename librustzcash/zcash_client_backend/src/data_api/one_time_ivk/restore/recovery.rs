@@ -44,7 +44,7 @@ impl EncryptedNote {
         &self.0
     }
 
-    /// Public commitment bytes used to request the matching common witness.
+    /// Public commitment bytes, which name a witness request with its position.
     pub fn commitment(&self) -> [u8; 32] {
         self.0[32..64].try_into().unwrap()
     }

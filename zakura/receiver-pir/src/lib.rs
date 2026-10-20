@@ -1,13 +1,13 @@
 //! Encrypted row retrieval. Results are candidates for wallet validation, not chain proofs:
-//! records and witness files are returned as untrusted bytes, which the wallet checks
+//! records and witness payloads are returned as untrusted bytes, which the wallet checks
 //! cryptographically before use.
 mod client;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod transport;
 
-pub use client::{Client, Query};
-use receiver_directory::{snapshot, Hash};
+pub use client::{Client, Query, WitnessClient, WitnessQuery};
+use receiver_directory::{snapshot, witness, Hash};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
@@ -84,6 +84,65 @@ impl Manifest {
         h.update(self.directory.revision()?);
         h.update(self.public_digest);
         Ok(h.finalize().into())
+    }
+}
+
+/// A companion witness table's session: its manifest and PIR setup digest. It shares the
+/// payment session's protocol and geometry rules.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WitnessManifest {
+    pub protocol: String,
+    pub table: witness::Manifest,
+    pub public_digest: Hash,
+}
+
+impl WitnessManifest {
+    /// Check the table manifest, the protocol and the supported geometry.
+    pub fn validate(&self) -> Result<(), Error> {
+        self.table.validate()?;
+        if self.protocol != PROTOCOL {
+            return Err(Error::Unsupported);
+        }
+        validate_rows(self.table.rows)
+    }
+
+    /// The session ID that pins witness requests to this table: a domain-separated
+    /// SHA-256 of the protocol, the table revision and the public setup digest.
+    pub fn id(&self) -> Result<Hash, Error> {
+        self.validate()?;
+        let mut h = Sha256::new();
+        h.update(b"ironwood-receiver-pir/v1/witness-session\0");
+        h.update((self.protocol.len() as u64).to_le_bytes());
+        h.update(self.protocol.as_bytes());
+        h.update(self.table.revision()?);
+        h.update(self.public_digest);
+        Ok(h.finalize().into())
+    }
+}
+
+/// A payment session and the companion witness session bound to it, which
+/// `/v1/receiver/init` serves together.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Publication {
+    pub payments: Manifest,
+    pub witnesses: WitnessManifest,
+}
+
+impl Publication {
+    /// Checks both sessions, that the witness table serves exactly this payment table, and
+    /// the serialized size, at most [`MAX_MANIFEST_BYTES`].
+    pub fn validate(&self) -> Result<(), Error> {
+        self.payments.validate()?;
+        self.witnesses.validate()?;
+        self.witnesses
+            .table
+            .check_payments(&self.payments.directory)?;
+        if serde_json::to_vec(self)?.len() > MAX_MANIFEST_BYTES {
+            return Err(Error::Malformed);
+        }
+        Ok(())
     }
 }
 

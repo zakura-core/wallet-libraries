@@ -579,6 +579,7 @@ impl Chain {
                         .expect("32-byte key"),
                     ciphertext_prefix: compact.ciphertext.as_slice().try_into().expect("52 bytes"),
                 },
+                ordinal: 0,
             });
             let entry = Mined {
                 txid,
@@ -696,6 +697,7 @@ impl Chain {
                             .try_into()
                             .expect("52 bytes"),
                     },
+                    ordinal: 0,
                 });
                 let mined = Mined {
                     txid,

@@ -2,14 +2,23 @@
 
 ## [Unreleased]
 
-### Removed
+### Changed
 
-- Remove aggregate filter downloads and evaluator storage. Rolling block hints are independent of full-history PIR sessions.
-- Remove `server::Server::rows` and `server::Server::new_reusing_rows`, which only tests used. A prepared server no longer keeps a second copy of its encoded rows.
+- `/v1/receiver/init` serves a `Publication`: the payment session and its companion
+  `WitnessManifest`. `DirectoryClient::fetch_manifest` returns it and `connect_manifest`
+  takes it.
 
 ### Added
 
+- `WitnessClient`, `WitnessQuery`, `server::WitnessServer` and `DirectoryClient::witness`:
+  one PIR query per witness payload, by ordinal, under its own session ID.
 - Fetch rolling block-filter availability and bounded batches independently of PIR sessions through the caller-owned transport.
+
+### Removed
+
+- `DirectoryClient::witnesses` and `transport::MAX_WITNESS_BYTES`: the common witness file.
+- Remove aggregate filter downloads and evaluator storage. Rolling block hints are independent of full-history PIR sessions.
+- Remove `server::Server::rows` and `server::Server::new_reusing_rows`, which only tests used. A prepared server no longer keeps a second copy of its encoded rows.
 
 ## [0.0.1-rc1] - 2026-10-20
 

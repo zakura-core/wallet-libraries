@@ -6,17 +6,19 @@
 use orchard::keys::{FullViewingKey, Scope};
 use receiver_directory::{
     RawRecord,
-    snapshot::{Manifest, PROFILE, Snapshot},
+    snapshot::{Manifest, PROFILE, Snapshot, assign_ordinals},
+    witness,
 };
-use receiver_pir::{AcceptedCoverage, MIN_ROWS, server::Server, transport::DirectoryClient};
+use receiver_pir::{
+    AcceptedCoverage, MIN_ROWS, Publication,
+    server::{Server, WitnessServer},
+    transport::DirectoryClient,
+};
 use std::sync::Mutex;
 use zakura_pir_receiver::{
-    DirectoryError, Transport, lookup, publication as wallet_publication, witnesses,
+    DirectoryError, Transport, lookup, publication as wallet_publication, witness,
 };
-use zakura_receiver_crypto::{
-    Payment, Receiver, Record,
-    witness::{Publication, WitnessSnapshot},
-};
+use zakura_receiver_crypto::{Payment, Receiver, Record, witness::payloads};
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _,
     chain::BlockSource as _,
@@ -121,6 +123,7 @@ fn pay_unscanned_to(st: &mut State, parent: &FullViewingKey, index: u64, positio
             ephemeral_key: compact.ephemeral_key.as_slice().try_into().unwrap(),
             ciphertext_prefix: compact.ciphertext.as_slice().try_into().unwrap(),
         },
+        ordinal: 0,
     }
 }
 
@@ -200,10 +203,11 @@ fn one_time_value(st: &State) -> u64 {
         .unwrap()
 }
 
-/// Publishes full payment history and common proofs with the production snapshot builder.
+/// Publishes full payment history and its companion witness table with the production
+/// builders, the witnesses built at the publication's own end.
 fn publish(records: &[Record], commitments: &[[u8; 32]], end: ChainPoint) -> Routes {
     // Each record's row slot, which the publisher writes after validating it.
-    let records: Vec<_> = records
+    let mut records: Vec<_> = records
         .iter()
         .map(|record| {
             RawRecord::decode(&record.encode().unwrap())
@@ -211,6 +215,7 @@ fn publish(records: &[Record], commitments: &[[u8; 32]], end: ChainPoint) -> Rou
                 .unwrap()
         })
         .collect();
+    assign_ordinals(&mut records);
     let manifest = Manifest {
         profile: PROFILE.into(),
         history_revision: 0,
@@ -227,47 +232,42 @@ fn publish(records: &[Record], commitments: &[[u8; 32]], end: ChainPoint) -> Rou
         data_sha256: [0; 32],
     };
     let snapshot = Snapshot::build(manifest, &records).unwrap();
-    let positions = records
-        .iter()
-        .map(|record| u32::try_from(record.payment.position).unwrap())
-        .collect();
-    // A chain without Ironwood outputs has no witnesses to serve.
-    let witnesses = (!commitments.is_empty()).then(|| {
-        WitnessSnapshot::build(&publication(&snapshot.manifest), commitments, &positions)
-            .unwrap()
-            .encode()
-    });
-    Routes::new(Server::new(snapshot).unwrap(), witnesses)
-}
-
-/// The fields of `manifest` its witness file binds to.
-fn publication(manifest: &Manifest) -> Publication {
-    Publication {
-        genesis: manifest.genesis,
-        directory_revision: manifest.revision().unwrap(),
-        end_height: manifest.end_height,
-        end_hash: manifest.end_hash,
-        start_position: manifest.start_position,
-        end_position: manifest.end_position,
-        records: manifest.records,
-    }
+    let mut positions: Vec<_> = records.iter().map(|r| r.payment.position).collect();
+    positions.sort_unstable();
+    let table = witness::Table::build(
+        witness::Manifest {
+            profile: witness::PROFILE.into(),
+            genesis: GENESIS,
+            history_revision: 0,
+            payments: snapshot.manifest.revision().unwrap(),
+            payloads: 0,
+            rows: MIN_ROWS,
+            tree_height: end.height.into(),
+            tree_hash: end.hash.0,
+            tree_size: commitments.len() as u64,
+            data_sha256: [0; 32],
+        },
+        &payloads(commitments, &positions).unwrap(),
+    )
+    .unwrap();
+    let payments = Server::new(snapshot).unwrap();
+    let witnesses = WitnessServer::new(table, &payments).unwrap();
+    Routes::new(payments, witnesses)
 }
 
 /// One publication's receiver routes, answered as the receiver service answers them:
-/// its manifest, PIR setup and witnesses, and real PIR evaluation of
-/// each encrypted query. A session it does not serve is gone (410).
+/// its sessions, PIR setup and real PIR evaluation of each encrypted payment or witness
+/// query. A session it does not serve is gone (410).
 struct Routes {
-    server: Server,
-    id: String,
-    witnesses: Option<Vec<u8>>,
+    payments: Server,
+    witnesses: WitnessServer,
 }
 
 impl Routes {
     /// Binds routes to one immutable publication.
-    fn new(server: Server, witnesses: Option<Vec<u8>>) -> Self {
+    fn new(payments: Server, witnesses: WitnessServer) -> Self {
         Self {
-            id: hex::encode(server.id()),
-            server,
+            payments,
             witnesses,
         }
     }
@@ -276,7 +276,13 @@ impl Routes {
     fn answer(&self, method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
         let route = path.strip_prefix("/v1/receiver/").unwrap_or(path);
         if (method, route) == ("POST", "query") {
-            return match self.server.respond(body) {
+            let session = body.get(4..36);
+            let response = if session == Some(&self.witnesses.id()[..]) {
+                self.witnesses.respond(body)
+            } else {
+                self.payments.respond(body)
+            };
+            return match response {
                 Ok(response) => (200, response),
                 Err(receiver_pir::Error::Revision) => (410, Vec::new()),
                 Err(receiver_pir::Error::Malformed) => (400, Vec::new()),
@@ -284,7 +290,11 @@ impl Routes {
             };
         }
         if (method, route) == ("GET", "init") {
-            return (200, serde_json::to_vec(self.server.manifest()).unwrap());
+            let publication = Publication {
+                payments: self.payments.manifest().clone(),
+                witnesses: self.witnesses.manifest().clone(),
+            };
+            return (200, serde_json::to_vec(&publication).unwrap());
         }
         let Some((material, id)) = route.split_once('/').filter(|_| method == "GET") else {
             return (404, Vec::new());
@@ -292,15 +302,15 @@ impl Routes {
         if hex::decode(id).ok().filter(|id| id.len() == 32).is_none() {
             return (400, Vec::new());
         }
-        if id != self.id {
+        let public = if id == hex::encode(self.payments.id()) {
+            self.payments.public()
+        } else if id == hex::encode(self.witnesses.id()) {
+            self.witnesses.public()
+        } else {
             return (410, Vec::new());
-        }
+        };
         match material {
-            "public" => (200, self.server.public().to_vec()),
-            "witness" => match &self.witnesses {
-                Some(bytes) => (200, bytes.clone()),
-                None => (503, Vec::new()),
-            },
+            "public" => (200, public.to_vec()),
             _ => (404, Vec::new()),
         }
     }
@@ -377,7 +387,7 @@ impl Transport for Directory {
     }
 }
 
-/// The receiver lookups `directory` has served.
+/// The encrypted queries `directory` has served, payment and witness alike.
 fn lookups(directory: &Directory) -> usize {
     let requests = directory.requests();
     requests
@@ -406,10 +416,8 @@ async fn connect(directory: &Directory, end: ChainPoint) -> DirectoryClient<&Dir
     .unwrap()
 }
 
-/// Completes bounded wallet work through encrypted queries and independently built proofs.
+/// Completes bounded wallet work through encrypted payment and witness queries.
 async fn drain(st: &mut State, account: AccountUuid, client: &DirectoryClient<&Directory>) {
-    let publication = wallet_publication(client.manifest()).unwrap();
-    let mut proofs = None;
     for _ in 0..256 {
         let status = st.wallet().db().one_time_recovery(account, NOW).unwrap();
         if let Some(work) = status.lookups.first() {
@@ -421,28 +429,11 @@ async fn drain(st: &mut State, account: AccountUuid, client: &DirectoryClient<&D
                     .unwrap()
             );
         } else if let Some(request) = status.witnesses.first() {
-            if proofs.is_none() {
-                proofs = Some(witnesses(client).await.unwrap());
-            }
-            let path = proofs
-                .as_ref()
-                .unwrap()
-                .path(request.position, request.cmx)
-                .unwrap();
+            let answer = witness(client, request).await.unwrap();
             assert!(
                 st.wallet_mut()
                     .db_mut()
-                    .record_one_time_witness(
-                        account,
-                        status.token,
-                        *request,
-                        ChainPoint {
-                            height: publication.end.height,
-                            hash: BlockHash(publication.end.hash)
-                        },
-                        path,
-                        NOW
-                    )
+                    .record_one_time_witness(account, status.token, *request, &answer, NOW)
                     .unwrap()
             );
         } else {
@@ -459,7 +450,7 @@ fn begin(r: &mut Restored, client: &DirectoryClient<&Directory>, direct: bool) {
     assert!(
         db.begin_one_time_recovery(
             r.account,
-            wallet_publication(client.manifest()).unwrap(),
+            wallet_publication(client.publication()).unwrap(),
             direct
         )
         .unwrap()
@@ -482,7 +473,8 @@ async fn seed_recovery_pages_history_and_stops_at_four_empty_indexes() {
     assert!(status.restore_complete);
     assert_eq!(status.restore_next, 8);
     assert_eq!(one_time_value(&r.st), 3 * VALUE);
-    assert_eq!(lookups(&directory), 9);
+    // Nine payment pages, then one witness query for each of the three payments.
+    assert_eq!(lookups(&directory), 12);
     let queries = lookups(&directory);
     begin(&mut r, &client, true);
     drain(&mut r.st, r.account, &client).await;
@@ -574,7 +566,7 @@ async fn manual_bound_crosses_a_gap() {
             .db_mut()
             .check_one_time_history(
                 r.account,
-                wallet_publication(client.manifest()).unwrap(),
+                wallet_publication(client.publication()).unwrap(),
                 Some(6)
             )
             .unwrap()
@@ -663,4 +655,66 @@ async fn a_forged_payment_is_not_an_empty_answer() {
     assert_eq!(status.restore_gap, 0);
     assert_eq!(one_time_value(&r.st), 0);
     assert_eq!(status.lookups[0], work);
+}
+
+/// A candidate read under a replaced session never reinterprets its ordinal in the new
+/// session's witness table: it is read again there, then admitted.
+#[tokio::test]
+async fn a_replaced_session_reads_the_payment_again_for_its_witness() {
+    let mut r = restored(&[2, 0]);
+    let old = serve(&r.records, r.through);
+    let client = connect(&old, r.through).await;
+    begin(&mut r, &client, true);
+    let work =
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, NOW)
+            .unwrap()
+            .lookups
+            .into_iter()
+            .find(|w| w.work.key == KeyId::new(Purpose::Receive, 0))
+            .unwrap();
+    let page = lookup(&client, &work).await.unwrap();
+    assert!(
+        r.st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(r.account, &work, &page, NOW)
+            .unwrap()
+    );
+    let status =
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, NOW)
+            .unwrap();
+    let request = status.witnesses[0];
+    assert_eq!(request.ordinal, 1, "ordinals rank payments by position");
+    // A later publication covers one more block; its payment session differs.
+    r.st.generate_and_scan_empty_blocks(1);
+    let end = tip(&r.st);
+    let directory = serve(&r.records, end);
+    let current = connect(&directory, end).await;
+    assert!(matches!(
+        witness(&current, &request).await,
+        Err(DirectoryError::Revision)
+    ));
+    assert!(
+        r.st.wallet_mut()
+            .db_mut()
+            .refresh_one_time_witness(r.account, status.token, request)
+            .unwrap()
+    );
+    let status =
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, NOW)
+            .unwrap();
+    assert!(status.witnesses.is_empty(), "the old binding is gone");
+    assert!(
+        status
+            .lookups
+            .iter()
+            .any(|w| w.work.key == KeyId::new(Purpose::Receive, 0) && w.last.is_none())
+    );
+    drain(&mut r.st, r.account, &current).await;
+    assert_eq!(one_time_value(&r.st), 2 * VALUE);
 }

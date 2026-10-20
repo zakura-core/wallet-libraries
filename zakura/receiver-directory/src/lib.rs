@@ -7,6 +7,7 @@ pub mod blocks;
 mod gcs;
 pub mod record;
 pub mod snapshot;
+pub mod witness;
 
 pub use record::{Payment, RawRecord, ReceiverBytes, RECORD_BYTES};
 /// A 32-byte hash in protocol byte order.

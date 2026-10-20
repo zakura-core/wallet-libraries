@@ -41,7 +41,8 @@ fn seed_gap_and_recycled_hole() {
         desktop.recover(&chain, &directory).await;
         assert_eq!(desktop.unspent_one_time_value(), 300_000);
         assert_eq!(desktop.status(&chain).restore_next, 8);
-        assert_eq!(directory.counts().0, 9);
+        // Nine payment pages, then one witness query per recovered payment.
+        assert_eq!(directory.counts().0, 12);
         desktop.reopen();
         let next = desktop
             .db
@@ -54,7 +55,7 @@ fn seed_gap_and_recycled_hole() {
             .db
             .check_one_time_history(
                 desktop.account,
-                zakura_pir_receiver::publication(client.manifest()).unwrap(),
+                zakura_pir_receiver::publication(client.publication()).unwrap(),
                 Some(42),
             )
             .unwrap();
@@ -176,7 +177,7 @@ fn offline_repeat_requires_manual_history() {
             .db
             .check_one_time_history(
                 phone.account,
-                zakura_pir_receiver::publication(client.manifest()).unwrap(),
+                zakura_pir_receiver::publication(client.publication()).unwrap(),
                 None,
             )
             .unwrap();
@@ -265,7 +266,7 @@ fn refund_after_birthday_requires_earlier_funding_memo() {
                 .db
                 .check_one_time_history(
                     desktop.account,
-                    zakura_pir_receiver::publication(client.manifest()).unwrap(),
+                    zakura_pir_receiver::publication(client.publication()).unwrap(),
                     None
                 )
                 .unwrap()
@@ -398,7 +399,7 @@ fn failures_and_manual_cancellation_survive_restart() {
         wallet.recover(&chain, &directory).await;
         assert_eq!(wallet.unspent_one_time_value(), 0);
         let client = wallet.connect(&directory).await;
-        let publication = zakura_pir_receiver::publication(client.manifest()).unwrap();
+        let publication = zakura_pir_receiver::publication(client.publication()).unwrap();
         wallet
             .db
             .check_one_time_history(wallet.account, publication, Some(10))
@@ -601,7 +602,7 @@ fn randomized_cross_device_payment_oracle() {
                     .db
                     .check_one_time_history(
                         desktop.account,
-                        zakura_pir_receiver::publication(client.manifest()).unwrap(),
+                        zakura_pir_receiver::publication(client.publication()).unwrap(),
                         None
                     )
                     .unwrap()

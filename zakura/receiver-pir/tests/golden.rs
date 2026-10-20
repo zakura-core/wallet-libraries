@@ -1,11 +1,15 @@
 //! Pinned bytes for what receiver PIR adds to the shared `pir-native` profile (seeds,
-//! session ID, framing and row placement), from a request built without `Client`.
+//! session ID, framing and row placement), from a request built without `Client`; a
+//! manifest-only changes alter session framing but preserve native setup and rows.
 mod common;
 use common::{manifest, receiver, record};
 use ipir_sp::bits::u64s_to_contiguous_bytes;
 use rand_chacha::{rand_core::SeedableRng, ChaCha20Rng};
 use receiver_directory::snapshot::{lookup_row, row_for, Snapshot, MIN_ROWS, ROW_BYTES};
-use receiver_pir::{server::Server, AcceptedCoverage, Client, HEADER_BYTES, MAGIC, PROTOCOL};
+use receiver_pir::{
+    server::{Server, WitnessServer},
+    AcceptedCoverage, Client, Publication, WitnessClient, HEADER_BYTES, MAGIC, PROTOCOL,
+};
 use sha2::{Digest, Sha256};
 use zakura_pir_client::native::{NativeKeys, NativeSecret, NativeSetup, D, Q, QUERY_BITS, Q_BITS};
 
@@ -104,30 +108,105 @@ fn the_protocol_reproduces_its_pinned_bytes() {
         ("response", digest(&response)),
         ("row", digest(&row)),
     ];
-    // The manifest format changes the session header and its framed digests only.
-    // Native setup, row placement and row bytes retain their independent golden values.
+    // The 289-byte record with its witness ordinal changes the row bytes, so the public
+    // setup, session and framed digests. Native setup and row placement are unchanged.
     let want = [
         ("row index", "2600"),
         (
             "session",
-            "766661f33f8a10fdc40909a5ece47b5c0f1dd6e1c5bf5d2f48b5a1901ecab746",
+            "dfef4a80bc698477eb33fed0147973a6a44a7177f9c726862c059ddeff53582f",
         ),
         (
             "public",
-            "f373884d2da8d24661a99793f5624739c4bfe90feedb7f8e4ed6f1042faa35e1",
+            "9e381bd348e26d914d073535b99c548cfe49613aa3428c8fbfea00a550e5edc2",
         ),
         (
             "request",
-            "4b684be5d8ffd9c95eef419884fac680829bab40b1acb07227ae3d5bfda5a329",
+            "105648f0abe4d5b4a76e4e766b4abd2cfd6c059f59492a8ed80fda5119a33095",
         ),
         (
             "response",
-            "05fbdbd2b7a3e57f4d92be76f638b97cf67351ccb5f1f2c7116ec58d07de08be",
+            "b385ab684031e348ea954da2bf452107710f987f794d184643bbb440def6acd3",
         ),
         (
             "row",
-            "6ac822f39e11fac5980508721afdd3fa8f3774ec01cdc7a2eb2e265a7cd82f44",
+            "48713abae152674088b49f320f09aadaa9c3adbd8288e0a73832cd0f1d66aa88",
         ),
     ];
     assert_eq!(got, want.map(|(name, value)| (name, value.to_owned())));
+}
+
+/// A companion witness session answers an ordinal's payload under its own session ID,
+/// bound to exactly one payment session, and refuses the payment session's queries.
+#[test]
+fn witness_sessions_answer_ordinals_and_bind_their_payment_table() {
+    use receiver_directory::witness::{Manifest, Table, PAYLOAD_BYTES, PROFILE};
+    let records = [record(0, 2), record(1, 2)];
+    let payments = Server::new(Snapshot::build(manifest(MIN_ROWS), &records).unwrap()).unwrap();
+    let directory = &payments.manifest().directory;
+    let table = |tree_height: u32| Manifest {
+        profile: PROFILE.into(),
+        genesis: directory.genesis,
+        history_revision: directory.history_revision,
+        payments: directory.revision().unwrap(),
+        payloads: 0,
+        rows: MIN_ROWS,
+        tree_height,
+        tree_hash: if tree_height == directory.end_height {
+            directory.end_hash
+        } else {
+            [9; 32]
+        },
+        tree_size: directory.end_position,
+        data_sha256: [0; 32],
+    };
+    let payloads = [[0x11; PAYLOAD_BYTES], [0x22; PAYLOAD_BYTES]];
+    let witnesses = WitnessServer::new(
+        Table::build(table(directory.end_height), &payloads).unwrap(),
+        &payments,
+    )
+    .unwrap();
+    let publication = Publication {
+        payments: payments.manifest().clone(),
+        witnesses: witnesses.manifest().clone(),
+    };
+    publication.validate().unwrap();
+    assert_eq!(
+        hex::encode(witnesses.id()),
+        "c024b19ad537bf88414d54b4d602a319800665ef9633a9f1693278050bdf9300"
+    );
+    let client = WitnessClient::new(witnesses.manifest().clone(), witnesses.public()).unwrap();
+    for (ordinal, payload) in payloads.iter().enumerate() {
+        let query = client.prepare(ordinal as u32).unwrap();
+        assert!(matches!(
+            payments.respond(query.body()),
+            Err(receiver_pir::Error::Revision)
+        ));
+        let answer = witnesses.respond(query.body()).unwrap();
+        assert_eq!(client.decode(query, &answer).unwrap(), *payload);
+    }
+    assert!(client.prepare(2).is_err());
+    // A witness-only replacement is a new witness session over the same payment session.
+    let replaced = WitnessServer::new(
+        Table::build(table(directory.end_height + 1), &payloads).unwrap(),
+        &payments,
+    )
+    .unwrap();
+    assert_ne!(replaced.id(), witnesses.id());
+    Publication {
+        payments: payments.manifest().clone(),
+        witnesses: replaced.manifest().clone(),
+    }
+    .validate()
+    .unwrap();
+    // Another payment table's companion is refused.
+    let other = Server::new(Snapshot::build(manifest(MIN_ROWS), &records[..0]).unwrap()).unwrap();
+    assert!(WitnessServer::new(
+        Table::build(table(directory.end_height), &payloads).unwrap(),
+        &other
+    )
+    .is_err());
+    let mut mixed = publication;
+    mixed.payments = other.manifest().clone();
+    assert!(mixed.validate().is_err());
 }

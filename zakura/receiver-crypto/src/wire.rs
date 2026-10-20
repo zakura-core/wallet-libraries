@@ -1,4 +1,5 @@
-//! Fixed receiver record layout. Decoded data is untrusted until checked by the caller.
+//! Fixed receiver record and witness payload layouts. Decoded data is untrusted until
+//! checked by the caller.
 #![forbid(unsafe_code)]
 
 /// Compact action bytes and their chain location, without cryptographic validation.
@@ -25,10 +26,13 @@ pub struct RawRecord {
     pub page: u32,
     pub total: u32,
     pub payment: Payment,
+    /// Selects this payment's slot in the companion witness table. Meaningful only under
+    /// the payment table that carries the record; never a chain position.
+    pub ordinal: u32,
 }
 
 /// Encoded size of one receiver record slot.
-pub const RECORD_BYTES: usize = 285;
+pub const RECORD_BYTES: usize = 289;
 
 /// A slot has an invalid length, version tag, empty encoding, or page range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,6 +68,7 @@ impl RawRecord {
         out[169..201].copy_from_slice(&p.cmx);
         out[201..233].copy_from_slice(&p.ephemeral_key);
         out[233..285].copy_from_slice(&p.ciphertext_prefix);
+        out[285..289].copy_from_slice(&self.ordinal.to_le_bytes());
         Ok(out)
     }
 
@@ -95,6 +100,7 @@ impl RawRecord {
                 ephemeral_key: bytes[201..233].try_into().unwrap(),
                 ciphertext_prefix: bytes[233..285].try_into().unwrap(),
             },
+            ordinal: u32::from_le_bytes(bytes[285..289].try_into().unwrap()),
         };
         record.check()?;
         Ok(Some(record))
@@ -106,6 +112,69 @@ impl RawRecord {
         }
         Ok(())
     }
+}
+
+/// Bytes of one companion witness payload: a payment's sixteen sibling nodes inside its
+/// Ironwood shard, lowest level first.
+pub const PAYLOAD_BYTES: usize = 512;
+/// Path levels inside one Ironwood shard of `2^16` leaves.
+pub const LOWER_LEVELS: u8 = 16;
+/// Leaves in a full depth-32 note commitment tree.
+const TREE_SIZE: u64 = 1 << 32;
+
+/// Whether `position`'s sibling at `level` is a complete subtree of a tree holding
+/// `tree_size` leaves. Only complete siblings are supplied by a payload built at that size.
+pub fn supplied(position: u64, tree_size: u64, level: u8) -> bool {
+    (((position >> level) ^ 1) + 1) << level <= tree_size
+}
+
+/// Whether `position`'s Ironwood shard is full at `tree_size`, so its lower path is final on
+/// that chain and usable at any later anchor.
+pub fn is_final(position: u64, tree_size: u64) -> bool {
+    ((position >> LOWER_LEVELS) + 1) << LOWER_LEVELS <= tree_size
+}
+
+/// Splits an untrusted payload for `position` built at `tree_size` into the siblings it
+/// supplies, lowest level first. Every other slot must be zero. Node encodings are not
+/// checked, and a position outside that tree is an error.
+pub fn decode_payload(
+    bytes: &[u8],
+    position: u64,
+    tree_size: u64,
+) -> Result<[Option<[u8; 32]>; LOWER_LEVELS as usize], Error> {
+    if bytes.len() != PAYLOAD_BYTES || position >= tree_size || tree_size > TREE_SIZE {
+        return Err(Error);
+    }
+    let mut siblings = [None; LOWER_LEVELS as usize];
+    for (level, slot) in bytes.as_chunks::<32>().0.iter().enumerate() {
+        if supplied(position, tree_size, level as u8) {
+            siblings[level] = Some(*slot);
+        } else if slot.iter().any(|b| *b != 0) {
+            return Err(Error);
+        }
+    }
+    Ok(siblings)
+}
+
+/// Encodes the siblings [`decode_payload`] reads, refusing a sibling supplied or omitted
+/// contrary to [`supplied`].
+pub fn encode_payload(
+    siblings: &[Option<[u8; 32]>; LOWER_LEVELS as usize],
+    position: u64,
+    tree_size: u64,
+) -> Result<[u8; PAYLOAD_BYTES], Error> {
+    if position >= tree_size || tree_size > TREE_SIZE {
+        return Err(Error);
+    }
+    let mut out = [0; PAYLOAD_BYTES];
+    for (level, sibling) in siblings.iter().enumerate() {
+        match (sibling, supplied(position, tree_size, level as u8)) {
+            (Some(hash), true) => out[level * 32..(level + 1) * 32].copy_from_slice(hash),
+            (None, false) => {}
+            _ => return Err(Error),
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -1,8 +1,6 @@
 //! Fixtures shared by this crate's integration tests.
 #![allow(dead_code)]
-use zakura_receiver_crypto::{
-    Hash, Payment, Receiver, Record, recovery::Action, witness::Publication,
-};
+use zakura_receiver_crypto::{Hash, Payment, Receiver, Record, recovery::Action};
 
 /// A public mainnet refund Action, recoverable with the zero OVK.
 pub fn action() -> Action {
@@ -53,20 +51,7 @@ pub fn record(page: u32, total: u32) -> Record {
             ephemeral_key: [7; 32],
             ciphertext_prefix: [8; 52],
         },
-    }
-}
-
-/// A publication from position zero ending at `len` commitments that promises
-/// `records` records.
-pub fn publication(len: usize, records: usize) -> Publication {
-    Publication {
-        genesis: [1; 32],
-        directory_revision: [9; 32],
-        end_height: 110,
-        end_hash: [3; 32],
-        start_position: 0,
-        end_position: len as u64,
-        records: records as u64,
+        ordinal: 3 + page,
     }
 }
 

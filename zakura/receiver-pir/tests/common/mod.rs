@@ -56,6 +56,7 @@ pub fn record(page: u32, total: u32) -> RawRecord {
             ephemeral_key: [7; 32],
             ciphertext_prefix: [8; 52],
         },
+        ordinal: page,
     }
 }
 

@@ -17,6 +17,7 @@ fn record() -> RawRecord {
             ephemeral_key: [0xf6; 32],
             ciphertext_prefix: [0x87; 52],
         },
+        ordinal: 0x18171615,
     }
 }
 
@@ -30,7 +31,7 @@ fn fixed_layout_preserves_every_field_and_byte_order() {
         "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
         "e5e5e5e5e5e5e5e5e5e5e5f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
         "f6f6f6f6f6878787878787878787878787878787878787878787878787878787878787878787",
-        "87878787878787878787878787878787878787",
+        "8787878787878787878787878787878787878715161718",
     );
     let expected: Vec<u8> = hex
         .as_bytes()
@@ -98,4 +99,40 @@ fn raw_records_do_not_claim_cryptographic_validation() {
     raw.payment.cmx = [255; 32];
     raw.payment.ephemeral_key = [255; 32];
     assert_eq!(RawRecord::decode(&raw.encode().unwrap()), Ok(Some(raw)));
+}
+
+#[test]
+fn payloads_carry_only_complete_siblings() {
+    // Position 5 at tree size 7: siblings 4 (level 0) and [6, 8) (level 1, partial)
+    // and [0, 4) (level 2, complete); everything above starts at or past 8.
+    assert!(supplied(5, 7, 0));
+    assert!(!supplied(5, 7, 1));
+    assert!(supplied(5, 7, 2));
+    assert!((3..16).all(|level| !supplied(5, 7, level)));
+    let mut siblings = [None; 16];
+    siblings[0] = Some([1; 32]);
+    siblings[2] = Some([2; 32]);
+    let bytes = encode_payload(&siblings, 5, 7).unwrap();
+    assert_eq!(&bytes[..32], &[1; 32]);
+    assert!(bytes[32..64].iter().all(|b| *b == 0));
+    assert_eq!(decode_payload(&bytes, 5, 7), Ok(siblings));
+    // A slot the tree size says is incomplete must be zero, and supplied ones present.
+    let mut extra = bytes;
+    extra[40] = 1;
+    assert_eq!(decode_payload(&extra, 5, 7), Err(Error));
+    let mut missing = siblings;
+    missing[2] = None;
+    assert_eq!(encode_payload(&missing, 5, 7), Err(Error));
+    assert_eq!(decode_payload(&bytes, 7, 7), Err(Error));
+    assert_eq!(decode_payload(&bytes[..511], 5, 7), Err(Error));
+}
+
+#[test]
+fn a_full_shard_makes_every_lower_sibling_final() {
+    let shard_end = 1 << 16;
+    assert!(!is_final(5, shard_end - 1));
+    assert!(is_final(5, shard_end));
+    assert!((0..16).all(|level| supplied(5, shard_end, level)));
+    assert!(!is_final(shard_end, shard_end + 1));
+    assert!(is_final(shard_end, 2 * shard_end));
 }

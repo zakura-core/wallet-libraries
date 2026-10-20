@@ -2,11 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Records are 289 bytes with a witness ordinal. Snapshots require ordinals to rank records
+  by note position; `snapshot::assign_ordinals` sets them.
+
 ### Removed
 
 - Remove the aggregate paid/seen/recent filter envelope and manifest fields. Snapshots retain the complete payment rows and coverage checks.
 
 ### Added
+
+- Add `witness`: companion witness tables of 512-byte lower paths addressed by ordinal,
+  with a manifest bound to its payment table and construction tree.
 
 - Bind the required history correction generation into PIR publication identity so unfinished work can fence older answers after a same-chain correction.
 

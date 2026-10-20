@@ -1,8 +1,9 @@
 //! Receiver discovery over a caller-supplied, bounded transport.
 use crate::{
-    public_bytes, response_bytes, AcceptedCoverage, Client, Error, Manifest, MAX_MANIFEST_BYTES,
+    public_bytes, response_bytes, AcceptedCoverage, Client, Error, Manifest, Publication,
+    WitnessClient, MAX_MANIFEST_BYTES,
 };
-use receiver_directory::{RawRecord, ReceiverBytes};
+use receiver_directory::{witness::PAYLOAD_BYTES, RawRecord, ReceiverBytes};
 
 /// Hosts supply their route policy, cancellation, and timeout for every request.
 /// Enforce `limit` while streaming, reject non-success responses, and map HTTP
@@ -28,43 +29,53 @@ impl<T: Transport> Transport for &T {
 pub struct DirectoryClient<T> {
     origin: String,
     http: T,
-    /// Hex session ID that pins the setup and witness routes.
-    id: String,
+    publication: Publication,
     client: Client,
+    witnesses: WitnessClient,
 }
 
-/// The largest common proof file a client downloads.
-pub const MAX_WITNESS_BYTES: usize = 64 * 1024 * 1024;
-
 impl<T: Transport> DirectoryClient<T> {
-    /// Use the exact advertised revision whose coverage the caller checked. Reuse the client
-    /// across lookups and reconnect for a new revision.
+    /// Use the exact advertised payment and witness revisions whose coverage the caller
+    /// checked. Reuse the client across lookups and reconnect for a new revision.
     pub async fn connect_manifest(
         origin: &str,
         http: T,
         accepted: AcceptedCoverage,
-        manifest: Manifest,
+        publication: Publication,
     ) -> Result<Self, Error> {
         let origin = origin.trim_end_matches('/').to_owned();
-        accepted.check(&manifest.directory)?;
-        let id = hex::encode(manifest.id()?);
+        publication.validate()?;
+        accepted.check(&publication.payments.directory)?;
+        let payments = &publication.payments;
         let public = http
             .get(
-                &format!("{origin}/v1/receiver/public/{id}"),
-                public_bytes(manifest.directory.rows)?,
+                &format!(
+                    "{origin}/v1/receiver/public/{}",
+                    hex::encode(payments.id()?)
+                ),
+                public_bytes(payments.directory.rows)?,
             )
             .await?;
-        let client = Client::new(manifest, &public, accepted)?;
+        let client = Client::new(payments.clone(), &public, accepted)?;
+        let witness = &publication.witnesses;
+        let public = http
+            .get(
+                &format!("{origin}/v1/receiver/public/{}", hex::encode(witness.id()?)),
+                public_bytes(witness.table.rows)?,
+            )
+            .await?;
+        let witnesses = WitnessClient::new(witness.clone(), &public)?;
         Ok(Self {
             origin,
             http,
-            id,
+            publication,
             client,
+            witnesses,
         })
     }
 
     /// Fetch bounded public metadata before selecting the corresponding local chain anchor.
-    pub async fn fetch_manifest(origin: &str, http: &T) -> Result<Manifest, Error> {
+    pub async fn fetch_manifest(origin: &str, http: &T) -> Result<Publication, Error> {
         let bytes = http
             .get(
                 &format!("{}/v1/receiver/init", origin.trim_end_matches('/')),
@@ -74,9 +85,9 @@ impl<T: Transport> DirectoryClient<T> {
         if bytes.len() > MAX_MANIFEST_BYTES {
             return Err(Error::Malformed);
         }
-        let manifest: Manifest = serde_json::from_slice(&bytes)?;
-        manifest.validate()?;
-        Ok(manifest)
+        let publication: Publication = serde_json::from_slice(&bytes)?;
+        publication.validate()?;
+        Ok(publication)
     }
 
     /// Downloads rolling-hint availability without opening or waiting for a PIR session.
@@ -129,22 +140,30 @@ impl<T: Transport> DirectoryClient<T> {
         Ok(batch)
     }
 
-    /// The session manifest.
+    /// The payment session manifest.
     pub fn manifest(&self) -> &Manifest {
         self.client.manifest()
     }
 
-    /// Download the common proof file, identical for all wallets, of at most
-    /// [`MAX_WITNESS_BYTES`]. The request never contains a receiver. The bytes are
-    /// unchecked: the wallet verifies them against this session's manifest and its own
-    /// chain before trusting any path.
-    pub async fn witnesses(&self) -> Result<Vec<u8>, Error> {
-        self.http
-            .get(
-                &format!("{}/v1/receiver/witness/{}", self.origin, self.id),
-                MAX_WITNESS_BYTES,
+    /// The payment and witness sessions this client answers from.
+    pub fn publication(&self) -> &Publication {
+        &self.publication
+    }
+
+    /// Reads the companion witness payload for `ordinal` over PIR: one query, whose row
+    /// choice is hidden in its encryption. Only ordinals from this session's payment records
+    /// are meaningful. The payload is unchecked: the wallet verifies it against its own tree.
+    pub async fn witness(&self, ordinal: u32) -> Result<[u8; PAYLOAD_BYTES], Error> {
+        let query = self.witnesses.prepare(ordinal)?;
+        let body = self
+            .http
+            .post(
+                &format!("{}/v1/receiver/query", self.origin),
+                query.body().to_vec(),
+                response_bytes(self.witnesses.manifest().table.rows)?,
             )
-            .await
+            .await?;
+        self.witnesses.decode(query, &body)
     }
 
     /// Reads page `page` of `receiver`'s history over PIR: one query, whose row choice is

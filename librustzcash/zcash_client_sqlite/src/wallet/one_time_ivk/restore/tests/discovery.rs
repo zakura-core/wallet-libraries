@@ -1,6 +1,8 @@
 //! Queue behavior using an independent compact-block oracle and Merkle witness builder.
 use super::*;
-use zcash_client_backend::data_api::one_time_ivk::restore::{RecoveryStatus, WitnessRequest};
+use zcash_client_backend::data_api::one_time_ivk::restore::{
+    RecoveryStatus, WitnessAnswer, WitnessRequest,
+};
 
 /// A receive identity beyond the initial window, used by explicit-history fixtures.
 pub(in crate::wallet::one_time_ivk) fn key8() -> KeyId {
@@ -20,6 +22,7 @@ pub(in crate::wallet::one_time_ivk) fn publication_at(
     let block = CompactBlock::decode(data.as_slice()).unwrap();
     RecoveryPublication {
         id: [1; 32],
+        witnesses: [7; 32],
         history_revision: 0,
         start_height: st.sapling_activation_height(),
         end: PublicationEnd {
@@ -43,6 +46,12 @@ pub(in crate::wallet::one_time_ivk) fn status(db: &Db, account: AccountUuid) -> 
 
 /// The path of the chain's Ironwood leaf at `position` at the cached tip.
 pub(in crate::wallet::one_time_ivk) fn witness_at(st: &State, position: u32) -> MerklePath {
+    path_after(st, &[], position)
+}
+
+/// The path of the leaf at `position` in a tree of `prefix`, the leaves before the first
+/// cached block, followed by every cached block's Ironwood actions.
+fn path_after(st: &State, prefix: &[MerkleHashOrchard], position: u32) -> MerklePath {
     use incrementalmerkletree::{frontier::CommitmentTree, witness::IncrementalWitness};
     let mut tree = CommitmentTree::<MerkleHashOrchard, 32>::empty();
     let mut witness: Option<IncrementalWitness<_, 32>> = None;
@@ -54,9 +63,9 @@ pub(in crate::wallet::one_time_ivk) fn witness_at(st: &State, position: u32) -> 
     let actions = blocks
         .iter()
         .flat_map(|data| CompactBlock::decode(data.as_slice()).unwrap().vtx)
-        .flat_map(|tx| tx.ironwood_actions);
-    for (leaf, action) in actions.enumerate() {
-        let cmx = MerkleHashOrchard::from_cmx(&action.cmx().unwrap());
+        .flat_map(|tx| tx.ironwood_actions)
+        .map(|action| MerkleHashOrchard::from_cmx(&action.cmx().unwrap()));
+    for (leaf, cmx) in prefix.iter().copied().chain(actions).enumerate() {
         match &mut witness {
             Some(witness) => witness.append(cmx).unwrap(),
             None => {
@@ -70,9 +79,42 @@ pub(in crate::wallet::one_time_ivk) fn witness_at(st: &State, position: u32) -> 
     witness.unwrap().path().unwrap().into()
 }
 
-/// `path`'s sibling hashes, as the directory serves them.
-pub(in crate::wallet::one_time_ivk) fn siblings(path: &MerklePath) -> [[u8; 32]; 32] {
+/// `path`'s sibling hashes.
+fn siblings(path: &MerklePath) -> [[u8; 32]; 32] {
     std::array::from_fn(|level| path.auth_path()[level].to_bytes())
+}
+
+/// The companion witness `request` names, as a publication ending at `end` serves it: the
+/// independent path's lower siblings that are complete at that block's tree size, every
+/// other slot zero.
+pub(in crate::wallet::one_time_ivk) fn witness_answer(
+    st: &State,
+    request: &WitnessRequest,
+    end: BlockHeight,
+) -> WitnessAnswer {
+    answer(
+        request,
+        &witness_at(st, request.position),
+        publication_at(st, end).end,
+    )
+}
+
+/// `path`'s lower siblings complete at `context`, answering `request`.
+fn answer(request: &WitnessRequest, path: &MerklePath, context: PublicationEnd) -> WitnessAnswer {
+    let mut payload = [0; 512];
+    for level in 0..16 {
+        let start = ((u64::from(request.position) >> level) ^ 1) << level;
+        if start + (1 << level) <= context.tree_size {
+            payload[level * 32..(level + 1) * 32]
+                .copy_from_slice(&path.auth_path()[level].to_bytes());
+        }
+    }
+    WitnessAnswer {
+        payments: request.payments,
+        revision: request.witnesses,
+        context,
+        payload,
+    }
 }
 
 /// The note values the wallet holds for one-time keys, with whether each is spent.
@@ -126,6 +168,7 @@ fn oracle(st: &State, receiver: [u8; 43], fvk: &FullViewingKey) -> Vec<Directory
                         page: records.len() as u32,
                         total: 0,
                         payment: directory_answer(&payment),
+                        ordinal: records.len() as u32,
                     });
                 }
                 position += 1;
@@ -187,43 +230,16 @@ pub(in crate::wallet::one_time_ivk) fn drain(
     publication: RecoveryPublication,
 ) {
     for _ in 0..256 {
-        let state = status(st.wallet().db(), account);
-        if let Some(work) = state.lookups.first() {
-            let fvk = get_key(st.wallet().db(), account, work.work.key)
-                .unwrap()
-                .unwrap();
-            let records = oracle(st, work.work.receiver, fvk.full_viewing_key());
-            let previous = work.last.as_ref().map(|r| records[r.page as usize].clone());
-            let start = previous.as_ref().map_or(0, |r| r.page as usize + 1);
-            let end = (start + 32).min(records.len());
-            let page = LookupPage {
-                publication,
-                previous,
-                records: records[start..end].to_vec(),
-                complete: end == records.len(),
-            };
-            assert!(
-                st.wallet_mut()
-                    .db_mut()
-                    .record_one_time_lookup(account, work, &page, clock_now())
-                    .unwrap()
-            );
+        if answer_lookup(st, account, publication) {
             continue;
         }
+        let state = status(st.wallet().db(), account);
         if let Some(request) = state.witnesses.first() {
-            let path = witness_at(st, request.position);
-            let anchor = tip(st);
+            let answer = witness_answer(st, request, tip(st).height);
             assert!(
                 st.wallet_mut()
                     .db_mut()
-                    .record_one_time_witness(
-                        account,
-                        state.token,
-                        *request,
-                        anchor,
-                        siblings(&path),
-                        clock_now()
-                    )
+                    .record_one_time_witness(account, state.token, *request, &answer, clock_now())
                     .unwrap()
             );
             continue;
@@ -231,6 +247,34 @@ pub(in crate::wallet::one_time_ivk) fn drain(
         return;
     }
     panic!("fixture recovery did not converge");
+}
+
+/// Answers the first due lookup from the independent oracle, if any is due.
+fn answer_lookup(st: &mut State, account: AccountUuid, publication: RecoveryPublication) -> bool {
+    let state = status(st.wallet().db(), account);
+    let Some(work) = state.lookups.first() else {
+        return false;
+    };
+    let fvk = get_key(st.wallet().db(), account, work.work.key)
+        .unwrap()
+        .unwrap();
+    let records = oracle(st, work.work.receiver, fvk.full_viewing_key());
+    let previous = work.last.as_ref().map(|r| records[r.page as usize].clone());
+    let start = previous.as_ref().map_or(0, |r| r.page as usize + 1);
+    let end = (start + 32).min(records.len());
+    let page = LookupPage {
+        publication,
+        previous,
+        records: records[start..end].to_vec(),
+        complete: end == records.len(),
+    };
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, work, &page, clock_now())
+            .unwrap()
+    );
+    true
 }
 
 /// Pays an unknown key while ordinary sync deliberately does not discover it.
@@ -246,18 +290,13 @@ pub(in crate::wallet::one_time_ivk) fn pay_candidate(st: &mut State, key: KeyId)
     candidate_at(st, height, &fvk)
 }
 
-/// A matched address has authenticated its candidate but is still waiting for inclusion.
-pub(in crate::wallet::one_time_ivk) fn late_fixture() -> (State, PendingPayment, RecoveryPublication)
-{
-    let mut st = scanned_wallet();
-    let candidate = pay_candidate(&mut st, key8());
-    let publication = queue_late(&mut st, key8(), &candidate);
-    (st, candidate, publication)
-}
-
-/// Starts recovery at the tip and answers `key`'s lookup with `candidate`, which then
-/// waits for its inclusion path.
-fn queue_late(st: &mut State, key: KeyId, candidate: &PendingPayment) -> RecoveryPublication {
+/// Reads `candidate`'s history at a publication ending at the tip, so it waits for its
+/// witness.
+pub(in crate::wallet::one_time_ivk) fn queue_late(
+    st: &mut State,
+    key: KeyId,
+    candidate: &PendingPayment,
+) -> RecoveryPublication {
     let account = st.test_account().unwrap().id();
     recover(st.wallet_mut().db_mut(), account, key, candidate.height);
     let publication = publication_at(st, tip(st).height);
@@ -285,6 +324,7 @@ fn queue_late(st: &mut State, key: KeyId, candidate: &PendingPayment) -> Recover
             page: 0,
             total: 1,
             payment: directory_answer(candidate),
+            ordinal: 0,
         }],
         complete: true,
     };
@@ -295,7 +335,31 @@ fn queue_late(st: &mut State, key: KeyId, candidate: &PendingPayment) -> Recover
     publication
 }
 
-/// Delivers a candidate proof using the current cancellation fence.
+/// A matched address has authenticated its candidate but is still waiting for inclusion.
+pub(in crate::wallet::one_time_ivk) fn late_fixture() -> (State, PendingPayment, RecoveryPublication)
+{
+    let mut st = scanned_wallet();
+    let candidate = pay_candidate(&mut st, key8());
+    let publication = queue_late(&mut st, key8(), &candidate);
+    (st, candidate, publication)
+}
+
+/// The pending witness request for `candidate`.
+pub(in crate::wallet::one_time_ivk) fn request_for(
+    st: &State,
+    key: KeyId,
+    candidate: &PendingPayment,
+) -> WitnessRequest {
+    let account = st.test_account().unwrap().id();
+    *status(st.wallet().db(), account)
+        .witnesses
+        .iter()
+        .find(|r| r.key == key && r.position == candidate.position)
+        .expect("a pending witness request")
+}
+
+/// Delivers a candidate's witness, built at the current tip, under the current
+/// cancellation fence. A candidate already admitted reuses its last binding.
 pub(in crate::wallet::one_time_ivk) fn send_witness(
     st: &mut State,
     key: KeyId,
@@ -303,26 +367,26 @@ pub(in crate::wallet::one_time_ivk) fn send_witness(
 ) {
     let account = st.test_account().unwrap().id();
     let state = status(st.wallet().db(), account);
-    let request = WitnessRequest {
-        key,
-        position: candidate.position,
-        cmx: candidate.encrypted_note.to_bytes()[32..64]
-            .try_into()
-            .unwrap(),
-    };
-    let anchor = tip(st);
-    let path = witness_at(st, candidate.position);
+    let request = state
+        .witnesses
+        .iter()
+        .find(|r| r.key == key && r.position == candidate.position)
+        .copied()
+        .unwrap_or(WitnessRequest {
+            key,
+            position: candidate.position,
+            cmx: candidate.encrypted_note.to_bytes()[32..64]
+                .try_into()
+                .unwrap(),
+            payments: [1; 32],
+            witnesses: [7; 32],
+            ordinal: 0,
+        });
+    let answer = witness_answer(st, &request, tip(st).height);
     assert!(
         st.wallet_mut()
             .db_mut()
-            .record_one_time_witness(
-                account,
-                state.token,
-                request,
-                anchor,
-                siblings(&path),
-                clock_now()
-            )
+            .record_one_time_witness(account, state.token, request, &answer, clock_now())
             .unwrap()
     );
     assert_no_stall(st.wallet().db(), account);
@@ -406,8 +470,8 @@ fn feature_toggle_rejects_stale_lookup_and_proof_callbacks() {
     let account = st.test_account().unwrap().id();
     let old = status(st.wallet().db(), account);
     let request = old.witnesses[0];
-    let path = witness_at(&st, candidate.position);
-    let anchor = tip(&st);
+    let answer = witness_answer(&st, &request, tip(&st).height);
+    assert_eq!(request.position, candidate.position);
     st.wallet_mut()
         .db_mut()
         .set_one_time_recovery_enabled(account, false)
@@ -417,14 +481,7 @@ fn feature_toggle_rejects_stale_lookup_and_proof_callbacks() {
     assert!(
         !st.wallet_mut()
             .db_mut()
-            .record_one_time_witness(
-                account,
-                old.token,
-                request,
-                anchor,
-                siblings(&path),
-                clock_now()
-            )
+            .record_one_time_witness(account, old.token, request, &answer, clock_now())
             .unwrap()
     );
     st.wallet_mut()
@@ -495,6 +552,7 @@ fn delayed_window_expansion_checks_history_after_the_filter_frontier() {
             page: 0,
             total: 1,
             payment: directory_answer(&payment0),
+            ordinal: 0,
         }],
     };
     assert!(
@@ -943,6 +1001,316 @@ fn birthday_rewind_keeps_ineligible_accounts_out_of_receiver_recovery() {
     st.generate_and_scan_empty_blocks(1);
 }
 
+/// Mines `count` blocks each paying one output to a key outside the wallet, then scans them.
+fn foreign_blocks(st: &mut State, count: usize) {
+    let other = IronwoodFvk(FullViewingKey::from(
+        &orchard::keys::SpendingKey::from_bytes([7; 32]).unwrap(),
+    ));
+    let mut first = None;
+    for _ in 0..count {
+        let (height, _, _) = st.generate_next_block(
+            &other,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(1_000),
+        );
+        first.get_or_insert(height);
+    }
+    if let Some(first) = first {
+        st.scan_cached_blocks(first, count);
+    }
+}
+
+/// A provisional witness built at three leaves supplies no partial sibling. Once the
+/// wallet has six leaves and has pruned its tree at three, that witness cannot be checked:
+/// the payment stays pending, is read again, and the witness built at the new tree size
+/// is admitted.
+#[test]
+fn a_pruned_provisional_witness_is_refreshed_rather_than_completed() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    foreign_blocks(&mut st, 2);
+    let three = tip(&st).height;
+    queue_late(&mut st, key8(), &candidate);
+    let request = request_for(&st, key8(), &candidate);
+    let stale = witness_answer(&st, &request, three);
+    assert_eq!(stale.context.tree_size, candidate.position as u64 + 3);
+    assert!(
+        stale.payload[32..64].iter().all(|b| *b == 0),
+        "the [2, 4) sibling is partial at three leaves"
+    );
+    foreign_blocks(&mut st, crate::PRUNING_DEPTH as usize + 3);
+    let token = status(st.wallet().db(), account).token;
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_witness(account, token, request, &stale, clock_now())
+            .unwrap()
+    );
+    assert!(one_time_notes(&st).is_empty());
+    let pending = status(st.wallet().db(), account);
+    assert!(pending.witnesses.is_empty(), "the old binding is dropped");
+    let candidates: u32 = value(
+        st.wallet().conn(),
+        "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery WHERE payments IS NULL",
+        [],
+    );
+    assert_eq!(candidates, 1, "the payment stays pending");
+    let id = key_ref(&st.wallet().db().conn, account, key8()).unwrap();
+    let (done, read): (bool, bool) = row(
+        st.wallet().conn(),
+        "SELECT done_height IS NOT NULL, read_complete FROM ironwood_one_time_lookups
+         WHERE one_time_key_id = ?1",
+        [id],
+    );
+    assert!(done && !read, "its history must be read again");
+    // The next attempt waits out the backoff, then a current publication rebinds it.
+    exec(
+        st.wallet().conn(),
+        "UPDATE ironwood_one_time_lookups SET next_attempt_at = 0",
+        [],
+    );
+    let publication = publication_at(&st, tip(&st).height);
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// `count` distinct Ironwood leaves for a chain's prefix.
+fn distinct_leaves(count: u64) -> Vec<MerkleHashOrchard> {
+    (0..count)
+        .map(|i| {
+            let mut cmx = [0; 32];
+            cmx[..8].copy_from_slice(&(i + 1).to_le_bytes());
+            MerkleHashOrchard::from_cmx(
+                &orchard::note::ExtractedNoteCommitment::from_bytes(&cmx).unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// A wallet whose chain starts with `prefix` known Ironwood leaves before its birthday.
+fn wallet_after_leaves(prefix: &[MerkleHashOrchard]) -> State {
+    use incrementalmerkletree::frontier::Frontier;
+    use zcash_client_backend::data_api::{chain::ChainState, testing::InitialChainState};
+    let mut ironwood = Frontier::<MerkleHashOrchard, 32>::empty();
+    for leaf in prefix {
+        ironwood.append(*leaf);
+    }
+    let mut st = TestBuilder::new()
+        .with_network(ironwood_network())
+        .with_data_store_factory(TestDbFactory::file_backed())
+        .with_block_cache(crate::testing::BlockCache::new())
+        .with_initial_chain_state(|_, _| InitialChainState {
+            chain_state: ChainState::new(
+                BlockHeight::from_u32(100_010),
+                BlockHash([5; 32]),
+                Frontier::empty(),
+                Frontier::empty(),
+                ironwood,
+            ),
+            prior_sapling_roots: vec![],
+            prior_orchard_roots: vec![],
+        })
+        .with_account_having_current_birthday()
+        .build();
+    st.generate_and_scan_empty_blocks(1);
+    let account = st.test_account().unwrap().id();
+    st.wallet_mut()
+        .db_mut()
+        .set_one_time_recovery_enabled(account, true)
+        .unwrap();
+    st
+}
+
+/// Once a payment's Ironwood shard is full its lower path is final, so the block it was
+/// built at is provenance only: past the pruning depth on a quiet chain, a provisional
+/// witness from before the shard filled is refreshed, while a final witness from just
+/// after it is admitted at a fresh anchor.
+#[test]
+fn a_final_witness_is_admitted_at_a_fresh_quiet_anchor() {
+    let prefix = distinct_leaves(65_534);
+    let mut st = wallet_after_leaves(&prefix);
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    assert_eq!(candidate.position, 65_534);
+    let filling = tip(&st).height;
+    // Leaf 65,535 completes shard zero and 65,536 starts shard one.
+    foreign_blocks(&mut st, 2);
+    let full = tip(&st).height;
+    queue_late(&mut st, key8(), &candidate);
+    let request = request_for(&st, key8(), &candidate);
+    let path = path_after(&st, &prefix, candidate.position);
+    let provisional = answer(&request, &path, publication_at(&st, filling).end);
+    let complete = answer(&request, &path, publication_at(&st, full).end);
+    assert!(provisional.payload[..32].iter().all(|b| *b == 0));
+    assert!(
+        complete
+            .payload
+            .chunks(32)
+            .all(|s| s.iter().any(|b| *b != 0))
+    );
+    st.generate_and_scan_empty_blocks(crate::PRUNING_DEPTH as usize + 5);
+
+    let token = status(st.wallet().db(), account).token;
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_witness(account, token, request, &provisional, clock_now())
+            .unwrap()
+    );
+    assert!(
+        one_time_notes(&st).is_empty(),
+        "too old to rebuild at 65,535"
+    );
+    exec(
+        st.wallet().conn(),
+        "UPDATE ironwood_one_time_lookups SET next_attempt_at = 0",
+        [],
+    );
+    let token = status(st.wallet().db(), account).token;
+    let id = key_ref(&st.wallet().db().conn, account, key8()).unwrap();
+    let (through, last): (u32, Option<Vec<u8>>) = row(
+        st.wallet().conn(),
+        "SELECT target_height, last_record FROM ironwood_one_time_lookups
+         WHERE one_time_key_id = ?1 AND read_complete = 0",
+        [id],
+    );
+    assert!(last.is_none(), "the payment is read again from page zero");
+    let stored = get_key(st.wallet().db(), account, key8()).unwrap().unwrap();
+    let work = &LookupWork {
+        token,
+        work: zcash_client_backend::data_api::one_time_ivk::restore::DiscoveryWork {
+            key: key8(),
+            receiver: stored.receiver().to_raw_address_bytes(),
+        },
+        through: BlockHeight::from(through),
+        last: None,
+    };
+    let publication = publication_at(&st, tip(&st).height);
+    let page = LookupPage {
+        publication,
+        previous: None,
+        records: vec![DirectoryRecord {
+            receiver: work.work.receiver,
+            page: 0,
+            total: 1,
+            payment: directory_answer(&candidate),
+            ordinal: 0,
+        }],
+        complete: true,
+    };
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, work, &page, clock_now())
+            .unwrap()
+    );
+    let request = request_for(&st, key8(), &candidate);
+    let token = status(st.wallet().db(), account).token;
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_witness(account, token, request, &complete, clock_now())
+            .unwrap()
+    );
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// A history scan leaves a late payment's note-free shard stored as its root alone, and
+/// the payment's final path is inserted there. If that insertion conflicts with the stored
+/// tree, nothing is kept and the payment waits for a newer anchor rather than failing every
+/// step. Once the tree agrees, the next scanned block admits it.
+#[test]
+fn a_witness_insertion_conflict_waits_for_a_newer_anchor() {
+    use incrementalmerkletree::{Address, Hashable, Position, Retention};
+    use shardtree::{LocatedTree, RetentionFlags, Tree, error::ShardTreeError, store::ShardStore};
+    use zcash_client_backend::data_api::WalletCommitmentTrees;
+    let prefix = distinct_leaves(65_534);
+    let mut st = wallet_after_leaves(&prefix);
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    foreign_blocks(&mut st, 2);
+    let full = tip(&st).height;
+    queue_late(&mut st, key8(), &candidate);
+    let request = request_for(&st, key8(), &candidate);
+    let path = path_after(&st, &prefix, candidate.position);
+    let complete = answer(&request, &path, publication_at(&st, full).end);
+    // Shard zero becomes its root alone, optionally with a wrong leaf where the note goes.
+    let shard = Address::from_parts(16.into(), 0);
+    let store_shard = |st: &mut State, planted: bool| {
+        st.wallet_mut()
+            .db_mut()
+            .with_ironwood_tree_mut(|tree| {
+                let root = tree.root(shard, Position::from(1 << 16))?;
+                let leaf = Tree::leaf((root, RetentionFlags::EPHEMERAL));
+                tree.store_mut()
+                    .put_shard(LocatedTree::from_parts(shard, leaf).unwrap())
+                    .map_err(ShardTreeError::Storage)?;
+                if planted {
+                    tree.batch_insert(
+                        Position::from(u64::from(candidate.position)),
+                        std::iter::once((MerkleHashOrchard::empty_leaf(), Retention::Ephemeral)),
+                    )?;
+                }
+                Ok::<_, ShardTreeError<_>>(())
+            })
+            .unwrap();
+    };
+    store_shard(&mut st, true);
+    let token = status(st.wallet().db(), account).token;
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_witness(account, token, request, &complete, clock_now())
+            .unwrap()
+    );
+    assert!(one_time_notes(&st).is_empty());
+    let bound: u32 = value(
+        st.wallet().conn(),
+        "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery WHERE witness IS NOT NULL",
+        [],
+    );
+    assert_eq!(bound, 1, "the final witness waits with the payment");
+
+    store_shard(&mut st, false);
+    st.generate_and_scan_empty_blocks(1);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// A witness built on a block the wallet's chain does not hold is unusable: the payment
+/// stays pending and is read again rather than crediting or completing the address.
+#[test]
+fn a_witness_from_another_fork_is_refreshed() {
+    let (mut st, candidate, _) = late_fixture();
+    let account = st.test_account().unwrap().id();
+    let request = request_for(&st, key8(), &candidate);
+    let mut answer = witness_answer(&st, &request, tip(&st).height);
+    answer.context.hash[0] ^= 1;
+    let token = status(st.wallet().db(), account).token;
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_witness(account, token, request, &answer, clock_now())
+            .unwrap()
+    );
+    assert!(one_time_notes(&st).is_empty());
+    let state = status(st.wallet().db(), account);
+    assert!(state.witnesses.is_empty());
+    let pending: u32 = value(
+        st.wallet().conn(),
+        "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery",
+        [],
+    );
+    assert_eq!(pending, 1);
+    // A request naming a binding the wallet no longer holds is not accepted.
+    assert!(
+        !st.wallet_mut()
+            .db_mut()
+            .refresh_one_time_witness(account, state.token, request)
+            .unwrap()
+    );
+}
+
 /// The mined one-time receipts the wallet holds, by receive or refund key index.
 fn mined_receipt_indexes(st: &State) -> Vec<u64> {
     let indexes: Vec<Vec<u8>> = column(
@@ -1075,6 +1443,225 @@ fn a_late_payment_keeps_a_sibling_the_wallet_already_holds() {
         return;
     }
     panic!("the payment was never its bundle's first action");
+}
+
+/// `key`'s pending lookup, read from the queue whether or not status lists it.
+fn pending_work(st: &State, key: KeyId) -> LookupWork {
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet().db();
+    let id = key_ref(&db.conn, account, key).unwrap();
+    let (through, last): (u32, Option<Vec<u8>>) = row(
+        &db.conn,
+        "SELECT target_height, last_record FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+        [id],
+    );
+    let stored = get_key(db, account, key).unwrap().unwrap();
+    LookupWork {
+        token: status(db, account).token,
+        work: zcash_client_backend::data_api::one_time_ivk::restore::DiscoveryWork {
+            key,
+            receiver: stored.receiver().to_raw_address_bytes(),
+        },
+        through: BlockHeight::from(through),
+        last: last.map(|b| DirectoryRecord::decode(&b).unwrap().unwrap()),
+    }
+}
+
+/// Clears every lookup's retry backoff.
+fn retry_now(st: &State) {
+    exec(
+        st.wallet().conn(),
+        "UPDATE ironwood_one_time_lookups SET next_attempt_at = 0",
+        [],
+    );
+}
+
+/// A payload that decodes but misses the accepted root condemns the witness, not the
+/// authenticated payment. The candidate stays pending through a later empty reread, which
+/// cannot settle the key, and a correct reread then recovers the payment.
+#[test]
+fn a_witness_missing_the_root_keeps_the_payment_pending() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    foreign_blocks(&mut st, 2);
+    queue_late(&mut st, key8(), &candidate);
+    let request = request_for(&st, key8(), &candidate);
+    let mut wrong = witness_answer(&st, &request, tip(&st).height);
+    assert!(
+        wrong.payload[..32].iter().any(|b| *b != 0),
+        "leaf sibling supplied"
+    );
+    wrong.payload[..32].copy_from_slice(&{
+        use incrementalmerkletree::Hashable;
+        MerkleHashOrchard::empty_leaf().to_bytes()
+    });
+    let token = status(st.wallet().db(), account).token;
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_witness(account, token, request, &wrong, clock_now())
+            .unwrap()
+    );
+    assert!(one_time_notes(&st).is_empty());
+    let pending = || {
+        value::<u32>(
+            st.wallet().conn(),
+            "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery",
+            [],
+        )
+    };
+    assert_eq!(pending(), 1, "the payment is kept");
+    // An empty replacement answer cannot settle the key while the payment is pending.
+    retry_now(&st);
+    let work = pending_work(&st, key8());
+    let publication = publication_at(&st, tip(&st).height);
+    let empty = LookupPage {
+        publication,
+        previous: None,
+        records: vec![],
+        complete: true,
+    };
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, &work, &empty, clock_now())
+            .unwrap()
+    );
+    let pending = value::<u32>(
+        st.wallet().conn(),
+        "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery",
+        [],
+    );
+    assert_eq!(pending, 1);
+    let id = key_ref(&st.wallet().db().conn, account, key8()).unwrap();
+    let read: bool = value(
+        st.wallet().conn(),
+        "SELECT read_complete FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+        [id],
+    );
+    assert!(!read, "the key is read again");
+    retry_now(&st);
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// A witness-only replacement keeps the payment session, so the witness session pins the
+/// companion: an answer from another companion is refused until the payment is reread.
+#[test]
+fn an_answer_from_another_companion_is_refused() {
+    let (mut st, candidate, _) = late_fixture();
+    let account = st.test_account().unwrap().id();
+    let request = request_for(&st, key8(), &candidate);
+    let mut other = witness_answer(&st, &request, tip(&st).height);
+    other.revision[0] ^= 1;
+    let token = status(st.wallet().db(), account).token;
+    assert!(
+        !st.wallet_mut()
+            .db_mut()
+            .record_one_time_witness(account, token, request, &other, clock_now())
+            .unwrap()
+    );
+    assert!(one_time_notes(&st).is_empty());
+    assert_eq!(status(st.wallet().db(), account).witnesses, [request]);
+    let right = witness_answer(&st, &request, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_witness(account, token, request, &right, clock_now())
+            .unwrap()
+    );
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// Refreshing the witness of an extended manual index keeps its lookup manual-only, so
+/// cancelling the search pauses it until the search resumes.
+#[test]
+fn a_refreshed_manual_witness_stays_manual() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key9 = KeyId::new(Purpose::Receive, 9);
+    let candidate = pay_candidate(&mut st, key9);
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, publication, Some(10))
+            .unwrap()
+    );
+    while answer_lookup(&mut st, account, publication) {}
+    let request = request_for(&st, key9, &candidate);
+    let token = status(st.wallet().db(), account).token;
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .refresh_one_time_witness(account, token, request)
+            .unwrap()
+    );
+    let id = key_ref(&st.wallet().db().conn, account, key9).unwrap();
+    let reasons: u8 = value(
+        st.wallet().conn(),
+        "SELECT reasons FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+        [id],
+    );
+    assert_eq!(reasons, 2, "still manual only");
+    st.wallet_mut()
+        .db_mut()
+        .cancel_one_time_history(account)
+        .unwrap();
+    let paused = status(st.wallet().db(), account);
+    assert!(paused.lookups.iter().all(|w| w.work.key != key9));
+    assert!(paused.witnesses.is_empty());
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, publication, Some(10))
+            .unwrap()
+    );
+    let resumed = status(st.wallet().db(), account);
+    assert!(resumed.lookups.iter().any(|w| w.work.key == key9));
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// Within the pruning depth, a provisional witness whose construction tree the wallet no
+/// longer holds stays pending and is read again; it neither credits nor completes.
+#[test]
+fn missing_tree_material_within_the_pruning_depth_is_refreshed() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    foreign_blocks(&mut st, 2);
+    let three = tip(&st).height;
+    queue_late(&mut st, key8(), &candidate);
+    let request = request_for(&st, key8(), &candidate);
+    let stale = witness_answer(&st, &request, three);
+    foreign_blocks(&mut st, 3);
+    assert!(tip(&st).height - three <= crate::PRUNING_DEPTH);
+    // The tree material at three leaves is gone, though the block is recent.
+    exec(
+        st.wallet().conn(),
+        "DELETE FROM ironwood_tree_checkpoints WHERE checkpoint_id <= ?1",
+        [u32::from(three)],
+    );
+    let token = status(st.wallet().db(), account).token;
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_witness(account, token, request, &stale, clock_now())
+            .unwrap()
+    );
+    assert!(one_time_notes(&st).is_empty());
+    let unbound: u32 = value(
+        st.wallet().conn(),
+        "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery WHERE payments IS NULL",
+        [],
+    );
+    assert_eq!(unbound, 1, "pending and read again");
+    retry_now(&st);
+    let publication = publication_at(&st, tip(&st).height);
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
 /// The seed walk checked I1 to I4 after authenticating I0's still unconfirmed payment.
@@ -1344,165 +1931,4 @@ fn a_cancelled_manual_only_lookup_counts_as_paused() {
     assert_eq!(status(st.wallet().db(), account).lookups[0].work.key, key4);
     drain(&mut st, account, publication);
     assert!(!status(st.wallet().db(), account).manual.unwrap().active);
-}
-
-/// A wallet whose chain starts with `count` distinct Ironwood leaves before its birthday,
-/// with those leaves.
-fn wallet_after_leaves(count: u64) -> (State, Vec<MerkleHashOrchard>) {
-    use incrementalmerkletree::frontier::Frontier;
-    use zcash_client_backend::data_api::{chain::ChainState, testing::InitialChainState};
-    let prefix: Vec<MerkleHashOrchard> = (0..count)
-        .map(|i| {
-            let mut cmx = [0; 32];
-            cmx[..8].copy_from_slice(&(i + 1).to_le_bytes());
-            MerkleHashOrchard::from_cmx(
-                &orchard::note::ExtractedNoteCommitment::from_bytes(&cmx).unwrap(),
-            )
-        })
-        .collect();
-    let mut ironwood = Frontier::<MerkleHashOrchard, 32>::empty();
-    for leaf in &prefix {
-        ironwood.append(*leaf);
-    }
-    let mut st = TestBuilder::new()
-        .with_network(ironwood_network())
-        .with_data_store_factory(TestDbFactory::file_backed())
-        .with_block_cache(crate::testing::BlockCache::new())
-        .with_initial_chain_state(|_, _| InitialChainState {
-            chain_state: ChainState::new(
-                BlockHeight::from_u32(100_010),
-                BlockHash([5; 32]),
-                Frontier::empty(),
-                Frontier::empty(),
-                ironwood,
-            ),
-            prior_sapling_roots: vec![],
-            prior_orchard_roots: vec![],
-        })
-        .with_account_having_current_birthday()
-        .build();
-    st.generate_and_scan_empty_blocks(1);
-    let account = st.test_account().unwrap().id();
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, true)
-        .unwrap();
-    (st, prefix)
-}
-
-/// The path of the leaf at `position` at the cached tip, on a chain starting with `prefix`.
-fn path_after(st: &State, prefix: &[MerkleHashOrchard], position: u32) -> MerklePath {
-    use incrementalmerkletree::{frontier::CommitmentTree, witness::IncrementalWitness};
-    let mut tree = CommitmentTree::<MerkleHashOrchard, 32>::empty();
-    let mut witness: Option<IncrementalWitness<_, 32>> = None;
-    let blocks: Vec<Vec<u8>> = column(
-        &st.cache().0,
-        "SELECT data FROM compactblocks ORDER BY height",
-        [],
-    );
-    let actions = blocks
-        .iter()
-        .flat_map(|data| CompactBlock::decode(data.as_slice()).unwrap().vtx)
-        .flat_map(|tx| tx.ironwood_actions)
-        .map(|action| MerkleHashOrchard::from_cmx(&action.cmx().unwrap()));
-    for (leaf, cmx) in prefix.iter().copied().chain(actions).enumerate() {
-        match &mut witness {
-            Some(witness) => witness.append(cmx).unwrap(),
-            None => {
-                tree.append(cmx).unwrap();
-                if leaf == position as usize {
-                    witness = IncrementalWitness::from_tree(tree.clone());
-                }
-            }
-        }
-    }
-    witness.unwrap().path().unwrap().into()
-}
-
-/// A history scan leaves a late payment's note-free shard stored as its root alone, and the
-/// payment's path is inserted there. If that insertion conflicts with the stored tree,
-/// nothing is kept and a newer path is requested after the retry backoff, rather than
-/// failing every step or asking again on every step. Once the tree agrees, the next path
-/// admits it.
-#[test]
-fn a_path_insertion_conflict_requests_a_newer_path() {
-    use incrementalmerkletree::{Address, Hashable, Position, Retention};
-    use shardtree::{LocatedTree, RetentionFlags, Tree, error::ShardTreeError, store::ShardStore};
-    use zcash_client_backend::data_api::WalletCommitmentTrees;
-    let (mut st, prefix) = wallet_after_leaves(65_534);
-    let account = st.test_account().unwrap().id();
-    let candidate = pay_candidate(&mut st, key8());
-    assert_eq!(candidate.position, 65_534);
-    // Leaf 65,535 completes shard zero and 65,536 starts shard one.
-    let foreign = FullViewingKey::from(&orchard::keys::SpendingKey::from_bytes([7; 32]).unwrap());
-    pay(&mut st, &foreign, 1_000);
-    pay(&mut st, &foreign, 1_000);
-    queue_late(&mut st, key8(), &candidate);
-    // Shard zero becomes its root alone, optionally with a wrong leaf where the note goes.
-    let shard = Address::from_parts(16.into(), 0);
-    let store_shard = |st: &mut State, planted: bool| {
-        st.wallet_mut()
-            .db_mut()
-            .with_ironwood_tree_mut(|tree| {
-                let root = tree.root(shard, Position::from(1 << 16))?;
-                let leaf = Tree::leaf((root, RetentionFlags::EPHEMERAL));
-                tree.store_mut()
-                    .put_shard(LocatedTree::from_parts(shard, leaf).unwrap())
-                    .map_err(ShardTreeError::Storage)?;
-                if planted {
-                    tree.batch_insert(
-                        Position::from(u64::from(candidate.position)),
-                        std::iter::once((MerkleHashOrchard::empty_leaf(), Retention::Ephemeral)),
-                    )?;
-                }
-                Ok::<_, ShardTreeError<_>>(())
-            })
-            .unwrap();
-    };
-    let deliver = |st: &mut State| {
-        let state = status(st.wallet().db(), account);
-        let request = WitnessRequest {
-            key: key8(),
-            position: candidate.position,
-            cmx: candidate.encrypted_note.to_bytes()[32..64]
-                .try_into()
-                .unwrap(),
-        };
-        let anchor = tip(st);
-        let path = path_after(st, &prefix, candidate.position);
-        assert!(
-            st.wallet_mut()
-                .db_mut()
-                .record_one_time_witness(
-                    account,
-                    state.token,
-                    request,
-                    anchor,
-                    siblings(&path),
-                    clock_now()
-                )
-                .unwrap()
-        );
-    };
-    store_shard(&mut st, true);
-    deliver(&mut st);
-    assert!(one_time_notes(&st).is_empty());
-    let pending: u32 = value(
-        st.wallet().conn(),
-        "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery WHERE witness IS NULL",
-        [],
-    );
-    assert_eq!(pending, 1, "the payment waits for a newer path");
-    // The tree is unchanged at this tip, so asking again now would fail the same way.
-    assert!(status(st.wallet().db(), account).witnesses.is_empty());
-    exec(
-        st.wallet().conn(),
-        "UPDATE ironwood_one_time_lookups SET next_attempt_at = 0",
-        [],
-    );
-    assert_eq!(status(st.wallet().db(), account).witnesses.len(), 1);
-
-    store_shard(&mut st, false);
-    deliver(&mut st);
-    assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }

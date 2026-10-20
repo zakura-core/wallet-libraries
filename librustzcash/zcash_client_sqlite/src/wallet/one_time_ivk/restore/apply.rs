@@ -5,7 +5,12 @@ use orchard::tree::{MerkleHashOrchard, MerklePath};
 use rusqlite::{Connection, OptionalExtension, params};
 use shardtree::error::ShardTreeError;
 use zcash_client_backend::{
-    data_api::{one_time_ivk::restore::recovery::RecoveredNote, transparent_ledger::ChainPoint},
+    data_api::{
+        one_time_ivk::restore::{
+            decode_witness_payload, recovery::RecoveredNote, witness_is_final,
+        },
+        transparent_ledger::ChainPoint,
+    },
     wallet::{WalletOrchardOutput, WalletTx},
 };
 use zcash_protocol::{
@@ -14,7 +19,7 @@ use zcash_protocol::{
 };
 
 use super::{PendingPayment, payments::authenticate};
-use crate::wallet::one_time_ivk::KeyId;
+use crate::wallet::one_time_ivk::{KeyId, corrupt};
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 /// The handle state that storing a note's transaction routes its enhancement with.
@@ -31,16 +36,25 @@ pub(in crate::wallet::one_time_ivk) enum Admission {
     /// The note, its witness and any spend were stored, or it already was, or it predates
     /// the account's birthday and only marks its key used.
     Admitted,
-    /// The scan has not stored its block or reached its path's anchor yet.
+    /// The scan has not stored its block or reached a usable anchor, or the local tree lacks
+    /// material a final path needs yet.
     Waiting,
     /// The scan finished blocks from the payment on without covering them for the account,
     /// so they must be scanned again (see `queue::admit`).
     Uncovered,
-    /// Its path's anchor is off the wallet's chain, too old to check, or no longer
-    /// reconstructible in the local tree, so a new path is needed.
+    /// Its witness is unusable: malformed, built on a tree off the wallet's chain, too old
+    /// or no longer reconstructible locally, or not reaching the accepted root. The payment
+    /// stays pending and is read again for a new witness.
     StaleWitness,
     /// The directory's claim failed a check against the wallet's own chain.
     Rejected,
+}
+
+/// A stored companion witness payload and the tree it was built at.
+pub(in crate::wallet::one_time_ivk) struct WitnessPath<'a> {
+    pub(in crate::wallet::one_time_ivk) payload: &'a [u8],
+    pub(in crate::wallet::one_time_ivk) context: ChainPoint,
+    pub(in crate::wallet::one_time_ivk) tree_size: u64,
 }
 
 /// Whether `error` means the local tree lacks or conflicts with material, rather than a
@@ -49,24 +63,18 @@ fn tree_data(error: &ShardTreeError<crate::wallet::commitment_tree::Error>) -> b
     !matches!(error, ShardTreeError::Storage(_))
 }
 
-/// The inclusion path at `position`, if every sibling is a valid hash.
-pub(in crate::wallet::one_time_ivk) fn merkle_path(
-    position: u32,
-    siblings: [[u8; 32]; 32],
-) -> Option<MerklePath> {
-    let hashes = siblings
-        .iter()
-        .map(|bytes| Option::from(MerkleHashOrchard::from_bytes(bytes)))
-        .collect::<Option<Vec<_>>>()?;
-    Some(MerklePath::from_parts(position, hashes.try_into().ok()?))
-}
-
-/// Admits late `candidate` with its inclusion path at an anchor on the wallet's chain,
-/// which authenticates the note and its position, so its height, but not its transaction
-/// ID. It waits until the scan covered every block from the payment through `through`, the
-/// highest block the scan stored, for the account: the change rule puts every spend of a
-/// one-time note in a transaction the scan recognizes, so the spend journal then holds the
-/// note's nullifier if it was spent. No memo is stored (see `wallet::one_time_ivk`).
+/// Admits late `candidate` with its companion witness, which authenticates the note and
+/// its position, so its height, but not its transaction ID. It waits until the scan covered
+/// every block from the payment through `through`, the highest block the scan stored, for
+/// the account: the change rule puts every spend of a one-time note in a transaction the
+/// scan recognizes, so the spend journal then holds the note's nullifier if it was spent.
+/// No memo is stored (see `wallet::one_time_ivk`).
+///
+/// A provisional witness is checked at exactly its construction block, which must be on
+/// the wallet's chain within the pruning depth. A final witness (its Ironwood shard full)
+/// is checked at `through`, its construction block being provenance only. Either way the
+/// accepted root is read before returned nodes touch the tree, and the path the tree then
+/// reconstructs must reach it, or nothing is kept.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
@@ -76,7 +84,7 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     key: KeyId,
     candidate: &PendingPayment,
     through: ChainPoint,
-    (anchor, path): (ChainPoint, &MerklePath),
+    witness: WitnessPath<'_>,
 ) -> Result<Admission, SqliteClientError> {
     let (key_ref, recovered) = authenticate(conn, params, account, key, candidate)?;
     let dequeue = || {
@@ -140,14 +148,47 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     if !placed {
         return Ok(Admission::Rejected);
     }
-    if anchor.height > through.height {
+    let Ok(supplied) = decode_witness_payload(witness.payload, position, witness.tree_size) else {
+        return Ok(Admission::StaleWitness);
+    };
+    let final_path = witness_is_final(position, witness.tree_size);
+    let context = witness.context;
+    if context.height > through.height {
         return Ok(Admission::Waiting);
     }
-    if through.height - anchor.height > crate::PRUNING_DEPTH
-        || wallet::get_block_hash(conn, anchor.height)? != Some(anchor.hash)
-    {
-        return Ok(Admission::StaleWitness);
-    }
+    let anchor = if final_path {
+        // A final path depends on blocks through its construction block only; a fork
+        // there replaces it, but its age does not.
+        if wallet::get_block_hash(conn, context.height)?.is_some_and(|h| h != context.hash) {
+            return Ok(Admission::StaleWitness);
+        }
+        through
+    } else {
+        if through.height - context.height > crate::PRUNING_DEPTH {
+            return Ok(Admission::StaleWitness);
+        }
+        let Some((hash, size)): Option<([u8; 32], u64)> = conn
+            .query_row(
+                "SELECT hash, ironwood_commitment_tree_size FROM blocks WHERE height = ?1",
+                [u32::from(context.height)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(Admission::Waiting);
+        };
+        if hash != context.hash.0 || size != witness.tree_size {
+            return Ok(Admission::StaleWitness);
+        }
+        context
+    };
+    // Missing final-path material can arrive with later scanning; a provisional tree that
+    // is gone cannot, so its payment is read again.
+    let missing = if final_path {
+        Admission::Waiting
+    } else {
+        Admission::StaleWitness
+    };
     // Quiet blocks do not create tree checkpoints. An older checkpoint is usable only
     // when it represents exactly the anchor's tree, never a preceding smaller tree.
     let checkpoint: Option<u32> = conn.query_row(
@@ -159,17 +200,44 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         |r| r.get(0),
     )?;
     let Some(checkpoint) = checkpoint.map(BlockHeight::from) else {
-        return Ok(Admission::StaleWitness);
+        return Ok(missing);
     };
     let mut tree = crate::ironwood_tree(conn)?;
     let root = match tree.root_at_checkpoint_id(&checkpoint) {
         Ok(Some(root)) => root,
-        Ok(None) => return Ok(Admission::StaleWitness),
-        Err(e) if tree_data(&e) => return Ok(Admission::StaleWitness),
+        Ok(None) => return Ok(missing),
+        Err(e) if tree_data(&e) => return Ok(missing),
         Err(e) => return Err(e.into()),
     };
-    if !recovered.verify_position(position, path, root.into()) {
-        return Ok(Admission::Rejected);
+    // Supplied siblings come from the payload. The tree supplies the rest at the anchor:
+    // empty subtrees, the one straddling the anchor's frontier, and levels above the shard.
+    let anchor_size = Position::from(checkpoint_position(conn, checkpoint)?);
+    let mut auth_path = Vec::with_capacity(32);
+    for level in 0..32u8 {
+        let address = Address::from_parts(level.into(), (position >> level) ^ 1);
+        let node = match supplied.get(usize::from(level)).copied().flatten() {
+            Some(bytes) => {
+                match Option::<MerkleHashOrchard>::from(MerkleHashOrchard::from_bytes(&bytes)) {
+                    Some(node) => node,
+                    None => return Ok(Admission::StaleWitness),
+                }
+            }
+            None => match tree.root(address, anchor_size) {
+                Ok(node) => node,
+                Err(e) if tree_data(&e) => return Ok(missing),
+                Err(e) => return Err(e.into()),
+            },
+        };
+        auth_path.push(node);
+    }
+    let path = MerklePath::from_parts(
+        u32::try_from(position).map_err(|_| corrupt("position beyond the tree"))?,
+        auth_path.try_into().expect("32 levels"),
+    );
+    // A path that misses the root condemns this witness, not the authenticated payment:
+    // the candidate stays and is read again for another witness.
+    if !recovered.verify_position(position, &path, root.into()) {
+        return Ok(Admission::StaleWitness);
     }
     // Like any note before the birthday, it is not tracked; marking its key paid keeps
     // the index from being issued again and moves the recovery bound past it.
@@ -234,6 +302,22 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     if !covered(conn, account, candidate.height, through.height)? {
         return Ok(Admission::Uncovered);
     }
+    // Tree material the scan stored only as roots, or left without checkpoints, can make
+    // insertion fail even though the path reached the accepted root. That condemns the
+    // anchor, not the payment, so the insertion is undone and retried at a newer one.
+    conn.execute_batch("SAVEPOINT one_time_witness")?;
+    let kept = match insert_witness(
+        &mut tree, position, &recovered, &supplied, &path, checkpoint, root,
+    ) {
+        Ok(kept) => kept,
+        Err(e) if tree_data(&e) => false,
+        Err(e) => return Err(e.into()),
+    };
+    if !kept {
+        conn.execute_batch("ROLLBACK TO one_time_witness; RELEASE one_time_witness")?;
+        return Ok(missing);
+    }
+    conn.execute_batch("RELEASE one_time_witness")?;
     let spent_in: Option<crate::TxRef> = conn
         .query_row(
             "SELECT t.id_tx FROM ironwood_spend_journal_nullifiers n
@@ -249,33 +333,6 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
             |r| r.get(0).map(crate::TxRef),
         )
         .optional()?;
-    let anchor_size: u64 = conn.query_row(
-        "SELECT ironwood_commitment_tree_size FROM blocks WHERE height = ?1",
-        [u32::from(anchor.height)],
-        |r| r.get(0),
-    )?;
-    // Tree material the scan stored only as roots, or left without checkpoints, can make
-    // insertion fail even though the path reached the accepted root. That condemns the
-    // anchor, not the payment, so the insertion is undone and a newer path requested.
-    conn.execute_batch("SAVEPOINT one_time_witness")?;
-    let kept = match insert_path(
-        &mut tree,
-        position,
-        &recovered,
-        path,
-        anchor_size,
-        checkpoint,
-        root,
-    ) {
-        Ok(kept) => kept,
-        Err(e) if tree_data(&e) => false,
-        Err(e) => return Err(e.into()),
-    };
-    if !kept {
-        conn.execute_batch("ROLLBACK TO one_time_witness; RELEASE one_time_witness")?;
-        return Ok(Admission::StaleWitness);
-    }
-    conn.execute_batch("RELEASE one_time_witness")?;
     let tx = WalletTx::new(
         candidate.txid,
         candidate.tx_index.into(),
@@ -316,21 +373,19 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     Ok(Admission::Admitted)
 }
 
-/// Inserts the recovered note as a marked leaf with the path's siblings complete at
-/// `anchor_size`, and reports whether the tree's own witness at `checkpoint` then reaches
-/// `root`.
+/// Inserts the recovered note as a marked leaf with the payload's supplied siblings, and
+/// reports whether the tree's own witness at `checkpoint` then reaches `root`.
 ///
 /// The marked leaf goes in before its siblings, since it keeps its pair from pruning. A
 /// sibling inserted first can strip a reference that held the pair unpruned, and the
-/// leaf's insertion under the pruned node would then drop that sibling. A partial right
-/// subtree includes empty future leaves and must not become a fixed hash for future
-/// appends, so only complete ones are kept.
-fn insert_path<'a>(
+/// leaf's insertion under the pruned node would then drop that sibling. Only supplied
+/// siblings are kept: they are complete at the anchor, so no future append changes them.
+fn insert_witness<'a>(
     tree: &mut crate::IronwoodCommitmentTree<&'a rusqlite::Transaction<'a>>,
     position: u64,
     recovered: &RecoveredNote,
+    supplied: &[Option<[u8; 32]>],
     path: &MerklePath,
-    anchor_size: u64,
     checkpoint: BlockHeight,
     root: MerkleHashOrchard,
 ) -> Result<bool, ShardTreeError<crate::wallet::commitment_tree::Error>> {
@@ -342,14 +397,29 @@ fn insert_path<'a>(
         )),
     )?;
     for (level, hash) in path.auth_path().into_iter().enumerate() {
-        let address = Address::from_parts((level as u8).into(), (position >> level) ^ 1);
-        if u64::from(address.position_range_end()) <= anchor_size {
-            tree.insert(address, hash)?;
+        if supplied.get(level).is_some_and(Option::is_some) {
+            tree.insert(
+                Address::from_parts((level as u8).into(), (position >> level) ^ 1),
+                hash,
+            )?;
         }
     }
     Ok(tree
         .witness_at_checkpoint_id(Position::from(position), &checkpoint)?
         .is_some_and(|stored| recovered.verify_position(position, &stored.into(), root.into())))
+}
+
+/// The tree size at checkpoint `checkpoint`: one past its last leaf, or zero.
+fn checkpoint_position(
+    conn: &Connection,
+    checkpoint: BlockHeight,
+) -> Result<u64, SqliteClientError> {
+    let position: Option<u64> = conn.query_row(
+        "SELECT position FROM ironwood_tree_checkpoints WHERE checkpoint_id = ?1",
+        [u32::from(checkpoint)],
+        |r| r.get(0),
+    )?;
+    Ok(position.map_or(0, |p| p + 1))
 }
 
 /// Whether the scan covered every block from `from` through `through` for `account`, with

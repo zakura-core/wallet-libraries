@@ -111,13 +111,17 @@ pub(in crate::wallet::one_time_ivk) fn pending_payment(
         .optional()?)
 }
 
-/// Authenticates and queues one candidate idempotently without crediting it.
+/// Authenticates and queues one candidate idempotently without crediting it. `binding` is
+/// the payment session, its companion witness session and the witness ordinal the candidate
+/// was read under; a candidate still waiting for its witness takes the latest binding, since
+/// only those sessions can answer.
 pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     key: KeyId,
     candidate: &PendingPayment,
+    binding: ([u8; 32], [u8; 32], u32),
 ) -> Result<(), SqliteClientError> {
     let (id, _) = authenticate(conn, params, account, key, candidate)?;
     if wallet::get_block_hash(conn, candidate.height)?
@@ -137,17 +141,27 @@ pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
         )
         .optional()?;
     if let Some((old, owner)) = old {
-        return if old == *candidate && owner == id {
-            Ok(())
-        } else {
-            Err(invalid("conflicting directory payment identity"))
-        };
+        if old != *candidate || owner != id {
+            return Err(invalid("conflicting directory payment identity"));
+        }
+        conn.execute(
+            "UPDATE ironwood_one_time_payment_recovery SET payments = ?3, witnesses = ?4,
+             ordinal = ?5 WHERE txid = ?1 AND action_index = ?2 AND witness IS NULL",
+            params![
+                candidate.txid.as_ref(),
+                candidate.action_index,
+                binding.0,
+                binding.1,
+                binding.2
+            ],
+        )?;
+        return Ok(());
     }
     conn.execute(
         "INSERT INTO ironwood_one_time_payment_recovery (
             one_time_key_id, txid, action_index, height, block_hash, tx_index, position,
-            encrypted_note
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            encrypted_note, payments, witnesses, ordinal
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             id,
             candidate.txid.as_ref(),
@@ -157,6 +171,9 @@ pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
             candidate.tx_index,
             candidate.position,
             candidate.encrypted_note.to_bytes().as_slice(),
+            binding.0,
+            binding.1,
+            binding.2,
         ],
     )?;
     Ok(())

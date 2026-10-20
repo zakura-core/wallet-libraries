@@ -14,7 +14,7 @@ use zakura_one_time_ivk::KeyId;
 use zcash_client_backend::data_api::{
     one_time_ivk::restore::{
         DiscoveryWork, LookupPage, LookupWork, RecoveryPublication, RecoveryStatus, RecoveryToken,
-        WitnessRequest,
+        WitnessAnswer, WitnessRequest,
     },
     transparent_ledger::ChainPoint,
 };
@@ -116,14 +116,15 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
         self.transactionally(|db| queue::defer(db.conn.0, account, work, now))
     }
 
-    /// Applies a candidate through the normal note, inclusion and spend-evidence checks.
+    /// Attaches the companion witness `answer` to the candidate `request` names, then applies
+    /// it through the normal note, inclusion and spend-evidence checks. A payload whose
+    /// construction tree is unusable locally re-reads the payment for a fresh binding.
     pub fn record_one_time_witness(
         &mut self,
         account: AccountUuid,
         captured: RecoveryToken,
         request: WitnessRequest,
-        anchor: ChainPoint,
-        siblings: [[u8; 32]; 32],
+        answer: &WitnessAnswer,
         now: i64,
     ) -> Result<bool, SqliteClientError> {
         self.transactionally(|db| {
@@ -134,11 +135,22 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
                 account,
                 captured,
                 request,
-                anchor,
-                siblings,
+                answer,
                 now,
             )
         })
+    }
+
+    /// Re-reads the payment behind `request` when its payment session can no longer serve
+    /// the witness, for example after the session was replaced. The candidate stays pending
+    /// and its old ordinal is discarded rather than reinterpreted.
+    pub fn refresh_one_time_witness(
+        &mut self,
+        account: AccountUuid,
+        captured: RecoveryToken,
+        request: WitnessRequest,
+    ) -> Result<bool, SqliteClientError> {
+        self.transactionally(|db| queue::refresh(db.conn.0, db.params, account, captured, request))
     }
 
     /// Starts or resumes explicit older-address recovery through a captured publication.

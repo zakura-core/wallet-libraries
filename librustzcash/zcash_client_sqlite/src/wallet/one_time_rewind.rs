@@ -41,8 +41,11 @@ pub(crate) fn truncate(
         "DELETE FROM ironwood_one_time_payment_recovery WHERE height > ?1",
         [floor],
     )?;
-    conn.execute("UPDATE ironwood_one_time_payment_recovery SET witness = NULL, witness_height = NULL, witness_hash = NULL
-        WHERE witness_height > ?1", [floor])?;
+    conn.execute(
+        "UPDATE ironwood_one_time_payment_recovery SET witness = NULL,
+        witness_height = NULL, witness_hash = NULL, witness_size = NULL WHERE witness_height > ?1",
+        [floor],
+    )?;
     conn.execute(
         "DELETE FROM ironwood_spend_journal WHERE block_height > ?1",
         [floor],

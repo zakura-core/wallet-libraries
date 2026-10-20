@@ -3,9 +3,13 @@ use super::chain::{ACTIVATION, Chain, GENESIS};
 use receiver_directory::{
     RawRecord,
     blocks::{Batch, BlockFilter, BlockId, Head},
-    snapshot::{Manifest, PROFILE, Snapshot},
+    snapshot::{Manifest, PROFILE, Snapshot, assign_ordinals},
+    witness,
 };
-use receiver_pir::{MIN_ROWS, server::Server};
+use receiver_pir::{
+    MIN_ROWS, Publication,
+    server::{Server, WitnessServer},
+};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -14,14 +18,14 @@ use std::{
     },
 };
 use zakura_pir_receiver::{DirectoryError, Transport};
-use zakura_receiver_crypto::witness::{Publication, WitnessSnapshot};
+use zakura_receiver_crypto::witness::payloads;
 
 pub const ORIGIN: &str = "https://receiver.test";
 
 /// An immutable PIR publication and independently lagging rolling filter suffix.
 pub struct Directory {
     server: Server,
-    proofs: Option<Vec<u8>>,
+    witnesses: WitnessServer,
     head: Head,
     filters: Vec<BlockFilter>,
     counts: Mutex<(usize, u64, u64)>,
@@ -55,10 +59,11 @@ impl Directory {
             r.total = totals[r.receiver.as_bytes()];
             *page += 1;
         }
-        let raw: Vec<_> = records
+        let mut raw: Vec<_> = records
             .iter()
             .map(|r| RawRecord::decode(&r.encode().unwrap()).unwrap().unwrap())
             .collect();
+        assign_ordinals(&mut raw);
         let manifest = Manifest {
             profile: PROFILE.into(),
             history_revision: revision,
@@ -76,23 +81,24 @@ impl Directory {
         };
         let snapshot = Snapshot::build(manifest, &raw).unwrap();
         let m = &snapshot.manifest;
-        let proofs = (m.end_position > 0).then(|| {
-            WitnessSnapshot::build(
-                &Publication {
-                    genesis: GENESIS,
-                    directory_revision: m.revision().unwrap(),
-                    end_height: m.end_height,
-                    end_hash: m.end_hash,
-                    start_position: 0,
-                    end_position: m.end_position,
-                    records: m.records,
-                },
-                &chain.commitments()[..m.end_position as usize],
-                &records.iter().map(|r| r.payment.position as u32).collect(),
-            )
-            .unwrap()
-            .encode()
-        });
+        let mut positions: Vec<_> = raw.iter().map(|r| r.payment.position).collect();
+        positions.sort_unstable();
+        let table = witness::Table::build(
+            witness::Manifest {
+                profile: witness::PROFILE.into(),
+                genesis: GENESIS,
+                history_revision: revision,
+                payments: m.revision().unwrap(),
+                payloads: 0,
+                rows: MIN_ROWS,
+                tree_height: m.end_height,
+                tree_hash: m.end_hash,
+                tree_size: m.end_position,
+                data_sha256: [0; 32],
+            },
+            &payloads(&chain.commitments()[..m.end_position as usize], &positions).unwrap(),
+        )
+        .unwrap();
         let tip = chain.tip() - filter_depth;
         let first = (u32::from(tip) + 1)
             .saturating_sub(retained)
@@ -123,9 +129,10 @@ impl Directory {
                 .unwrap()
             })
             .collect();
+        let server = Server::new(snapshot).unwrap();
         Self {
-            server: Server::new(snapshot).unwrap(),
-            proofs,
+            witnesses: WitnessServer::new(table, &server).unwrap(),
+            server,
             head: Head {
                 genesis: GENESIS,
                 revision,
@@ -141,7 +148,8 @@ impl Directory {
         }
     }
 
-    /// Observed encrypted query count and actual request/response body bytes.
+    /// Observed encrypted query count, payment and witness alike, and actual
+    /// request/response body bytes.
     pub fn counts(&self) -> (usize, u64, u64) {
         *self.counts.lock().unwrap()
     }
@@ -166,9 +174,17 @@ impl Directory {
             assert_eq!(route, "query");
             counts.0 += 1;
             counts.1 += body.len() as u64;
-            self.server.respond(body)?
+            if body.get(4..36) == Some(&self.witnesses.id()[..]) {
+                self.witnesses.respond(body)?
+            } else {
+                self.server.respond(body)?
+            }
         } else if route == "init" {
-            serde_json::to_vec(self.server.manifest()).unwrap()
+            serde_json::to_vec(&Publication {
+                payments: self.server.manifest().clone(),
+                witnesses: self.witnesses.manifest().clone(),
+            })
+            .unwrap()
         } else if route == "block-filters/head" {
             serde_json::to_vec(&self.head).unwrap()
         } else if let Some(request) = route.strip_prefix("block-filters/") {
@@ -190,15 +206,15 @@ impl Directory {
             Batch::new(GENESIS, self.head.revision, filters)?.encode()?
         } else {
             let (material, id) = route.split_once('/').unwrap();
-            if id != hex::encode(self.server.id()) {
+            let public = if id == hex::encode(self.server.id()) {
+                self.server.public()
+            } else if id == hex::encode(self.witnesses.id()) {
+                self.witnesses.public()
+            } else {
                 return Err(DirectoryError::Revision);
-            }
+            };
             match material {
-                "public" => self.server.public().to_vec(),
-                "witness" => self
-                    .proofs
-                    .clone()
-                    .ok_or_else(|| DirectoryError::Transport("no proofs".into()))?,
+                "public" => public.to_vec(),
                 _ => return Err(DirectoryError::Transport("unknown route".into())),
             }
         };
