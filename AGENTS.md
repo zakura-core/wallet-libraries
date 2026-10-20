@@ -11,8 +11,8 @@ instructions still apply; do not duplicate them here.
 - `librustzcash/pczt`: package `zakura-pczt`.
 - `zakura/`: PIR role packages ([package map](docs/pir-packages.md)), one-time IVK
   keys (`zakura-one-time-ivk`) and their provider adapter (`zakura-near-intents`).
-- `zakura/pir-chain/`: server-only chain readers in a separate Cargo workspace
-  with their own lockfile; never add them to the wallet dependency graph.
+- Node chain readers live in wallet-pir; never add node or wallet-pir packages
+  to this repository's dependency graph.
 - `wallet-lib/`: package `zakura-wallet-lib`; its `zakura` and `lrz` backends
   are mutually exclusive. Never run workspace `--all-features` on the facade.
 

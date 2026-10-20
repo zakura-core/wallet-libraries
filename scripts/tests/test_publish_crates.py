@@ -146,6 +146,16 @@ class PublishingTests(unittest.TestCase):
             for inherited in (False, True):
                 self.check_forbidden_dependency(declaration, inherited)
 
+    def test_node_dependencies_are_refused_before_publication(self):
+        for declaration in (
+            'zakura-chain = "=1.0.0"',
+            'alias = { package = "zakura-state", version = "=1.0.0" }',
+            'future-node = { git = "https://github.com/zakura-core/zakura.git", version = "=1.0.0" }',
+            'alias = { package = "zakura-server-chain", version = "=0.0.1-rc0" }',
+        ):
+            for inherited in (False, True):
+                self.check_forbidden_dependency(declaration, inherited)
+
     def test_wallet_pir_repository_spellings_are_refused(self):
         # An unlisted package name leaves only the repository identity to refuse it.
         for owner in ("valargroup", "zakura-core"):
@@ -193,8 +203,8 @@ class PublishingTests(unittest.TestCase):
                                               "--manifest-path", str(manifest)], text=True)
         source = json.loads(output)["packages"][0]["dependencies"][0]["source"]
         self.assertEqual(source, "git+https://github.com/valargroup/wallet-pir")
-        self.assertTrue(release.server_graph.wallet_pir_owned(source))
-        self.assertTrue(release.server_graph.wallet_pir_owned(url))
+        self.assertTrue(release.dependency_boundary.wallet_pir_owned(source))
+        self.assertTrue(release.dependency_boundary.wallet_pir_owned(url))
 
     def test_neighbouring_git_repositories_remain_release_prerequisites(self):
         for url in (
@@ -228,7 +238,7 @@ class PublishingTests(unittest.TestCase):
                 root = Path(directory)
                 (root / "manifests").mkdir()
                 (root / "manifests/sources.toml").write_text(
-                    '[server]\nwallet_pir_packages = ["receiver-pir", "transparent-shard"]\n')
+                    '[dependency_boundary]\nnode_packages = ["zakura-chain", "zakura-state"]\nwallet_pir_packages = ["receiver-pir", "transparent-shard", "zakura-server-chain"]\n')
                 (root / "first").mkdir()
                 (root / "first/Cargo.toml").write_text(
                     f'[package]\nname = "first"\nversion = "1.0.0"\n[{table}]\n'
@@ -241,7 +251,7 @@ class PublishingTests(unittest.TestCase):
         for table, root in self.release_roots(declaration, inherited):
             with self.subTest(declaration=declaration, inherited=inherited, table=table), \
                     patch.object(release, "ORDER", ("first",)), \
-                    self.assertRaisesRegex(release.ReleaseError, "depends on the wallet-pir package"):
+                    self.assertRaisesRegex(release.ReleaseError, "depends on the (wallet-pir|node) package"):
                 release.release_packages(root)
 
     def test_string_dependencies_keep_release_version_and_order_checks(self):
@@ -254,7 +264,7 @@ class PublishingTests(unittest.TestCase):
                 with self.subTest(inherited=inherited, requirement=requirement, ordered=ordered), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
                     (root / "manifests").mkdir()
-                    (root / "manifests/sources.toml").write_text('[server]\nwallet_pir_packages = []\n')
+                    (root / "manifests/sources.toml").write_text('[dependency_boundary]\nnode_packages = []\nwallet_pir_packages = []\n')
                     (root / "first").mkdir()
                     (root / "first/Cargo.toml").write_text('[package]\nname = "first"\nversion = "1.0.0"\n')
                     (root / "second").mkdir()

@@ -93,14 +93,10 @@ for package_id in reachable:
 
 problems = []
 
-# The node's crates belong to the server-only workspace alone.
-for name in sorted(set(manifest["server"]["node_packages"]) & versions.keys()):
-    problems.append(f"{name}: node package in the wallet graph; it belongs in {manifest['server']['workspace']}/")
-members = set(json.loads(Path(sys.argv[1]).read_text())["workspace_members"])
-for package_id in members:
-    manifest_path = Path(packages[package_id]["manifest_path"])
-    if Path(sys.argv[3], manifest["server"]["workspace"]) in manifest_path.parents:
-        problems.append(f"{packages[package_id]['name']}: server package in the wallet workspace")
+# Node source and ownership checks also cover declarations and standalone tools
+# in verify-dependency-boundary.sh. Keep the wallet crypto graph node-free here.
+for name in sorted(set(manifest["dependency_boundary"]["node_packages"]) & versions.keys()):
+    problems.append(f"{name}: node package in the wallet graph")
 
 for name in sorted(forbidden & versions.keys()):
     problems.append(

@@ -14,6 +14,7 @@ python3 scripts/dev.py doctor --config transparent
 python3 scripts/dev.py test --config transparent -p zakura-client-sqlite transparent_ledger
 python3 scripts/dev.py check --config orchard -p zakura-client-backend
 python3 scripts/dev.py lint --config transparent -p zakura-client-sqlite
+python3 scripts/dev.py verify --only dependency-boundary
 python3 scripts/dev.py verify --only wallet-lib-modes
 python3 scripts/dev.py verify
 ```
@@ -44,13 +45,16 @@ python3 scripts/dev.py verify
 | `transaction-status-lightwalletd` | Status policy plus the explicit lightwalletd adapter, including payload validation and cancellation |
 | `receiver-wire` | Library-owned receiver codec with default features disabled |
 | `receiver-pir-server` | Receiver PIR client with the `server` evaluator, which the golden client/evaluator vectors need |
-| `server-rpc` | Separate `zakura/pir-chain` workspace with independent node fixtures under `testing`, without the RocksDB reader |
-| `server` | Separate `zakura/pir-chain` workspace, including all four explicit product features, the node fixture helpers under `testing` and the opt-in RocksDB reader under `rocksdb`; `-p` retains this workspace and doctor checks its lockfile |
 | `one-time-ivk-scenarios` | One-time IVK scenario suite (see its README); `ONE_TIME_IVK_SLOW=1` adds the scenarios that wait months of chain time. CI runs it nightly, not on PRs |
 
 `default` builds the backend and SQLite crates without Orchard or transparent
 inputs, which `orchard` and `transparent` test, so items used only under those
 features warn as dead code in `default`.
+
+Node chain readers and their RPC, fixture and RocksDB checks live in wallet-pir.
+The `dependency-boundary` check rejects node and wallet-pir packages in this
+repository's declarations, resolved graphs, lockfiles and fresh wallet consumers.
+The release tooling applies the same policy before packaging.
 
 The Python configuration table is authoritative. `-p` replaces the package
 selection; features still come from the selected configuration. Test-name
