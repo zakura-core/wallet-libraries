@@ -7,6 +7,14 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9.3] - 2026-10-20
+
+### Changed
+
+- Use the stable Common `4.0.0` dependency family, with compatible requirements
+  for downstream consumers.
+- Use PIR protocol `0.0.1-rc2`, one-time IVK `0.0.1-rc3` and PCZT `0.1.0-rc9`.
+
 ## [0.1.0-rc9.2] - 2026-10-20
 
 ### Fixed

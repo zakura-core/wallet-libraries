@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc2] - 2026-10-20
+
+### Changed
+
+- Use the stable Common `4.0.0` dependency family, with compatible requirements
+  for downstream consumers.
+- Use PIR protocol and server crates `0.0.1-rc2` and SQLite `0.1.0-rc9.3`.
+
 ## [0.0.1-rc1] - 2026-10-20
 
 ### Changed
