@@ -597,7 +597,6 @@ fn delayed_window_expansion_checks_history_after_the_filter_frontier() {
     let held = status(st.wallet().db(), account).lookups[0].clone();
     let key0 = KeyId::new(Purpose::Receive, 0);
     let payment0 = pay_candidate(&mut st, key0);
-    st.generate_and_scan_empty_blocks(10);
     let key4 = KeyId::new(Purpose::Receive, 4);
     pay_candidate(&mut st, key4);
     let publication = publication_at(&st, tip(&st).height);
@@ -879,7 +878,6 @@ fn orphaned_receipts_do_not_permanently_exhaust_the_receive_window() {
     for index in 0..4 {
         pay_candidate(&mut st, KeyId::new(Purpose::Receive, index));
     }
-    st.generate_and_scan_empty_blocks(10);
     let publication = publication_at(&st, tip(&st).height);
     st.wallet_mut()
         .db_mut()
@@ -1466,7 +1464,6 @@ fn a_reorg_that_orphans_the_window_payment_keeps_its_lookahead() {
     let account = st.test_account().unwrap().id();
     let floor = tip(&st).height;
     pay_candidate(&mut st, KeyId::new(Purpose::Receive, 0));
-    st.generate_and_scan_empty_blocks(10);
     let publication = publication_at(&st, tip(&st).height);
     assert!(
         st.wallet_mut()
@@ -1481,7 +1478,6 @@ fn a_reorg_that_orphans_the_window_payment_keeps_its_lookahead() {
 
     st.truncate_to_height(floor);
     pay_candidate(&mut st, key4);
-    st.generate_and_scan_empty_blocks(10);
     let publication = publication_at(&st, tip(&st).height);
     assert!(
         st.wallet_mut()
@@ -1512,7 +1508,6 @@ fn window_expansion_rechecks_an_index_a_manual_check_completed() {
 
     pay_candidate(&mut st, KeyId::new(Purpose::Receive, 0));
     pay_candidate(&mut st, key4);
-    st.generate_and_scan_empty_blocks(10);
     let publication = publication_at(&st, tip(&st).height);
     assert!(
         st.wallet_mut()
@@ -1953,7 +1948,6 @@ fn a_reorg_keeps_lookahead_the_seed_walk_reached_before_confirmation() {
     let key4 = KeyId::new(Purpose::Receive, 4);
     st.truncate_to_height(floor);
     pay_candidate(&mut st, key4);
-    st.generate_and_scan_empty_blocks(10);
     let publication = publication_at(&st, tip(&st).height);
     assert!(
         st.wallet_mut()
