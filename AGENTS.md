@@ -61,4 +61,4 @@ Do not promise automatic wake unless the runtime provides it.
 
 Keep PIR client, publisher and query-server production dependencies separate; name the serving package `query-server`.
 
-- Use compatible Common version requirements in library manifests; pin tested builds in Cargo.lock so wallet updates do not require a matching Zakura release.
+- Use compatible Common version requirements in wallet library manifests; pin tested builds in Cargo.lock so downstream consumers can select compatible Common updates.

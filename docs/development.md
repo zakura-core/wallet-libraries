@@ -139,7 +139,7 @@ published family after the extracted client is released.
 
 ## Common dependency compatibility
 
-Library manifests use compatible Common version requirements so wallet and node
+Wallet library manifests use compatible Common version requirements so downstream
 consumers can select a shared release without matching exact pins. The lockfiles
 record the concrete versions tested by this repository. Orchard notes, keys and
 proof components must still have one package identity across each consumer's
