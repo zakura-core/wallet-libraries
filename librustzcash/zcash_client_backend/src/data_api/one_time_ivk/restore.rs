@@ -14,7 +14,8 @@ pub use zakura_receiver_crypto::wire::{Payment as DirectoryPayment, RawRecord as
 
 /// Maximum records accepted from one network step.
 pub const RECOVERY_PAGE_LIMIT: usize = 32;
-/// The receive issuance and seed-recovery gap, justified only by confirmed payments.
+/// The receive issuance and seed-recovery gap, justified only by payments mined on the
+/// wallet's current chain.
 pub const RECEIVE_GAP: u64 = 4;
 
 /// Account-local cancellation and same-chain correction fence.

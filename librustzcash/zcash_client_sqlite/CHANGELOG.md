@@ -9,7 +9,7 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
-- Replace one-time-key discovery passes and scan watches with a durable PIR recovery queue. Seed recovery stops after four complete empty receive histories, receive issuance recycles unpaid holes in a four-index confirmed window, and refunds use authenticated funding evidence. Manual history checks support cancellation, restart and an explicit receive bound.
+- Replace one-time-key discovery passes and scan watches with a durable PIR recovery queue. Seed recovery stops after four complete empty receive histories, receive issuance recycles unpaid holes in a four-index window that extends once a payment is mined, and refunds use authenticated funding evidence. Manual history checks support cancellation, restart and an explicit receive bound.
 - Remove provider seen gates, broad one-time-key decryption, scan hints, replay state and their old APIs. Ordinary sync never waits for receiver discovery. Retain targeted payment authentication, chain proofs, spend-journal checks and existing note ownership. Rewinds and earlier birthdays requeue affected history even while discovery is disabled.
 - A provider's promised receipt settles only through a recovered note in a transaction the provider reported for that operation, recorded from `Observation::receipts`. Without one, the address stays in direct catch-up.
 - Rebaseline the unlaunched one-time-key schema. The cutover drops abandoned discovery progress while preserving accounts, note ownership and unrelated wallet data. Recovery starts disabled.
