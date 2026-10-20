@@ -80,6 +80,56 @@ impl<T: Transport> DirectoryClient<T> {
         Ok(manifest)
     }
 
+    /// Downloads rolling-hint availability without opening or waiting for a PIR session.
+    pub async fn fetch_block_head(
+        origin: &str,
+        http: &T,
+        genesis: &[u8; 32],
+    ) -> Result<receiver_directory::blocks::Head, Error> {
+        let bytes = http
+            .get(
+                &format!(
+                    "{}/v1/receiver/block-filters/head",
+                    origin.trim_end_matches('/')
+                ),
+                16 * 1024,
+            )
+            .await?;
+        if bytes.len() > 16 * 1024 {
+            return Err(Error::Malformed);
+        }
+        let head: receiver_directory::blocks::Head = serde_json::from_slice(&bytes)?;
+        head.validate(genesis)?;
+        Ok(head)
+    }
+
+    /// Fetches a bounded prefix for one captured head. Errors never mean an empty range.
+    /// The wallet must verify returned block hashes against its own chain before advancing.
+    pub async fn fetch_block_batch(
+        origin: &str,
+        http: &T,
+        head: &receiver_directory::blocks::Head,
+        from: u32,
+        limit: u32,
+    ) -> Result<receiver_directory::blocks::Batch, Error> {
+        head.check_request(from, limit)?;
+        let bytes = http
+            .get(
+                &format!(
+                    "{}/v1/receiver/block-filters/{}/{}/{}",
+                    origin.trim_end_matches('/'),
+                    head.revision,
+                    from,
+                    limit
+                ),
+                receiver_directory::blocks::MAX_BATCH_BYTES,
+            )
+            .await?;
+        let batch = receiver_directory::blocks::Batch::decode(&bytes)?;
+        batch.check(head, from, limit)?;
+        Ok(batch)
+    }
+
     /// Downloads `manifest`'s filters, identical for every wallet, so a wallet can test its
     /// receivers before deciding whether to look any up. The file must hold exactly the
     /// sets the manifest declares.

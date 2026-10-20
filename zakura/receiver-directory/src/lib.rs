@@ -3,7 +3,9 @@
 //! This crate places, stores and parses records structurally; it checks no
 //! cryptography. Callers validate receivers, Action fields and inclusion proofs at
 //! their trust boundaries.
+pub mod blocks;
 pub mod filter;
+mod gcs;
 pub mod record;
 pub mod snapshot;
 

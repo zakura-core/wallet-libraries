@@ -105,11 +105,13 @@ fn the_protocol_reproduces_its_pinned_bytes() {
         ("response", digest(&response)),
         ("row", digest(&row)),
     ];
+    // The correction revision changes the session header and its framed digests only.
+    // Native setup, row placement and row bytes retain their independent golden values.
     let want = [
         ("row index", "2600"),
         (
             "session",
-            "1ff67e1b137866eed28623586925a7e258af335857854f38909f915f410e8945",
+            "fdcdbb7ac3303d82a516050f036ef25aeab02e75e614de7bdcb8248996367c35",
         ),
         (
             "public",
@@ -117,11 +119,11 @@ fn the_protocol_reproduces_its_pinned_bytes() {
         ),
         (
             "request",
-            "37c8a73cdd1f943da9ff2e202133d960bcd063af91626d5574c866f81114ef66",
+            "f93ef6e515eae32680ca7e50567d8b9bf31ace8b2005e53a3fea02e07ca7b16d",
         ),
         (
             "response",
-            "9c52cf1169e5fc4dc6bcb5c4d3e99ebb906977a6f13260bccdd1d03cd0b4572c",
+            "8b00631bc12b1dab1c4218ad36bd19af96a76db206606faac086a91defe1ce92",
         ),
         (
             "row",

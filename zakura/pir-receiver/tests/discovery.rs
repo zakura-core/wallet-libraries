@@ -300,6 +300,7 @@ fn publish(
         .collect();
     let manifest = Manifest {
         profile: PROFILE.into(),
+        history_revision: 0,
         genesis: GENESIS,
         start_height: ACTIVATION,
         start_parent: [0; 32],

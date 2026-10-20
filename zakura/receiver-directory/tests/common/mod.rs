@@ -21,6 +21,7 @@ pub fn receiver() -> ReceiverBytes {
 pub fn manifest(rows: u32) -> Manifest {
     Manifest {
         profile: PROFILE.into(),
+        history_revision: 0,
         genesis: [1; 32],
         start_height: 100,
         start_parent: [2; 32],

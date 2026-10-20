@@ -38,6 +38,8 @@ pub fn capacity(rows: u32) -> Result<u64, Error> {
 pub struct Manifest {
     pub profile: String,
     pub genesis: Hash,
+    /// Operator correction generation shared with rolling hints, independent of reorgs.
+    pub history_revision: u64,
     pub start_height: u32,
     pub start_parent: Hash,
     pub start_position: u64,
@@ -145,6 +147,7 @@ impl Manifest {
         h.update(b"ironwood-receiver/v1/manifest\0");
         update_str(&mut h, &self.profile);
         h.update(self.genesis);
+        h.update(self.history_revision.to_le_bytes());
         h.update(self.start_height.to_le_bytes());
         h.update(self.start_parent);
         h.update(self.start_position.to_le_bytes());

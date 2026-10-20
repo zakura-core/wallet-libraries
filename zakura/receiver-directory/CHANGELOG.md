@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Bind the required history correction generation into PIR publication identity so unfinished work can fence older answers after a same-chain correction.
+
+- Add bounded, consecutive Receiver block-filter batches for rolling hints, with explicit network, correction revision, block identities and parent linkage. Reuse the validated GCS decoder.
+
 ## [0.0.1-rc1] - 2026-10-20
 
 ### Changed

@@ -605,3 +605,18 @@ fn pages_continue_in_chain_order() {
         assert!(matches!(check_next(&first, &r), Err(Error::Malformed)));
     }
 }
+
+/// A same-chain indexing correction changes the immutable PIR publication identity.
+#[test]
+fn corrections_change_publication_identity() {
+    let first = Snapshot::build(manifest(8), &[], &[]).unwrap();
+    let mut corrected = first.manifest.clone();
+    corrected.history_revision += 1;
+    assert_ne!(
+        first.manifest.revision().unwrap(),
+        corrected.revision().unwrap()
+    );
+    let mut json = serde_json::to_value(&first.manifest).unwrap();
+    json.as_object_mut().unwrap().remove("history_revision");
+    assert!(serde_json::from_value::<receiver_directory::snapshot::Manifest>(json).is_err());
+}

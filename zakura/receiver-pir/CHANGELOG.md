@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Fetch rolling block-filter availability and bounded batches independently of PIR sessions through the caller-owned transport.
+
 ## [0.0.1-rc1] - 2026-10-20
 
 ### Changed

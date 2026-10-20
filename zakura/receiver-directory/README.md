@@ -17,3 +17,13 @@ services in wallet-pir, which consume this crate; nothing here depends on
 wallet-pir.
 
 The library target keeps wallet-pir's name, `receiver_directory`.
+
+## Rolling block hints
+
+`blocks::Head` advertises a network, correction revision and inclusive available range. `blocks::Batch` contains at most 256 consecutive filters and 4 MiB. A server may return a shorter nonempty prefix to honor the byte limit. Empty blocks have explicit empty GCS sets; missing/pruned ranges are errors and require the wallet's direct PIR path.
+
+The batch binds the captured revision and requested range, and checks parent linkage. Consumers must still compare block identities with their independently synced chain before using negative hints or advancing progress. The service is trusted for complete indexing. Matches only schedule PIR queries; payment authentication, inclusion and spend checks happen separately. Newly exposed receive indexes need historical PIR checks even if their blocks were already processed.
+
+`IWBATCH1` encodes the genesis hash, little-endian correction revision (`u64`), block count (`u32`), then each height (`u32`), block hash, parent hash, payload length (`u32`) and GCS payload. Hashes use protocol byte order. GCS uses P=20 and M=1,569,792 with a salt derived from network, height and hash. No archive index, permanent seen set or scan/cache state is part of this format.
+
+PIR manifests require `history_revision`, the operator correction generation also advertised by rolling hints. It is bound into the immutable publication/session identity. Clients must retain the required generation with unfinished work and reject answers from an older generation, even when block heights and hashes match. Reorgs still use chain hashes.

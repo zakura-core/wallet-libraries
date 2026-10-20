@@ -13,17 +13,10 @@
 //!
 //! Decoding reads every value and checks the padding before any match, because the
 //! upstream reader's `match_any` stops at the first match and never checks the tail.
-use crate::{Error, Hash, ReceiverBytes};
-use bitcoin_hashes::siphash24;
-use sha2::{Digest, Sha256};
+pub use crate::gcs::{Filter, M, P};
+use crate::Error;
 use std::collections::BTreeMap;
-use zakura_filters::{read_compact_size, BitStreamReader, GcsFilterWriter};
 
-/// Golomb-Rice parameter of every set.
-pub const P: u8 = 10;
-/// Range multiplier of every set, BIP 158's ratio to `2^P`; see the module docs for the
-/// false match rate.
-pub const M: u64 = 1_533;
 /// Largest encoded [`Filters`] a client downloads, and a publisher builds.
 pub const MAX_FILTERS_BYTES: usize = 8 * 1024 * 1024;
 const MAGIC: &[u8; 8] = b"IWFLT1\0\0";
@@ -51,102 +44,6 @@ pub fn valid_label(label: &str) -> bool {
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
                 && (kind == RECENT || kind == SEEN)
         })
-}
-
-/// The SipHash keys of every set in a publication keyed by `key`, its salt.
-fn keys(key: &Hash) -> (u64, u64) {
-    let digest = Sha256::new()
-        .chain_update(b"ironwood-receiver/v1/filter\0")
-        .chain_update(key)
-        .finalize();
-    (
-        u64::from_le_bytes(digest[..8].try_into().unwrap()),
-        u64::from_le_bytes(digest[8..16].try_into().unwrap()),
-    )
-}
-
-/// One BIP 158 Golomb-coded set of receivers, keyed by the publication salt.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Filter {
-    /// The encoded set: a CompactSize count, then the Golomb-Rice coded deltas.
-    bytes: Vec<u8>,
-    /// The decoded values, ascending, each below `count * M`.
-    values: Vec<u64>,
-}
-
-impl Filter {
-    /// Encodes the distinct `receivers` under `key`.
-    pub fn build<'a>(key: &Hash, receivers: impl IntoIterator<Item = &'a ReceiverBytes>) -> Self {
-        let (k0, k1) = keys(key);
-        let mut bytes = Vec::new();
-        let mut writer = GcsFilterWriter::new(&mut bytes, k0, k1, M, P);
-        for receiver in receivers {
-            writer.add_element(receiver);
-        }
-        writer.finish().expect("in-memory filter");
-        Self::decode(&bytes).expect("filter the writer encoded")
-    }
-
-    /// How many distinct receivers the set holds.
-    pub fn count(&self) -> u32 {
-        self.values.len() as u32
-    }
-
-    /// Which of `receivers` may be in the set, in the same order.
-    pub fn matches(&self, key: &Hash, receivers: &[ReceiverBytes]) -> Vec<bool> {
-        let (k0, k1) = keys(key);
-        let range = self.values.len() as u64 * M;
-        receivers
-            .iter()
-            .map(|r| {
-                let hash = siphash24::Hash::hash_to_u64_with_keys(k0, k1, r);
-                let value = ((u128::from(hash) * u128::from(range)) >> 64) as u64;
-                self.values.binary_search(&value).is_ok()
-            })
-            .collect()
-    }
-
-    /// Strictly decodes one set: a minimal count no larger than a `u32`, every value in
-    /// range, zero padding and nothing after it.
-    fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let mut rest = bytes;
-        let count = read_compact_size(&mut rest).map_err(|_| Error::Malformed)?;
-        // Each value takes at least `P + 1` bits; bound the count before allocating.
-        if count > u64::from(u32::MAX) || count * (u64::from(P) + 1) > rest.len() as u64 * 8 {
-            return Err(Error::Malformed);
-        }
-        let range = count * M;
-        let mut bits = BitStreamReader::new(&mut rest);
-        let mut read = |n: u8| bits.read(n).map_err(|_| Error::Malformed);
-        let mut used = 0u64;
-        let mut value = 0u64;
-        let mut values = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            // A quotient is bounded by the bit count, so the shift cannot overflow.
-            let mut quotient = 0u64;
-            while read(1)? == 1 {
-                quotient += 1;
-            }
-            let remainder = read(P)?;
-            used += quotient + 1 + u64::from(P);
-            value = value
-                .checked_add((quotient << P) + remainder)
-                .filter(|v| *v < range)
-                .ok_or(Error::Malformed)?;
-            values.push(value);
-        }
-        let padding = ((8 - used % 8) % 8) as u8;
-        if padding > 0 && read(padding)? != 0 {
-            return Err(Error::Malformed);
-        }
-        if !rest.is_empty() {
-            return Err(Error::Malformed);
-        }
-        Ok(Self {
-            bytes: bytes.to_vec(),
-            values,
-        })
-    }
 }
 
 /// The labeled sets of one publication, in label order; see the module docs.
@@ -195,11 +92,11 @@ impl Filters {
             out.push(u8::try_from(label.len()).expect("label length"));
             out.extend(label.as_bytes());
             out.extend(
-                u32::try_from(filter.bytes.len())
+                u32::try_from(filter.bytes().len())
                     .expect("filter size")
                     .to_le_bytes(),
             );
-            out.extend(&filter.bytes);
+            out.extend(filter.bytes());
         }
         if out.len() > MAX_FILTERS_BYTES {
             return Err(Error::Malformed);
@@ -246,6 +143,7 @@ impl Filters {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{gcs::keys, ReceiverBytes};
 
     /// `n` distinct pseudorandom receivers; filters hash bytes and never parse them.
     fn receivers(n: u32, seed: u8) -> Vec<ReceiverBytes> {
@@ -298,7 +196,7 @@ mod tests {
         let false_matches = paid.matches(&key, &others).iter().filter(|m| **m).count();
         assert!(false_matches < 12, "{false_matches} false matches");
         // About 1.6 bytes per receiver.
-        assert!(paid.bytes.len() < 340, "{}", paid.bytes.len());
+        assert!(paid.bytes().len() < 340, "{}", paid.bytes().len());
     }
 
     /// The upstream BIP 158 reader agrees with the strict decoder on every member.
@@ -310,10 +208,7 @@ mod tests {
         let (k0, k1) = keys(&key);
         let reader = bitcoin::bip158::GcsFilterReader::new(k0, k1, M, P);
         assert!(reader
-            .match_all(
-                &mut filter.bytes.as_slice(),
-                members.iter().map(|r| r.as_slice())
-            )
+            .match_all(&mut filter.bytes(), members.iter().map(|r| r.as_slice()))
             .unwrap());
         let mut expected = Vec::new();
         let mut upstream = bitcoin::bip158::GcsFilterWriter::new(&mut expected, k0, k1, M, P);
@@ -322,7 +217,8 @@ mod tests {
         }
         upstream.finish().unwrap();
         assert_eq!(
-            filter.bytes, expected,
+            filter.bytes(),
+            expected,
             "receiver filter bytes must remain unchanged"
         );
         assert_eq!(filter.count(), 100);
@@ -370,11 +266,11 @@ mod tests {
         assert!(Filters::decode(&count).is_err());
         // A set's count must be minimally encoded, and its padding zero.
         assert!(Filter::decode(&[0xfd, 0, 0]).is_err());
-        let one = Filter::build(&key, &receivers(1, 1)).bytes;
+        let one = Filter::build(&key, &receivers(1, 1)).bytes().to_vec();
         let mut padded = one.clone();
         *padded.last_mut().unwrap() |= 1;
         assert!(Filter::decode(&one).is_ok() && Filter::decode(&padded).is_err());
-        let valid = Filter::build(&key, &receivers(100, 3)).bytes;
+        let valid = Filter::build(&key, &receivers(100, 3)).bytes().to_vec();
         for end in 0..valid.len() {
             assert!(Filter::decode(&valid[..end]).is_err());
         }
@@ -414,8 +310,8 @@ mod tests {
             bytes.extend(1u32.to_le_bytes());
             bytes.push(PAID.len() as u8);
             bytes.extend(PAID.as_bytes());
-            bytes.extend((filter.bytes.len() as u32).to_le_bytes());
-            bytes.extend(&filter.bytes);
+            bytes.extend((filter.bytes().len() as u32).to_le_bytes());
+            bytes.extend(filter.bytes());
             (Filters::new(filter, []).unwrap(), bytes)
         };
         let fits = (MAX_FILTERS_BYTES as u64 - 30) * 8 / (u64::from(P) + 1);
