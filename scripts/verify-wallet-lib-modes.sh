@@ -235,8 +235,8 @@ if cargo check --manifest-path "$repo_root/Cargo.toml" \
 fi
 
 # Resolve the facade as a fresh external consumer. The workspace lockfile
-# cannot protect downstream users, and Cargo's prerelease ranges otherwise
-# allow a newer Zakura release with a higher MSRV into their graph.
+# cannot protect downstream users. Check that compatible Common requirements
+# resolve without duplicate package identities and still build on the promised MSRV.
 consumer="$(mktemp -d "${TMPDIR:-/tmp}/zakura-wallet-lib-consumer.XXXXXX")"
 trap 'rm -rf "$probe_root" "$consumer"' EXIT
 mkdir -p "$consumer/src"
@@ -262,10 +262,9 @@ cargo +1.97 generate-lockfile --manifest-path "$consumer/Cargo.toml"
 cargo +1.97 metadata --manifest-path "$consumer/Cargo.toml" \
   --format-version 1 --locked > "$consumer/metadata.json"
 
-python3 - "$consumer/metadata.json" "$manifest" <<'PY'
+python3 - "$consumer/metadata.json" <<'PY'
 import json
 import sys
-import tomllib
 from pathlib import Path
 
 packages = json.loads(Path(sys.argv[1]).read_text())["packages"]
@@ -294,24 +293,21 @@ expected = {
     "zakura-sapling-crypto",
     "zakura-sinsemilla",
 }
-with open(sys.argv[2], "rb") as manifest_file:
-    protocol = tomllib.load(manifest_file)["rewire"]["zcash_protocol"]
-required_version = protocol["version"].removeprefix("=")
+# Cargo checks the declared version ranges; inspect package identities here.
 required_source = "registry+https://github.com/rust-lang/crates.io-index"
 problems = []
 for name in sorted(expected):
     matches = [package for package in packages if package["name"] == name]
     if (
         len(matches) != 1
-        or matches[0]["version"] != required_version
         or matches[0]["source"] != required_source
     ):
         problems.append(
-            f"{name}: expected exactly one {required_version} from {required_source}, "
+            f"{name}: expected exactly one compatible package from {required_source}, "
             f"found {matches or 'missing'}"
         )
 if problems:
-    print("fresh consumer did not stay on the pinned Common release:", file=sys.stderr)
+    print("fresh consumer did not resolve one compatible Common family:", file=sys.stderr)
     for problem in problems:
         print(f"  {problem}", file=sys.stderr)
     raise SystemExit(1)
@@ -320,5 +316,5 @@ PY
 cargo +1.97 check --manifest-path "$consumer/Cargo.toml" --locked
 
 echo "verified: Zakura is the clean default, each explicit backend resolves"
-echo "to exactly one stack, a fresh Rust 1.97 consumer stays on the pinned Common release, and"
+echo "to exactly one stack, a fresh Rust 1.97 consumer resolves compatible Common packages, and"
 echo "neither no-backend nor both-backends compiles"

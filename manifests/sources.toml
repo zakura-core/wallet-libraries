@@ -77,25 +77,25 @@ path = "zcash_client_sqlite"
 package = "zakura-client-sqlite"
 version = "0.1.0-rc9.1"
 
-# Workspace dependencies pinned together to the published Common RC3 family.
+# Minimum compatible Common release; Cargo.lock records the tested versions.
 # The upstream dependency key is kept, so crate sources continue to say
 # `orchard::` and `zcash_primitives::` while resolving to the forks.
 [rewire]
-bellman = { package = "zakura-bellman", version = "=4.0.0-rc3" }
-bls12_381 = { package = "zakura-bls12-381", version = "=4.0.0-rc3" }
-jubjub = { package = "zakura-jubjub", version = "=4.0.0-rc3" }
-zcash_address = { package = "zakura-address", version = "=4.0.0-rc3" }
-zcash_protocol = { package = "zakura-protocol", version = "=4.0.0-rc3" }
-transparent = { package = "zakura-transparent", version = "=4.0.0-rc3" }
-zip321 = { package = "zakura-zip321", version = "=4.0.0-rc3" }
-zcash_note_encryption = { package = "zakura-note-encryption", version = "=4.0.0-rc3" }
-zcash_primitives = { package = "zakura-primitives", version = "=4.0.0-rc3" }
-zcash_keys = { package = "zakura-keys", version = "=4.0.0-rc3" }
-zcash_proofs = { package = "zakura-proofs", version = "=4.0.0-rc3" }
-orchard = { features = ["backend-halo2"], package = "zakura-orchard", version = "=4.0.0-rc3" }
-sapling = { package = "zakura-sapling-crypto", version = "=4.0.0-rc3" }
-redjubjub = { package = "zakura-redjubjub", version = "=4.0.0-rc3" }
-pasta_curves = { package = "zakura-pasta-curves", version = "=4.0.0-rc3" }
+bellman = { package = "zakura-bellman", version = "4.0.0-rc3" }
+bls12_381 = { package = "zakura-bls12-381", version = "4.0.0-rc3" }
+jubjub = { package = "zakura-jubjub", version = "4.0.0-rc3" }
+zcash_address = { package = "zakura-address", version = "4.0.0-rc3" }
+zcash_protocol = { package = "zakura-protocol", version = "4.0.0-rc3" }
+transparent = { package = "zakura-transparent", version = "4.0.0-rc3" }
+zip321 = { package = "zakura-zip321", version = "4.0.0-rc3" }
+zcash_note_encryption = { package = "zakura-note-encryption", version = "4.0.0-rc3" }
+zcash_primitives = { package = "zakura-primitives", version = "4.0.0-rc3" }
+zcash_keys = { package = "zakura-keys", version = "4.0.0-rc3" }
+zcash_proofs = { package = "zakura-proofs", version = "4.0.0-rc3" }
+orchard = { features = ["backend-halo2"], package = "zakura-orchard", version = "4.0.0-rc3" }
+sapling = { package = "zakura-sapling-crypto", version = "4.0.0-rc3" }
+redjubjub = { package = "zakura-redjubjub", version = "4.0.0-rc3" }
+pasta_curves = { package = "zakura-pasta-curves", version = "4.0.0-rc3" }
 
 # Non-renamed ecosystem crates whose public traits changed with the 1.0 crypto
 # family. The generated workspace keeps upstream's other dependency metadata

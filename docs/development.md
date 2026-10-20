@@ -137,6 +137,16 @@ Keep IPIR, its native client, InspiRING and ReinspiRING on the same source when
 repinning, since their exposed types must share one identity. Repin to the
 published family after the extracted client is released.
 
+## Common dependency compatibility
+
+Library manifests use compatible Common version requirements so wallet and node
+consumers can select a shared release without matching exact pins. The lockfiles
+record the concrete versions tested by this repository. Orchard notes, keys and
+proof components must still have one package identity across each consumer's
+graph; the fresh-consumer checks retain that boundary and the Rust 1.97 build.
+Changing the allowed range does not establish that an untested future prerelease
+preserves those APIs or cryptographic behavior.
+
 ## CI and completion
 
 CI runs existing configurations independently, retains doctests and repository
