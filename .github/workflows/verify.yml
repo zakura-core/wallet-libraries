@@ -36,9 +36,16 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup show
-      - run: python3 -m unittest discover -s scripts/tests -v
-      - run: cargo fmt --all -- --check
-      - run: cargo fmt --manifest-path tools/proto/Cargo.toml --all -- --check
+      - name: Run repository preflight
+        run: |
+          python3 - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+          for step in json.loads(Path('.github/preflight.json').read_text())['steps']:
+              print(step['name'], flush=True)
+              subprocess.run(step['argv'], check=True)
+          PY
       - run: git diff --exit-code
 
   repository-checks:
