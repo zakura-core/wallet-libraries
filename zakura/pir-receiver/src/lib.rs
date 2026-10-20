@@ -1,7 +1,7 @@
 //! Private receiver lookups over caller-owned transports.
 //!
-//! Rolling GCS hints are an optional bandwidth optimization. Matches trigger PIR rather
-//! than compact scanning. PIR hides the queried address, but query timing is visible.
+//! Rolling block GCS hints and sealed shard filters are optional bandwidth optimizations.
+//! Matches trigger PIR rather than compact scanning. PIR hides the queried address, but query timing is visible.
 //! All returned payments require wallet authentication, inclusion and spend checks.
 //! Network futures hold no database handle. The caller commits results through the
 //! wallet's recovery queue, which fences stale callbacks and enforces the feature toggle.
@@ -9,12 +9,12 @@
 #[cfg(feature = "wallet")]
 mod discovery;
 #[cfg(feature = "wallet")]
-pub use discovery::{lookup, publication, witness};
+pub use discovery::{FILTER_STEP_LIMIT, lookup, publication, witness};
 
 pub use receiver_pir::{Error as DirectoryError, transport::Transport};
 /// The directory format and client underneath, for callers that need them directly.
 /// They parse records and witness payloads structurally only: records from
-/// `DirectoryClient::page` and payloads from `DirectoryClient::witness` are
+/// `InventoryClient::page` and payloads from `InventoryClient::witness` are
 /// unchecked. Commit them through the wallet recovery queue before crediting funds.
 pub use {receiver_directory, receiver_pir};
 

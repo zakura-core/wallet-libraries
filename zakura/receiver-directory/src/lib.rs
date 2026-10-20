@@ -6,6 +6,7 @@
 pub mod blocks;
 mod gcs;
 pub mod record;
+pub mod shards;
 pub mod snapshot;
 pub mod witness;
 

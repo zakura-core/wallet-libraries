@@ -13,6 +13,9 @@
 
 ### Added
 
+- Add `shards::ShardFilter`: one GCS receiver filter per sealed shard, with bounds separate
+  from block hints and streaming, bounded-memory decoding and matching.
+
 - Add `witness`: companion witness tables of 512-byte lower paths addressed by ordinal,
   with a manifest bound to its payment table and construction tree.
 

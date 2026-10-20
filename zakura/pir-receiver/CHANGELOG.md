@@ -4,6 +4,7 @@
 
 ### Changed
 
+- `lookup` and `witness` read against a captured shard inventory (`InventoryClient`), and `publication` describes that inventory. A lookup step covers sealed shards excluded by a validated filter, then reads at most one segment, returning a cursor bound to the inventory.
 - Replace `witnesses` with `witness`, one PIR query to the payment session's companion witness table per candidate. A request bound to another session is `Revision`.
 
 - Replace the store-owning discovery pass and provider seen checks with bounded `publication`, `lookup` and `witnesses` network steps behind the `wallet` feature. The caller commits results through the wallet recovery queue after requests complete.

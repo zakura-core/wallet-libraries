@@ -6,13 +6,15 @@
 use orchard::keys::{FullViewingKey, Scope};
 use receiver_directory::{
     RawRecord,
+    shards::{Coverage, ShardFilter},
     snapshot::{Manifest, PROFILE, Snapshot, assign_ordinals},
     witness,
 };
 use receiver_pir::{
-    AcceptedCoverage, MIN_ROWS, Publication,
+    MIN_ROWS, Publication,
+    inventory::{FilterRef, Inventory, Shard},
     server::{Server, WitnessServer},
-    transport::DirectoryClient,
+    transport::{Inventories, InventoryClient},
 };
 use std::sync::Mutex;
 use zakura_pir_receiver::{
@@ -203,84 +205,226 @@ fn one_time_value(st: &State) -> u64 {
         .unwrap()
 }
 
-/// Publishes full payment history and its companion witness table with the production
-/// builders, the witnesses built at the publication's own end.
-fn publish(records: &[Record], commitments: &[[u8; 32]], end: ChainPoint) -> Routes {
-    // Each record's row slot, which the publisher writes after validating it.
-    let mut records: Vec<_> = records
-        .iter()
-        .map(|record| {
-            RawRecord::decode(&record.encode().unwrap())
-                .unwrap()
-                .unwrap()
-        })
-        .collect();
-    assign_ordinals(&mut records);
-    let manifest = Manifest {
-        profile: PROFILE.into(),
-        history_revision: 0,
-        genesis: GENESIS,
-        start_height: ACTIVATION,
-        start_parent: [0; 32],
-        start_position: 0,
-        end_height: end.height.into(),
-        end_hash: end.hash.0,
-        end_position: commitments.len() as u64,
-        rows: MIN_ROWS,
-        salt: [5; 32],
-        records: 0,
-        data_sha256: [0; 32],
-    };
-    let snapshot = Snapshot::build(manifest, &records).unwrap();
-    let mut positions: Vec<_> = records.iter().map(|r| r.payment.position).collect();
-    positions.sort_unstable();
-    let table = witness::Table::build(
-        witness::Manifest {
-            profile: witness::PROFILE.into(),
-            genesis: GENESIS,
-            history_revision: 0,
-            payments: snapshot.manifest.revision().unwrap(),
-            payloads: 0,
-            rows: MIN_ROWS,
-            tree_height: end.height.into(),
-            tree_hash: end.hash.0,
-            tree_size: commitments.len() as u64,
-            data_sha256: [0; 32],
-        },
-        &payloads(commitments, &positions).unwrap(),
-    )
-    .unwrap();
-    let payments = Server::new(snapshot).unwrap();
-    let witnesses = WitnessServer::new(table, &payments).unwrap();
-    Routes::new(payments, witnesses)
+/// One planned shard: its last block, whether it is sealed (with a filter when
+/// `filter`), and how many segments its records split across.
+#[derive(Clone, Copy)]
+struct Plan {
+    end: BlockHeight,
+    sealed: bool,
+    filter: bool,
+    segments: usize,
 }
 
-/// One publication's receiver routes, answered as the receiver service answers them:
-/// its sessions, PIR setup and real PIR evaluation of each encrypted payment or witness
-/// query. A session it does not serve is gone (410).
-struct Routes {
-    payments: Server,
-    witnesses: WitnessServer,
-}
-
-impl Routes {
-    /// Binds routes to one immutable publication.
-    fn new(payments: Server, witnesses: WitnessServer) -> Self {
+impl Plan {
+    /// A sealed shard ending at `end`, with one segment and a filter.
+    fn sealed(end: BlockHeight) -> Self {
         Self {
-            payments,
-            witnesses,
+            end,
+            sealed: true,
+            filter: true,
+            segments: 1,
         }
     }
 
+    /// The recent tier ending at `end`, with one segment and no filter.
+    fn recent(end: BlockHeight) -> Self {
+        Self {
+            end,
+            sealed: false,
+            filter: false,
+            segments: 1,
+        }
+    }
+}
+
+/// The block identity and Ironwood tree size at `height` in `st`'s cached chain.
+fn block_at(st: &State, height: BlockHeight) -> ([u8; 32], u64) {
+    let block = cached(st, height);
+    (
+        block.hash().0,
+        block
+            .chain_metadata
+            .unwrap()
+            .ironwood_commitment_tree_size
+            .into(),
+    )
+}
+
+/// Publishes `records`, the chain's indexed Ironwood outputs, as contiguous shards following
+/// `plans` with the production snapshot, witness, filter and inventory builders. Every
+/// witness table is built at the last shard's end. `segment_of` picks a record's segment
+/// within its shard; pages are segment-local.
+fn publish_with(
+    st: &State,
+    records: &[Record],
+    plans: &[Plan],
+    segment_of: &dyn Fn(&Record) -> usize,
+) -> Routes {
+    publish_revision(st, records, plans, segment_of, 0)
+}
+
+/// [`publish_with`] under correction generation `revision`.
+fn publish_revision(
+    st: &State,
+    records: &[Record],
+    plans: &[Plan],
+    segment_of: &dyn Fn(&Record) -> usize,
+    revision: u64,
+) -> Routes {
+    let last = plans.last().unwrap().end;
+    let mut commitments = vec![];
+    st.cache()
+        .with_blocks::<_, ()>(None, None, |block| {
+            if block.height() <= last {
+                for tx in &block.vtx {
+                    for action in &tx.ironwood_actions {
+                        commitments.push(action.cmx.as_slice().try_into().unwrap());
+                    }
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    let (last_hash, last_size) = block_at(st, last);
+    let mut routes = Routes::default();
+    let mut shards = vec![];
+    let (mut start, mut parent, mut position) = (ACTIVATION, [0; 32], 0);
+    for plan in plans {
+        let (end_hash, end_position) = block_at(st, plan.end);
+        let mut segments = vec![];
+        let in_shard: Vec<_> = records
+            .iter()
+            .filter(|r| (start..=u32::from(plan.end)).contains(&r.payment.height))
+            .collect();
+        for index in 0..plan.segments {
+            let mut raw: Vec<RawRecord> = vec![];
+            for record in in_shard
+                .iter()
+                .filter(|r| segment_of(r) % plan.segments == index)
+            {
+                let mut r = RawRecord::decode(&record.encode().unwrap())
+                    .unwrap()
+                    .unwrap();
+                r.page = raw.iter().filter(|o| o.receiver == r.receiver).count() as u32;
+                raw.push(r);
+            }
+            for i in 0..raw.len() {
+                let receiver = raw[i].receiver;
+                raw[i].total = raw.iter().filter(|o| o.receiver == receiver).count() as u32;
+            }
+            assign_ordinals(&mut raw);
+            let snapshot = Snapshot::build(
+                Manifest {
+                    profile: PROFILE.into(),
+                    history_revision: revision,
+                    genesis: GENESIS,
+                    start_height: start,
+                    start_parent: parent,
+                    start_position: position,
+                    end_height: plan.end.into(),
+                    end_hash,
+                    end_position,
+                    rows: MIN_ROWS,
+                    salt: [5 + index as u8; 32],
+                    records: 0,
+                    data_sha256: [0; 32],
+                },
+                &raw,
+            )
+            .unwrap();
+            let mut positions: Vec<_> = raw.iter().map(|r| r.payment.position).collect();
+            positions.sort_unstable();
+            let table = witness::Table::build(
+                witness::Manifest {
+                    profile: witness::PROFILE.into(),
+                    genesis: GENESIS,
+                    history_revision: revision,
+                    payments: snapshot.manifest.revision().unwrap(),
+                    payloads: 0,
+                    rows: MIN_ROWS,
+                    tree_height: last.into(),
+                    tree_hash: last_hash,
+                    tree_size: last_size,
+                    data_sha256: [0; 32],
+                },
+                &payloads(&commitments[..last_size as usize], &positions).unwrap(),
+            )
+            .unwrap();
+            let payments = Server::new(snapshot).unwrap();
+            let witnesses = WitnessServer::new(table, &payments).unwrap();
+            segments.push(Publication {
+                payments: payments.manifest().clone(),
+                witnesses: witnesses.manifest().clone(),
+            });
+            routes.payments.push(payments);
+            routes.witnesses.push(witnesses);
+        }
+        let coverage = Coverage {
+            start_height: start,
+            end_height: plan.end.into(),
+            end_hash,
+        };
+        let filter = (plan.sealed && plan.filter).then(|| {
+            let filter = ShardFilter::build(
+                GENESIS,
+                revision,
+                coverage,
+                in_shard.iter().map(|r| r.receiver.as_bytes()),
+            )
+            .unwrap();
+            routes
+                .filters
+                .push((filter.digest(), filter.bytes().to_vec()));
+            FilterRef {
+                digest: filter.digest(),
+                bytes: filter.bytes().len() as u32,
+                receivers: filter.receivers() as u32,
+            }
+        });
+        shards.push(Shard {
+            index: 0,
+            sealed: plan.sealed,
+            start_height: start,
+            start_parent: parent,
+            start_position: position,
+            end_height: plan.end.into(),
+            end_hash,
+            end_position,
+            segments,
+            filter,
+        });
+        (start, parent, position) = (u32::from(plan.end) + 1, end_hash, end_position);
+    }
+    routes.inventory = Some(Inventory::build(GENESIS, revision, shards).unwrap());
+    routes
+}
+
+/// One inventory's receiver routes, answered as the receiver service answers them: its
+/// head and chunks, shard filters by digest, session setup and real PIR evaluation of each
+/// encrypted payment or witness query. A session it does not serve is gone (410).
+#[derive(Default)]
+struct Routes {
+    inventory: Option<Inventory>,
+    payments: Vec<Server>,
+    witnesses: Vec<WitnessServer>,
+    filters: Vec<([u8; 32], Vec<u8>)>,
+}
+
+impl Routes {
     /// The status and body for `method` on `path`.
     fn answer(&self, method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
         let route = path.strip_prefix("/v1/receiver/").unwrap_or(path);
+        let inventory = self.inventory.as_ref().unwrap();
         if (method, route) == ("POST", "query") {
             let session = body.get(4..36);
-            let response = if session == Some(&self.witnesses.id()[..]) {
-                self.witnesses.respond(body)
+            let response = if let Some(w) =
+                self.witnesses.iter().find(|w| session == Some(&w.id()[..]))
+            {
+                w.respond(body)
+            } else if let Some(p) = self.payments.iter().find(|p| session == Some(&p.id()[..])) {
+                p.respond(body)
             } else {
-                self.payments.respond(body)
+                Err(receiver_pir::Error::Revision)
             };
             return match response {
                 Ok(response) => (200, response),
@@ -289,43 +433,61 @@ impl Routes {
                 Err(_) => (500, Vec::new()),
             };
         }
-        if (method, route) == ("GET", "init") {
-            let publication = Publication {
-                payments: self.payments.manifest().clone(),
-                witnesses: self.witnesses.manifest().clone(),
-            };
-            return (200, serde_json::to_vec(&publication).unwrap());
-        }
-        let Some((material, id)) = route.split_once('/').filter(|_| method == "GET") else {
+        if method != "GET" {
             return (404, Vec::new());
-        };
-        if hex::decode(id).ok().filter(|id| id.len() == 32).is_none() {
-            return (400, Vec::new());
         }
-        let public = if id == hex::encode(self.payments.id()) {
-            self.payments.public()
-        } else if id == hex::encode(self.witnesses.id()) {
-            self.witnesses.public()
-        } else {
-            return (410, Vec::new());
-        };
-        match material {
-            "public" => (200, public.to_vec()),
+        if route == "inventory" {
+            return (200, serde_json::to_vec(inventory.head()).unwrap());
+        }
+        let parts: Vec<_> = route.split('/').collect();
+        match parts.as_slice() {
+            ["inventory", id, chunk] => {
+                if *id != hex::encode(inventory.head().inventory) {
+                    return (410, Vec::new());
+                }
+                let chunks = inventory.chunks().unwrap();
+                match chunk.parse::<usize>().ok().and_then(|i| chunks.get(i)) {
+                    Some(chunk) => (200, serde_json::to_vec(chunk).unwrap()),
+                    None => (404, Vec::new()),
+                }
+            }
+            ["shard-filters", digest] => self
+                .filters
+                .iter()
+                .find(|(d, _)| hex::encode(d) == *digest)
+                .map_or((404, Vec::new()), |(_, f)| (200, f.clone())),
+            ["public", id] => {
+                let public = self
+                    .payments
+                    .iter()
+                    .find(|p| hex::encode(p.id()) == *id)
+                    .map(|p| p.public())
+                    .or_else(|| {
+                        self.witnesses
+                            .iter()
+                            .find(|w| hex::encode(w.id()) == *id)
+                            .map(|w| w.public())
+                    });
+                public.map_or((410, Vec::new()), |p| (200, p.to_vec()))
+            }
             _ => (404, Vec::new()),
         }
     }
 }
 
-/// Serves a [`publish`]ed publication of `records`, the chain's only Ironwood outputs,
-/// ending at `end`.
-fn serve(records: &[Record], end: ChainPoint) -> Directory {
-    let commitments: Vec<_> = records.iter().map(|record| record.payment.cmx).collect();
-    Directory::new(publish(records, &commitments, end))
+/// Serves `records`, the chain's only Ironwood outputs, as one recent tier ending at `end`.
+fn serve(st: &State, records: &[Record], end: ChainPoint) -> Directory {
+    Directory::new(publish_with(
+        st,
+        records,
+        &[Plan::recent(end.height)],
+        &|_| 0,
+    ))
 }
 
 /// Serves a directory's routes in process and records every request.
 struct Directory {
-    routes: Routes,
+    routes: Mutex<Routes>,
     requests: Mutex<Vec<String>>,
 }
 
@@ -333,9 +495,14 @@ impl Directory {
     /// Serves `routes` at [`ORIGIN`].
     fn new(routes: Routes) -> Self {
         Self {
-            routes,
+            routes: Mutex::new(routes),
             requests: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Replaces the served inventory; the old one's objects are gone.
+    fn replace(&self, routes: Routes) {
+        *self.routes.lock().unwrap() = routes;
     }
 
     /// Every request so far, as method and path.
@@ -358,7 +525,7 @@ impl Directory {
             .lock()
             .unwrap()
             .push(format!("{method} {path}"));
-        let (status, body) = self.routes.answer(method, path, &body);
+        let (status, body) = self.routes.lock().unwrap().answer(method, path, &body);
         if body.len() > limit {
             return Err(DirectoryError::Transport("response over its limit".into()));
         }
@@ -396,28 +563,32 @@ fn lookups(directory: &Directory) -> usize {
         .count()
 }
 
-/// Opens a session only after selecting its endpoint from the wallet's chain.
-async fn connect(directory: &Directory, end: ChainPoint) -> DirectoryClient<&Directory> {
-    let manifest = DirectoryClient::fetch_manifest(ORIGIN, &directory)
+/// Captures the served inventory only after checking its end against the wallet's chain,
+/// reading sealed shards' filters.
+async fn connect(directory: &Directory, end: ChainPoint) -> InventoryClient<&Directory> {
+    connect_with(directory, end, true).await
+}
+
+/// [`connect`], reading every required segment blind unless `filters`.
+async fn connect_with(
+    directory: &Directory,
+    end: ChainPoint,
+    filters: bool,
+) -> InventoryClient<&Directory> {
+    let head = Inventories::head(ORIGIN, &directory, &GENESIS)
         .await
         .unwrap();
-    DirectoryClient::connect_manifest(
-        ORIGIN,
-        directory,
-        AcceptedCoverage {
-            genesis: GENESIS,
-            required_start: ACTIVATION,
-            height: end.height.into(),
-            hash: end.hash.0,
-        },
-        manifest,
-    )
-    .await
-    .unwrap()
+    let inventory = Inventories::capture(ORIGIN, &directory, head)
+        .await
+        .unwrap();
+    inventory
+        .accept(&GENESIS, ACTIVATION, end.height.into(), &end.hash.0)
+        .unwrap();
+    InventoryClient::new(ORIGIN, directory, inventory, filters)
 }
 
 /// Completes bounded wallet work through encrypted payment and witness queries.
-async fn drain(st: &mut State, account: AccountUuid, client: &DirectoryClient<&Directory>) {
+async fn drain(st: &mut State, account: AccountUuid, client: &InventoryClient<&Directory>) {
     for _ in 0..256 {
         let status = st.wallet().db().one_time_recovery(account, NOW).unwrap();
         if let Some(work) = status.lookups.first() {
@@ -444,16 +615,12 @@ async fn drain(st: &mut State, account: AccountUuid, client: &DirectoryClient<&D
 }
 
 /// Starts recovery without retaining a database handle across network work.
-fn begin(r: &mut Restored, client: &DirectoryClient<&Directory>, direct: bool) {
+fn begin(r: &mut Restored, client: &InventoryClient<&Directory>, direct: bool) {
     let db = r.st.wallet_mut().db_mut();
     db.set_one_time_recovery_enabled(r.account, true).unwrap();
     assert!(
-        db.begin_one_time_recovery(
-            r.account,
-            wallet_publication(client.publication()).unwrap(),
-            direct
-        )
-        .unwrap()
+        db.begin_one_time_recovery(r.account, wallet_publication(client.inventory()), direct)
+            .unwrap()
     );
 }
 
@@ -461,7 +628,7 @@ fn begin(r: &mut Restored, client: &DirectoryClient<&Directory>, direct: bool) {
 #[tokio::test]
 async fn seed_recovery_pages_history_and_stops_at_four_empty_indexes() {
     let mut r = restored(&[0, 3, 3, 40]);
-    let directory = serve(&r.records, r.through);
+    let directory = serve(&r.st, &r.records, r.through);
     let client = connect(&directory, r.through).await;
     begin(&mut r, &client, true);
     drain(&mut r.st, r.account, &client).await;
@@ -497,7 +664,7 @@ async fn seed_recovery_pages_history_and_stops_at_four_empty_indexes() {
 async fn a_positive_hint_without_payment_settles_with_one_empty_query() {
     use receiver_directory::blocks::{Batch, BlockFilter, BlockId};
     let mut r = restored(&[]);
-    let initial = serve(&[], r.through);
+    let initial = serve(&r.st, &[], r.through);
     let client = connect(&initial, r.through).await;
     begin(&mut r, &client, true);
     drain(&mut r.st, r.account, &client).await;
@@ -529,7 +696,7 @@ async fn a_positive_hint_without_payment_settles_with_one_empty_query() {
             .record_one_time_filters(r.account, token, 0, &[end], &[receiver.key])
             .unwrap()
     );
-    let directory = serve(&[], end);
+    let directory = serve(&r.st, &[], end);
     let client = connect(&directory, end).await;
     drain(&mut r.st, r.account, &client).await;
     let status =
@@ -556,7 +723,7 @@ async fn a_positive_hint_without_payment_settles_with_one_empty_query() {
 #[tokio::test]
 async fn manual_bound_crosses_a_gap() {
     let mut r = restored(&[5]);
-    let directory = serve(&r.records, r.through);
+    let directory = serve(&r.st, &r.records, r.through);
     let client = connect(&directory, r.through).await;
     begin(&mut r, &client, true);
     drain(&mut r.st, r.account, &client).await;
@@ -564,11 +731,7 @@ async fn manual_bound_crosses_a_gap() {
     assert!(
         r.st.wallet_mut()
             .db_mut()
-            .check_one_time_history(
-                r.account,
-                wallet_publication(client.publication()).unwrap(),
-                Some(6)
-            )
+            .check_one_time_history(r.account, wallet_publication(client.inventory()), Some(6))
             .unwrap()
     );
     drain(&mut r.st, r.account, &client).await;
@@ -589,7 +752,7 @@ async fn manual_bound_crosses_a_gap() {
 #[tokio::test]
 async fn disabling_fences_a_held_encrypted_response() {
     let mut r = restored(&[0]);
-    let directory = serve(&r.records, r.through);
+    let directory = serve(&r.st, &r.records, r.through);
     let client = connect(&directory, r.through).await;
     begin(&mut r, &client, true);
     let work =
@@ -630,7 +793,7 @@ async fn disabling_fences_a_held_encrypted_response() {
 async fn a_forged_payment_is_not_an_empty_answer() {
     let mut r = restored(&[1]);
     r.records[0].receiver = receiver(&r.st, 0);
-    let directory = serve(&r.records, r.through);
+    let directory = serve(&r.st, &r.records, r.through);
     let client = connect(&directory, r.through).await;
     begin(&mut r, &client, true);
     let work =
@@ -662,7 +825,7 @@ async fn a_forged_payment_is_not_an_empty_answer() {
 #[tokio::test]
 async fn a_replaced_session_reads_the_payment_again_for_its_witness() {
     let mut r = restored(&[2, 0]);
-    let old = serve(&r.records, r.through);
+    let old = serve(&r.st, &r.records, r.through);
     let client = connect(&old, r.through).await;
     begin(&mut r, &client, true);
     let work =
@@ -691,7 +854,7 @@ async fn a_replaced_session_reads_the_payment_again_for_its_witness() {
     // A later publication covers one more block; its payment session differs.
     r.st.generate_and_scan_empty_blocks(1);
     let end = tip(&r.st);
-    let directory = serve(&r.records, end);
+    let directory = serve(&r.st, &r.records, end);
     let current = connect(&directory, end).await;
     assert!(matches!(
         witness(&current, &request).await,
@@ -713,8 +876,344 @@ async fn a_replaced_session_reads_the_payment_again_for_its_witness() {
         status
             .lookups
             .iter()
-            .any(|w| w.work.key == KeyId::new(Purpose::Receive, 0) && w.last.is_none())
+            .any(|w| w.work.key == KeyId::new(Purpose::Receive, 0) && w.cursor.is_none())
     );
     drain(&mut r.st, r.account, &current).await;
     assert_eq!(one_time_value(&r.st), 2 * VALUE);
+}
+
+/// Validated shard filters stand in for PIR on sealed shards that exclude a receiver,
+/// while the recent tier is always read. Blind reads cover every required segment. Both
+/// routes recover the same payment.
+#[tokio::test]
+async fn shard_filters_skip_sealed_shards_that_exclude_a_receiver() {
+    for filters in [true, false] {
+        let mut r = restored(&[0]);
+        let paid = BlockHeight::from(r.records[0].payment.height);
+        let plans = [Plan::sealed(paid), Plan::recent(r.through.height)];
+        let directory = Directory::new(publish_with(&r.st, &r.records, &plans, &|_| 0));
+        let client = connect_with(&directory, r.through, filters).await;
+        begin(&mut r, &client, true);
+        drain(&mut r.st, r.account, &client).await;
+        assert_eq!(one_time_value(&r.st), VALUE);
+        assert!(
+            r.st.wallet()
+                .db()
+                .one_time_recovery(r.account, NOW)
+                .unwrap()
+                .restore_complete
+        );
+        // I0 reads both shards and its witness. I1 to I4 skip the sealed shard by filter,
+        // or read it blind.
+        let expected = if filters { 2 + 4 + 1 } else { 2 * 5 + 1 };
+        assert_eq!(lookups(&directory), expected, "filters: {filters}");
+        let fetched = directory
+            .requests()
+            .iter()
+            .filter(|r| r.starts_with("GET /v1/receiver/shard-filters/"))
+            .count();
+        assert_eq!(fetched, usize::from(filters), "one fetch serves every key");
+    }
+}
+
+/// A filter that fails its digest is never a negative: the shard is read over PIR.
+#[tokio::test]
+async fn a_substituted_shard_filter_falls_back_to_pir() {
+    let mut r = restored(&[0]);
+    let paid = BlockHeight::from(r.records[0].payment.height);
+    let plans = [Plan::sealed(paid), Plan::recent(r.through.height)];
+    let mut routes = publish_with(&r.st, &r.records, &plans, &|_| 0);
+    // Serve an empty set under the digest the inventory names.
+    let empty = ShardFilter::build(
+        GENESIS,
+        0,
+        Coverage {
+            start_height: ACTIVATION,
+            end_height: paid.into(),
+            end_hash: block_at(&r.st, paid).0,
+        },
+        [],
+    )
+    .unwrap();
+    routes.filters[0].1 = empty.bytes().to_vec();
+    let directory = Directory::new(routes);
+    let client = connect(&directory, r.through).await;
+    begin(&mut r, &client, true);
+    drain(&mut r.st, r.account, &client).await;
+    assert_eq!(one_time_value(&r.st), VALUE);
+    assert_eq!(lookups(&directory), 2 * 5 + 1);
+}
+
+/// A shard too large for one table splits into segments with local pages. A receiver
+/// only in the last segment is still found, and every segment is read before the shard
+/// counts as covered.
+#[tokio::test]
+async fn a_receiver_only_in_the_last_segment_of_an_oversized_shard_is_found() {
+    let mut r = restored(&[1, 0]);
+    let last = BlockHeight::from(r.records[1].payment.height);
+    let target = r.records[1].receiver;
+    let plans = [
+        Plan {
+            end: last,
+            sealed: true,
+            filter: true,
+            segments: 2,
+        },
+        Plan::recent(r.through.height),
+    ];
+    let directory = Directory::new(publish_with(&r.st, &r.records, &plans, &|record| {
+        usize::from(record.receiver == target)
+    }));
+    let client = connect(&directory, r.through).await;
+    begin(&mut r, &client, true);
+    drain(&mut r.st, r.account, &client).await;
+    assert_eq!(one_time_value(&r.st), 2 * VALUE);
+    assert!(
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, NOW)
+            .unwrap()
+            .restore_complete
+    );
+}
+
+/// After direct catch-up completes a receiver through one inventory's end, a payment just
+/// past that point lands in a newly sealed shard that straddles it. The whole shard is
+/// required, so its filter matches and the payment is read; shards wholly below are not.
+#[tokio::test]
+async fn a_payment_in_a_shard_straddling_the_completion_point_is_found() {
+    let mut r = restored(&[]);
+    let first = Directory::new(publish_with(
+        &r.st,
+        &[],
+        &[Plan::recent(r.through.height)],
+        &|_| 0,
+    ));
+    let client = connect(&first, r.through).await;
+    begin(&mut r, &client, true);
+    drain(&mut r.st, r.account, &client).await;
+    assert_eq!(lookups(&first), 4);
+    let completed = r.through.height;
+    let payment = pay_restored_key(&mut r.st, 0, 0);
+    r.st.generate_and_scan_empty_blocks(2);
+    let end = tip(&r.st);
+    let records = [payment];
+    // The sealed shard covers from activation through the payment's next block, straddling
+    // the completion point; the recent tier holds the last block.
+    let plans = [Plan::sealed(end.height - 1), Plan::recent(end.height)];
+    let directory = Directory::new(publish_with(&r.st, &records, &plans, &|_| 0));
+    let client = connect(&directory, end).await;
+    let status =
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, NOW)
+            .unwrap();
+    assert!(status.lookups.is_empty());
+    begin(&mut r, &client, true);
+    let queued =
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, NOW)
+            .unwrap();
+    assert!(
+        queued.lookups.iter().all(|w| w.from == completed + 1),
+        "catch-up continues after the completed span"
+    );
+    drain(&mut r.st, r.account, &client).await;
+    assert_eq!(one_time_value(&r.st), VALUE);
+    // I0 reads the straddling shard, the recent tier and its witness; I1 to I3 only the
+    // recent tier. I4 waits for the payment to confirm.
+    assert_eq!(lookups(&directory), 3 + 3);
+}
+
+/// An inventory replaced between reading a payment and reading its witness: the old
+/// sessions are gone, so neither a held lookup nor the witness completes anything. The
+/// candidate stays pending and is read again in the new inventory's sealed segment.
+#[tokio::test]
+async fn inventory_replacement_between_payment_and_witness_keeps_the_payment_pending() {
+    let mut r = restored(&[1, 0]);
+    let directory = serve(&r.st, &r.records, r.through);
+    let old = connect(&directory, r.through).await;
+    begin(&mut r, &old, true);
+    let status =
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, NOW)
+            .unwrap();
+    let key0 = status
+        .lookups
+        .iter()
+        .find(|w| w.work.key == KeyId::new(Purpose::Receive, 0))
+        .unwrap()
+        .clone();
+    let page = lookup(&old, &key0).await.unwrap();
+    assert!(
+        r.st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(r.account, &key0, &page, NOW)
+            .unwrap()
+    );
+    let held =
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, NOW)
+            .unwrap()
+            .lookups
+            .into_iter()
+            .find(|w| w.work.key == KeyId::new(Purpose::Receive, 1))
+            .unwrap();
+    // The publisher seals the paid blocks into a two-segment shard and drops the old
+    // inventory's sessions.
+    let last = BlockHeight::from(r.records[1].payment.height);
+    let plans = [
+        Plan {
+            end: last,
+            sealed: true,
+            filter: true,
+            segments: 2,
+        },
+        Plan::recent(r.through.height),
+    ];
+    let target = r.records[1].receiver;
+    directory.replace(publish_with(&r.st, &r.records, &plans, &|record| {
+        usize::from(record.receiver == target)
+    }));
+    assert!(matches!(
+        lookup(&old, &held).await,
+        Err(DirectoryError::Revision)
+    ));
+    let status =
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, NOW)
+            .unwrap();
+    let request = status.witnesses[0];
+    assert!(matches!(
+        witness(&old, &request).await,
+        Err(DirectoryError::Revision)
+    ));
+    assert_eq!(one_time_value(&r.st), 0);
+    assert!(
+        r.st.wallet_mut()
+            .db_mut()
+            .refresh_one_time_witness(r.account, status.token, request)
+            .unwrap()
+    );
+    let current = connect(&directory, r.through).await;
+    drain(&mut r.st, r.account, &current).await;
+    assert_eq!(one_time_value(&r.st), 2 * VALUE);
+    assert!(
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, NOW)
+            .unwrap()
+            .restore_complete
+    );
+}
+
+/// A correction that adds a previously omitted payment invalidates a held empty answer
+/// from the old generation; the corrected inventory's sealed shard yields the payment.
+#[tokio::test]
+async fn a_correction_adding_an_omitted_payment_voids_held_empties() {
+    let mut r = restored(&[0]);
+    let paid = BlockHeight::from(r.records[0].payment.height);
+    let plans = [Plan::sealed(paid), Plan::recent(r.through.height)];
+    let omitted = Directory::new(publish_with(&r.st, &[], &plans, &|_| 0));
+    let client = connect(&omitted, r.through).await;
+    begin(&mut r, &client, true);
+    let work =
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, NOW)
+            .unwrap()
+            .lookups
+            .remove(0);
+    let mut held = vec![];
+    let mut step = work.clone();
+    loop {
+        let page = lookup(&client, &step).await.unwrap();
+        let next = page.next.clone();
+        held.push(page);
+        match next {
+            Some(cursor) => step.cursor = Some(cursor),
+            None => break,
+        }
+    }
+    let corrected = Directory::new(publish_revision(&r.st, &r.records, &plans, &|_| 0, 1));
+    let client = connect(&corrected, r.through).await;
+    assert!(
+        r.st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(r.account, wallet_publication(client.inventory()), true)
+            .unwrap()
+    );
+    assert!(
+        !r.st
+            .wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(r.account, &work, &held[0], NOW)
+            .unwrap()
+    );
+    drain(&mut r.st, r.account, &client).await;
+    assert_eq!(one_time_value(&r.st), VALUE);
+}
+
+/// Shard filters are kept within a byte budget: a restore needing more filters than fit
+/// evicts and fetches them again, and still recovers every payment.
+#[tokio::test]
+async fn recovery_continues_across_more_filters_than_the_cache_holds() {
+    let mut r = restored(&[0, 2, 1]);
+    let height = |i: usize| BlockHeight::from(r.records[i].payment.height);
+    let plans = [
+        Plan::sealed(height(0)),
+        Plan::sealed(height(1)),
+        Plan::sealed(height(2)),
+        Plan::recent(r.through.height),
+    ];
+    let routes = publish_with(&r.st, &r.records, &plans, &|_| 0);
+    let largest = routes.filters.iter().map(|(_, f)| f.len()).max().unwrap();
+    let directory = Directory::new(routes);
+    let client = connect(&directory, r.through)
+        .await
+        .with_filter_budget(largest);
+    begin(&mut r, &client, true);
+    drain(&mut r.st, r.account, &client).await;
+    assert_eq!(one_time_value(&r.st), 3 * VALUE);
+    let fetched = directory
+        .requests()
+        .iter()
+        .filter(|r| r.starts_with("GET /v1/receiver/shard-filters/"))
+        .count();
+    assert!(fetched > 3, "evicted filters are fetched again: {fetched}");
+}
+
+/// Opened segment sessions are kept within a byte budget: a blind restore across more
+/// segments than fit evicts sessions and opens them again, and still recovers every payment.
+#[tokio::test]
+async fn a_blind_restore_reopens_segments_beyond_the_session_budget() {
+    let mut r = restored(&[0, 2, 1]);
+    let height = |i: usize| BlockHeight::from(r.records[i].payment.height);
+    let plans = [
+        Plan::sealed(height(0)),
+        Plan::sealed(height(1)),
+        Plan::sealed(height(2)),
+        Plan::recent(r.through.height),
+    ];
+    let directory = Directory::new(publish_with(&r.st, &r.records, &plans, &|_| 0));
+    let one_segment = 2 * receiver_pir::public_bytes(MIN_ROWS).unwrap();
+    let client = connect_with(&directory, r.through, false)
+        .await
+        .with_segment_budget(one_segment);
+    begin(&mut r, &client, true);
+    drain(&mut r.st, r.account, &client).await;
+    assert_eq!(one_time_value(&r.st), 3 * VALUE);
+    let setups = directory
+        .requests()
+        .iter()
+        .filter(|r| r.starts_with("GET /v1/receiver/public/"))
+        .count();
+    assert!(
+        setups > 2 * plans.len(),
+        "evicted sessions reopen: {setups}"
+    );
 }

@@ -2,6 +2,7 @@
 //! records and witness payloads are returned as untrusted bytes, which the wallet checks
 //! cryptographically before use.
 mod client;
+pub mod inventory;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod transport;
@@ -21,9 +22,9 @@ pub use receiver_directory::snapshot::{MAX_ROWS, MIN_ROWS};
 pub const HEADER_BYTES: usize = 52;
 /// Leading bytes of every request header, which responses echo.
 pub const MAGIC: &[u8; 4] = b"RPQ1";
-/// Bound on a serialized directory or session manifest, read before parsing. A
-/// session manifest over it, in the compact JSON that `/v1/receiver/init` serves, is
-/// invalid (see [`Manifest::validate`]), so no server can publish one.
+/// Bound on a serialized session manifest, segment or inventory head, read before
+/// parsing. A session manifest over it in compact JSON is invalid (see
+/// [`Manifest::validate`]), so no server can publish one.
 pub const MAX_MANIFEST_BYTES: usize = 16384;
 /// Plaintext coefficients per row: a row is exactly one packing block.
 const COLS: usize = snapshot::ROW_BYTES / 2;
@@ -121,8 +122,8 @@ impl WitnessManifest {
     }
 }
 
-/// A payment session and the companion witness session bound to it, which
-/// `/v1/receiver/init` serves together.
+/// One segment: a payment session and the companion witness session bound to it, as an
+/// inventory lists them.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Publication {
@@ -143,22 +144,6 @@ impl Publication {
             return Err(Error::Malformed);
         }
         Ok(())
-    }
-}
-
-/// Supply this from wallet chain validation, never by copying the directory manifest.
-#[derive(Clone, Copy, Debug)]
-pub struct AcceptedCoverage {
-    pub genesis: Hash,
-    pub required_start: u32,
-    pub height: u32,
-    pub hash: Hash,
-}
-
-impl AcceptedCoverage {
-    /// Fail unless `m` ends at this anchor and covers the required history.
-    pub fn check(&self, m: &snapshot::Manifest) -> Result<(), Error> {
-        Ok(m.accept(self.genesis, self.required_start, self.height, self.hash)?)
     }
 }
 

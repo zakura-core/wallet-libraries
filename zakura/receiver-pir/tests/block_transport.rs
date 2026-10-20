@@ -1,6 +1,6 @@
 use receiver_directory::blocks::{Batch, BlockFilter, BlockId, Head, MAX_BATCH_BYTES};
 use receiver_pir::{
-    transport::{DirectoryClient, Transport},
+    transport::{Inventories, Transport},
     Error,
 };
 use std::{
@@ -55,7 +55,7 @@ fn head_is_bounded_and_network_checked() {
         calls: RefCell::default(),
     };
     assert_eq!(
-        ready(DirectoryClient::fetch_block_head(
+        ready(Inventories::block_head(
             "https://receiver/",
             &http,
             &[9; 32]
@@ -70,17 +70,12 @@ fn head_is_bounded_and_network_checked() {
             16 * 1024
         )
     );
-    assert!(ready(DirectoryClient::fetch_block_head(
-        "https://receiver",
-        &http,
-        &[8; 32]
-    ))
-    .is_err());
+    assert!(ready(Inventories::block_head("https://receiver", &http, &[8; 32])).is_err());
     let too_large = Http {
         body: vec![0; 16 * 1024 + 1],
         calls: RefCell::default(),
     };
-    assert!(ready(DirectoryClient::fetch_block_head(
+    assert!(ready(Inventories::block_head(
         "https://receiver",
         &too_large,
         &[9; 32]
@@ -111,7 +106,7 @@ fn batch_checks_session_range_and_payload() {
         body: batch.encode().unwrap(),
         calls: RefCell::default(),
     };
-    let got = ready(DirectoryClient::fetch_block_batch(
+    let got = ready(Inventories::block_batch(
         "https://receiver/",
         &http,
         &head,
@@ -127,7 +122,7 @@ fn batch_checks_session_range_and_payload() {
             MAX_BATCH_BYTES
         )
     );
-    assert!(ready(DirectoryClient::fetch_block_batch(
+    assert!(ready(Inventories::block_batch(
         "https://receiver",
         &http,
         &head,
@@ -142,7 +137,7 @@ fn batch_checks_session_range_and_payload() {
     );
     let mut changed = head;
     changed.revision = 3;
-    assert!(ready(DirectoryClient::fetch_block_batch(
+    assert!(ready(Inventories::block_batch(
         "https://receiver",
         &http,
         &changed,

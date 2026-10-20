@@ -7,6 +7,7 @@ ownership or spendability.
 - `record`: the 289-byte payment record, re-exported from
   `zakura-receiver-crypto::wire` with cryptography disabled.
 - `blocks`: bounded rolling GCS hints, separate from full payment history.
+- `shards`: one GCS receiver filter per sealed shard, with its own bounds.
 - `snapshot`: publication manifests and their revision, row placement, snapshot
   construction and validation, continuation-page rules, and row lookup. Each record's
   witness ordinal is the rank of its note position (`assign_ordinals`), so a payment
@@ -34,3 +35,13 @@ The batch binds the captured revision and requested range, and checks parent lin
 PIR manifests require `history_revision`, the operator correction generation also advertised by rolling hints. It is bound into the immutable publication/session identity. Clients must retain the required generation with unfinished work and reject answers from an older generation, even when block heights and hashes match. Reorgs still use chain hashes.
 
 Snapshots contain only the manifest and payment rows; witnesses live in the companion table. Aggregate `paid`, provider `seen` and `recent` sets and the `IWFLT1` envelope are removed. This is an incompatible change to the unlaunched format. It does not prune PIR history or change row placement.
+
+## Sealed shard filters
+
+`shards::ShardFilter` encodes a sealed shard's distinct receivers: `IWSHARD1`, the
+genesis hash, the correction generation (`u64`), the shard's first and last heights
+(`u32`) and last block hash, then the length (`u32`) and the GCS set. It uses the block
+hints' P=20 and M=1,569,792, keyed by network and coverage. A shard can hold up to
+8,388,608 receivers in at most 24 MiB, well past one block's 65,536. Decoding and
+matching stream the set, so memory does not grow with the shard. A wallet checks the
+digest its inventory names before use; a missing, malformed or matching filter means PIR.

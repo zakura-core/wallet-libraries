@@ -196,7 +196,12 @@ fn register<P: Parameters>(
     if inserted != 0 {
         conn.execute("UPDATE ironwood_one_time_recovery SET generation = generation + 1 WHERE account_id = ?1", [owner.0])?;
         if key_id.purpose() == Purpose::Receive {
-            restore::queue::register_history(conn, owner.0, id)?;
+            restore::queue::register_history(
+                conn,
+                owner.0,
+                id,
+                restore::queue::activation(params),
+            )?;
         }
     }
     Ok((id, OneTimeKey { key_id, fvk }))

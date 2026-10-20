@@ -4,7 +4,7 @@ use super::{
     directory::{Directory, ORIGIN},
 };
 use orchard::keys::FullViewingKey;
-use receiver_pir::{AcceptedCoverage, transport::DirectoryClient};
+use receiver_pir::transport::{Inventories, InventoryClient};
 use rusqlite::Connection;
 use sapling::prover::mock::{MockOutputProver, MockSpendProver};
 use secrecy::SecretVec;
@@ -143,7 +143,44 @@ impl Device {
     /// made due here by a far-future clock), a publication or ordinary sync, or the user
     /// (feature or manual search paused, which leaves a cancelled search's lookups without
     /// a reason).
+    ///
+    /// Shard-local state must also stay consistent: no settled request keeps a target
+    /// nothing would clear, a completed read keeps no segment cursor, and a candidate whose
+    /// witness binding was dropped has an unread lookup to rebind it after rewound coverage,
+    /// unless the user paused that lookup.
     pub fn assert_no_stall(&self) {
+        let owner: i64 = self
+            .conn()
+            .query_row(
+                "SELECT id FROM accounts WHERE uuid = ?1",
+                [self.account.expose_uuid()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let (settled, cursor, unbound): (bool, bool, bool) = self
+            .conn()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
+                 JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
+                 WHERE k.account_id = ?1 AND l.reasons != 0 AND l.target_height IS NOT NULL
+                   AND l.read_complete = 1 AND l.done_height >= l.target_height
+                   AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
+                       WHERE p.one_time_key_id = k.id)),
+                 EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
+                 JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
+                 WHERE k.account_id = ?1 AND l.read_complete = 1 AND l.inventory IS NOT NULL),
+                 EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
+                 JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
+                 JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id
+                 WHERE k.account_id = ?1 AND p.payments IS NULL
+                   AND l.reasons != 0 AND (l.read_complete = 1 OR l.target_height IS NULL))",
+                [owner],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(!settled, "a settled request keeps a target nothing clears");
+        assert!(!cursor, "a completed read keeps a segment cursor");
+        assert!(!unbound, "an unbound candidate has no read to rebind it");
         let state = self.db.one_time_recovery(self.account, i64::MAX).unwrap();
         if !state.enabled || !state.lookups.is_empty() || !state.witnesses.is_empty() {
             return;
@@ -177,31 +214,25 @@ impl Device {
         );
     }
 
-    /// Opens an exact publication checked against this wallet's already scanned chain.
-    pub async fn connect<'a>(&self, directory: &'a Directory) -> DirectoryClient<&'a Directory> {
-        let manifest = DirectoryClient::fetch_manifest(ORIGIN, &directory)
+    /// Captures an inventory whose end this wallet's already scanned chain holds.
+    pub async fn connect<'a>(&self, directory: &'a Directory) -> InventoryClient<&'a Directory> {
+        let head = Inventories::head(ORIGIN, &directory, &GENESIS)
             .await
             .unwrap();
-        let end = manifest.payments.directory.end_height.into();
+        let end = head.end_height.into();
         let hash = self.db.get_block_hash(end).unwrap().unwrap();
-        DirectoryClient::connect_manifest(
-            ORIGIN,
-            directory,
-            AcceptedCoverage {
-                genesis: GENESIS,
-                required_start: ACTIVATION,
-                height: end.into(),
-                hash: hash.0,
-            },
-            manifest,
-        )
-        .await
-        .unwrap()
+        let inventory = Inventories::capture(ORIGIN, &directory, head)
+            .await
+            .unwrap();
+        inventory
+            .accept(&GENESIS, ACTIVATION, end.into(), &hash.0)
+            .unwrap();
+        InventoryClient::new(ORIGIN, directory, inventory, true)
     }
 
     /// Completes the real encrypted lookup and witness pipeline, preserving database
     /// boundaries. A witness bound to another session is read again under this one.
-    pub async fn drain(&mut self, chain: &Chain, client: &DirectoryClient<&Directory>) {
+    pub async fn drain(&mut self, chain: &Chain, client: &InventoryClient<&Directory>) {
         for _ in 0..256 {
             self.assert_no_stall();
             let state = self.status(chain);
@@ -242,7 +273,7 @@ impl Device {
     /// Captures direct catch-up obligations and runs them against one compatible session.
     pub async fn recover(&mut self, chain: &Chain, directory: &Directory) {
         let client = self.connect(directory).await;
-        let publication = publication(client.publication()).unwrap();
+        let publication = publication(client.inventory());
         assert!(
             self.db
                 .begin_one_time_recovery(self.account, publication, true)

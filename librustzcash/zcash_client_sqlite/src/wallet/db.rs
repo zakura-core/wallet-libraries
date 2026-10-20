@@ -2043,10 +2043,19 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_LOOKUPS: &str = "CREATE TABLE ironwood_
                 target_height INTEGER CHECK (target_height BETWEEN 0 AND 4294967295),
                 reasons INTEGER NOT NULL DEFAULT 0 CHECK (reasons BETWEEN 0 AND 3),
                 done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295),
+                done_from INTEGER CHECK (done_from BETWEEN 0 AND 4294967295),
+                start_height INTEGER NOT NULL DEFAULT 0 CHECK (start_height BETWEEN 0 AND 4294967295),
+                checked_height INTEGER CHECK (checked_height BETWEEN 0 AND 4294967295),
+                inventory BLOB CHECK (length(inventory) = 32),
+                shard INTEGER CHECK (shard BETWEEN 0 AND 4294967295),
+                segment INTEGER CHECK (segment BETWEEN 0 AND 4294967295),
                 last_record BLOB CHECK (length(last_record) = 289),
                 read_complete INTEGER NOT NULL DEFAULT 0 CHECK (read_complete IN (0, 1)),
                 attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
-                next_attempt_at INTEGER NOT NULL DEFAULT 0
+                next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                CHECK ((inventory IS NULL) = (shard IS NULL)
+                    AND (inventory IS NULL) = (segment IS NULL)),
+                CHECK (inventory IS NOT NULL OR last_record IS NULL)
             )";
 
 pub(super) const TABLE_IRONWOOD_SPEND_JOURNAL: &str = "CREATE TABLE ironwood_spend_journal (

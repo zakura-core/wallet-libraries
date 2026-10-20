@@ -4,18 +4,28 @@
 
 ### Changed
 
-- `/v1/receiver/init` serves a `Publication`: the payment session and its companion
-  `WitnessManifest`. `DirectoryClient::fetch_manifest` returns it and `connect_manifest`
-  takes it.
+- Publications are inventories of sealed Receiver shards and a recent tier. A shard's
+  segments are `Publication`s: a payment session and its companion `WitnessManifest`.
+  `/v1/receiver/inventory` serves the `inventory::Head` and
+  `/v1/receiver/inventory/{inventory}/{chunk}` its bounded chunks. `Client::new` no
+  longer takes an anchor: the wallet accepts the whole inventory with `Inventory::accept`.
 
 ### Added
 
-- `WitnessClient`, `WitnessQuery`, `server::WitnessServer` and `DirectoryClient::witness`:
+- `WitnessClient`, `WitnessQuery`, `server::WitnessServer` and `InventoryClient::witness`:
   one PIR query per witness payload, by ordinal, under its own session ID.
+- `inventory::{Inventory, Head, Chunk, Shard, FilterRef}`, `transport::Inventories` and
+  `transport::InventoryClient`: captured shard inventories, lazily opened segment
+  sessions and shard filters fetched by digest. Captures check each chunk as it arrives
+  within a byte budget (`Inventories::capture_within`), and fetched filters are kept in a
+  byte-bounded cache (`InventoryClient::with_filter_budget`), as are opened segment sessions
+  (`InventoryClient::with_segment_budget`).
 - Fetch rolling block-filter availability and bounded batches independently of PIR sessions through the caller-owned transport.
 
 ### Removed
 
+- `DirectoryClient`, `AcceptedCoverage` and `/v1/receiver/init`: one session for all
+  history. Its rolling-hint reads moved to `Inventories`.
 - `DirectoryClient::witnesses` and `transport::MAX_WITNESS_BYTES`: the common witness file.
 - Remove aggregate filter downloads and evaluator storage. Rolling block hints are independent of full-history PIR sessions.
 - Remove `server::Server::rows` and `server::Server::new_reusing_rows`, which only tests used. A prepared server no longer keeps a second copy of its encoded rows.

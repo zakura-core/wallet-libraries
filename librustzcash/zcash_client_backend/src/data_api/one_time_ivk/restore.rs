@@ -36,14 +36,12 @@ pub struct PublicationEnd {
     pub tree_size: u64,
 }
 
-/// Identity and full-history coverage of the session answering a lookup.
+/// One captured inventory: its identity and the history it covers. Every cursor and
+/// completion is relative to the inventory it was captured under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecoveryPublication {
-    /// The payment session.
+    /// The inventory identity.
     pub id: [u8; 32],
-    /// The companion witness session captured with it, which candidates read under this
-    /// publication must use.
-    pub witnesses: [u8; 32],
     pub history_revision: u64,
     pub start_height: BlockHeight,
     pub end: PublicationEnd,
@@ -56,26 +54,61 @@ pub struct DiscoveryWork {
     pub receiver: [u8; 43],
 }
 
+/// Where a request stopped inside one captured inventory: a shard, one of its segments,
+/// and the last page read there. Meaningless under any other inventory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LookupCursor {
+    pub inventory: [u8; 32],
+    pub shard: u32,
+    pub segment: u32,
+    /// The last record read in that segment; pages are segment-local.
+    pub last: Option<DirectoryRecord>,
+}
+
 /// One pending address history, independent of why it was queued.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LookupWork {
     pub token: RecoveryToken,
     pub work: DiscoveryWork,
+    /// History below this height is already checked for this request. A shard reaching
+    /// it is read whole.
+    pub from: BlockHeight,
     /// An answer below this height cannot complete the request.
     pub through: BlockHeight,
-    /// Last accepted record. A new session must reproduce its payment before continuing.
-    pub last: Option<DirectoryRecord>,
+    pub cursor: Option<LookupCursor>,
 }
 
-/// A bounded consecutive slice from one immutable PIR session.
+/// The payment and witness sessions of the segment a step read, which bind its records'
+/// ordinals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SegmentRef {
+    pub shard: u32,
+    pub segment: u32,
+    pub payments: [u8; 32],
+    /// The segment's companion witness session, which its candidates must use.
+    pub witnesses: [u8; 32],
+}
+
+/// One bounded step against one captured inventory: shards a negative filter excluded,
+/// then consecutive pages of at most one segment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LookupPage {
     pub publication: RecoveryPublication,
-    /// The new session's copy of the saved cursor, including its current total.
-    pub previous: Option<DirectoryRecord>,
+    /// The segment `records` come from, if the step read one.
+    pub segment: Option<SegmentRef>,
     pub records: Vec<DirectoryRecord>,
-    /// True only for a genuine empty page zero or the final advertised page.
-    pub complete: bool,
+    /// Every required shard ending at or below this height is covered: excluded by a
+    /// validated filter of this inventory or read through its final page in every segment.
+    pub checked_through: Option<BlockHeight>,
+    /// Where the next step resumes; `None` once every required shard is covered.
+    pub next: Option<LookupCursor>,
+}
+
+impl LookupPage {
+    /// Whether every shard the request needs is covered through the inventory's end.
+    pub fn complete(&self) -> bool {
+        self.next.is_none()
+    }
 }
 
 /// A candidate waiting for its lower inclusion path. The ordinal is meaningful only in the

@@ -6,7 +6,7 @@ use harness::{
     directory::{Directory, ORIGIN},
 };
 use orchard::keys::Scope;
-use receiver_pir::transport::DirectoryClient;
+use receiver_pir::transport::Inventories;
 use zakura_one_time_ivk::{KeyId, Purpose};
 use zcash_client_backend::{
     data_api::{WalletRead as _, WalletWrite as _, transparent_ledger::ChainPoint},
@@ -55,7 +55,7 @@ fn seed_gap_and_recycled_hole() {
             .db
             .check_one_time_history(
                 desktop.account,
-                zakura_pir_receiver::publication(client.publication()).unwrap(),
+                zakura_pir_receiver::publication(client.inventory()),
                 Some(42),
             )
             .unwrap();
@@ -113,7 +113,7 @@ fn live_filters_and_late_publication() {
 
 /// Downloads real GCS bodies and atomically records only locally matched receiver obligations.
 async fn hints(device: &mut Device, directory: &Directory) {
-    let head = DirectoryClient::fetch_block_head(ORIGIN, &directory, &GENESIS)
+    let head = Inventories::block_head(ORIGIN, &directory, &GENESIS)
         .await
         .unwrap();
     let state = device.db.one_time_recovery(device.account, 0).unwrap();
@@ -121,7 +121,7 @@ async fn hints(device: &mut Device, directory: &Directory) {
         .filter_frontier
         .map_or(ACTIVATION, |p| u32::from(p.height) + 1);
     let (token, receivers) = device.db.one_time_receivers(device.account).unwrap();
-    let batch = DirectoryClient::fetch_block_batch(ORIGIN, &directory, &head, from, 256)
+    let batch = Inventories::block_batch(ORIGIN, &directory, &head, from, 256)
         .await
         .unwrap();
     let bytes: Vec<_> = receivers.iter().map(|r| r.receiver).collect();
@@ -177,7 +177,7 @@ fn offline_repeat_requires_manual_history() {
             .db
             .check_one_time_history(
                 phone.account,
-                zakura_pir_receiver::publication(client.publication()).unwrap(),
+                zakura_pir_receiver::publication(client.inventory()),
                 None,
             )
             .unwrap();
@@ -266,7 +266,7 @@ fn refund_after_birthday_requires_earlier_funding_memo() {
                 .db
                 .check_one_time_history(
                     desktop.account,
-                    zakura_pir_receiver::publication(client.publication()).unwrap(),
+                    zakura_pir_receiver::publication(client.inventory()),
                     None
                 )
                 .unwrap()
@@ -385,6 +385,30 @@ fn lowering_birthday_recovers_an_excluded_payment_after_restart() {
     });
 }
 
+/// Seed receive discovery checks history from activation, not the birthday: I0 paid in a
+/// sealed shard before the birthday permits I4, which is paid afterwards. A walk limited to
+/// post-birthday history would see I0 to I3 empty and stop before I4.
+#[test]
+fn a_pre_birthday_payment_extends_the_seed_walk_across_shards() {
+    run(async {
+        let mut chain = Chain::new();
+        let phone = Device::new(&mut chain, [8; 32], ACTIVATION.into());
+        chain.pay(&[(phone.key(Purpose::Receive, 0), 100_000)], Payer::Near);
+        chain.mine(2 * harness::directory::SEAL_BLOCKS);
+        let birthday = chain.tip();
+        chain.pay(&[(phone.key(Purpose::Receive, 4), 70_000)], Payer::Near);
+        chain.mine(12);
+        let mut desktop = Device::new(&mut chain, [8; 32], birthday);
+        desktop.scan(&chain);
+        let directory = Directory::publish(&chain, 0, 0, 256, 0);
+        desktop.recover(&chain, &directory).await;
+        assert_eq!(desktop.unspent_one_time_value(), 70_000);
+        let status = desktop.status(&chain);
+        assert!(status.restore_complete);
+        assert_eq!(status.restore_next, 9);
+    });
+}
+
 /// Errors and canceled work never become successful empty pages or silently resume manual ranges.
 #[test]
 fn failures_and_manual_cancellation_survive_restart() {
@@ -399,7 +423,7 @@ fn failures_and_manual_cancellation_survive_restart() {
         wallet.recover(&chain, &directory).await;
         assert_eq!(wallet.unspent_one_time_value(), 0);
         let client = wallet.connect(&directory).await;
-        let publication = zakura_pir_receiver::publication(client.publication()).unwrap();
+        let publication = zakura_pir_receiver::publication(client.inventory());
         wallet
             .db
             .check_one_time_history(wallet.account, publication, Some(10))
@@ -571,8 +595,10 @@ fn randomized_cross_device_payment_oracle() {
                     &phone,
                     &payments.iter().map(|(_, p)| p.clone()).collect::<Vec<_>>(),
                 );
+                phone.assert_no_stall();
                 if rng.try_next_u64().unwrap() % 2 == 0 {
                     phone.reopen();
+                    phone.assert_no_stall();
                 }
                 if round % 3 == 2 {
                     // This model records completion only from prior expected payments,
@@ -587,6 +613,7 @@ fn randomized_cross_device_payment_oracle() {
                     desktop.reopen();
                     desktop.scan(&chain);
                     desktop.recover(&chain, &directory).await;
+                    desktop.assert_no_stall();
                     assert_receipts(&desktop, &desktop_receipts);
                 }
             }
@@ -602,16 +629,96 @@ fn randomized_cross_device_payment_oracle() {
                     .db
                     .check_one_time_history(
                         desktop.account,
-                        zakura_pir_receiver::publication(client.publication()).unwrap(),
+                        zakura_pir_receiver::publication(client.inventory()),
                         None
                     )
                     .unwrap()
             );
+            desktop.assert_no_stall();
             desktop.drain(&chain, &client).await;
+            desktop.assert_no_stall();
+            assert_receipts(&desktop, &all);
+            // Complete more receive histories than one progress step's budget, then rewind
+            // so part of that coverage survives, and search it again against a publication
+            // from the surviving chain.
+            let wide = highest.unwrap_or(0) + 70;
+            let client = desktop.connect(&directory).await;
+            assert!(
+                desktop
+                    .db
+                    .check_one_time_history(
+                        desktop.account,
+                        zakura_pir_receiver::publication(client.inventory()),
+                        Some(wide)
+                    )
+                    .unwrap()
+            );
+            desktop.drain(&chain, &client).await;
+            desktop.assert_no_stall();
+            let depth = 1 + (rng.try_next_u64().unwrap() % 4) as u32;
+            desktop.db.truncate_to_height(chain.tip() - depth).unwrap();
+            desktop.assert_no_stall();
+            // The wallet may truncate further, to its nearest retained checkpoint.
+            let kept = desktop
+                .db
+                .block_max_scanned()
+                .unwrap()
+                .unwrap()
+                .block_height();
+            let surviving = Directory::publish(&chain, u32::from(chain.tip() - kept), 0, 256, 0);
+            let client = desktop.connect(&surviving).await;
+            assert!(
+                desktop
+                    .db
+                    .check_one_time_history(
+                        desktop.account,
+                        zakura_pir_receiver::publication(client.inventory()),
+                        Some(wide)
+                    )
+                    .unwrap()
+            );
+            desktop.assert_no_stall();
+            // Older work may wait for a later publication; answer what this one covers.
+            for _ in 0..512 {
+                let Some(work) = desktop
+                    .status(&chain)
+                    .lookups
+                    .into_iter()
+                    .find(|w| w.through <= kept)
+                else {
+                    break;
+                };
+                let page = zakura_pir_receiver::lookup(&client, &work).await.unwrap();
+                assert!(
+                    desktop
+                        .db
+                        .record_one_time_lookup(desktop.account, &work, &page, chain.now())
+                        .unwrap()
+                );
+                desktop.assert_no_stall();
+            }
+            desktop.scan(&chain);
+            desktop.recover(&chain, &directory).await;
+            desktop.assert_no_stall();
+            assert_receipts(&desktop, &all);
+            // A birthday-lowering restart reopens every known history.
+            desktop
+                .db
+                .rewind_to_chain_state(
+                    chain.state_below(ACTIVATION.into()),
+                    std::collections::HashSet::from([desktop.account]),
+                )
+                .unwrap();
+            desktop.reopen();
+            desktop.assert_no_stall();
+            desktop.scan(&chain);
+            desktop.recover(&chain, &directory).await;
+            desktop.assert_no_stall();
             assert_receipts(&desktop, &all);
             let mut restored = Device::new(&mut chain, seed, ACTIVATION.into());
             restored.scan(&chain);
             restored.recover(&chain, &directory).await;
+            restored.assert_no_stall();
             assert_receipts(&restored, &all);
         }
     });

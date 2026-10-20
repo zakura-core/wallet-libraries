@@ -1,6 +1,6 @@
 use crate::{
-    profile, public_bytes, response_bytes, AcceptedCoverage, Error, Manifest, Profile,
-    WitnessManifest, COLS, HEADER_BYTES, MAGIC,
+    profile, public_bytes, response_bytes, Error, Manifest, Profile, WitnessManifest, COLS,
+    HEADER_BYTES, MAGIC,
 };
 use rand::{rngs::OsRng, Rng};
 use receiver_directory::{snapshot, witness, Hash, RawRecord, ReceiverBytes};
@@ -70,7 +70,7 @@ impl Session {
     }
 }
 
-/// A PIR session for one manifest, accepted against the caller's chain anchor.
+/// A PIR session for one payment table.
 pub struct Client {
     manifest: Manifest,
     session: Session,
@@ -92,14 +92,10 @@ impl Query {
 }
 
 impl Client {
-    /// Check the manifest against `accepted` and the public setup against its digest.
-    pub fn new(
-        manifest: Manifest,
-        public: &[u8],
-        accepted: AcceptedCoverage,
-    ) -> Result<Self, Error> {
+    /// Check the manifest and the public setup against its digest. Chain coverage is
+    /// accepted for the whole inventory (see [`crate::inventory::Inventory::accept`]).
+    pub fn new(manifest: Manifest, public: &[u8]) -> Result<Self, Error> {
         manifest.validate()?;
-        accepted.check(&manifest.directory)?;
         let session = Session::new(
             manifest.id()?,
             manifest.directory.rows,
@@ -112,6 +108,11 @@ impl Client {
     /// The session manifest.
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
+    }
+
+    /// Bytes of public setup this session keeps.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.session.public.len()
     }
 
     /// Receiver and page influence only the encrypted row selection, never a public header.
@@ -176,6 +177,11 @@ impl WitnessClient {
     /// The session manifest.
     pub fn manifest(&self) -> &WitnessManifest {
         &self.manifest
+    }
+
+    /// Bytes of public setup this session keeps.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.session.public.len()
     }
 
     /// The ordinal influences only the encrypted row selection.

@@ -1,31 +1,36 @@
-//! Production snapshot, GCS and encrypted PIR codecs served through a counted transport.
+//! Production snapshot, witness, shard inventory, GCS and encrypted PIR codecs served
+//! through a counted transport. History is sealed into shards every [`SEAL_BLOCKS`] blocks,
+//! the last partial shard being the recent tier.
 use super::chain::{ACTIVATION, Chain, GENESIS};
 use receiver_directory::{
     RawRecord,
     blocks::{Batch, BlockFilter, BlockId, Head},
+    shards::{Coverage, ShardFilter},
     snapshot::{Manifest, PROFILE, Snapshot, assign_ordinals},
     witness,
 };
 use receiver_pir::{
     MIN_ROWS, Publication,
+    inventory::{FilterRef, Inventory, Shard},
     server::{Server, WitnessServer},
 };
-use std::{
-    collections::BTreeMap,
-    sync::{
-        Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use zakura_pir_receiver::{DirectoryError, Transport};
 use zakura_receiver_crypto::witness::payloads;
 
 pub const ORIGIN: &str = "https://receiver.test";
+/// Blocks per sealed shard.
+pub const SEAL_BLOCKS: u32 = 32;
 
-/// An immutable PIR publication and independently lagging rolling filter suffix.
+/// An immutable shard inventory and independently lagging rolling filter suffix.
 pub struct Directory {
-    server: Server,
-    witnesses: WitnessServer,
+    inventory: Inventory,
+    payments: Vec<Server>,
+    witnesses: Vec<WitnessServer>,
+    shard_filters: Vec<([u8; 32], Vec<u8>)>,
     head: Head,
     filters: Vec<BlockFilter>,
     counts: Mutex<(usize, u64, u64)>,
@@ -42,63 +47,113 @@ impl Directory {
         revision: u64,
     ) -> Self {
         let end = chain.tip() - pir_depth;
-        let mut records: Vec<_> = chain
-            .mined()
-            .iter()
-            .filter_map(|m| m.indexed.clone())
-            .filter(|r| r.payment.height <= u32::from(end))
-            .collect();
-        let mut totals = BTreeMap::new();
-        for r in &records {
-            *totals.entry(*r.receiver.as_bytes()).or_insert(0u32) += 1;
+        let (end_hash, end_size) = (chain.hash_at(end).0, chain.tree_size_at(end));
+        let (mut payments, mut witnesses, mut shard_filters, mut shards) =
+            (vec![], vec![], vec![], vec![]);
+        let (mut start, mut parent, mut position) = (ACTIVATION, [0; 32], 0);
+        while start <= u32::from(end) {
+            let last = (start + SEAL_BLOCKS - 1).min(u32::from(end));
+            let sealed = last - start + 1 == SEAL_BLOCKS && last < u32::from(end);
+            let records: Vec<_> = chain
+                .mined()
+                .iter()
+                .filter_map(|m| m.indexed.clone())
+                .filter(|r| (start..=last).contains(&r.payment.height))
+                .collect();
+            let mut raw: Vec<RawRecord> = vec![];
+            for r in &records {
+                let mut r = RawRecord::decode(&r.encode().unwrap()).unwrap().unwrap();
+                r.page = raw.iter().filter(|o| o.receiver == r.receiver).count() as u32;
+                raw.push(r);
+            }
+            for i in 0..raw.len() {
+                let receiver = raw[i].receiver;
+                raw[i].total = raw.iter().filter(|o| o.receiver == receiver).count() as u32;
+            }
+            assign_ordinals(&mut raw);
+            let (last_hash, last_size) = (
+                chain.hash_at(last.into()).0,
+                chain.tree_size_at(last.into()),
+            );
+            let snapshot = Snapshot::build(
+                Manifest {
+                    profile: PROFILE.into(),
+                    history_revision: revision,
+                    genesis: GENESIS,
+                    start_height: start,
+                    start_parent: parent,
+                    start_position: position,
+                    end_height: last,
+                    end_hash: last_hash,
+                    end_position: last_size,
+                    rows: MIN_ROWS,
+                    salt: [5; 32],
+                    records: 0,
+                    data_sha256: [0; 32],
+                },
+                &raw,
+            )
+            .unwrap();
+            let mut positions: Vec<_> = raw.iter().map(|r| r.payment.position).collect();
+            positions.sort_unstable();
+            // Every witness table is built at the publication's end.
+            let table = witness::Table::build(
+                witness::Manifest {
+                    profile: witness::PROFILE.into(),
+                    genesis: GENESIS,
+                    history_revision: revision,
+                    payments: snapshot.manifest.revision().unwrap(),
+                    payloads: 0,
+                    rows: MIN_ROWS,
+                    tree_height: end.into(),
+                    tree_hash: end_hash,
+                    tree_size: end_size,
+                    data_sha256: [0; 32],
+                },
+                &payloads(&chain.commitments()[..end_size as usize], &positions).unwrap(),
+            )
+            .unwrap();
+            let server = Server::new(snapshot).unwrap();
+            let witness = WitnessServer::new(table, &server).unwrap();
+            let filter = sealed.then(|| {
+                let filter = ShardFilter::build(
+                    GENESIS,
+                    revision,
+                    Coverage {
+                        start_height: start,
+                        end_height: last,
+                        end_hash: last_hash,
+                    },
+                    records.iter().map(|r| r.receiver.as_bytes()),
+                )
+                .unwrap();
+                shard_filters.push((filter.digest(), filter.bytes().to_vec()));
+                FilterRef {
+                    digest: filter.digest(),
+                    bytes: filter.bytes().len() as u32,
+                    receivers: filter.receivers() as u32,
+                }
+            });
+            shards.push(Shard {
+                index: 0,
+                sealed,
+                start_height: start,
+                start_parent: parent,
+                start_position: position,
+                end_height: last,
+                end_hash: last_hash,
+                end_position: last_size,
+                segments: vec![Publication {
+                    payments: server.manifest().clone(),
+                    witnesses: witness.manifest().clone(),
+                }],
+                filter,
+            });
+            payments.push(server);
+            witnesses.push(witness);
+            (start, parent, position) = (last + 1, last_hash, last_size);
         }
-        let mut pages = BTreeMap::new();
-        for r in &mut records {
-            let page = pages.entry(*r.receiver.as_bytes()).or_insert(0u32);
-            r.page = *page;
-            r.total = totals[r.receiver.as_bytes()];
-            *page += 1;
-        }
-        let mut raw: Vec<_> = records
-            .iter()
-            .map(|r| RawRecord::decode(&r.encode().unwrap()).unwrap().unwrap())
-            .collect();
-        assign_ordinals(&mut raw);
-        let manifest = Manifest {
-            profile: PROFILE.into(),
-            history_revision: revision,
-            genesis: GENESIS,
-            start_height: ACTIVATION,
-            start_parent: [0; 32],
-            start_position: 0,
-            end_height: end.into(),
-            end_hash: chain.hash_at(end).0,
-            end_position: chain.tree_size_at(end),
-            rows: MIN_ROWS,
-            salt: [5; 32],
-            records: 0,
-            data_sha256: [0; 32],
-        };
-        let snapshot = Snapshot::build(manifest, &raw).unwrap();
-        let m = &snapshot.manifest;
-        let mut positions: Vec<_> = raw.iter().map(|r| r.payment.position).collect();
-        positions.sort_unstable();
-        let table = witness::Table::build(
-            witness::Manifest {
-                profile: witness::PROFILE.into(),
-                genesis: GENESIS,
-                history_revision: revision,
-                payments: m.revision().unwrap(),
-                payloads: 0,
-                rows: MIN_ROWS,
-                tree_height: m.end_height,
-                tree_hash: m.end_hash,
-                tree_size: m.end_position,
-                data_sha256: [0; 32],
-            },
-            &payloads(&chain.commitments()[..m.end_position as usize], &positions).unwrap(),
-        )
-        .unwrap();
+        let inventory = Inventory::build(GENESIS, revision, shards).unwrap();
         let tip = chain.tip() - filter_depth;
         let first = (u32::from(tip) + 1)
             .saturating_sub(retained)
@@ -129,10 +184,11 @@ impl Directory {
                 .unwrap()
             })
             .collect();
-        let server = Server::new(snapshot).unwrap();
         Self {
-            witnesses: WitnessServer::new(table, &server).unwrap(),
-            server,
+            inventory,
+            payments,
+            witnesses,
+            shard_filters,
             head: Head {
                 genesis: GENESIS,
                 revision,
@@ -174,17 +230,29 @@ impl Directory {
             assert_eq!(route, "query");
             counts.0 += 1;
             counts.1 += body.len() as u64;
-            if body.get(4..36) == Some(&self.witnesses.id()[..]) {
-                self.witnesses.respond(body)?
+            let session = body.get(4..36);
+            if let Some(w) = self.witnesses.iter().find(|w| session == Some(&w.id()[..])) {
+                w.respond(body)?
+            } else if let Some(p) = self.payments.iter().find(|p| session == Some(&p.id()[..])) {
+                p.respond(body)?
             } else {
-                self.server.respond(body)?
+                return Err(DirectoryError::Revision);
             }
-        } else if route == "init" {
-            serde_json::to_vec(&Publication {
-                payments: self.server.manifest().clone(),
-                witnesses: self.witnesses.manifest().clone(),
-            })
-            .unwrap()
+        } else if route == "inventory" {
+            serde_json::to_vec(self.inventory.head()).unwrap()
+        } else if let Some(request) = route.strip_prefix("inventory/") {
+            let (id, chunk) = request.split_once('/').unwrap();
+            if id != hex::encode(self.inventory.head().inventory) {
+                return Err(DirectoryError::Revision);
+            }
+            let chunks = self.inventory.chunks().unwrap();
+            serde_json::to_vec(&chunks[chunk.parse::<usize>().unwrap()]).unwrap()
+        } else if let Some(digest) = route.strip_prefix("shard-filters/") {
+            self.shard_filters
+                .iter()
+                .find(|(d, _)| hex::encode(d) == digest)
+                .map(|(_, f)| f.clone())
+                .ok_or_else(|| DirectoryError::Transport("unknown filter".into()))?
         } else if route == "block-filters/head" {
             serde_json::to_vec(&self.head).unwrap()
         } else if let Some(request) = route.strip_prefix("block-filters/") {
@@ -206,13 +274,18 @@ impl Directory {
             Batch::new(GENESIS, self.head.revision, filters)?.encode()?
         } else {
             let (material, id) = route.split_once('/').unwrap();
-            let public = if id == hex::encode(self.server.id()) {
-                self.server.public()
-            } else if id == hex::encode(self.witnesses.id()) {
-                self.witnesses.public()
-            } else {
-                return Err(DirectoryError::Revision);
-            };
+            let public = self
+                .payments
+                .iter()
+                .find(|p| hex::encode(p.id()) == id)
+                .map(|p| p.public())
+                .or_else(|| {
+                    self.witnesses
+                        .iter()
+                        .find(|w| hex::encode(w.id()) == id)
+                        .map(|w| w.public())
+                })
+                .ok_or(DirectoryError::Revision)?;
             match material {
                 "public" => public.to_vec(),
                 _ => return Err(DirectoryError::Transport("unknown route".into())),

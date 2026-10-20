@@ -4,9 +4,9 @@ use rusqlite::{Connection, OptionalExtension, named_params, params};
 use zcash_client_backend::data_api::scanning::ScanPriority;
 use zcash_client_backend::data_api::{
     one_time_ivk::restore::{
-        DirectoryRecord, DiscoveryWork, LookupPage, LookupWork, ManualProgress, RECEIVE_GAP,
-        RECOVERY_PAGE_LIMIT, RecoveryPublication, RecoveryStatus, RecoveryToken, WitnessAnswer,
-        WitnessRequest, decode_witness_payload,
+        DirectoryRecord, DiscoveryWork, LookupCursor, LookupPage, LookupWork, ManualProgress,
+        RECEIVE_GAP, RECOVERY_PAGE_LIMIT, RecoveryPublication, RecoveryStatus, RecoveryToken,
+        WitnessAnswer, WitnessRequest, decode_witness_payload,
     },
     transparent_ledger::ChainPoint,
 };
@@ -30,6 +30,15 @@ const MANUAL: u8 = 2;
 /// step that runs out with work left hands it to the worker (see [`hand_off`]).
 const STEP_BUDGET: usize = 64;
 
+use crate::wallet::one_time_rewind::CURSOR_RESET;
+
+/// The first height receiver history can hold, where seed receive discovery starts.
+pub(crate) fn activation<P: Parameters>(params: &P) -> u32 {
+    params
+        .activation_height(NetworkUpgrade::Nu6_3)
+        .map_or(0, u32::from)
+}
+
 /// SQL over key alias `k`: an already-owned receipt needs its chain placement repaired.
 const REPAIR_KEY: &str = "EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
     ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = k.id AND t.mined_height IS NULL)";
@@ -45,10 +54,11 @@ const UNSETTLED: &str = "EXISTS(SELECT 1 FROM ironwood_one_time_operations o
         JOIN ironwood_one_time_operation_receipts r ON r.operation_id = o.id AND r.txid = t.txid
         WHERE n.one_time_key_id = k.id AND t.mined_height IS NOT NULL), 0))";
 
-/// SQL over key alias `k`: a complete lookup checked the key through `:height` and left no
-/// candidate waiting for admission.
+/// SQL over key alias `k`: a complete lookup checked the key from `:from` through `:height`
+/// and left no candidate waiting for admission.
 const CHECKED_THROUGH: &str = "EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
-    WHERE l.one_time_key_id = k.id AND l.done_height >= :height AND l.read_complete = 1
+    WHERE l.one_time_key_id = k.id AND l.done_height >= :height AND l.done_from <= :from
+    AND l.read_complete = 1
     AND l.target_height IS NULL AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
         WHERE p.one_time_key_id = k.id))";
 
@@ -86,6 +96,44 @@ fn admitted(
     )?)
 }
 
+/// Makes `key`'s lookup read its history again from the shard holding `height`, keeping
+/// its reasons: checked progress, any cursor and a completion reaching that height are
+/// void. `retry_at` delays the next attempt.
+fn rewind_lookup(
+    conn: &Connection,
+    key: i64,
+    height: u32,
+    retry_at: i64,
+) -> Result<(), SqliteClientError> {
+    let reasons: Option<u8> = conn
+        .query_row(
+            "SELECT reasons FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+            [key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    enqueue(
+        conn,
+        key,
+        height,
+        height,
+        reasons.filter(|r| *r != 0).unwrap_or(AUTOMATIC),
+    )?;
+    conn.execute(
+        &format!(
+            "UPDATE ironwood_one_time_lookups SET start_height = MIN(start_height, ?2),
+            checked_height = CASE WHEN checked_height >= ?2 THEN ?2 - 1 ELSE checked_height END,
+            done_from = CASE WHEN done_height >= ?2 AND NOT done_from < ?2 THEN NULL ELSE done_from END,
+            done_height = CASE WHEN done_height >= ?2
+                THEN CASE WHEN done_from < ?2 THEN ?2 - 1 ELSE NULL END ELSE done_height END,
+            {CURSOR_RESET}, read_complete = 0, attempts = 0, next_attempt_at = ?3
+            WHERE one_time_key_id = ?1"
+        ),
+        params![key, height, retry_at],
+    )?;
+    Ok(())
+}
+
 /// Drops a candidate's session binding and witness and reads its key's history again, so a
 /// current session binds a fresh ordinal; an ordinal is never reinterpreted under another
 /// session. The candidate stays pending, never an empty answer. The lookup keeps its reasons,
@@ -105,13 +153,7 @@ fn refresh_witness(
         witness_size = NULL WHERE txid = ?1 AND action_index = ?2",
         params![txid.as_ref(), action],
     )?;
-    conn.execute("INSERT INTO ironwood_one_time_lookups(one_time_key_id, target_height, reasons, next_attempt_at)
-        VALUES (?1, ?2, ?3, ?4) ON CONFLICT(one_time_key_id) DO UPDATE SET
-        target_height = MAX(COALESCE(target_height, 0), excluded.target_height),
-        reasons = CASE WHEN reasons = 0 THEN excluded.reasons ELSE reasons END,
-        last_record = NULL, read_complete = 0, attempts = 0,
-        next_attempt_at = excluded.next_attempt_at",
-        params![key, u32::from(height), AUTOMATIC, retry_at])?;
+    rewind_lookup(conn, key, u32::from(height), retry_at)?;
     Ok(())
 }
 
@@ -155,40 +197,112 @@ fn token(conn: &Connection, owner: i64) -> Result<(bool, RecoveryToken), SqliteC
     ))
 }
 
-/// Raises a queued target without discarding a previously recorded positive or page cursor.
-/// A settled history that already covers `through` stays settled, since no callback would
-/// otherwise clear a target nothing needs to query.
+/// Raises a request to need history `[from, through]` without discarding a recorded positive
+/// or valid progress. After completion, a request reaching back into the completed span
+/// starts where that span ends. Lowering a pending request's start voids its progress,
+/// which held only from the old start.
+/// A completed history that already covers the request settles it without a target, since
+/// nothing would query or clear one; this returns true, and a caller stepping through keys
+/// continues rather than waiting for work that will never be exposed.
 pub(crate) fn enqueue(
     conn: &Connection,
     key: i64,
+    from: u32,
     through: u32,
     reason: u8,
-) -> Result<(), SqliteClientError> {
-    conn.execute("INSERT INTO ironwood_one_time_lookups(one_time_key_id, target_height, reasons)
-        VALUES (?1, ?2, ?3) ON CONFLICT(one_time_key_id) DO UPDATE SET
-        target_height = MAX(COALESCE(target_height, 0), excluded.target_height),
-        reasons = reasons | excluded.reasons,
-        read_complete = CASE WHEN done_height >= excluded.target_height THEN read_complete ELSE 0 END,
-        attempts = CASE WHEN target_height IS NULL OR target_height < excluded.target_height THEN 0 ELSE attempts END,
-        next_attempt_at = CASE WHEN target_height IS NULL OR target_height < excluded.target_height THEN 0 ELSE next_attempt_at END
-        WHERE NOT (ironwood_one_time_lookups.target_height IS NULL
-            AND ironwood_one_time_lookups.read_complete = 1
-            AND ironwood_one_time_lookups.done_height >= excluded.target_height
-            AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
-                WHERE p.one_time_key_id = excluded.one_time_key_id))", params![key, through, reason])?;
-    Ok(())
+) -> Result<bool, SqliteClientError> {
+    #[allow(clippy::type_complexity)]
+    let current: Option<(Option<u32>, u32, Option<u32>, Option<u32>, bool)> = conn
+        .query_row(
+            "SELECT target_height, start_height, done_height, done_from, read_complete
+             FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+            [key],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?;
+    let Some((target, start, done, done_from, read)) = current else {
+        conn.execute(
+            "INSERT INTO ironwood_one_time_lookups(one_time_key_id, target_height, reasons, start_height)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![key, through, reason, from],
+        )?;
+        return Ok(false);
+    };
+    // Completed coverage this request can build on: it must reach back to `from`, and
+    // history it already covers is not required again.
+    let covered = done
+        .zip(done_from)
+        .filter(|(_, f)| *f <= from)
+        .map(|(d, _)| d);
+    let from = covered
+        .filter(|d| from <= d.saturating_add(1))
+        .map_or(from, |d| d.saturating_add(1));
+    match target {
+        None if covered.is_some_and(|d| d >= through) && !candidates(conn, key)? => {
+            // Completed coverage already answers the request: settle it here, since nothing
+            // would query or clear a target for it.
+            conn.execute(
+                "UPDATE ironwood_one_time_lookups SET read_complete = 1 WHERE one_time_key_id = ?1",
+                [key],
+            )?;
+            return Ok(true);
+        }
+        None => {
+            let start = from;
+            conn.execute(
+                &format!(
+                    "UPDATE ironwood_one_time_lookups SET target_height = ?2, reasons = reasons | ?3,
+                    start_height = ?4, checked_height = NULL, {CURSOR_RESET}, read_complete = ?5,
+                    attempts = 0, next_attempt_at = 0 WHERE one_time_key_id = ?1"
+                ),
+                params![key, through, reason, start, covered.is_some_and(|d| d >= through)],
+            )?;
+        }
+        Some(target) => {
+            let lowered = from < start;
+            let raised = through > target;
+            let keep = read && !lowered && covered.is_some_and(|d| d >= through.max(target));
+            conn.execute(
+                "UPDATE ironwood_one_time_lookups SET target_height = MAX(target_height, ?2),
+                    reasons = reasons | ?3, start_height = MIN(start_height, ?4),
+                    checked_height = CASE WHEN ?5 THEN NULL ELSE checked_height END,
+                    inventory = CASE WHEN ?5 THEN NULL ELSE inventory END,
+                    shard = CASE WHEN ?5 THEN NULL ELSE shard END,
+                    segment = CASE WHEN ?5 THEN NULL ELSE segment END,
+                    last_record = CASE WHEN ?5 THEN NULL ELSE last_record END,
+                    read_complete = ?6,
+                    attempts = CASE WHEN ?7 THEN 0 ELSE attempts END,
+                    next_attempt_at = CASE WHEN ?7 THEN 0 ELSE next_attempt_at END
+                    WHERE one_time_key_id = ?1",
+                params![key, through, reason, from, lowered, keep, raised],
+            )?;
+        }
+    }
+    Ok(false)
 }
 
-/// Newly learned receivers must cover history already passed by live filters.
+/// Whether a payment candidate of `key` still waits for admission.
+fn candidates(conn: &Connection, key: i64) -> Result<bool, SqliteClientError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery WHERE one_time_key_id = ?1)",
+        [key],
+        |r| r.get(0),
+    )?)
+}
+
+/// Newly learned receivers must cover history from `from`, including history already
+/// passed by live filters.
 pub(crate) fn register_history(
     conn: &Connection,
     owner: i64,
     key: i64,
+    from: u32,
 ) -> Result<(), SqliteClientError> {
     let through: u32 = conn.query_row("SELECT MAX(COALESCE(filter_height, 0),
         COALESCE((SELECT MAX(height) FROM blocks), 0)) FROM ironwood_one_time_recovery WHERE account_id = ?1",
         [owner], |r| r.get(0))?;
-    enqueue(conn, key, through, AUTOMATIC)
+    enqueue(conn, key, from, through, AUTOMATIC)?;
+    Ok(())
 }
 
 /// Registers only the four lookahead indexes justified by confirmed payment evidence and
@@ -207,7 +321,7 @@ pub(crate) fn ensure_window<P: Parameters>(
     for index in end.saturating_sub(RECEIVE_GAP)..end {
         register(conn, params, account, KeyId::new(Purpose::Receive, index))?;
     }
-    enroll(conn, owner.0, end)
+    enroll(conn, owner.0, end, activation(params))
 }
 
 /// The stored exclusive end of receive indexes enrolled for automatic discovery.
@@ -223,8 +337,9 @@ fn enrolled_end(conn: &Connection, owner: i64) -> Result<u64, SqliteClientError>
 /// Enrolls registered receive indexes below `end` for automatic discovery, whether the
 /// confirmed window or the seed walk reached them. Every newly enrolled index, including
 /// one an earlier manual check already derived and completed, gets a historical target
-/// through the processed filter frontier. This shares the transaction with filter progress.
-fn enroll(conn: &Connection, owner: i64, end: u64) -> Result<(), SqliteClientError> {
+/// through the processed filter frontier from `from`. This shares the transaction with
+/// filter progress.
+fn enroll(conn: &Connection, owner: i64, end: u64, from: u32) -> Result<(), SqliteClientError> {
     let enrolled = enrolled_end(conn, owner)?;
     if end <= enrolled {
         return Ok(());
@@ -240,7 +355,7 @@ fn enroll(conn: &Connection, owner: i64, end: u64) -> Result<(), SqliteClientErr
         )?
         .collect::<Result<_, _>>()?;
     for id in exposed {
-        register_history(conn, owner, id)?;
+        register_history(conn, owner, id, from)?;
     }
     conn.execute(
         "UPDATE ironwood_one_time_recovery SET receive_end = ?2 WHERE account_id = ?1",
@@ -288,7 +403,7 @@ pub(crate) fn funded(
         "UPDATE ironwood_one_time_recovery SET generation = generation + 1 WHERE account_id = ?1",
         [owner],
     )?;
-    register_history(conn, owner, key)
+    register_history(conn, owner, key, u32::from(height))
 }
 
 /// Pauses work and invalidates in-flight responses without deleting notes or pending requests.
@@ -307,11 +422,15 @@ pub(crate) fn set_enabled<P: Parameters>(
     )?;
     if changed > 0 && enabled {
         // Repair-only reads may have skipped new receipts. Start their history again
-        // before enabled discovery can treat any saved page as complete.
+        // before enabled discovery can treat any saved page as complete, including partial
+        // progress past a completed prefix that survived a reorg.
         conn.execute(
-            "UPDATE ironwood_one_time_lookups SET last_record = NULL, read_complete = 0
-            WHERE done_height IS NULL AND target_height IS NOT NULL AND one_time_key_id IN
-                (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
+            &format!(
+                "UPDATE ironwood_one_time_lookups SET {CURSOR_RESET}, checked_height = NULL,
+                read_complete = 0 WHERE target_height IS NOT NULL
+                AND (done_height IS NULL OR read_complete = 0)
+                AND one_time_key_id IN (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)"
+            ),
             [owner.0],
         )?;
     }
@@ -380,9 +499,19 @@ pub(crate) fn begin<P: Parameters>(
             manual_next = CASE WHEN manual_end IS NOT NULL THEN X'0000000000000000' ELSE manual_next END
             WHERE account_id = ?1",
             params![owner.0, publication.history_revision.to_be_bytes()])?;
-        conn.execute("UPDATE ironwood_one_time_lookups SET last_record = NULL, done_height = NULL, read_complete = 0
-            WHERE one_time_key_id IN
-            (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)", [owner.0])?;
+        // Corrections void negatives, cursors and completions captured under the old
+        // generation, including progress between shards. An active request may have been
+        // started after such a completion, so it needs its whole history again.
+        conn.execute(
+            &format!(
+                "UPDATE ironwood_one_time_lookups SET {CURSOR_RESET}, checked_height = NULL,
+            start_height = CASE WHEN target_height IS NOT NULL THEN MIN(start_height, ?2)
+                ELSE start_height END,
+            done_height = NULL, done_from = NULL, read_complete = 0
+            WHERE one_time_key_id IN (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)"
+            ),
+            params![owner.0, activation(params)],
+        )?;
         conn.execute(
             "DELETE FROM ironwood_one_time_payment_recovery WHERE one_time_key_id IN
             (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
@@ -399,7 +528,7 @@ pub(crate) fn begin<P: Parameters>(
             .query_map([owner.0], |r| r.get::<_, i64>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         for key in keys {
-            enqueue(conn, key, height, AUTOMATIC)?;
+            enqueue(conn, key, activation(params), height, AUTOMATIC)?;
         }
         return Ok(true);
     }
@@ -413,7 +542,7 @@ pub(crate) fn begin<P: Parameters>(
     if direct {
         let keys = direct_keys(conn, owner.0)?;
         for key in keys {
-            enqueue(conn, key, height, AUTOMATIC)?;
+            enqueue(conn, key, activation(params), height, AUTOMATIC)?;
         }
         conn.execute("UPDATE ironwood_one_time_recovery SET skipped_height = MAX(COALESCE(skipped_height, 0), ?2),
             filter_height = ?2, filter_hash = ?3 WHERE account_id = ?1 AND COALESCE(filter_height, 0) <= ?2",
@@ -499,7 +628,7 @@ pub(crate) fn record_filters<P: Parameters>(
         if !eligible {
             return Err(invalid("filter hit for an unfunded refund key"));
         }
-        enqueue(conn, id, u32::from(end.height), AUTOMATIC)?;
+        enqueue(conn, id, previous + 1, u32::from(end.height), AUTOMATIC)?;
     }
     conn.execute("UPDATE ironwood_one_time_recovery SET filter_height = ?2, filter_hash = ?3 WHERE account_id = ?1",
         params![owner.0, u32::from(end.height), end.hash.0])?;
@@ -542,14 +671,20 @@ fn progress<P: Parameters>(
         let (id, _) = register(conn, params, account, KeyId::new(Purpose::Receive, next))?;
         // The walk advances on authenticated use before confirmation, so its reach must
         // outlast a reorg that removes that use.
-        enroll(conn, owner.0, index_after(next, 1)?)?;
+        enroll(conn, owner.0, index_after(next, 1)?, activation(params))?;
+        // An empty counts only with complete history from activation through the frontier,
+        // so the four empties share compatible captured coverage.
         let checked: Option<bool> = conn.query_row("SELECT k.used FROM ironwood_one_time_keys k
             JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id WHERE k.id = ?1
-            AND l.done_height >= ?2 AND l.target_height IS NULL AND l.read_complete = 1
+            AND l.done_height >= ?2 AND l.done_from <= ?3 AND l.target_height IS NULL AND l.read_complete = 1
             AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = k.id)",
-            params![id, height], |r| r.get(0)).optional()?;
+            params![id, height, activation(params)], |r| r.get(0)).optional()?;
         let Some(paid) = checked else {
-            enqueue(conn, id, height, AUTOMATIC)?;
+            if enqueue(conn, id, activation(params), height, AUTOMATIC)? {
+                // A settled key can carry the continuation if the budget runs out.
+                handed = Some((id, height));
+                continue;
+            }
             handed = None;
             break;
         };
@@ -686,7 +821,8 @@ fn manual_progress<P: Parameters>(
                 WHERE k.account_id = :owner AND k.purpose = 0 AND k.funding_height IS NOT NULL
                 AND k.key_index >= :next AND NOT {CHECKED_THROUGH} ORDER BY k.key_index LIMIT 1"
                 ),
-                named_params![":owner": owner.0, ":next": next.to_be_bytes(), ":height": height],
+                named_params![":owner": owner.0, ":next": next.to_be_bytes(), ":height": height,
+                    ":from": activation(params)],
                 |r| r.get::<_, Vec<u8>>(0),
             )
             .optional()?
@@ -701,7 +837,7 @@ fn manual_progress<P: Parameters>(
                 ))?
                 .query_map(
                     named_params![":owner": owner.0, ":next": next.to_be_bytes(),
-                    ":end": end.to_be_bytes(), ":height": height],
+                    ":end": end.to_be_bytes(), ":height": height, ":from": activation(params)],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )?
                 .collect::<Result<_, _>>()?;
@@ -763,11 +899,15 @@ fn manual_progress<P: Parameters>(
         }
         let checked: bool = conn.query_row(
             &format!("SELECT {CHECKED_THROUGH} FROM ironwood_one_time_keys k WHERE k.id = :id"),
-            named_params![":id": id, ":height": height],
+            named_params![":id": id, ":height": height, ":from": activation(params)],
             |r| r.get(0),
         )?;
         if !checked {
-            enqueue(conn, id, height, MANUAL)?;
+            if enqueue(conn, id, activation(params), height, MANUAL)? {
+                // A settled key can carry the continuation if the budget runs out.
+                handed = Some((id, height));
+                continue;
+            }
             handed = None;
             break;
         }
@@ -793,6 +933,33 @@ fn decode_record(bytes: Option<Vec<u8>>) -> Result<Option<DirectoryRecord>, Sqli
                 .ok_or_else(|| corrupt("invalid recovery cursor"))
         })
         .transpose()
+}
+
+/// Lookup columns, over alias `l`, that [`progress_of`] reads from a row starting at an offset.
+const PROGRESS: &str =
+    "l.start_height, l.checked_height, l.inventory, l.shard, l.segment, l.last_record";
+
+/// A request's first unchecked height and its cursor, from the [`PROGRESS`] columns starting
+/// at `at`.
+fn progress_of(
+    row: &rusqlite::Row<'_>,
+    at: usize,
+) -> Result<(BlockHeight, Option<LookupCursor>), SqliteClientError> {
+    let start: u32 = row.get(at)?;
+    let checked: Option<u32> = row.get(at + 1)?;
+    let inventory: Option<[u8; 32]> = row.get(at + 2)?;
+    let cursor = inventory
+        .map(|inventory| {
+            Ok::<_, SqliteClientError>(LookupCursor {
+                inventory,
+                shard: row.get(at + 3)?,
+                segment: row.get(at + 4)?,
+                last: decode_record(row.get(at + 5)?)?,
+            })
+        })
+        .transpose()?;
+    let from = checked.map_or(start, |c| start.max(c.saturating_add(1)));
+    Ok((BlockHeight::from(from), cursor))
 }
 
 /// Exposes bounded due work. Disabled accounts expose only repair of already-owned receipts.
@@ -821,16 +988,19 @@ pub(crate) fn status<P: Parameters>(
                 refunds_done: r.get::<_, u8>(7)? == 1, next: u64::from_be_bytes(manual_next),
                 receive_end: u64::from_be_bytes(end) })).transpose()?, lookups: vec![], witnesses: vec![] })
     })?;
-    status.lookups = conn.prepare(&format!("SELECT k.purpose, k.key_index, k.receiver, l.target_height, l.last_record
+    status.lookups = conn.prepare(&format!("SELECT k.purpose, k.key_index, k.receiver, l.target_height, {PROGRESS}
         FROM ironwood_one_time_lookups l JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
         WHERE k.account_id = ?1 AND l.target_height IS NOT NULL AND l.reasons != 0
             AND (?3 OR {REPAIR_KEY})
             AND l.read_complete = 0 AND l.next_attempt_at <= ?2 ORDER BY l.next_attempt_at, k.id LIMIT 4"))?
-        .query_and_then(params![owner.0, now, enabled], |r| Ok::<_, SqliteClientError>(LookupWork {
-            token, work: DiscoveryWork { key: stored_key_id(r)?,
-                receiver: r.get::<_, Vec<u8>>(2)?.try_into().map_err(|_| corrupt("invalid receiver"))? },
-            through: BlockHeight::from(r.get::<_, u32>(3)?), last: decode_record(r.get(4)?)?
-        }))?.collect::<Result<_, _>>()?;
+        .query_and_then(params![owner.0, now, enabled], |r| {
+            let (from, cursor) = progress_of(r, 4)?;
+            Ok::<_, SqliteClientError>(LookupWork {
+                token, work: DiscoveryWork { key: stored_key_id(r)?,
+                    receiver: r.get::<_, Vec<u8>>(2)?.try_into().map_err(|_| corrupt("invalid receiver"))? },
+                from, through: BlockHeight::from(r.get::<_, u32>(3)?), cursor,
+            })
+        })?.collect::<Result<_, _>>()?;
     status.witnesses = conn.prepare("SELECT k.purpose, k.key_index, p.position, substr(p.encrypted_note, 33, 32),
             p.payments, p.witnesses, p.ordinal
         FROM ironwood_one_time_payment_recovery p JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
@@ -846,7 +1016,10 @@ pub(crate) fn status<P: Parameters>(
     Ok(status)
 }
 
-/// Rejects stale callbacks before accepting any cursor, candidate or negative answer.
+/// Rejects stale callbacks before accepting any cursor, candidate or negative answer. A
+/// step's progress counts only under the inventory it was captured with; a cursor from a
+/// replaced inventory is never resumed, and shards are skipped only when the step covered
+/// them.
 pub(crate) fn record_lookup<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -858,10 +1031,11 @@ pub(crate) fn record_lookup<P: Parameters>(
 ) -> Result<bool, SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
     let id = key_ref(conn, account, work.work.key)?;
+    let publication = page.publication;
     if !can_lookup(conn, owner.0, id, work.token)?
-        || page.publication.history_revision != work.token.history_revision
-        || page.publication.end.height < work.through
-        || !accepts(conn, params, page.publication)?
+        || publication.history_revision != work.token.history_revision
+        || publication.end.height < work.through
+        || !accepts(conn, params, publication)?
         || page.records.len() > RECOVERY_PAGE_LIMIT
     {
         return Ok(false);
@@ -874,29 +1048,66 @@ pub(crate) fn record_lookup<P: Parameters>(
     if receiver != work.work.receiver {
         return Err(invalid("lookup receiver does not belong to the key"));
     }
-    let current: Option<(Option<u32>, Option<Vec<u8>>, bool)> = conn.query_row(
-        "SELECT target_height, last_record, read_complete FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1 AND reasons != 0",
-        [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-    let Some((Some(target), last, false)) = current else {
+    #[allow(clippy::type_complexity)]
+    let current: Option<(
+        u32,
+        Option<u32>,
+        Option<u32>,
+        u32,
+        BlockHeight,
+        Option<LookupCursor>,
+    )> = conn
+        .query_row(
+            &format!(
+                "SELECT l.target_height, l.done_height, l.done_from, {PROGRESS}
+                 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = ?1 AND l.reasons != 0
+                   AND l.target_height IS NOT NULL AND l.read_complete = 0"
+            ),
+            [id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    progress_of(r, 3),
+                ))
+            },
+        )
+        .optional()?
+        .map(|(target, done, done_from, start, progress)| {
+            progress.map(|(from, cursor)| (target, done, done_from, start, from, cursor))
+        })
+        .transpose()?;
+    let Some((target, done, done_from, start, from, cursor)) = current else {
         return Ok(false);
     };
-    if target < u32::from(work.through) || decode_record(last)? != work.last {
+    if target < u32::from(work.through) || from != work.from || cursor != work.cursor {
         return Ok(false);
     }
-    match (&work.last, &page.previous) {
-        (None, None) => {}
-        (Some(old), Some(new))
-            if new.encode().is_ok()
-                && old.receiver == new.receiver
-                && old.page == new.page
-                && old.payment == new.payment
-                && new.total >= old.total => {}
-        _ => {
-            conn.execute("UPDATE ironwood_one_time_lookups SET last_record = NULL WHERE one_time_key_id = ?1", [id])?;
-            return Ok(false);
-        }
+    // A step continues the saved segment only under the same inventory and position.
+    let resumed = cursor.as_ref().filter(|c| {
+        c.inventory == publication.id
+            && page
+                .segment
+                .is_some_and(|s| (s.shard, s.segment) == (c.shard, c.segment))
+    });
+    if !page.records.is_empty() && page.segment.is_none()
+        || page.next.as_ref().is_some_and(|next| {
+            next.inventory != publication.id
+                || (next.last.is_some()
+                    && (next.last.as_ref() != page.records.last()
+                        || page
+                            .segment
+                            .is_none_or(|s| (s.shard, s.segment) != (next.shard, next.segment))))
+        })
+        || page
+            .checked_through
+            .is_some_and(|h| h < work.from.saturating_sub(1) || h > publication.end.height)
+    {
+        return Err(invalid("inconsistent receiver lookup step"));
     }
-    let mut previous = page.previous.as_ref();
+    let mut previous = resumed.and_then(|c| c.last.as_ref());
     for record in &page.records {
         let expected = previous.map_or(Some(0), |p| p.page.checked_add(1));
         if record.receiver != work.work.receiver
@@ -917,9 +1128,9 @@ pub(crate) fn record_lookup<P: Parameters>(
                         && p.payment.tx_index == record.payment.tx_index
                         && p.payment.txid != record.payment.txid)
             })
-            || record.payment.height < u32::from(page.publication.start_height)
-            || record.payment.height > u32::from(page.publication.end.height)
-            || record.payment.position >= page.publication.end.tree_size
+            || record.payment.height < u32::from(publication.start_height)
+            || record.payment.height > u32::from(publication.end.height)
+            || record.payment.position >= publication.end.tree_size
             || record.payment.tx_index == 0
         {
             return Err(invalid("invalid receiver history page"));
@@ -929,64 +1140,76 @@ pub(crate) fn record_lookup<P: Parameters>(
         authenticate(conn, params, account, work.work.key, &candidate)?;
         previous = Some(record);
     }
-    let ended = previous.is_none_or(|p| p.page.checked_add(1) == Some(p.total));
-    if page.complete != ended || (page.records.is_empty() && !page.complete) {
-        return Err(invalid(
-            "incomplete receiver history advertised as complete",
-        ));
-    }
     let discovery_enabled = token(conn, owner.0)?.0;
-    for record in &page.records {
-        let candidate = directory_candidate(&record.payment).expect("validated above");
-        if (discovery_enabled || known_receipt(conn, id, candidate.txid, candidate.action_index)?)
-            && !admitted(conn, id, &candidate)?
-        {
-            queue_payment(
-                conn,
-                params,
-                account,
-                work.work.key,
-                &candidate,
-                (
-                    page.publication.id,
-                    page.publication.witnesses,
-                    record.ordinal,
-                ),
-            )?;
+    if let Some(segment) = page.segment {
+        for record in &page.records {
+            let candidate = directory_candidate(&record.payment).expect("validated above");
+            if (discovery_enabled
+                || known_receipt(conn, id, candidate.txid, candidate.action_index)?)
+                && !admitted(conn, id, &candidate)?
+            {
+                queue_payment(
+                    conn,
+                    params,
+                    account,
+                    work.work.key,
+                    &candidate,
+                    (segment.payments, segment.witnesses, record.ordinal),
+                )?;
+            }
         }
     }
-    let last = previous
-        .map(|r| {
-            r.encode()
-                .map(|b| b.to_vec())
-                .map_err(|_| invalid("invalid cursor"))
-        })
-        .transpose()?;
-    // A candidate this history did not bind again still lacks a usable witness, so the read
-    // cannot settle the key: it is read again later rather than completing.
-    let unbound: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery
-         WHERE one_time_key_id = ?1 AND payments IS NULL)",
-        [id],
-        |r| r.get(0),
-    )?;
-    let reread = page.complete && unbound;
-    conn.execute(
-        "UPDATE ironwood_one_time_lookups SET last_record = CASE WHEN ?7 THEN NULL ELSE ?2 END,
-        read_complete = ?3 AND NOT ?7,
-        done_height = CASE WHEN NOT ?6 THEN NULL WHEN ?5 THEN ?4 ELSE done_height END, attempts = 0,
-        next_attempt_at = CASE WHEN ?7 THEN ?8 ELSE 0 END WHERE one_time_key_id = ?1",
-        params![
-            id,
-            last,
-            page.complete && u32::from(page.publication.end.height) >= target,
-            u32::from(page.publication.end.height),
-            page.complete,
-            discovery_enabled,
-            reread,
-            now.saturating_add(60)
-        ],
-    )?;
+    if let Some(next) = &page.next {
+        let last = next
+            .last
+            .as_ref()
+            .map(|r| {
+                r.encode()
+                    .map(|b| b.to_vec())
+                    .map_err(|_| invalid("invalid cursor"))
+            })
+            .transpose()?;
+        conn.execute(
+            "UPDATE ironwood_one_time_lookups SET checked_height = COALESCE(?2, checked_height),
+            inventory = ?3, shard = ?4, segment = ?5, last_record = ?6, attempts = 0,
+            next_attempt_at = 0 WHERE one_time_key_id = ?1",
+            params![
+                id,
+                page.checked_through.map(u32::from),
+                next.inventory,
+                next.shard,
+                next.segment,
+                last
+            ],
+        )?;
+    } else {
+        let end = u32::from(publication.end.height);
+        // Coverage joins an earlier completion only when the two spans meet.
+        let joined = done
+            .zip(done_from)
+            .filter(|(d, f)| *f <= start && start <= d.saturating_add(1))
+            .map_or(start, |(_, f)| f);
+        conn.execute(
+            &format!(
+                "UPDATE ironwood_one_time_lookups SET checked_height = ?2, {CURSOR_RESET},
+                read_complete = ?3, done_height = CASE WHEN ?4 THEN ?2 ELSE NULL END,
+                done_from = CASE WHEN ?4 THEN ?5 ELSE NULL END, attempts = 0, next_attempt_at = 0
+                WHERE one_time_key_id = ?1"
+            ),
+            params![id, end, end >= target, discovery_enabled, joined],
+        )?;
+        // A candidate this history did not bind again still lacks a usable witness, so the
+        // read cannot settle the key: its shard is read again later.
+        let unbound: Option<u32> = conn.query_row(
+            "SELECT MIN(height) FROM ironwood_one_time_payment_recovery
+             WHERE one_time_key_id = ?1 AND payments IS NULL",
+            [id],
+            |r| r.get(0),
+        )?;
+        if let Some(height) = unbound {
+            rewind_lookup(conn, id, height, now.saturating_add(60))?;
+        }
+    }
     admit(conn, params, sessions, account, now)?;
     progress(conn, params, account)?;
     Ok(true)
@@ -1008,18 +1231,25 @@ pub(crate) fn defer(
     if !can_lookup(conn, owner, id, work.token)? {
         return Ok(());
     }
-    let current: Option<(u32, Option<Vec<u8>>)> = conn
+    #[allow(clippy::type_complexity)]
+    let current: Option<(
+        u32,
+        Result<(BlockHeight, Option<LookupCursor>), SqliteClientError>,
+    )> = conn
         .query_row(
-            "SELECT attempts, last_record FROM ironwood_one_time_lookups
-         WHERE one_time_key_id = ?1 AND target_height = ?2 AND reasons != 0 AND read_complete = 0",
+            &format!(
+                "SELECT l.attempts, {PROGRESS} FROM ironwood_one_time_lookups l
+                 WHERE l.one_time_key_id = ?1 AND l.target_height = ?2 AND l.reasons != 0
+                   AND l.read_complete = 0"
+            ),
             params![id, u32::from(work.through)],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, progress_of(r, 1))),
         )
         .optional()?;
-    let Some((attempts, last)) = current else {
+    let Some((attempts, progress)) = current else {
         return Ok(());
     };
-    if decode_record(last)? != work.last {
+    if progress? != (work.from, work.cursor.clone()) {
         return Ok(());
     }
     let delay = (60i64 << attempts.min(10)).min(43_200);
@@ -1253,10 +1483,13 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
                      WHERE txid = ?1 AND action_index = ?2",
                     params![txid.as_ref(), action],
                 )?;
-                conn.execute(
-                    "UPDATE ironwood_one_time_lookups SET last_record = NULL, read_complete = 0,
-                    next_attempt_at = ?2 WHERE one_time_key_id = ?1",
-                    params![id, now.saturating_add(60)],
+                // Its pages were already read past it, so the coverage that read claimed
+                // must be undone before the key can complete.
+                rewind_lookup(
+                    conn,
+                    id,
+                    u32::from(candidate.height),
+                    now.saturating_add(60),
                 )?;
             }
         }

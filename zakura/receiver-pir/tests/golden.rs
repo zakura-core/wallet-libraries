@@ -8,7 +8,7 @@ use rand_chacha::{rand_core::SeedableRng, ChaCha20Rng};
 use receiver_directory::snapshot::{lookup_row, row_for, Snapshot, MIN_ROWS, ROW_BYTES};
 use receiver_pir::{
     server::{Server, WitnessServer},
-    AcceptedCoverage, Client, Publication, WitnessClient, HEADER_BYTES, MAGIC, PROTOCOL,
+    Client, Publication, WitnessClient, HEADER_BYTES, MAGIC, PROTOCOL,
 };
 use sha2::{Digest, Sha256};
 use zakura_pir_client::native::{NativeKeys, NativeSecret, NativeSetup, D, Q, QUERY_BITS, Q_BITS};
@@ -84,13 +84,7 @@ fn the_protocol_reproduces_its_pinned_bytes() {
     );
 
     // `Client` frames its own fresh query the same way.
-    let accepted = AcceptedCoverage {
-        genesis: [1; 32],
-        required_start: 100,
-        height: 101,
-        hash: [3; 32],
-    };
-    let client = Client::new(server.manifest().clone(), server.public(), accepted).unwrap();
+    let client = Client::new(server.manifest().clone(), server.public()).unwrap();
     let query = client.prepare(receiver(), 1).unwrap();
     assert_eq!(query.body().len(), request.len());
     assert_eq!(query.body()[..36], request[..36]);

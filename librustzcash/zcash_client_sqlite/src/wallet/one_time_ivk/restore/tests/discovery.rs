@@ -1,8 +1,34 @@
 //! Queue behavior using an independent compact-block oracle and Merkle witness builder.
 use super::*;
 use zcash_client_backend::data_api::one_time_ivk::restore::{
-    RecoveryStatus, WitnessAnswer, WitnessRequest,
+    LookupCursor, RecoveryStatus, SegmentRef, WitnessAnswer, WitnessRequest,
 };
+
+/// A fixture publication's whole history for one receiver: one shard of one segment,
+/// read through its final page in this step.
+pub(in crate::wallet::one_time_ivk) fn whole(
+    publication: RecoveryPublication,
+    records: Vec<DirectoryRecord>,
+) -> LookupPage {
+    LookupPage {
+        publication,
+        segment: Some(segment_ref(publication)),
+        records,
+        checked_through: Some(publication.end.height),
+        next: None,
+    }
+}
+
+/// The fixture publication's only segment: its payment session is the publication's
+/// identity and its witness session is fixed.
+pub(in crate::wallet::one_time_ivk) fn segment_ref(publication: RecoveryPublication) -> SegmentRef {
+    SegmentRef {
+        shard: 0,
+        segment: 0,
+        payments: publication.id,
+        witnesses: [7; 32],
+    }
+}
 
 /// A receive identity beyond the initial window, used by explicit-history fixtures.
 pub(in crate::wallet::one_time_ivk) fn key8() -> KeyId {
@@ -22,7 +48,6 @@ pub(in crate::wallet::one_time_ivk) fn publication_at(
     let block = CompactBlock::decode(data.as_slice()).unwrap();
     RecoveryPublication {
         id: [1; 32],
-        witnesses: [7; 32],
         history_revision: 0,
         start_height: st.sapling_activation_height(),
         end: PublicationEnd {
@@ -187,7 +212,38 @@ fn oracle(st: &State, receiver: [u8; 43], fvk: &FullViewingKey) -> Vec<Directory
 /// a far-future clock), a publication or ordinary sync, or the user (feature or manual
 /// search paused, which leaves a cancelled search's lookups without a reason). Anything
 /// else waits on a mutation nothing will make.
+///
+/// Shard-local state must also stay consistent: no settled request keeps a target nothing
+/// would clear, a completed read keeps no segment cursor, and a candidate whose witness
+/// binding was dropped has an unread lookup to rebind it after rewound coverage, unless the
+/// user paused that lookup.
 pub(in crate::wallet::one_time_ivk) fn assert_no_stall(db: &Db, account: AccountUuid) {
+    let owner: i64 = value(
+        &db.conn,
+        "SELECT id FROM accounts WHERE uuid = ?1",
+        [account.0],
+    );
+    let (settled, cursor, unbound): (bool, bool, bool) = row(
+        &db.conn,
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
+         JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
+         WHERE k.account_id = ?1 AND l.reasons != 0 AND l.target_height IS NOT NULL
+           AND l.read_complete = 1 AND l.done_height >= l.target_height
+           AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
+               WHERE p.one_time_key_id = k.id)),
+         EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
+         JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
+         WHERE k.account_id = ?1 AND l.read_complete = 1 AND l.inventory IS NOT NULL),
+         EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
+         JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
+         JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id
+         WHERE k.account_id = ?1 AND p.payments IS NULL
+           AND l.reasons != 0 AND (l.read_complete = 1 OR l.target_height IS NULL))",
+        [owner],
+    );
+    assert!(!settled, "a settled request keeps a target nothing clears");
+    assert!(!cursor, "a completed read keeps a segment cursor");
+    assert!(!unbound, "an unbound candidate has no read to rebind it");
     let state = db.one_time_recovery(account, i64::MAX).unwrap();
     if !state.enabled || !state.lookups.is_empty() || !state.witnesses.is_empty() {
         return;
@@ -259,14 +315,24 @@ fn answer_lookup(st: &mut State, account: AccountUuid, publication: RecoveryPubl
         .unwrap()
         .unwrap();
     let records = oracle(st, work.work.receiver, fvk.full_viewing_key());
-    let previous = work.last.as_ref().map(|r| records[r.page as usize].clone());
-    let start = previous.as_ref().map_or(0, |r| r.page as usize + 1);
+    let start = work
+        .cursor
+        .as_ref()
+        .filter(|c| c.inventory == publication.id)
+        .and_then(|c| c.last.as_ref())
+        .map_or(0, |r| r.page as usize + 1);
     let end = (start + 32).min(records.len());
     let page = LookupPage {
         publication,
-        previous,
+        segment: Some(segment_ref(publication)),
         records: records[start..end].to_vec(),
-        complete: end == records.len(),
+        checked_through: (end == records.len()).then_some(publication.end.height),
+        next: (end < records.len()).then(|| LookupCursor {
+            inventory: publication.id,
+            shard: 0,
+            segment: 0,
+            last: records[..end].last().cloned(),
+        }),
     };
     assert!(
         st.wallet_mut()
@@ -305,34 +371,48 @@ pub(in crate::wallet::one_time_ivk) fn queue_late(
         db.begin_one_time_recovery(account, publication, false)
             .unwrap()
     );
-    let state = status(db, account);
-    let stored = get_key(db, account, key).unwrap().unwrap();
-    let work = LookupWork {
-        token: state.token,
-        work: zcash_client_backend::data_api::one_time_ivk::restore::DiscoveryWork {
-            key,
-            receiver: stored.receiver().to_raw_address_bytes(),
-        },
-        through: publication.end.height,
-        last: None,
-    };
-    let page = LookupPage {
+    let work = work_of(st, key);
+    let db = st.wallet_mut().db_mut();
+    let page = whole(
         publication,
-        previous: None,
-        records: vec![DirectoryRecord {
+        vec![DirectoryRecord {
             receiver: work.work.receiver,
             page: 0,
             total: 1,
             payment: directory_answer(candidate),
             ordinal: 0,
         }],
-        complete: true,
-    };
+    );
     assert!(
         db.record_one_time_lookup(account, &work, &page, clock_now())
             .unwrap()
     );
     publication
+}
+
+/// `key`'s pending lookup as status hands it out, without a saved cursor.
+pub(in crate::wallet::one_time_ivk) fn work_of(st: &State, key: KeyId) -> LookupWork {
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet().db();
+    let id = key_ref(&db.conn, account, key).unwrap();
+    let (through, start, checked, inventory): (u32, u32, Option<u32>, Option<Vec<u8>>) = row(
+        &db.conn,
+        "SELECT target_height, start_height, checked_height, inventory
+         FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+        [id],
+    );
+    assert!(inventory.is_none(), "no saved cursor");
+    let stored = get_key(db, account, key).unwrap().unwrap();
+    LookupWork {
+        token: status(db, account).token,
+        work: zcash_client_backend::data_api::one_time_ivk::restore::DiscoveryWork {
+            key,
+            receiver: stored.receiver().to_raw_address_bytes(),
+        },
+        from: BlockHeight::from(checked.map_or(start, |c| start.max(c + 1))),
+        through: BlockHeight::from(through),
+        cursor: None,
+    }
 }
 
 /// A matched address has authenticated its candidate but is still waiting for inclusion.
@@ -543,18 +623,16 @@ fn delayed_window_expansion_checks_history_after_the_filter_frontier() {
             .record_one_time_filters(account, captured, 0, &blocks, &[key0])
             .unwrap()
     );
-    let page = LookupPage {
+    let page = whole(
         publication,
-        previous: None,
-        complete: true,
-        records: vec![DirectoryRecord {
+        vec![DirectoryRecord {
             receiver: held.work.receiver,
             page: 0,
             total: 1,
             payment: directory_answer(&payment0),
             ordinal: 0,
         }],
-    };
+    );
     assert!(
         st.wallet_mut()
             .db_mut()
@@ -594,12 +672,7 @@ fn corrected_history_cannot_be_completed_by_an_old_empty_response() {
             .unwrap()
     );
     let held = status(db, account).lookups[0].clone();
-    let old = LookupPage {
-        publication,
-        previous: None,
-        records: vec![],
-        complete: true,
-    };
+    let old = whole(publication, vec![]);
     assert!(
         db.record_one_time_lookup(account, &held, &old, clock_now())
             .unwrap()
@@ -644,12 +717,7 @@ fn a_new_filter_target_survives_a_held_older_complete_answer() {
             .record_one_time_filters(account, held.token, 0, &[block], &[held.work.key])
             .unwrap()
     );
-    let page = LookupPage {
-        publication,
-        previous: None,
-        records: vec![],
-        complete: true,
-    };
+    let page = whole(publication, vec![]);
     assert!(
         st.wallet_mut()
             .db_mut()
@@ -747,12 +815,7 @@ fn direct_catch_up_raises_pending_targets_before_skipping_filters() {
         .db_mut()
         .begin_one_time_recovery(account, current, true)
         .unwrap();
-    let page = LookupPage {
-        publication: older,
-        previous: None,
-        records: vec![],
-        complete: true,
-    };
+    let page = whole(older, vec![]);
     assert!(
         st.wallet_mut()
             .db_mut()
@@ -780,12 +843,7 @@ fn paused_manual_history_rechecks_its_prefix_after_invalidation() {
         db.check_one_time_history(account, publication, Some(10))
             .unwrap();
         let work = status(db, account).lookups[0].clone();
-        let page = LookupPage {
-            publication,
-            previous: None,
-            records: vec![],
-            complete: true,
-        };
+        let page = whole(publication, vec![]);
         assert!(
             db.record_one_time_lookup(account, &work, &page, clock_now())
                 .unwrap()
@@ -1167,38 +1225,18 @@ fn a_final_witness_is_admitted_at_a_fresh_quiet_anchor() {
         "UPDATE ironwood_one_time_lookups SET next_attempt_at = 0",
         [],
     );
-    let token = status(st.wallet().db(), account).token;
-    let id = key_ref(&st.wallet().db().conn, account, key8()).unwrap();
-    let (through, last): (u32, Option<Vec<u8>>) = row(
-        st.wallet().conn(),
-        "SELECT target_height, last_record FROM ironwood_one_time_lookups
-         WHERE one_time_key_id = ?1 AND read_complete = 0",
-        [id],
-    );
-    assert!(last.is_none(), "the payment is read again from page zero");
-    let stored = get_key(st.wallet().db(), account, key8()).unwrap().unwrap();
-    let work = &LookupWork {
-        token,
-        work: zcash_client_backend::data_api::one_time_ivk::restore::DiscoveryWork {
-            key: key8(),
-            receiver: stored.receiver().to_raw_address_bytes(),
-        },
-        through: BlockHeight::from(through),
-        last: None,
-    };
+    let work = &work_of(&st, key8());
     let publication = publication_at(&st, tip(&st).height);
-    let page = LookupPage {
+    let page = whole(
         publication,
-        previous: None,
-        records: vec![DirectoryRecord {
+        vec![DirectoryRecord {
             receiver: work.work.receiver,
             page: 0,
             total: 1,
             payment: directory_answer(&candidate),
             ordinal: 0,
         }],
-        complete: true,
-    };
+    );
     assert!(
         st.wallet_mut()
             .db_mut()
@@ -1309,6 +1347,99 @@ fn a_witness_from_another_fork_is_refreshed() {
             .refresh_one_time_witness(account, state.token, request)
             .unwrap()
     );
+}
+
+/// Progress through whole shards survives a replacement inventory, but a cursor inside a
+/// shard is never resumed under another inventory, and a reorg clamps checked progress to
+/// the fork and drops the cursor.
+#[test]
+fn shard_progress_survives_recapture_but_cursors_do_not() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    st.generate_and_scan_empty_blocks(6);
+    let end = tip(&st).height;
+    let first = RecoveryPublication {
+        id: [0xa1; 32],
+        ..publication_at(&st, end)
+    };
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, first, false)
+            .unwrap()
+    );
+    let work = work_of(&st, KeyId::new(Purpose::Receive, 0));
+    let sealed_end = end - 3;
+    // A sealed shard was excluded by its filter; the step stopped at the recent tier.
+    let step = LookupPage {
+        publication: first,
+        segment: None,
+        records: vec![],
+        checked_through: Some(sealed_end),
+        next: Some(LookupCursor {
+            inventory: first.id,
+            shard: 1,
+            segment: 0,
+            last: None,
+        }),
+    };
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, &work, &step, clock_now())
+            .unwrap()
+    );
+    let resumed = status(st.wallet().db(), account)
+        .lookups
+        .into_iter()
+        .find(|w| w.work.key == work.work.key)
+        .unwrap();
+    assert_eq!(resumed.from, sealed_end + 1);
+    assert_eq!(resumed.cursor.as_ref().unwrap().inventory, first.id);
+    // A cursor the step did not continue must name the same inventory.
+    let foreign = LookupPage {
+        next: Some(LookupCursor {
+            inventory: [0xb2; 32],
+            shard: 1,
+            segment: 0,
+            last: None,
+        }),
+        ..step.clone()
+    };
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, &resumed, &foreign, clock_now())
+            .is_err()
+    );
+    // Under a replacement inventory the step starts at the first unchecked height.
+    let second = RecoveryPublication {
+        id: [0xb2; 32],
+        ..first
+    };
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, &resumed, &whole(second, vec![]), clock_now())
+            .unwrap()
+    );
+    let id = key_ref(&st.wallet().db().conn, account, work.work.key).unwrap();
+    let (done, done_from): (Option<u32>, Option<u32>) = row(
+        st.wallet().conn(),
+        "SELECT done_height, done_from FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+        [id],
+    );
+    assert_eq!(done, Some(u32::from(end)));
+    assert_eq!(done_from, Some(u32::from(work.from)));
+    // A reorg below the completed end keeps coverage only to the fork.
+    st.wallet_mut().truncate_to_height(end - 2).unwrap();
+    let (done, cursor): (Option<u32>, Option<Vec<u8>>) = row(
+        st.wallet().conn(),
+        "SELECT done_height, inventory FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+        [id],
+    );
+    assert_eq!(done, Some(u32::from(end - 2)));
+    assert!(cursor.is_none());
 }
 
 /// The mined one-time receipts the wallet holds, by receive or refund key index.
@@ -1445,28 +1576,6 @@ fn a_late_payment_keeps_a_sibling_the_wallet_already_holds() {
     panic!("the payment was never its bundle's first action");
 }
 
-/// `key`'s pending lookup, read from the queue whether or not status lists it.
-fn pending_work(st: &State, key: KeyId) -> LookupWork {
-    let account = st.test_account().unwrap().id();
-    let db = st.wallet().db();
-    let id = key_ref(&db.conn, account, key).unwrap();
-    let (through, last): (u32, Option<Vec<u8>>) = row(
-        &db.conn,
-        "SELECT target_height, last_record FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
-        [id],
-    );
-    let stored = get_key(db, account, key).unwrap().unwrap();
-    LookupWork {
-        token: status(db, account).token,
-        work: zcash_client_backend::data_api::one_time_ivk::restore::DiscoveryWork {
-            key,
-            receiver: stored.receiver().to_raw_address_bytes(),
-        },
-        through: BlockHeight::from(through),
-        last: last.map(|b| DirectoryRecord::decode(&b).unwrap().unwrap()),
-    }
-}
-
 /// Clears every lookup's retry backoff.
 fn retry_now(st: &State) {
     exec(
@@ -1514,14 +1623,9 @@ fn a_witness_missing_the_root_keeps_the_payment_pending() {
     assert_eq!(pending(), 1, "the payment is kept");
     // An empty replacement answer cannot settle the key while the payment is pending.
     retry_now(&st);
-    let work = pending_work(&st, key8());
+    let work = work_of(&st, key8());
     let publication = publication_at(&st, tip(&st).height);
-    let empty = LookupPage {
-        publication,
-        previous: None,
-        records: vec![],
-        complete: true,
-    };
+    let empty = whole(publication, vec![]);
     assert!(
         st.wallet_mut()
             .db_mut()
@@ -1664,6 +1768,168 @@ fn missing_tree_material_within_the_pruning_depth_is_refreshed() {
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
+/// A payment whose claim admission rejects after its segment was read through the final
+/// page must not leave that coverage behind: the next lookup reads the payment's shard
+/// again instead of completing past it.
+#[test]
+fn a_rejection_after_the_final_segment_rereads_the_payment() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    foreign_blocks(&mut st, 2);
+    recover(st.wallet_mut().db_mut(), account, key8(), candidate.height);
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, false)
+            .unwrap()
+    );
+    let work = work_of(&st, key8());
+    let mut misplaced = directory_answer(&candidate);
+    misplaced.position += 1;
+    let receiver = work.work.receiver;
+    let page = whole(
+        publication,
+        vec![DirectoryRecord {
+            receiver,
+            page: 0,
+            total: 1,
+            payment: misplaced,
+            ordinal: 0,
+        }],
+    );
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, &work, &page, clock_now())
+            .unwrap()
+    );
+    let request = *status(st.wallet().db(), account).witnesses.first().unwrap();
+    let answer = witness_answer(&st, &request, tip(&st).height);
+    let token = status(st.wallet().db(), account).token;
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_witness(account, token, request, &answer, clock_now())
+            .unwrap()
+    );
+    assert!(one_time_notes(&st).is_empty());
+    let pending: u32 = value(
+        st.wallet().conn(),
+        "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery",
+        [],
+    );
+    assert_eq!(pending, 0, "the rejected claim is dropped");
+    retry_now(&st);
+    let again = work_of(&st, key8());
+    assert!(
+        again.from <= candidate.height,
+        "the payment's shard is required again"
+    );
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// After a finished seed walk completed I0 empty, a live hit queues I0 only from the next
+/// block. A correction then voids the old negatives on the non-direct route, so I0's active
+/// request must cover its whole history again and find the payment the old generation
+/// omitted.
+#[test]
+fn a_correction_restores_the_historical_start_of_active_requests() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key0 = KeyId::new(Purpose::Receive, 0);
+    let candidate = pay_candidate(&mut st, key0);
+    st.generate_and_scan_empty_blocks(1);
+    let omitted = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, omitted, true)
+            .unwrap()
+    );
+    for _ in 0..16 {
+        let Some(work) = status(st.wallet().db(), account).lookups.first().cloned() else {
+            break;
+        };
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .record_one_time_lookup(account, &work, &whole(omitted, vec![]), clock_now())
+                .unwrap()
+        );
+    }
+    assert!(status(st.wallet().db(), account).restore_complete);
+    st.generate_and_scan_empty_blocks(1);
+    let block = tip(&st);
+    let token = status(st.wallet().db(), account).token;
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_filters(account, token, 0, &[block], &[key0])
+            .unwrap()
+    );
+    assert_eq!(work_of(&st, key0).from, block.height);
+    let corrected = RecoveryPublication {
+        history_revision: 1,
+        id: [2; 32],
+        ..publication_at(&st, block.height)
+    };
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, corrected, false)
+            .unwrap()
+    );
+    assert!(work_of(&st, key0).from <= candidate.height);
+    drain(&mut st, account, corrected);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// While disabled, a repair read can pass shards and skip receipts that discovery would
+/// keep, even when a completed prefix survived a reorg. Enabling discovery between shards
+/// drops that partial progress and the cursor, keeping only the surviving prefix.
+#[test]
+fn enabling_between_shards_drops_partial_repair_progress() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    let key0 = KeyId::new(Purpose::Receive, 0);
+    let id = key_ref(&st.wallet().db().conn, account, key0).unwrap();
+    let done: u32 = value(
+        st.wallet().conn(),
+        "SELECT done_height FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+        [id],
+    );
+    st.wallet_mut()
+        .db_mut()
+        .set_one_time_recovery_enabled(account, false)
+        .unwrap();
+    // A repair request after the surviving prefix, stopped between shards.
+    exec(
+        st.wallet().conn(),
+        "UPDATE ironwood_one_time_lookups SET target_height = ?2 + 5, reasons = 1,
+         start_height = ?2 + 1, checked_height = ?2 + 3, inventory = zeroblob(32), shard = 2,
+         segment = 0, read_complete = 0 WHERE one_time_key_id = ?1",
+        rusqlite::params![id, done],
+    );
+    st.wallet_mut()
+        .db_mut()
+        .set_one_time_recovery_enabled(account, true)
+        .unwrap();
+    let work = work_of(&st, key0);
+    assert_eq!(work.from, BlockHeight::from(done + 1));
+    assert!(work.cursor.is_none());
+}
+
 /// The seed walk checked I1 to I4 after authenticating I0's still unconfirmed payment.
 /// A reorg then drops that payment, so direct catch-up must still check I4.
 #[test]
@@ -1743,12 +2009,7 @@ fn answer_lookups(st: &mut State, account: AccountUuid, publication: RecoveryPub
             .unwrap()
             .unwrap();
         let records = oracle(st, work.work.receiver, fvk.full_viewing_key());
-        let page = LookupPage {
-            publication,
-            previous: None,
-            records,
-            complete: true,
-        };
+        let page = whole(publication, records);
         assert!(
             st.wallet_mut()
                 .db_mut()
@@ -1889,6 +2150,277 @@ fn a_manual_search_passes_more_completed_refunds_than_one_step_budget() {
     assert_eq!(
         (done.active, done.refunds_done, done.next),
         (false, true, 6)
+    );
+}
+
+/// A paid key completed through the publication end, then a live hit queued it from the
+/// next block. A reorg below that end voids part of the completed span, so the active
+/// request must cover the invalidated interval again and find a replacement payment there.
+#[test]
+fn a_reorg_below_completed_coverage_lowers_active_request_starts() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key0 = KeyId::new(Purpose::Receive, 0);
+    pay_candidate(&mut st, key0);
+    let floor = tip(&st).height + 2;
+    st.generate_and_scan_empty_blocks(8);
+    let completed = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, completed, true)
+            .unwrap()
+    );
+    drain(&mut st, account, completed);
+    assert_eq!(mined_receipt_indexes(&st), [0]);
+    st.generate_and_scan_empty_blocks(1);
+    let block = tip(&st);
+    let token = status(st.wallet().db(), account).token;
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_filters(account, token, 0, &[block], &[key0])
+            .unwrap()
+    );
+    assert_eq!(work_of(&st, key0).from, block.height);
+
+    st.truncate_to_height(floor);
+    assert!(work_of(&st, key0).from <= floor + 1);
+    pay_candidate(&mut st, key0);
+    st.generate_and_scan_empty_blocks(10);
+    let replaced = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, replaced, false)
+            .unwrap()
+    );
+    drain(&mut st, account, replaced);
+    assert_eq!(mined_receipt_indexes(&st), [0, 0]);
+}
+
+/// After a completed restore and a reorg that keeps part of each key's completed span, a
+/// manual search reaching only that span settles each key in the same step instead of
+/// leaving the search with nothing runnable.
+#[test]
+fn a_manual_search_over_surviving_coverage_does_not_stall() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    pay_candidate(&mut st, KeyId::new(Purpose::Receive, 0));
+    st.generate_and_scan_empty_blocks(8);
+    let completed = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, completed, true)
+            .unwrap()
+    );
+    drain(&mut st, account, completed);
+    let floor = tip(&st).height - 3;
+    st.truncate_to_height(floor);
+    let surviving = publication_at(&st, floor);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, surviving, Some(4))
+            .unwrap()
+    );
+    assert_no_stall(st.wallet().db(), account);
+    drain(&mut st, account, surviving);
+    let manual = status(st.wallet().db(), account).manual.unwrap();
+    assert_eq!((manual.active, manual.next), (false, 4));
+}
+
+/// More covered refunds than one progress step's budget: after a rewind keeps their
+/// completed spans, a manual search settles them in place across several steps, each
+/// handing the rest to the worker, and reaches its end.
+#[test]
+fn a_manual_search_over_many_covered_refunds_hands_off_and_finishes() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    st.generate_and_scan_empty_blocks(8);
+    let funded = tip(&st).height - 6;
+    for index in 0..70 {
+        recover(
+            st.wallet_mut().db_mut(),
+            account,
+            KeyId::new(Purpose::Refund, index),
+            funded,
+        );
+    }
+    let completed = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, completed, true)
+            .unwrap()
+    );
+    drain(&mut st, account, completed);
+    let floor = tip(&st).height - 3;
+    st.truncate_to_height(floor);
+    let surviving = publication_at(&st, floor);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, surviving, Some(1))
+            .unwrap()
+    );
+    drain(&mut st, account, surviving);
+    let manual = status(st.wallet().db(), account).manual.unwrap();
+    assert_eq!(
+        (manual.active, manual.refunds_done, manual.next),
+        (false, true, 1)
+    );
+}
+
+/// A deterministic generator for the property test below.
+struct Steps(u64);
+
+impl Steps {
+    /// The next value below `bound`.
+    fn below(&mut self, bound: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 33) % bound
+    }
+}
+
+/// Seeded sequences of payments, direct catch-up, manual searches over more than one step's
+/// budget of completed receive and refund entries, rewinds before manual searches, birthday
+/// lowering and toggles. Every status read checks the no-stall invariant (see
+/// [`assert_no_stall`]), and every search finishes.
+#[test]
+fn seeded_recovery_sequences_never_stall() {
+    for seed in 0..3u64 {
+        let mut steps = Steps(seed);
+        let mut st = scanned_wallet();
+        let account = st.test_account().unwrap().id();
+        st.generate_and_scan_empty_blocks(4);
+        let funded = tip(&st).height;
+        for index in 0..70 {
+            recover(
+                st.wallet_mut().db_mut(),
+                account,
+                KeyId::new(Purpose::Refund, index),
+                funded,
+            );
+        }
+        let publication = publication_at(&st, tip(&st).height);
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .begin_one_time_recovery(account, publication, true)
+                .unwrap()
+        );
+        drain(&mut st, account, publication);
+        for _ in 0..24 {
+            let publication = publication_at(&st, tip(&st).height);
+            // Rewinds before manual searches come up twice as often as other steps.
+            match steps.below(7).min(6) {
+                6 => {
+                    let depth = 1 + steps.below(3) as u32;
+                    rewind_and_search(&mut st, account, depth, 1 + steps.below(80), seed);
+                }
+                0 => {
+                    let index = steps.below(6);
+                    pay_candidate(&mut st, KeyId::new(Purpose::Receive, index));
+                    st.generate_and_scan_empty_blocks(1);
+                }
+                1 => {
+                    assert!(
+                        st.wallet_mut()
+                            .db_mut()
+                            .begin_one_time_recovery(account, publication, true)
+                            .unwrap()
+                    );
+                    drain(&mut st, account, publication);
+                }
+                2 => {
+                    let end = 1 + steps.below(80);
+                    assert!(
+                        st.wallet_mut()
+                            .db_mut()
+                            .check_one_time_history(account, publication, Some(end))
+                            .unwrap()
+                    );
+                    drain(&mut st, account, publication);
+                    let manual = status(st.wallet().db(), account).manual.unwrap();
+                    assert!(!manual.active, "seed {seed}: the search finishes");
+                }
+                3 => {
+                    let depth = 1 + steps.below(3) as u32;
+                    rewind_and_search(&mut st, account, depth, 1 + steps.below(80), seed);
+                }
+                4 => {
+                    // Lowering the birthday reopens every known history.
+                    tx(st.wallet_mut().db_mut(), |conn, _| {
+                        crate::wallet::one_time_rewind::reopen_discovery(conn, account)
+                    })
+                    .unwrap();
+                    status(st.wallet().db(), account);
+                    assert!(
+                        st.wallet_mut()
+                            .db_mut()
+                            .begin_one_time_recovery(account, publication, true)
+                            .unwrap()
+                    );
+                    drain(&mut st, account, publication);
+                }
+                _ => {
+                    let db = st.wallet_mut().db_mut();
+                    db.set_one_time_recovery_enabled(account, false).unwrap();
+                    status(db, account);
+                    db.set_one_time_recovery_enabled(account, true).unwrap();
+                    status(db, account);
+                }
+            }
+            status(st.wallet().db(), account);
+        }
+    }
+}
+
+/// Rewinds `depth` blocks, keeping part of the completed coverage, and runs a manual search
+/// bounded by `end` over the surviving chain, then finishes it after the chain grows back.
+fn rewind_and_search(st: &mut State, account: AccountUuid, depth: u32, end: u64, seed: u64) {
+    let floor = tip(st).height - depth;
+    st.truncate_to_height(floor);
+    let surviving = publication_at(st, floor);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, surviving, Some(end))
+            .unwrap()
+    );
+    status(st.wallet().db(), account);
+    // Older work may need a later publication; answer what this one covers.
+    for _ in 0..512 {
+        let Some(work) = status(st.wallet().db(), account)
+            .lookups
+            .into_iter()
+            .find(|w| w.through <= floor)
+        else {
+            break;
+        };
+        let fvk = get_key(st.wallet().db(), account, work.work.key)
+            .unwrap()
+            .unwrap();
+        let records = oracle(st, work.work.receiver, fvk.full_viewing_key());
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .record_one_time_lookup(account, &work, &whole(surviving, records), clock_now())
+                .unwrap()
+        );
+    }
+    st.generate_and_scan_empty_blocks(depth as usize + 1);
+    let current = publication_at(st, tip(st).height);
+    drain(st, account, current);
+    let manual = status(st.wallet().db(), account).manual.unwrap();
+    assert!(
+        !manual.active,
+        "seed {seed}: the search after a rewind finishes"
     );
 }
 

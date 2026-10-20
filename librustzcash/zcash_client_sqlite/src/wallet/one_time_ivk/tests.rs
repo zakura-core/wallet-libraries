@@ -495,7 +495,7 @@ pub(crate) fn scan_and_recover(st: &mut State, from: BlockHeight, count: usize) 
             let ids: Vec<i64> = conn.prepare("SELECT k.id FROM ironwood_one_time_keys k JOIN accounts a ON a.id = k.account_id
                 WHERE a.uuid = ?1 AND (k.purpose = 1 OR k.funding_height IS NOT NULL)")?
                 .query_map([account.0], |r| r.get(0))?.collect::<Result<_, _>>()?;
-            for id in ids { store::restore::queue::enqueue(conn, id, u32::from(publication.end.height), 1)?; }
+            for id in ids { store::restore::queue::enqueue(conn, id, 0, u32::from(publication.end.height), 1)?; }
             Ok(())
         }).unwrap();
         store::restore::tests::discovery::drain(st, account, publication);
