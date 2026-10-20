@@ -1232,6 +1232,53 @@ where
         )
     }
 
+    /// Invokes [`decrypt_cached_blocks`] with the given arguments, expecting success.
+    ///
+    /// [`decrypt_cached_blocks`]: super::chain::decrypt_cached_blocks
+    pub fn decrypt_cached_blocks(
+        &self,
+        from_height: BlockHeight,
+        limit: usize,
+    ) -> super::chain::BlockDecryption<<DbT as WalletRead>::AccountId> {
+        match super::chain::decrypt_cached_blocks(
+            &self.network,
+            self.cache.block_source(),
+            &self.wallet_data,
+            from_height,
+            limit,
+        ) {
+            Ok(decryption) => decryption,
+            Err(e) => panic!("decrypt_cached_blocks failed: {e:?}"),
+        }
+    }
+
+    /// Invokes [`scan_decrypted_blocks`] with the given arguments, expecting success.
+    ///
+    /// [`scan_decrypted_blocks`]: super::chain::scan_decrypted_blocks
+    pub fn scan_decrypted_blocks(
+        &mut self,
+        from_height: BlockHeight,
+        limit: usize,
+        decryption: super::chain::BlockDecryption<<DbT as WalletRead>::AccountId>,
+    ) -> ScanSummary {
+        let prior_cached_block = self
+            .latest_cached_block_below_height(from_height)
+            .cloned()
+            .unwrap_or_else(|| CachedBlock::none(from_height - 1));
+
+        let result = super::chain::scan_decrypted_blocks(
+            &self.network,
+            self.cache.block_source(),
+            &mut self.wallet_data,
+            from_height,
+            &prior_cached_block.chain_state,
+            limit,
+            decryption,
+        );
+        assert_matches!(result, Ok(_));
+        result.unwrap()
+    }
+
     /// Invokes [`scan_cached_blocks`] with a caller-supplied `from_state` instead of deriving it
     /// from the block cache.
     ///

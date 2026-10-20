@@ -36,10 +36,16 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup show
-      - run: python3 -m unittest discover -s scripts/tests -v
-      - run: cargo fmt --all -- --check
-      - run: cargo fmt --manifest-path zakura/pir-chain/Cargo.toml --all -- --check
-      - run: cargo fmt --manifest-path tools/proto/Cargo.toml --all -- --check
+      - name: Run repository preflight
+        run: |
+          python3 - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+          for step in json.loads(Path('.github/preflight.json').read_text())['steps']:
+              print(step['name'], flush=True)
+              subprocess.run(step['argv'], check=True)
+          PY
       - run: git diff --exit-code
 
   repository-checks:
@@ -52,7 +58,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - check: server-graph
+          - check: dependency-boundary
             fetch-depth: 1
           - check: zakura-graph
             fetch-depth: 1
@@ -64,10 +70,6 @@ jobs:
             fetch-depth: 1
     env:
       WALLET_LIB_BUILD_ROOT: ${{ github.workspace }}/target/dev-lanes
-      # The server graph's fresh RocksDB consumer builds librocksdb-sys; see the
-      # server test lane below.
-      CFLAGS: ${{ matrix.check == 'server-graph' && '-mpclmul' || '' }}
-      CXXFLAGS: ${{ matrix.check == 'server-graph' && '-mpclmul' || '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -89,13 +91,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        config: [pir-protocol, pir-client, pir-server, default, orchard, transparent, transparent-import, proving, pczt, pczt-wallet, sqlite, enhance-wallet, enhance, transparent-filter-client, enhance-testing, transparent-engine, transparent-engine-store, transparent-pir, transparent-pir-sqlite, transparent-pir-testing, pir-receiver, transaction-status-core, transaction-status-lightwalletd, receiver-wire, receiver-pir-server, server-decoding, server]
+        config: [pir-protocol, pir-client, pir-server, default, orchard, transparent, transparent-import, proving, pczt, pczt-wallet, sqlite, enhance-wallet, enhance, transparent-filter-client, enhance-testing, transparent-engine, transparent-engine-store, transparent-pir, transparent-pir-sqlite, transparent-pir-testing, pir-receiver, transaction-status-core, transaction-status-lightwalletd, receiver-wire, receiver-pir-server]
     env:
       WALLET_LIB_BUILD_ROOT: ${{ github.workspace }}/target/dev-lanes
-      # librocksdb-sys (the server lane's opt-in `rocksdb` reader) enables SSE4.2 for
-      # its CRC32C code without the carry-less multiply flag that code needs.
-      CFLAGS: ${{ matrix.config == 'server' && '-mpclmul' || '' }}
-      CXXFLAGS: ${{ matrix.config == 'server' && '-mpclmul' || '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup show

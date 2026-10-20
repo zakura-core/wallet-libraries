@@ -7731,6 +7731,75 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn tip_first_history_with_empty_pools_reopens_rewinds_and_rescans() {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::file_backed())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let start = st.sapling_activation_height();
+        let account = st.test_account().unwrap().id();
+        let ours = st.test_account_sapling().unwrap().clone();
+        let foreign = ExtendedSpendingKey::master(&[]).to_diversifiable_full_viewing_key();
+        let value = Zatoshis::const_from_u64(10_000);
+
+        st.generate_block_at(
+            start,
+            BlockHash([0; 32]),
+            &[FakeCompactOutput::new(
+                &foreign,
+                AddressType::DefaultExternal,
+                value,
+            )],
+            0,
+            0,
+            0,
+            false,
+        );
+        for offset in 1..160 {
+            st.generate_next_block(
+                if offset == 40 { &ours } else { &foreign },
+                AddressType::DefaultExternal,
+                value,
+            );
+        }
+
+        // Only Sapling has outputs. The tip establishes more than the checkpoint budget
+        // in every pool before the first history batch is scanned, leaving a gap between them.
+        st.scan_cached_blocks(start + 40, 120);
+        st.scan_cached_blocks(start, 20);
+        let target = start + 19;
+        assert_eq!(st.get_total_balance(account), value);
+        let tree_state = |st: &mut TestState<BlockCache, TestDb, LocalNetwork>| {
+            st.wallet_mut()
+                .with_sapling_tree_mut(|tree| {
+                    Ok::<_, ShardTreeError<crate::wallet::commitment_tree::Error>>((
+                        tree.root_at_checkpoint_depth(Some(0))?.unwrap(),
+                        tree.witness_at_checkpoint_depth(40u64.into(), 0)?
+                            .unwrap()
+                            .path_elems()
+                            .to_vec(),
+                    ))
+                })
+                .unwrap()
+        };
+        let before = tree_state(&mut st);
+
+        // The rewind decision must use the persisted state, including the pools that
+        // received no commitments. The state immediately before the birthday has no block row.
+        let reopened = Connection::open(st.wallet().data_file_path()).unwrap();
+        rusqlite::vtab::array::load_module(&reopened).unwrap();
+        *st.wallet_mut().conn_mut() = reopened;
+        assert_eq!(st.wallet_mut().truncate_to_height(target).unwrap(), target);
+        assert_eq!(max_block_height(st.wallet().conn()), Some(target));
+
+        st.scan_cached_blocks(target + 1, 140);
+        assert_eq!(st.get_total_balance(account), value);
+        assert_eq!(tree_state(&mut st), before);
+    }
+
     #[cfg(feature = "orchard")]
     fn max_block_height(conn: &Connection) -> Option<BlockHeight> {
         conn.query_row("SELECT MAX(height) FROM blocks", [], |row| {

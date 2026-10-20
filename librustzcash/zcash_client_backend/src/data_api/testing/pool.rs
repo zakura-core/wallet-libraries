@@ -1,6 +1,7 @@
 #[cfg(feature = "transparent-inputs")]
 use crate::data_api::status::TransactionStatusRead;
 use std::{
+    cell::Cell,
     cmp::Eq,
     collections::HashSet,
     convert::Infallible,
@@ -39,7 +40,7 @@ use crate::{
         MaxSpendMode, NoteFilter, Ratio, TargetValue, WalletCommitmentTrees, WalletRead,
         WalletSummary, WalletTest, WalletWrite,
         anchor_retention::AnchorRetentionInterval,
-        chain::{self, ChainState, CommitmentTreeRoot, ScanSummary},
+        chain::{self, BlockSource, ChainState, CommitmentTreeRoot, ScanSummary},
         error::Error,
         testing::{
             AddressType, CacheInsertionResult, FakeCompactOutput, InitialChainState, TestBuilder,
@@ -55,6 +56,7 @@ use crate::{
         self, DustOutputPolicy, SplitPolicy, StandardFeeRule,
         standard::{self, SingleOutputChangeStrategy},
     },
+    proto::compact_formats::CompactBlock,
     scanning::ScanError,
     wallet::{Note, NoteId, OvkPolicy, ReceivedNote},
 };
@@ -6933,6 +6935,209 @@ pub fn scan_cached_blocks_finds_received_notes<T: ShieldedPoolTester, Dsf>(
         st.get_total_balance(account.id()),
         (value + value2).unwrap()
     );
+}
+
+/// A range decrypted ahead of its scan finds the notes [`scan_cached_blocks`] would.
+///
+/// [`scan_cached_blocks`]: crate::data_api::chain::scan_cached_blocks
+pub fn scan_decrypted_blocks_finds_received_notes<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
+{
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
+
+    let account = st.test_account().cloned().unwrap();
+    let dfvk = T::test_account_fvk(&st);
+
+    let value = Zatoshis::const_from_u64(50000);
+    let (h1, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+    let value2 = Zatoshis::const_from_u64(70000);
+    st.generate_next_block(&dfvk, AddressType::DefaultExternal, value2);
+
+    let decryption = st.decrypt_cached_blocks(h1, 2);
+    let summary = st.scan_decrypted_blocks(h1, 2, decryption);
+    assert_eq!(summary.scanned_range(), h1..h1 + 2);
+    assert_eq!(T::received_note_count(&summary), 2);
+    assert_eq!(
+        st.get_total_balance(account.id()),
+        (value + value2).unwrap()
+    );
+}
+
+/// A decryption that no longer matches its scan, because it covers another range,
+/// predates an account or used consensus parameters that give its blocks another ZIP 212
+/// enforcement, is decrypted again rather than hiding the notes it missed.
+pub fn scan_decrypted_blocks_decrypts_again_when_stale<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
+{
+    use secrecy::ExposeSecret;
+
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
+    let dfvk = T::test_account_fvk(&st);
+    let value = Zatoshis::const_from_u64(50000);
+
+    // Decrypted for one block, scanned for two.
+    let (h1, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+    st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+    let decryption = st.decrypt_cached_blocks(h1, 1);
+    let summary = st.scan_decrypted_blocks(h1, 2, decryption);
+    assert_eq!(T::received_note_count(&summary), 2);
+
+    // Decrypted before the account the block pays was added. The next account under
+    // the test seed takes ZIP 32 index 1, so its key can be derived beforehand.
+    let seed = st.test_seed().unwrap().expose_secret().clone();
+    let index = zip32::AccountId::ZERO.next().unwrap();
+    let usk2 = UnifiedSpendingKey::from_seed(st.network(), &seed, index).unwrap();
+    let dfvk2 = T::sk_to_fvk(T::usk_to_sk(&usk2));
+    let (h3, _, _) = st.generate_next_block(&dfvk2, AddressType::DefaultExternal, value);
+    let decryption = st.decrypt_cached_blocks(h3, 1);
+    st.create_account_from_test_seed("account2");
+    let summary = st.scan_decrypted_blocks(h3, 1, decryption);
+    assert_eq!(T::received_note_count(&summary), 1);
+
+    // Decrypted under parameters of the same network type that activate Canopy after the
+    // block, so its Sapling outputs were decrypted without ZIP 212; the scan's parameters
+    // put the block in the ZIP 212 grace period, under which the note was made. Only
+    // Sapling decryption depends on this.
+    let (h4, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+    let pre_canopy = LocalNetwork {
+        canopy: Some(h4 + 1),
+        ..*st.network()
+    };
+    let decryption =
+        chain::decrypt_cached_blocks(&pre_canopy, st.cache(), st.wallet(), h4, 1).unwrap();
+    let summary = st.scan_decrypted_blocks(h4, 1, decryption);
+    assert_eq!(T::received_note_count(&summary), 1);
+}
+
+/// Blocks replaced at the same heights after their decryption started are scanned as the
+/// scan reads them. A block that differs from the decrypted one, or is missing, makes the
+/// scan discard the decryption and find the notes of the blocks it reads; a block replaced
+/// only after the scan has read it leaves the decryption in use.
+pub fn scan_decrypted_blocks_scans_replaced_blocks<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
+{
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
+    let account = st.test_account().cloned().unwrap();
+    let dfvk = T::test_account_fvk(&st);
+    let network = *st.network();
+    let zats = Zatoshis::const_from_u64;
+
+    let (h0, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, zats(10000));
+    st.scan_cached_blocks(h0, 1);
+
+    // The second of two decrypted blocks is replaced before the scan. The wallet's tip is
+    // below the truncation height, so only the block cache is truncated.
+    let (h1, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, zats(20000));
+    st.generate_next_block(&dfvk, AddressType::DefaultExternal, zats(30000));
+    let decryption = st.decrypt_cached_blocks(h1, 2);
+    st.truncate_to_height(h1);
+    st.generate_next_block(&dfvk, AddressType::DefaultExternal, zats(40000));
+    let summary = st.scan_decrypted_blocks(h1, 2, decryption);
+    assert_eq!(T::received_note_count(&summary), 2);
+    assert_eq!(st.get_total_balance(account.id()), zats(70000));
+
+    // The second of two decrypted blocks is gone before the scan.
+    let (h3, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, zats(50000));
+    st.generate_next_block(&dfvk, AddressType::DefaultExternal, zats(60000));
+    let decryption = st.decrypt_cached_blocks(h3, 2);
+    st.truncate_to_height(h3);
+    let summary = st.scan_decrypted_blocks(h3, 2, decryption);
+    assert_eq!(summary.scanned_range(), h3..h3 + 1);
+    assert_eq!(T::received_note_count(&summary), 1);
+    assert_eq!(st.get_total_balance(account.id()), zats(120000));
+
+    // The decrypted block is replaced while the scan runs, right after the scan's first
+    // read of the block source. The scan reads the blocks once, so it uses the
+    // decryption and stores the block it read.
+    let from_state = st.latest_cached_block().unwrap().chain_state().clone();
+    let (h4, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, zats(70000));
+    let decryption = st.decrypt_cached_blocks(h4, 1);
+    let decrypted = read_blocks(st.cache(), h4, 1);
+    st.truncate_to_height(h3);
+    st.generate_next_block(&dfvk, AddressType::DefaultExternal, zats(80000));
+    let source = ReplacedAfterFirstRead {
+        first: decrypted,
+        later: read_blocks(st.cache(), h4, 1),
+        reads: Cell::new(0),
+    };
+    let summary = chain::scan_decrypted_blocks(
+        &network,
+        &source,
+        st.wallet_mut(),
+        h4,
+        &from_state,
+        1,
+        decryption,
+    )
+    .unwrap();
+    assert_eq!(T::received_note_count(&summary), 1);
+    assert_eq!(st.get_total_balance(account.id()), zats(190000));
+    assert_eq!(source.reads.get(), 1);
+}
+
+/// The blocks `source` holds from `from_height`, at most `limit` of them.
+fn read_blocks<S: BlockSource>(
+    source: &S,
+    from_height: BlockHeight,
+    limit: usize,
+) -> Vec<CompactBlock>
+where
+    S::Error: std::fmt::Debug,
+{
+    let mut blocks = vec![];
+    source
+        .with_blocks::<_, Infallible>(Some(from_height), Some(limit), |block| {
+            blocks.push(block);
+            Ok(())
+        })
+        .unwrap();
+    blocks
+}
+
+/// A block source that serves `first` to its first read and `later` to every later read,
+/// as if its blocks were replaced right after that read.
+struct ReplacedAfterFirstRead {
+    first: Vec<CompactBlock>,
+    later: Vec<CompactBlock>,
+    reads: Cell<usize>,
+}
+
+impl BlockSource for ReplacedAfterFirstRead {
+    type Error = Infallible;
+
+    fn with_blocks<F, WalletErrT>(
+        &self,
+        from_height: Option<BlockHeight>,
+        limit: Option<usize>,
+        mut with_block: F,
+    ) -> Result<(), chain::error::Error<WalletErrT, Infallible>>
+    where
+        F: FnMut(CompactBlock) -> Result<(), chain::error::Error<WalletErrT, Infallible>>,
+    {
+        let blocks = if self.reads.get() == 0 {
+            &self.first
+        } else {
+            &self.later
+        };
+        self.reads.set(self.reads.get() + 1);
+        blocks
+            .iter()
+            .filter(|block| from_height.is_none_or(|height| block.height() >= height))
+            .take(limit.unwrap_or(usize::MAX))
+            .try_for_each(|block| with_block(block.clone()))
+    }
 }
 
 pub fn scan_cached_blocks_finds_change_notes<T: ShieldedPoolTester, Dsf>(

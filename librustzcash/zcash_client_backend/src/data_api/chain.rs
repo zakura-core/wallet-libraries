@@ -151,12 +151,16 @@
 //! # }
 //! ```
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use incrementalmerkletree::frontier::Frontier;
+use sapling::note_encryption::Zip212Enforcement;
 use subtle::ConditionallySelectable;
-use zcash_primitives::block::BlockHash;
+use zcash_keys::keys::UnifiedFullViewingKey;
+use zcash_primitives::{block::BlockHash, transaction::components::sapling::zip212_enforcement};
 use zcash_protocol::consensus::{self, BlockHeight};
+use zip32::Scope;
 
 use crate::{
     data_api::{ScannedBlock, WalletWrite},
@@ -657,6 +661,195 @@ where
     Ok(scan_summary)
 }
 
+/// Trial decryption of a range of cached blocks, started by [`decrypt_cached_blocks`]
+/// before the range is scanned with [`scan_decrypted_blocks`].
+///
+/// Its work runs on the rayon thread pool that was current when it was started, so a
+/// caller can let it run while it writes the previous range.
+pub struct BlockDecryption<AccountId: Copy + Eq + std::hash::Hash + Send + Sync + 'static> {
+    from_height: BlockHeight,
+    limit: usize,
+    /// Each decrypted block, in order. Decryption results are looked up by block hash and
+    /// txid, and a missing result reads as "no notes", so the scan checks each block it
+    /// reads against these and uses the decryption only if the blocks, and the ZIP 212
+    /// enforcement the scan's parameters give them, are exactly these.
+    blocks: Vec<DecryptedBlock>,
+    /// The encoded viewing keys the decryption used, so that a scan after an account
+    /// change decrypts again.
+    encoded_ufvks: HashMap<AccountId, String>,
+    scanning_keys: ScanningKeys<AccountId, (AccountId, Scope)>,
+    runners: BatchRunners<(AccountId, Scope), (), (), ()>,
+}
+
+/// Starts trial decryption of at most `limit` cached blocks from `from_height` with the
+/// viewing keys `data_db` tracks, for a later [`scan_decrypted_blocks`] of the same blocks.
+///
+/// It reads the blocks once to queue their outputs, and returns while the decryption
+/// still runs on the current rayon thread pool. It reads `data_db` but does not write it.
+///
+/// ## Errors
+///
+/// - [`Error::BlockSource`] if the requested blocks cannot be read from `block_source`.
+/// - [`Error::Wallet`] if the tracked viewing keys cannot be read.
+#[tracing::instrument(skip(params, block_source, data_db))]
+#[allow(clippy::type_complexity)]
+pub fn decrypt_cached_blocks<ParamsT, DbT, BlockSourceT>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &DbT,
+    from_height: BlockHeight,
+    limit: usize,
+) -> Result<
+    BlockDecryption<<DbT as WalletRead>::AccountId>,
+    Error<<DbT as WalletRead>::Error, BlockSourceT::Error>,
+>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: WalletRead,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+{
+    let account_ufvks = data_db
+        .get_unified_full_viewing_keys()
+        .map_err(Error::Wallet)?;
+    let encoded_ufvks = encode_ufvks(params, &account_ufvks);
+    let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
+    let mut runners = BatchRunners::<_, (), (), ()>::for_keys(100, &scanning_keys);
+    let mut blocks = vec![];
+    block_source.with_blocks::<_, <DbT as WalletRead>::Error>(
+        Some(from_height),
+        Some(limit),
+        |block| {
+            blocks.push(DecryptedBlock::new(params, &block));
+            runners.add_block(params, block).map_err(|e| e.into())
+        },
+    )?;
+    runners.flush();
+
+    Ok(BlockDecryption {
+        from_height,
+        limit,
+        blocks,
+        encoded_ufvks,
+        scanning_keys,
+        runners,
+    })
+}
+
+/// Scans at most `limit` cached blocks from `from_height` and stores them, as
+/// [`scan_cached_blocks`] does, using the trial decryption `decryption` that
+/// [`decrypt_cached_blocks`] started.
+///
+/// `decryption` is used only if it covers the same `from_height` and `limit` and the
+/// viewing keys `data_db` tracks now, and only for the blocks it decrypted under the
+/// ZIP 212 enforcement that `params` gives them: the scan compares each block it reads,
+/// and that enforcement at its height, with the decrypted block at the same position. If
+/// either differs, or the scan reads a different number of blocks, the blocks scanned so
+/// far are discarded before anything is stored, and the range is scanned as
+/// [`scan_cached_blocks`] scans it, with the viewing keys read at the start of this call.
+/// A decryption of other blocks, under other keys or under another ZIP 212 enforcement
+/// therefore never decides which notes are found.
+///
+/// ## Errors
+///
+/// As for [`scan_cached_blocks`].
+///
+/// ## Panics
+///
+/// This method will panic if `from_height != from_state.block_height() + 1`.
+#[tracing::instrument(skip(params, block_source, data_db, from_state, decryption))]
+#[allow(clippy::type_complexity)]
+pub fn scan_decrypted_blocks<ParamsT, DbT, BlockSourceT>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &mut DbT,
+    from_height: BlockHeight,
+    from_state: &ChainState,
+    limit: usize,
+    decryption: BlockDecryption<<DbT as WalletRead>::AccountId>,
+) -> Result<ScanSummary, Error<<DbT as WalletRead>::Error, BlockSourceT::Error>>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: WalletWrite,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+{
+    assert_eq!(from_height, from_state.block_height + 1);
+
+    let current_ufvks = data_db
+        .get_unified_full_viewing_keys()
+        .map_err(Error::Wallet)?;
+    let scan_pass = if decryption.from_height == from_height
+        && decryption.limit == limit
+        && decryption.encoded_ufvks == encode_ufvks(params, &current_ufvks)
+    {
+        let BlockDecryption {
+            blocks,
+            scanning_keys,
+            runners,
+            ..
+        } = decryption;
+        scan_with_runners(
+            params,
+            block_source,
+            data_db,
+            from_height,
+            limit,
+            &scanning_keys,
+            runners,
+            Some(&blocks),
+        )?
+    } else {
+        ScanPass::Stale
+    };
+    let (scan_summary, scanned_blocks) = match scan_pass {
+        ScanPass::Scanned(scan_summary, scanned_blocks) => (scan_summary, scanned_blocks),
+        // Nothing has been stored, so the range is scanned as `scan_cached_blocks` scans it.
+        ScanPass::Stale => scan_blocks(
+            params,
+            block_source,
+            data_db,
+            from_height,
+            limit,
+            &ScanningKeys::from_account_ufvks(current_ufvks),
+        )?,
+    };
+
+    data_db
+        .put_blocks(from_state, scanned_blocks)
+        .map_err(Error::Wallet)?;
+    Ok(scan_summary)
+}
+
+fn encode_ufvks<ParamsT: consensus::Parameters, AccountId: Copy + Eq + std::hash::Hash>(
+    params: &ParamsT,
+    account_ufvks: &HashMap<AccountId, UnifiedFullViewingKey>,
+) -> HashMap<AccountId, String> {
+    account_ufvks
+        .iter()
+        .map(|(account, ufvk)| (*account, ufvk.encode(params)))
+        .collect()
+}
+
+/// What the trial decryption of a block depends on besides the viewing keys.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DecryptedBlock {
+    /// The block's hash, by which its decryption results are looked up.
+    hash: BlockHash,
+    /// The ZIP 212 enforcement under which its Sapling outputs are decrypted, which the
+    /// consensus parameters decide.
+    zip212_enforcement: Zip212Enforcement,
+}
+
+impl DecryptedBlock {
+    fn new<ParamsT: consensus::Parameters>(params: &ParamsT, block: &CompactBlock) -> Self {
+        DecryptedBlock {
+            hash: block.hash(),
+            zip212_enforcement: zip212_enforcement(params, block.height()),
+        }
+    }
+}
+
 /// [`scan_cached_blocks`], also trial-decrypting with the wallet's one-time keys.
 ///
 /// The keys come from [`OneTimeIvkRead::get_one_time_scanning_keys_for_range`] for the
@@ -745,6 +938,63 @@ where
     )?;
     runners.flush();
 
+    match scan_with_runners(
+        params,
+        block_source,
+        data_db,
+        from_height,
+        limit,
+        scanning_keys,
+        runners,
+        None,
+    )? {
+        ScanPass::Scanned(scan_summary, scanned_blocks) => Ok((scan_summary, scanned_blocks)),
+        ScanPass::Stale => unreachable!("a scan pass without decrypted blocks is never stale"),
+    }
+}
+
+/// The outcome of [`scan_with_runners`].
+enum ScanPass<AccountId> {
+    /// The blocks were scanned and are ready to store.
+    Scanned(ScanSummary, Vec<ScannedBlock<AccountId>>),
+    /// The blocks read, or their ZIP 212 enforcement, are not those of the decryption the
+    /// runners hold.
+    Stale,
+}
+
+/// The wallet error with which [`scan_with_runners`] stops reading the block source at a
+/// block whose decryption the runners do not hold.
+struct StaleDecryption;
+
+/// The scanning half of [`scan_blocks`], with the blocks' trial decryption already queued
+/// on `runners`.
+///
+/// If `decrypted_blocks` is given, `runners` hold the decryption of these blocks, in order.
+/// The pass then compares each block it reads, with its ZIP 212 enforcement under
+/// `params`, with the decrypted block at the same position before scanning it, and
+/// returns [`ScanPass::Stale`] at the first block that differs, or at the end if it read
+/// fewer blocks.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn scan_with_runners<ParamsT, DbT, BlockSourceT, IvkTag>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &DbT,
+    from_height: BlockHeight,
+    limit: usize,
+    scanning_keys: &ScanningKeys<<DbT as WalletRead>::AccountId, IvkTag>,
+    mut runners: BatchRunners<IvkTag, (), (), ()>,
+    decrypted_blocks: Option<&[DecryptedBlock]>,
+) -> Result<
+    ScanPass<<DbT as WalletRead>::AccountId>,
+    Error<<DbT as WalletRead>::Error, BlockSourceT::Error>,
+>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: WalletRead,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+    IvkTag: Copy + std::hash::Hash + Eq + Send + 'static,
+{
     let mut prior_block_metadata = if from_height > BlockHeight::from(0) {
         data_db
             .block_metadata(from_height - 1)
@@ -758,10 +1008,16 @@ where
 
     let mut scanned_blocks = vec![];
     let mut scan_summary = ScanSummary::for_range(from_height..from_height);
-    block_source.with_blocks::<_, <DbT as WalletRead>::Error>(
+    let read = block_source.with_blocks::<_, StaleDecryption>(
         Some(from_height),
         Some(limit),
         |block: CompactBlock| {
+            if decrypted_blocks.is_some_and(|decrypted| {
+                decrypted.get(scanned_blocks.len()) != Some(&DecryptedBlock::new(params, &block))
+            }) {
+                return Err(Error::Wallet(StaleDecryption));
+            }
+
             scan_summary.scanned_range.end = block.height() + 1;
             let scanned_block = scan_block_with_runners::<_, _, _, (), (), ()>(
                 params,
@@ -789,9 +1045,18 @@ where
 
             Ok(())
         },
-    )?;
+    );
+    match read {
+        Ok(()) => {}
+        Err(Error::Wallet(StaleDecryption)) => return Ok(ScanPass::Stale),
+        Err(Error::BlockSource(e)) => return Err(Error::BlockSource(e)),
+        Err(Error::Scan(e)) => return Err(Error::Scan(e)),
+    }
+    if decrypted_blocks.is_some_and(|decrypted| decrypted.len() != scanned_blocks.len()) {
+        return Ok(ScanPass::Stale);
+    }
 
-    Ok((scan_summary, scanned_blocks))
+    Ok(ScanPass::Scanned(scan_summary, scanned_blocks))
 }
 
 #[cfg(feature = "test-dependencies")]

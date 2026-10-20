@@ -1,12 +1,19 @@
 # Changelog
 
-The package structure changes without changing database or protocol formats.
+## [Unreleased]
+
+## [0.0.1-rc0] - 2026-10-19
+
+### Added
+
+- Shared hint and packing preparation used independently by publishers and
+  query servers, with explicit Enhance, Status and Transparent features.
 
 ## pir-native history
 
 # Changelog
 
-## [Unreleased]
+## Changes carried into consolidation
 
 ## [0.0.1-rc2] - 2026-10-16
 

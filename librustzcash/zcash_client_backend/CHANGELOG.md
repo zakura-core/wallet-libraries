@@ -7,6 +7,55 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Fixed
+
+- `data_api::ll::wallet::update_tree` (and so `put_blocks`) keeps a tree it
+  inserts no note commitments into to `max_checkpoints` unretained checkpoints.
+  Only inserting a subtree pruned, so such a tree kept every checkpoint added
+  for it: an empty tree one at each frontier height, with or without the
+  `orchard` feature, and Ironwood's tree before its activation one at every
+  height another pool checkpointed. Only checkpoints of an empty tree state are
+  removed this way.
+
+### Added
+
+- `data_api::ll::wallet::stored_root_mismatches`, the number of shards whose
+  computed root differed from the stored one since the process started.
+
+- `data_api::chain::decrypt_cached_blocks` starts trial decryption of a range of cached
+  blocks and returns a `BlockDecryption` while the work still runs on the current rayon
+  pool; `data_api::chain::scan_decrypted_blocks` then scans and stores the range as
+  `scan_cached_blocks` does. A caller can decrypt the next range while it stores the
+  previous one. The decryption is used only if it covers the same range, blocks, viewing
+  keys and ZIP 212 enforcement, and the range is decrypted again otherwise.
+  `testing::TestState::decrypt_cached_blocks` and `scan_decrypted_blocks` call them.
+
+### Changed
+
+- `data_api::ll::wallet::put_blocks` inserts a range's note commitments without
+  block checkpoints when every pool's tree would prune those checkpoints in the
+  same call: the tree already holds `max_checkpoints` newer checkpoints that are
+  not retained, and none of the range's heights is retained. This is the case
+  for history scanned after the chain tip. The trees end in the same state, and
+  the update no longer adds and then prunes a checkpoint for every block.
+- Without those checkpoints, `put_blocks` also leaves out of the tree update
+  each shard that lies wholly inside the range, holds no wallet note, and is
+  already stored as its root alone, as `put_*_subtree_roots` stores a completed
+  shard. Inserting such a shard would collapse it back to that root, so the
+  trees end in the same state without hashing its note commitments. Inserting
+  a shard never checked the computed root against the stored one, so this
+  trusts the stored root no more than before.
+  Tree updates with no subtrees still prune obsolete checkpoints, including
+  pools receiving no commitments and batches whose shards are all left out,
+  preserving rewind behavior. Explicitly retained checkpoints remain pinned.
+- `put_blocks` now checks stored roots where it builds a shard that has one: a
+  random sample of about one in 16 of the shards it could leave out, and every
+  shard holding a wallet note. A mismatch is logged and counted, without failing
+  the scan or replacing the stored root, and stops shards being left out for
+  the rest of the process.
+
+## [0.1.0-rc9.1] - 2026-10-19
+
 ### Added
 
 - One-time IVK discovery (with `orchard`): `data_api::one_time_ivk::restore` replaces restore
@@ -47,7 +96,7 @@ and this library adheres to Rust's notion of
   transaction without it. A PCZT that spends a one-time-key note says so under the
   proprietary global key `zcash_client_backend:spends_one_time`, which the signer views
   redact. Other PCZTs are encoded as before.
-- Common dependencies use the protocol-port revision of the version 4 family,
+- Common dependencies use the published `4.0.0-rc2` family,
   with the Halo 2 backend selected explicitly for transaction proving.
 - ZIP 318 anchor retention, canonical crossing fees, and rolling expiry now follow
   the network's NU7 block spacing. `AnchorRetention::new` and `union`, and
@@ -68,6 +117,12 @@ and this library adheres to Rust's notion of
 - `EnhancePirWork::Waiting`: newly queued private payload work is eligible through
   the ordinary recovery schedule without a randomized first-query delay.
   Consumers must remove waiting-state handling.
+
+### Fixed
+
+- Extract partially signed transactions created by older wallet releases without
+  changing their saved proposal metadata. One-time-key spends use a separate
+  marker, which is removed from the views sent to signers.
 
 ## [0.1.0-rc9] - 2026-10-14
 

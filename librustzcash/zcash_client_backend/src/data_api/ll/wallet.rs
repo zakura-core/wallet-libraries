@@ -34,6 +34,17 @@ use crate::{
 
 use super::{LowLevelWalletRead, LowLevelWalletWrite, TxMeta};
 
+mod positionless_checkpoints;
+use positionless_checkpoints::prune_positionless_checkpoints;
+
+mod history_insertion;
+pub use history_insertion::stored_root_mismatches;
+use history_insertion::{
+    STORED_ROOT_MISMATCHES, StoredRootShards, audit_sample, build_subtrees_except,
+    checkpoints_pruned_on_insert_in_all_pools, count_stored_root_mismatches,
+    drop_checkpoint_retention, leave_out_shards_stored_as_root,
+};
+
 #[cfg(feature = "transparent-inputs")]
 use {
     crate::data_api::Account,
@@ -659,28 +670,104 @@ where
     // We will have a start position and a last scanned height in all cases where
     // `blocks` is non-empty.
     if let Some(last_scanned_height) = last_scanned_height {
+        // A history range scanned after the chain tip adds checkpoints that `insert_tree` prunes
+        // again before it returns, because the trees already hold `max_checkpoints` newer ones.
+        // Inserting their leaves without checkpoint retention leaves the trees in the same state
+        // and spares the update from adding and then pruning them.
+        let batch_heights = (from_state.block_height() + 1)..=last_scanned_height;
+        let checkpoints_dropped =
+            checkpoints_pruned_on_insert_in_all_pools(wallet_db, anchor_retention, &batch_heights)?;
+        if checkpoints_dropped {
+            drop_checkpoint_retention(&mut sapling_commitments);
+            #[cfg(feature = "orchard")]
+            drop_checkpoint_retention(&mut orchard_commitments);
+            #[cfg(feature = "orchard")]
+            drop_checkpoint_retention(&mut ironwood_commitments);
+        }
+
+        // Without checkpoints, a shard that lies wholly inside the range and holds no wallet note
+        // collapses to its root once inserted. When the tree already stores the shard as that root
+        // alone, as `put_*_subtree_roots` stores a completed shard, its commitments are left out
+        // of the subtrees below, which spares hashing them. A sample of such shards, and those
+        // holding a note, are built anyway and their stored roots checked after the update.
+        let leave_out_allowed = stored_root_mismatches() == 0;
+        let sapling_start = Position::from(from_state.final_sapling_tree().tree_size());
+        let sapling_stored = if checkpoints_dropped {
+            wallet_db.with_sapling_tree_mut(|tree| {
+                leave_out_shards_stored_as_root(
+                    tree,
+                    sapling_start,
+                    &sapling_commitments,
+                    leave_out_allowed,
+                    audit_sample,
+                )
+                .map_err(PutBlocksError::ShardTree)
+            })?
+        } else {
+            StoredRootShards::default()
+        };
+        #[cfg(feature = "orchard")]
+        let orchard_start = Position::from(from_state.final_orchard_tree().tree_size());
+        #[cfg(feature = "orchard")]
+        let orchard_stored = if checkpoints_dropped {
+            wallet_db.with_orchard_tree_mut(|tree| {
+                leave_out_shards_stored_as_root(
+                    tree,
+                    orchard_start,
+                    &orchard_commitments,
+                    leave_out_allowed,
+                    audit_sample,
+                )
+                .map_err(PutBlocksError::ShardTree)
+            })?
+        } else {
+            StoredRootShards::default()
+        };
+        #[cfg(feature = "orchard")]
+        let ironwood_start = Position::from(from_state.final_ironwood_tree().tree_size());
+        #[cfg(feature = "orchard")]
+        let ironwood_stored = if checkpoints_dropped {
+            wallet_db
+                .with_ironwood_tree_mut(|tree| {
+                    leave_out_shards_stored_as_root(
+                        tree,
+                        ironwood_start,
+                        &ironwood_commitments,
+                        leave_out_allowed,
+                        audit_sample,
+                    )
+                    .map_err(PutBlocksError::ShardTree)
+                })?
+                .unwrap_or_default()
+        } else {
+            StoredRootShards::default()
+        };
+
         // Create subtrees from the note commitments in parallel.
         const CHUNK_SIZE: usize = 1024;
-        let sapling_subtrees = build_subtrees::<_, SAPLING_SHARD_HEIGHT>(
-            Position::from(from_state.final_sapling_tree().tree_size()),
+        let sapling_subtrees = build_subtrees_except::<_, SAPLING_SHARD_HEIGHT>(
+            sapling_start,
             &mut sapling_commitments,
             CHUNK_SIZE,
+            &sapling_stored.left_out,
         );
 
         #[cfg(feature = "orchard")]
-        let orchard_subtrees = build_subtrees::<_, ORCHARD_SHARD_HEIGHT>(
-            Position::from(from_state.final_orchard_tree().tree_size()),
+        let orchard_subtrees = build_subtrees_except::<_, ORCHARD_SHARD_HEIGHT>(
+            orchard_start,
             &mut orchard_commitments,
             CHUNK_SIZE,
+            &orchard_stored.left_out,
         );
 
         // The Ironwood note commitment tree is Orchard-shaped and so uses the Orchard shard
         // height, but is a distinct pool with its own tree.
         #[cfg(feature = "orchard")]
-        let ironwood_subtrees = build_subtrees::<_, ORCHARD_SHARD_HEIGHT>(
-            Position::from(from_state.final_ironwood_tree().tree_size()),
+        let ironwood_subtrees = build_subtrees_except::<_, ORCHARD_SHARD_HEIGHT>(
+            ironwood_start,
             &mut ironwood_commitments,
             CHUNK_SIZE,
+            &ironwood_stored.left_out,
         );
 
         // Ensure that we have the same set of checkpoints across all trees. Each tree must gain a
@@ -798,6 +885,27 @@ where
                     block_range: from_state.block_height()..(last_scanned_height + 1),
                     error,
                 })
+            })?;
+        }
+
+        // Check the stored roots of the shards built in place of being left out.
+        wallet_db.with_sapling_tree_mut(|tree| {
+            count_stored_root_mismatches(tree, &sapling_stored.audited, &STORED_ROOT_MISMATCHES)
+                .map_err(PutBlocksError::ShardTree)
+        })?;
+        #[cfg(feature = "orchard")]
+        {
+            wallet_db.with_orchard_tree_mut(|tree| {
+                count_stored_root_mismatches(tree, &orchard_stored.audited, &STORED_ROOT_MISMATCHES)
+                    .map_err(PutBlocksError::ShardTree)
+            })?;
+            wallet_db.with_ironwood_tree_mut(|tree| {
+                count_stored_root_mismatches(
+                    tree,
+                    &ironwood_stored.audited,
+                    &STORED_ROOT_MISMATCHES,
+                )
+                .map_err(PutBlocksError::ShardTree)
             })?;
         }
 
@@ -1748,7 +1856,9 @@ where
     )?;
     retain_anchor_checkpoint(tree, anchor_retention, frontier_height)?;
 
+    let mut inserted_subtrees = false;
     for (subtree, checkpoints) in subtrees {
+        inserted_subtrees = true;
         // Register anchor retention for this batch's checkpoint heights *before* `insert_tree`,
         // which prunes down to `max_checkpoints` during insertion. A batch larger than the
         // checkpoint budget would otherwise prune an anchor before it could be retained, so
@@ -1784,6 +1894,13 @@ where
                 retain_anchor_checkpoint(tree, anchor_retention, height)?;
             }
         }
+    }
+
+    // `insert_tree` is what prunes excess checkpoints, so a tree this call inserted nothing into
+    // keeps every checkpoint added for it: an empty tree gains one at each frontier height, and
+    // Ironwood's tree, before its activation, one at every height another pool checkpoints.
+    if !inserted_subtrees {
+        prune_positionless_checkpoints(tree)?;
     }
 
     Ok(())

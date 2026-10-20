@@ -9,9 +9,21 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
-- Updated the Zakura Common dependency family to `4.0.0-rc0`, including the
+- Updated the published Zakura Common dependency family to `4.0.0-rc3`.
+  Compatible newer releases are allowed so consumers can share Common packages
+  with the node libraries without matching exact dependency pins.
+
+## [0.1.0-rc9] - 2026-10-19
+
+### Changed
+
+- Updated the Zakura Common dependency family to `4.0.0-rc2`, including the
   Orchard backend and proof API changes. The Zakura backend no longer enables
   the removed `unstable-voting-circuits` feature.
+
+- Update the Zakura backend and SQLite dependencies to `0.1.0-rc9.1` and
+  PCZT to `0.1.0-rc7`, including one-time key discovery and NU7 block-spacing support.
+
 
 ## [0.1.0-rc8] - 2026-10-14
 

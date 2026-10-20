@@ -44,11 +44,6 @@ CONFIGS = {
     "receiver-wire": (["-p", "zakura-receiver-crypto", "--no-default-features"], []),
     "receiver-pir-server": (["-p", "zakura-receiver-pir"], ["server"]),
     "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
-    # Node readers retain their separate workspace and lockfile.
-    # Decoding and fixtures alone: what PIR product cores compile, without a runtime or HTTP.
-    "server-decoding": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing", "transparent", "enhance", "status", "receiver"]),
-    "server-rpc": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing-node", "transparent", "enhance", "status", "receiver"]),
-    "server": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing-node", "rocksdb", "enhance", "status", "receiver"]),
     # Role lanes cover formats and server-only helpers independently.
     "pir-protocol": (["-p", "zakura-pir-protocol"], ["enhance", "status", "transparent-inputs", "native", "http-endpoint"]),
     "pir-server": (["-p", "zakura-pir-server-core", "-p", "zakura-pir-publisher", "-p", "zakura-pir-query-server"], ["enhance", "status", "transparent"]),
@@ -57,7 +52,7 @@ CONFIGS = {
     "pir-integration": (["-p", "zakura-pir-protocol", "-p", "zakura-pir-server-core", "-p", "zakura-pir-publisher", "-p", "zakura-pir-query-server", "-p", "zakura-pir-client"], ["enhance", "status", "transparent", "transparent-inputs", "native", "http-endpoint", "sqlite", "testing", "engine-conformance", "reqwest", "lightwalletd", "cli"]),
 }
 
-VERIFY = ("server-graph", "zakura-graph", "wallet-lib-modes", "vendor-ancestry", "dependency-graph")
+VERIFY = ("dependency-boundary", "zakura-graph", "wallet-lib-modes", "vendor-ancestry", "dependency-graph")
 
 
 def capture(argv: list[str], **kwargs) -> str:

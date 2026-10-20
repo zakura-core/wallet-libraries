@@ -768,6 +768,27 @@ pub(crate) fn scan_cached_blocks_finds_received_notes<T: ShieldedPoolTester>() {
     )
 }
 
+pub(crate) fn scan_decrypted_blocks_finds_received_notes<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::scan_decrypted_blocks_finds_received_notes::<T, _>(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    )
+}
+
+pub(crate) fn scan_decrypted_blocks_decrypts_again_when_stale<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::scan_decrypted_blocks_decrypts_again_when_stale::<
+        T,
+        _,
+    >(TestDbFactory::default(), BlockCache::new())
+}
+
+pub(crate) fn scan_decrypted_blocks_scans_replaced_blocks<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::scan_decrypted_blocks_scans_replaced_blocks::<T, _>(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    )
+}
+
 // TODO: This test can probably be entirely removed, as the following test duplicates it entirely.
 pub(crate) fn scan_cached_blocks_finds_change_notes<T: ShieldedPoolTester>() {
     zcash_client_backend::data_api::testing::pool::scan_cached_blocks_finds_change_notes::<T, _>(

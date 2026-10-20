@@ -61,8 +61,8 @@ Shared contracts remain independently usable by the wallet backend.
 
 Receiver retains its existing packages and APIs. Its native helper imports use
 `zakura-pir-client` with only `native`; no other product is selected. The generic
-filter codec remains in `zakura-filters`. Node readers remain in the separate
-`zakura/pir-chain` workspace and are selected explicitly by ingestion/publisher
+filter codec remains in `zakura-filters`. Node readers are owned by wallet-pir
+and are selected explicitly by ingestion/publisher
 consumers. Operational services, HTTP routing, activation and cache policy remain
 in wallet-pir.
 
