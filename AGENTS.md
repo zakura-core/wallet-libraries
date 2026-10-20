@@ -60,3 +60,5 @@ Do not promise automatic wake unless the runtime provides it.
 - Keep release dependencies one-way: wallet-pir may consume wallet-libraries, but wallet-libraries must not depend on packages owned or released by wallet-pir, including normal, optional, build, target-specific and development dependencies.
 
 Keep PIR client, publisher and query-server production dependencies separate; name the serving package `query-server`.
+
+- Use compatible Common version requirements in library manifests; pin tested builds in Cargo.lock so wallet updates do not require a matching Zakura release.
