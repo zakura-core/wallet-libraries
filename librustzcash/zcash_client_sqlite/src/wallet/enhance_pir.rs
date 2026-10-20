@@ -314,36 +314,22 @@ fn require_lwd(
     Ok(())
 }
 
-/// Settles enhancement for `tx_ref`, which holds a one-time IVK late candidate that
-/// discovery retrieved privately and admitted. A stored or routed transaction keeps its
-/// route (private if it had none) and retires its enhancement if nothing is left. Otherwise
-/// nothing shows whether it has transparent parts, so it is queued and routed like a
-/// scanned transaction whose compact data does not prove it Ironwood-only.
+/// Queues targeted metadata for an admitted receipt without assuming its transaction shape.
+/// Existing routing and outgoing work remain authoritative. The private response decides
+/// whether transparent details need the wallet's separate routing policy.
 #[cfg(feature = "orchard")]
 pub(crate) fn finish_private_receipt(
     conn: &Transaction<'_>,
-    tpir_session: &TransparentSession,
-    configured: Option<TransparentLedgerMode>,
     session: &SessionState,
     tx_ref: crate::TxRef,
-    txid: TxId,
 ) -> Result<(), SqliteClientError> {
     let has_raw: bool = conn.query_row(
-        "SELECT raw IS NOT NULL FROM transactions WHERE id_tx = :tx",
-        named_params![":tx": tx_ref.0],
+        "SELECT raw IS NOT NULL FROM transactions WHERE id_tx = ?1",
+        [tx_ref.0],
         |row| row.get(0),
     )?;
-    // A routed transaction already has its retrieval request.
     if !has_raw && route(conn, tx_ref)?.is_none() {
-        super::queue_tx_retrieval(conn, std::iter::once(txid), None)?;
-        return queue_transaction(
-            conn,
-            tpir_session,
-            configured,
-            session,
-            tx_ref,
-            &IronwoodEnhancementPlan::Ineligible,
-        );
+        metadata::queue(conn, session, tx_ref, &[])?;
     }
     conn.execute(
         "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1,?2)

@@ -9,14 +9,10 @@ license.workspace = true
 repository.workspace = true
 readme = "README.md"
 
-# The library holds only the report model and its renderers. The scenarios and
-# their harness are the `scenarios` test target, so the wallet's test features
-# stay out of every normal build.
-[dependencies]
-serde = { workspace = true, features = ["std"] }
-serde_json.workspace = true
-
+# Heavy wallet and chain fixtures remain test-only.
 [dev-dependencies]
+rand_core.workspace = true
+serde_json.workspace = true
 hex.workspace = true
 incrementalmerkletree.workspace = true
 orchard = { workspace = true, features = ["circuit"] }
@@ -43,7 +39,6 @@ zip321.workspace = true
 [[test]]
 name = "scenarios"
 path = "tests/scenarios/main.rs"
-harness = false
 
 [lints]
 workspace = true

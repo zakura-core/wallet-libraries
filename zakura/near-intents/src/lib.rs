@@ -1,6 +1,7 @@
 //! Normalizes NEAR Intents 1Click execution statuses into the provider-neutral
 //! [`Observation`] that one-time IVK stores record. Apps fetch statuses
-//! themselves and pass the fields that affect scanning as a [`NearStatus`].
+//! themselves and pass the fields that set local operation ownership and receipt
+//! expectations as a [`NearStatus`]. A status never proves or discovers a payment.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -9,9 +10,10 @@ use zakura_one_time_ivk::{
     Purpose,
     swap::{Observation, OperationStatus, ReceiptExpectation},
 };
-use zcash_protocol::value::Zatoshis;
+use zcash_protocol::{TxId, value::Zatoshis};
 
-/// The fields of a NEAR 1Click status response that affect scanning.
+/// The fields of a NEAR 1Click status response that set operation ownership and
+/// receipt expectations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NearStatus<'a> {
     /// The `status` string.
@@ -22,10 +24,18 @@ pub struct NearStatus<'a> {
     pub refunded_amount: Option<Zatoshis>,
     /// `swapDetails.amountOut` in the destination asset's base units.
     pub amount_out: Option<Zatoshis>,
+    /// The `hash` of each `swapDetails.originChainTxHashes` entry. On a refund key's
+    /// Zcash-origin swap these include the refund as well as the wallet's own deposit,
+    /// which pays the deposit address rather than the refund key.
+    pub origin_tx_hashes: &'a [&'a str],
+    /// The `hash` of each `swapDetails.destinationChainTxHashes` entry, which holds an
+    /// incoming swap's Zcash payout.
+    pub destination_tx_hashes: &'a [&'a str],
 }
 
 /// Normalizes a NEAR status response for a key of `purpose`. An unrecognized
-/// status counts as active, so it neither releases an address nor ends scanning.
+/// status counts as active, so it neither releases an address nor settles an
+/// expected receipt.
 ///
 /// A refund key expects ZEC whenever the provider reports a positive refunded
 /// amount. A `SUCCESS` of a recognized swap type that reports a zero refunded
@@ -37,6 +47,10 @@ pub struct NearStatus<'a> {
 /// source chain is not a Zcash receipt. A zero payout amount is treated as
 /// unreported. Every status from `KNOWN_DEPOSIT_TX` on, including `FAILED`,
 /// implies a deposit; `PENDING_DEPOSIT` and an unrecognized status do not.
+///
+/// An incoming key's receipts are the destination-chain transactions and a refund
+/// key's are the origin-chain ones, since only that side is Zcash. Each hash is read
+/// as a canonical Zcash transaction ID, and one that is not is skipped.
 pub fn near_observation(purpose: Purpose, status: &NearStatus<'_>) -> Observation {
     use OperationStatus::*;
     use ReceiptExpectation::{Positive, Unknown};
@@ -44,8 +58,7 @@ pub fn near_observation(purpose: Purpose, status: &NearStatus<'_>) -> Observatio
     let refund_reported = status.refunded_amount.is_some();
     let outcome = match (status.status, purpose) {
         ("PENDING_DEPOSIT", _) => AwaitingDeposit,
-        // INCOMPLETE_DEPOSIT is not final: an underpayment is refunded around the deadline,
-        // and the completion limit bounds the wait.
+        // INCOMPLETE_DEPOSIT is not final: an underpayment is refunded around the deadline.
         ("KNOWN_DEPOSIT_TX" | "INCOMPLETE_DEPOSIT" | "PROCESSING", _) => Active,
         ("SUCCESS", Purpose::Receive) => {
             Terminal(Positive(status.amount_out.filter(|v| !v.is_zero())))
@@ -71,9 +84,15 @@ pub fn near_observation(purpose: Purpose, status: &NearStatus<'_>) -> Observatio
             | "REFUNDED"
             | "FAILED"
     );
+    let hashes = match purpose {
+        Purpose::Receive => status.destination_tx_hashes,
+        Purpose::Refund => status.origin_tx_hashes,
+        _ => &[],
+    };
     Observation {
         status: outcome,
         funded,
+        receipts: hashes.iter().filter_map(|h| TxId::from_hex(h)).collect(),
     }
 }
 
@@ -126,7 +145,7 @@ mod tests {
 
     /// A deposit seen but not yet swapped stays in progress for either key purpose. An
     /// underpayment (`INCOMPLETE_DEPOSIT`) is refunded around the deadline, so treating
-    /// it as final could close a refund key before its refund arrives.
+    /// it as final could settle a refund key's expected receipt before the refund arrives.
     #[test]
     fn deposits_in_progress_are_not_final() {
         for status in ["KNOWN_DEPOSIT_TX", "INCOMPLETE_DEPOSIT", "PROCESSING"] {
@@ -190,6 +209,7 @@ mod tests {
             Observation {
                 status: OperationStatus::Terminal(ReceiptExpectation::Positive(Some(amount))),
                 funded: true,
+                receipts: vec![],
             }
         );
     }
@@ -261,5 +281,23 @@ mod tests {
                 "{swap_type:?}"
             );
         }
+    }
+
+    /// Each direction reads its Zcash side's hashes, skipping any that is not a txid.
+    #[test]
+    fn receipts_come_from_the_zcash_side_of_the_swap() {
+        let payout = TxId::from_bytes([1; 32]);
+        let refund = TxId::from_bytes([2; 32]);
+        let (payout_hex, refund_hex) = (payout.to_string(), refund.to_string());
+        let destination = [payout_hex.as_str(), "0xnot-a-txid"];
+        let origin = [refund_hex.as_str()];
+        let status = NearStatus {
+            status: "SUCCESS",
+            origin_tx_hashes: &origin,
+            destination_tx_hashes: &destination,
+            ..Default::default()
+        };
+        assert_eq!(near_observation(Receive, &status).receipts, [payout]);
+        assert_eq!(near_observation(Refund, &status).receipts, [refund]);
     }
 }

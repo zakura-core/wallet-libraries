@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Remove aggregate filter downloads and evaluator storage. Rolling block hints are independent of full-history PIR sessions.
+- Remove `server::Server::rows` and `server::Server::new_reusing_rows`, which only tests used. A prepared server no longer keeps a second copy of its encoded rows.
+
 ### Added
 
 - Fetch rolling block-filter availability and bounded batches independently of PIR sessions through the caller-owned transport.

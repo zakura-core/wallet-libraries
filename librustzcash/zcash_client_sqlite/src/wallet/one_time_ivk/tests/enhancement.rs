@@ -1,8 +1,6 @@
 use super::*;
 use zakura_one_time_ivk::swap::RefundMemo;
-use zcash_client_backend::data_api::wallet::{
-    decrypt_and_store_transaction, decrypt_and_store_transaction_with_one_time_ivks,
-};
+use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
 use zcash_protocol::{ShieldedPool, TxId, memo::MemoBytes};
 
 /// Builds a wallet whose test account holds one confirmed 1,000,000 zatoshi
@@ -11,9 +9,12 @@ fn ironwood_funded_wallet() -> (State, BlockHeight) {
     let mut st = ironwood_wallet();
     let fvk = parent(&st);
     let first = pay(&mut st, &fvk, 1_000_000);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(5);
+    st.generate_and_scan_empty_blocks(5);
     let account = st.test_account().unwrap().id();
-    discover(&mut st, account, &[]);
+    st.wallet_mut()
+        .db_mut()
+        .set_one_time_recovery_enabled(account, true)
+        .unwrap();
     (st, first)
 }
 
@@ -38,7 +39,7 @@ fn send(
     let (proposal, txid) = try_send(st, payments, memo);
     let txid = txid.unwrap();
     let (mined, _) = st.generate_next_block_including(txid);
-    st.scan_cached_blocks_with_one_time_ivks(mined, 1);
+    st.scan_cached_blocks(mined, 1);
     (proposal, txid, mined)
 }
 
@@ -50,16 +51,16 @@ fn refund_memo(index: u64) -> MemoBytes {
 /// Runs refund memo recovery for `account` in its own transaction.
 fn recover_memos(st: &mut State, account: AccountUuid) {
     tx(st.wallet_mut().db_mut(), |c, p| {
-        store::restore::recovery::recover_refund_memos(c, p, account, clock_now())
+        store::restore::recovery::recover_refund_memos(c, p, account)
     })
     .unwrap()
 }
 
-/// `(index, scan_from, registered for a lookup)` of each registered refund key.
+/// `(index, funding height, registered for a lookup)` of each registered refund key.
 fn refund_keys(st: &State) -> Vec<(u64, u32, bool)> {
     let keys: Vec<(Vec<u8>, u32, bool)> = rows(
         st.wallet().conn(),
-        "SELECT k.key_index, k.scan_from,
+        "SELECT k.key_index, k.funding_height,
             EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id)
          FROM ironwood_one_time_keys k WHERE k.purpose = 0 ORDER BY k.key_index",
         [],
@@ -91,166 +92,19 @@ fn externally_paid_refund_key(
     let key = reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, from);
     let tx = external_payment(key.receiver(), &MemoBytes::from_bytes(b"refund").unwrap());
     let (height, _) = st.generate_next_block_from_tx(1, &tx);
-    st.scan_cached_blocks_with_one_time_ivks(height, 1);
+    scan_and_recover(st, height, 1);
     (key, tx, height)
 }
 
-/// Self-payments to both purposes, found as outgoing by ordinary OVK recovery, decrypt
-/// with the one-time keys as one incoming record each, not change, whether the full
-/// transaction is stored before or after its compact block, and idempotently across a reopen.
+/// Full transaction retrieval preserves a PIR-admitted note without broad key decryption.
 #[test]
-fn one_time_ivk_full_transaction_before_or_after_compact_scan() {
-    for full_first in [false, true] {
-        let (mut st, h) = ironwood_funded_wallet();
-        let network = *st.network();
-        let account = st.test_account().cloned().unwrap();
-        let scan_from = st.wallet().chain_height().unwrap().unwrap() + 1;
-        let keys: Vec<_> = [Purpose::Refund, Purpose::Receive]
-            .into_iter()
-            .map(|purpose| reserve_key(st.wallet_mut().db_mut(), account.id(), purpose, scan_from))
-            .collect();
-        let memo = MemoBytes::from_bytes(b"swap payment memo").unwrap();
-        let payments = keys
-            .iter()
-            .map(|key| payment(&unified(key.receiver()), 50_000, Some(&memo)))
-            .collect();
-        let change = (None, ShieldedPool::Orchard);
-        let (_, txid) = transfer(&mut st, (account.id(), account.usk()), payments, change);
-        let txid = txid.unwrap();
-        let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
-
-        let ufvks = st.wallet().get_unified_full_viewing_keys().unwrap();
-        let decoded = zcash_client_backend::decrypt_transaction_with_one_time_ivks(
-            &network,
-            None,
-            Some(h),
-            &tx,
-            &ufvks,
-            st.wallet().get_one_time_scanning_keys().unwrap(),
-        );
-        for key in &keys {
-            let outputs: Vec<_> = decoded
-                .ironwood_outputs()
-                .iter()
-                .filter(|o| o.note().0.recipient() == key.receiver())
-                .collect();
-            assert_eq!(outputs.len(), 1);
-            assert_eq!(outputs[0].one_time_key_id(), Some(key.key_id()));
-            assert_eq!(
-                outputs[0].transfer_type(),
-                zcash_client_backend::TransferType::Incoming
-            );
-            assert_eq!(outputs[0].memo(), &memo);
-        }
-        // Without the one-time keys these payments would be stored as outgoing only.
-        assert!(matches!(
-            decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, None),
-            Err(SqliteClientError::OneTimeIvksNotUsed)
-        ));
-        if full_first {
-            decrypt_and_store_transaction_with_one_time_ivks(&network, st.wallet_mut(), &tx, None)
-                .unwrap();
-        }
-        let (mined, _) = st.generate_next_block_including(txid);
-        st.scan_cached_blocks_with_one_time_ivks(mined, 1);
-        // Reopen before fetching the full transaction, as on a resumed sync.
-        reopen(&mut st);
-        for _ in 0..2 {
-            decrypt_and_store_transaction_with_one_time_ivks(
-                &network,
-                st.wallet_mut(),
-                &tx,
-                Some(mined),
-            )
-            .unwrap();
-        }
-        st.scan_cached_blocks_with_one_time_ivks(mined, 1);
-        let stored = notes(&st, mined);
-        for key in keys {
-            let note = stored
-                .iter()
-                .find(|n| n.one_time_key_id() == Some(key.key_id()));
-            let note = note.unwrap();
-            assert_eq!(note.note().recipient(), key.receiver());
-            let (memo_stored, is_change): (Vec<u8>, bool) = row(
-                st.wallet().conn(),
-                "SELECT rn.memo, rn.is_change FROM ironwood_received_notes rn
-                 JOIN transactions t ON t.id_tx = rn.transaction_id
-                 WHERE t.txid = ?1 AND rn.action_index = ?2",
-                rusqlite::params![txid.as_ref(), note.output_index()],
-            );
-            assert_eq!(memo_stored, memo.as_slice());
-            // The account funded the payment, but it stays incoming in either order.
-            assert!(!is_change);
-        }
-        assert_eq!(stored.len(), 3); // Both swap payments and ordinary internal change.
-    }
-}
-
-/// A closed key still decrypts the transactions its stored notes came from, so fetching
-/// an externally funded payment after closure stores it instead of discarding the
-/// retrieval as irrelevant. This guards the store's `get_one_time_transaction_keys`.
-#[test]
-fn closed_key_decrypts_its_externally_funded_transaction_after_reopen() {
-    use zakura_one_time_ivk::swap::COMPLETION_LIMIT_SECS;
+fn recovered_receipt_survives_full_transaction_retrieval() {
     let mut st = scanned_wallet();
     let network = *st.network();
-    let account = st.test_account().unwrap().id();
-    let (key, tx, height) = externally_paid_refund_key(&mut st);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(9);
-    let sql = "SELECT COUNT(*) FROM tx_retrieval_queue WHERE txid = ?1";
-    assert_eq!(
-        value::<u64>(st.wallet().conn(), sql, [tx.txid().as_ref()]),
-        1
-    );
-    let tip = st.wallet().chain_height().unwrap().unwrap();
-    let now = clock_now() + COMPLETION_LIMIT_SECS;
-    assert_eq!(close_at(st.wallet_mut().db_mut(), account, now, tip), 1);
-    assert!(!scanning_keys(&st).contains(&key.key_id()));
+    let (_, transaction, height) = externally_paid_refund_key(&mut st);
     reopen(&mut st);
-    decrypt_and_store_transaction_with_one_time_ivks(&network, st.wallet_mut(), &tx, Some(height))
-        .unwrap();
-    let memo = MemoBytes::from_bytes(b"refund")
-        .unwrap()
-        .as_slice()
-        .to_vec();
-    assert_eq!(stored_receipt(&st, tx.txid()), (true, Some(memo)));
-    assert!(!scanning_keys(&st).contains(&key.key_id()));
-}
-
-/// A ZeWIF import into a wallet with an open one-time key decrypts with it, storing the
-/// memo of a payment to that key rather than refusing the import.
-#[cfg(feature = "zewif")]
-#[test]
-fn zewif_import_decrypts_with_open_one_time_keys() {
-    let mut st = scanned_wallet();
-    let (_, tx, height) = externally_paid_refund_key(&mut st);
-    assert_eq!(stored_receipt(&st, tx.txid()), (false, None));
-
-    let mut raw = vec![];
-    tx.write(&mut raw).unwrap();
-    let mut imported = ::zewif::Transaction::new(::zewif::TxId::from_bytes(*tx.txid().as_ref()));
-    imported.set_tx_data(::zewif::TransactionData::Raw(::zewif::RawTxData::new(
-        ::zewif::Data::from_bytes(&raw),
-    )));
-    imported.set_mined_height(::zewif::BlockHeight::from(u32::from(height)));
-    let mut doc = ::zewif::Zewif::new(
-        ::zewif::BlockHeight::from(u32::from(height)),
-        ::zewif::BlockHash::from_bytes([0; 32]),
-    );
-    doc.add_transaction(imported.txid(), imported);
-    let report = crate::zewif::import_wallet(
-        st.wallet_mut().db_mut(),
-        &doc,
-        &mut crate::zewif::DiscardSecrets,
-    )
-    .unwrap();
-    assert_eq!(report.transactions_stored, 1);
-    let memo = MemoBytes::from_bytes(b"refund").unwrap();
-    assert_eq!(
-        stored_receipt(&st, tx.txid()),
-        (true, Some(memo.as_slice().to_vec()))
-    );
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &transaction, Some(height)).unwrap();
+    assert_eq!(stored_receipt(&st, transaction.txid()), (true, None));
 }
 
 #[test]
@@ -281,8 +135,11 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
         .unwrap();
     st.wallet_mut().update_chain_tip(mined).unwrap();
     let blocks = u32::from(mined) - u32::from(first) + 1;
-    st.scan_cached_blocks_with_one_time_ivks(first, blocks as usize);
-    discover(&mut st, restored, &[]);
+    st.scan_cached_blocks(first, blocks as usize);
+    st.wallet_mut()
+        .db_mut()
+        .set_one_time_recovery_enabled(restored, true)
+        .unwrap();
     let pending = |st: &State| {
         store::restore::recovery::refund_memos_pending(st.wallet().conn(), restored).unwrap()
     };
@@ -290,8 +147,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     recover_memos(&mut st, restored);
     assert!(refund_keys(&st).is_empty());
     assert!(pending(&st));
-    decrypt_and_store_transaction_with_one_time_ivks(&network, st.wallet_mut(), &tx, Some(mined))
-        .unwrap();
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
 
     // Changing the authenticated scope, or losing own-send evidence, makes the memo
     // ineligible. A marker still waiting for its evidence holds back refund issuance.
@@ -314,27 +170,18 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
         "DELETE FROM ironwood_received_note_spends",
         [],
     );
-    // Without own-send evidence, though scanning covers the funding block, the inputs
-    // predate the birthday or the record is not this wallet's. It no longer holds back
-    // issuance: its key is registered for a lookup without advancing allocation, which skips its index.
+    // Without an owned input this marker must not create any refund identity.
     let replace_memo = |st: &State, from: &[u8], to: &[u8]| {
-        let sql = "UPDATE ironwood_received_notes SET memo = ?2 WHERE memo = ?1";
-        exec(st.wallet().conn(), sql, rusqlite::params![from, to]);
+        exec(
+            st.wallet().conn(),
+            "UPDATE ironwood_received_notes SET memo = ?2 WHERE memo = ?1",
+            rusqlite::params![from, to],
+        );
     };
     let unauthenticated = RefundMemo::new(0).encode();
     replace_memo(&st, memo_bytes.as_slice(), unauthenticated.as_slice());
-    // Recovery registers the key even when issuance has no seen set to issue with.
-    let db = st.wallet_mut().db_mut();
-    let unchecked = db.reserve_refund_key(restored, clock_now(), mined, None);
-    assert!(matches!(
-        unchecked,
-        Ok(Err(ReservationPolicy::SeenUnavailable))
-    ));
-    assert_eq!(refund_keys(&st), vec![(0, u32::from(mined), true)]);
-    assert!(!pending(&st));
-    let db = st.wallet_mut().db_mut();
-    let next = reserve_refund(db, restored, mined).unwrap().unwrap();
-    assert_eq!(next.key_id(), KeyId::new(Purpose::Refund, 1));
+    recover_memos(&mut st, restored);
+    assert!(refund_keys(&st).is_empty());
     replace_memo(&st, unauthenticated.as_slice(), memo_bytes.as_slice());
     exec(st.wallet().conn(), "DELETE FROM ironwood_one_time_keys", []);
     let sql = "INSERT INTO ironwood_received_note_spends VALUES(?1,?2)";
@@ -352,7 +199,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
 
     // A failed enclosing transaction leaves the registration for a retry.
     let aborted: Result<(), SqliteClientError> = super::tx(st.wallet_mut().db_mut(), |c, p| {
-        store::restore::recovery::recover_refund_memos(c, p, restored, clock_now())?;
+        store::restore::recovery::recover_refund_memos(c, p, restored)?;
         Err(corrupt("test rollback"))
     });
     assert!(aborted.is_err());
@@ -364,28 +211,24 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     let registered = vec![(7, u32::from(mined), true)];
     assert_eq!(refund_keys(&st), registered);
     assert!(!pending(&st));
-    assert!(scanning_keys(&st).is_empty());
     let db = st.wallet().db();
     assert!(lookup_pending(db, restored));
 
-    // A restored refund key makes no provider lookups. Like a restored incoming key, it
-    // is watched for a day from its registration.
-    let (registered_at, operations): (i64, i64) = row(
+    // Recovery creates no synthetic provider operation.
+    let operations: i64 = value(
         st.wallet().conn(),
-        "SELECT k.registered_at, (SELECT COUNT(*) FROM ironwood_one_time_operations o
-            WHERE o.one_time_key_id = k.id)
-         FROM ironwood_one_time_keys k WHERE k.purpose = 0",
+        "SELECT COUNT(*) FROM ironwood_one_time_operations o
+         JOIN ironwood_one_time_keys k ON k.id = o.one_time_key_id WHERE k.purpose = 0",
         [],
     );
-    assert_eq!((registered_at, operations), (clock_now(), 0));
+    assert_eq!(operations, 0);
 
     // Repeated recovery, including after identical re-enhancement, changes nothing,
-    // and it widens a key that starts after its funding block.
-    decrypt_and_store_transaction_with_one_time_ivks(&network, st.wallet_mut(), &tx, Some(mined))
-        .unwrap();
+    // and it lowers a recorded funding height that is above the funding block.
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
     recover_memos(&mut st, restored);
     assert_eq!(refund_keys(&st), registered);
-    let sql = "UPDATE ironwood_one_time_keys SET scan_from = scan_from + 1";
+    let sql = "UPDATE ironwood_one_time_keys SET funding_height = funding_height + 1";
     exec(st.wallet().conn(), sql, []);
     recover_memos(&mut st, restored);
     assert_eq!(refund_keys(&st), registered);
@@ -405,10 +248,13 @@ fn refund_funding_refuses_its_memo_on_orchard_change() {
     let orchard = Zatoshis::const_from_u64(1_000_000);
     let (funded, _, _) =
         st.generate_next_block(&parent(&st), AddressType::DefaultExternal, orchard);
-    st.scan_cached_blocks_with_one_time_ivks(funded, 1);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(5);
+    st.scan_cached_blocks(funded, 1);
+    st.generate_and_scan_empty_blocks(5);
     let account = st.test_account().unwrap().id();
-    discover(&mut st, account, &[]);
+    st.wallet_mut()
+        .db_mut()
+        .set_one_time_recovery_enabled(account, true)
+        .unwrap();
     let tip = st.wallet().chain_height().unwrap().unwrap();
     let deposit = p2pkh(7).encode(st.network());
     let now = clock_now();
@@ -438,12 +284,12 @@ fn refund_funding_refuses_its_memo_on_orchard_change() {
 
 /// A refund key's funding memo is issued only for the deposit its quote recorded, and a
 /// transaction whose memo names another key than the deposit it pays fails to store,
-/// starting no key and pairing nothing. Storing a matching funding transaction starts
-/// its key above the scanned chain, and the funded quote then waits for the swap's
-/// outcome; an unfunded quote never starts its key. Issuance recovers a funding memo
-/// first, so it never reissues the funded index.
+/// funding no key and pairing nothing. Storing a matching funding transaction records
+/// the key's funding height and queues its history for PIR, and the funded quote then
+/// waits for the swap's outcome. An unfunded quote never funds its key. Issuance
+/// recovers a funding memo first, so it never reissues the funded index.
 #[test]
-fn a_refund_key_starts_scanning_when_its_matching_funding_transaction_is_stored() {
+fn a_refund_key_queues_history_when_its_matching_funding_transaction_is_stored() {
     use zakura_one_time_ivk::swap::{OperationStatus::Terminal, ReceiptExpectation};
     let (mut st, _) = ironwood_funded_wallet();
     let account = st.test_account().unwrap().id();
@@ -469,13 +315,13 @@ fn a_refund_key_starts_scanning_when_its_matching_funding_transaction_is_stored(
             .unwrap()
     });
 
-    /// Refund keys' scan starts, `(key index, reference)` operations, and the stored
+    /// Refund keys' funding heights, `(key index, reference)` operations, and the stored
     /// transaction count.
     type Snapshot = (Vec<Option<u32>>, Vec<(Vec<u8>, String)>, i64);
     let state = |conn: &Connection| -> Snapshot {
-        let active = column(
+        let funding = column(
             conn,
-            "SELECT active_from FROM ironwood_one_time_keys WHERE purpose = 0
+            "SELECT funding_height FROM ironwood_one_time_keys WHERE purpose = 0
              ORDER BY key_index",
             [],
         );
@@ -487,7 +333,7 @@ fn a_refund_key_starts_scanning_when_its_matching_funding_transaction_is_stored(
             [],
         );
         (
-            active,
+            funding,
             operations,
             value(conn, "SELECT COUNT(*) FROM transactions", []),
         )
@@ -506,31 +352,30 @@ fn a_refund_key_starts_scanning_when_its_matching_funding_transaction_is_stored(
     verify_refund_funding_proposal(&proposal, &memos[1], &funded).unwrap();
     assert!(verify_refund_funding_proposal(&proposal, &memos[1], &stale).is_err());
     assert!(verify_refund_funding_proposal(&proposal, &memos[0], &funded).is_err());
-    // Storing the funding transaction starts its key above the scanned chain, so no
-    // block is rescanned, and opens the funded quote until the provider reports.
-    let (active, operations, _) = state(st.wallet().conn());
-    assert_eq!(active, [None, Some(u32::from(tip) + 1)]);
+    // Storing the funding transaction records a funding height above the scanned chain,
+    // so no block is rescanned, and keeps the funded quote open until the provider reports.
+    let (funding, operations, _) = state(st.wallet().conn());
+    assert_eq!(funding, [None, Some(u32::from(tip) + 1)]);
     assert_eq!(operations, before.1);
     let sql = "SELECT observed_at, expectation FROM ironwood_one_time_operations
                WHERE reference = ?1";
     assert_eq!(row::<(i64, u8)>(st.wallet().conn(), sql, [&funded]), (0, 0));
 
     let (mined, _) = st.generate_next_block_including(txid.unwrap());
-    st.scan_cached_blocks_with_one_time_ivks(mined, 1);
-    // The key already scans from before its funding block, so recovery queues no lookup.
+    st.scan_cached_blocks(mined, 1);
     recover_memos(&mut st, account);
     let db = st.wallet_mut().db_mut();
-    assert!(!lookup_pending(db, account));
-    assert_eq!(close_at(db, account, now, mined), 0);
-    let finished = now + 7_200;
-    let no_refund = Terminal(ReceiptExpectation::None);
-    observe(db, account, key, &funded, no_refund, finished).unwrap();
-    // The swap is over.
-    assert_eq!(close_at(db, account, finished, mined), 1);
-    assert_eq!(
-        state(st.wallet().conn()).0,
-        [None, Some(u32::from(tip) + 1)]
-    );
+    assert!(lookup_pending(db, account));
+    observe(
+        db,
+        account,
+        key,
+        &funded,
+        Terminal(ReceiptExpectation::None),
+        now + 7_200,
+    )
+    .unwrap();
+    assert!(lookup_pending(db, account));
 
     // A restored wallet's compact scan stores the change before enhancement
     // retrieves its memo, which holds back refund issuance until it arrives.
@@ -547,7 +392,7 @@ fn a_refund_key_starts_scanning_when_its_matching_funding_transaction_is_stored(
     set_memo(&st, None);
     assert!(matches!(
         reserve_refund(st.wallet_mut().db_mut(), account, mined),
-        Ok(Err(ReservationPolicy::Coverage))
+        Ok(Err(ReservationPolicy::FundingHistory))
     ));
     set_memo(&st, Some(&stored));
     let next = reserve_refund(st.wallet_mut().db_mut(), account, mined);
@@ -629,7 +474,7 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
         db.set_enhancement_mode(EnhancementMode::PrivateIronwood);
         st.wallet_mut().update_chain_tip(mined).unwrap();
         let blocks = u32::from(mined) - u32::from(first) + 1;
-        st.scan_cached_blocks_with_one_time_ivks(first, blocks as usize);
+        st.scan_cached_blocks(first, blocks as usize);
 
         let work = st.wallet().db().transaction_enhancement_work().unwrap();
         let requests: Vec<_> = work
@@ -685,24 +530,17 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
             "flagged={flagged} private={private}"
         );
         if public {
-            decrypt_and_store_transaction_with_one_time_ivks(
-                &network,
-                st.wallet_mut(),
-                &tx,
-                Some(mined),
-            )
-            .unwrap();
+            decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
         }
         recover_memos(&mut st, restored);
         assert_eq!(refund_keys(&st), [(7, u32::from(mined), true)]);
     }
 }
 
-/// A quote binds to a refund key reserved here that is still open, and the key to that
-/// quote's deposit alone; the key need not scan yet, since only its funding transaction
-/// starts it.
+/// A quote binds only to a refund key reserved in this account, and the key to that
+/// quote's deposit alone. Funding, not the quote, later queues the key's history for PIR.
 #[test]
-fn refund_quote_needs_an_open_reserved_refund_key_and_a_canonical_transparent_deposit() {
+fn refund_quote_needs_a_reserved_refund_key_and_a_canonical_transparent_deposit() {
     let (mut st, _) = ironwood_funded_wallet();
     let account = st.test_account().unwrap().id();
     let network = *st.network();
@@ -740,10 +578,6 @@ fn refund_quote_needs_an_open_reserved_refund_key_and_a_canonical_transparent_de
     ));
     assert!(db.refund_funding_memo(account, 0, &other).is_err());
     assert!(db.refund_funding_memo(account, 0, &deposit).is_ok());
-    // A closed key would miss the refund.
-    let sql = "UPDATE ironwood_one_time_keys SET closed_at = ?1 WHERE purpose = 0";
-    exec(&db.conn, sql, [now]);
-    assert!(db.refund_funding_memo(account, 0, &deposit).is_err());
 }
 
 /// Whether one of `account`'s keys is registered for a lookup not done yet.
@@ -753,7 +587,60 @@ fn lookup_pending(db: &Db, account: AccountUuid) -> bool {
         "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
              JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
              JOIN accounts a ON a.id = k.account_id
-             WHERE a.uuid = ?1 AND l.done_height IS NULL)",
+             WHERE a.uuid = ?1 AND l.target_height IS NOT NULL)",
         [account.0],
     )
+}
+
+/// Disabling receiver discovery does not discard independently authenticated outgoing details.
+#[test]
+fn outgoing_one_time_payment_details_survive_disabled_discovery() {
+    for enabled in [false, true] {
+        let mut desktop = scanned_wallet();
+        let account = desktop.test_account().unwrap().id();
+        let start = desktop.sapling_activation_height();
+        let key = reserve(
+            desktop.wallet_mut().db_mut(),
+            account,
+            Purpose::Receive,
+            start,
+        )
+        .unwrap();
+        let (mut phone, _) = ironwood_funded_wallet();
+        assert_eq!(parent(&phone), parent(&desktop));
+        let sender = phone.test_account().cloned().unwrap();
+        let memo = MemoBytes::from_bytes(b"self payment").unwrap();
+        let to = payment(&unified(key.receiver()), 50_000, Some(&memo));
+        let (_, txid) = transfer(
+            &mut phone,
+            (sender.id(), sender.usk()),
+            vec![to],
+            (None, ShieldedPool::Orchard),
+        );
+        let transaction = phone
+            .wallet()
+            .get_transaction(txid.unwrap())
+            .unwrap()
+            .unwrap();
+        desktop
+            .wallet_mut()
+            .db_mut()
+            .set_one_time_recovery_enabled(account, enabled)
+            .unwrap();
+        let network = *desktop.network();
+        decrypt_and_store_transaction(&network, desktop.wallet_mut(), &transaction, None).unwrap();
+        let sent: (u64, Vec<u8>, String) = desktop.wallet().conn().query_row(
+            "SELECT n.value,n.memo,n.to_address FROM sent_notes n JOIN transactions t ON t.id_tx=n.transaction_id
+             WHERE t.txid=?1 AND n.output_pool=4 AND n.value=50000",
+            [transaction.txid().as_ref()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(sent.0, 50_000);
+        assert_eq!(sent.1, memo.as_slice());
+        assert!(!sent.2.is_empty());
+        let received: u64 = value(
+            desktop.wallet().conn(),
+            "SELECT COUNT(*) FROM ironwood_received_notes WHERE one_time_key_id IS NOT NULL",
+            [],
+        );
+        assert_eq!(received, 0);
+    }
 }

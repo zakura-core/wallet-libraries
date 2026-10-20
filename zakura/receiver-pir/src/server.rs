@@ -15,8 +15,6 @@ pub struct Server {
     manifest: Manifest,
     id: Hash,
     prepared: Arc<Prepared>,
-    rows: Arc<[u8]>,
-    filters: Arc<[u8]>,
 }
 
 struct Prepared {
@@ -76,34 +74,6 @@ impl Server {
                 server,
                 preprocessed,
             }),
-            rows: snapshot.data.into(),
-            filters: snapshot.filters.into(),
-        })
-    }
-
-    /// Validate a fresh snapshot and reuse only public row preprocessing when
-    /// its geometry and actual row bytes match `previous`. Session identity and
-    /// filters always come from the new snapshot. Changed rows build normally.
-    /// This does not accept a chain anchor or validate payment cryptography.
-    pub fn new_reusing_rows(snapshot: Snapshot, previous: &Self) -> Result<Self, Error> {
-        snapshot.validate()?;
-        if snapshot.manifest.rows != previous.manifest.directory.rows
-            || snapshot.data.as_slice() != previous.rows.as_ref()
-        {
-            return Self::new(snapshot);
-        }
-        let manifest = Manifest {
-            protocol: PROTOCOL.into(),
-            directory: snapshot.manifest,
-            public_digest: previous.manifest.public_digest,
-        };
-        let id = manifest.id()?;
-        Ok(Self {
-            manifest,
-            id,
-            rows: previous.rows.clone(),
-            filters: snapshot.filters.into(),
-            prepared: previous.prepared.clone(),
         })
     }
 
@@ -120,16 +90,6 @@ impl Server {
     /// The public setup that clients download once per session.
     pub fn public(&self) -> &[u8] {
         &self.prepared.public
-    }
-
-    /// Identical immutable directory bytes for every caller, already digest-checked.
-    pub fn rows(&self) -> Arc<[u8]> {
-        self.rows.clone()
-    }
-
-    /// The publication's filter file, identical for every caller and already checked.
-    pub fn filters(&self) -> Arc<[u8]> {
-        self.filters.clone()
     }
 
     /// Answer one encrypted query for this session, rejecting any other length or session.

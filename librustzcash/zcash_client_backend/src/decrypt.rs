@@ -21,15 +21,6 @@ use orchard::note_encryption::{
     DomainVersion, IronwoodVersion, NoteEncryptionDomain, OrchardVersion,
 };
 
-#[cfg(feature = "orchard")]
-use {
-    crate::scanning::one_time_ivk::OneTimeScanningKey, std::hash::Hash, zakura_one_time_ivk::KeyId,
-};
-
-/// The prepared one-time IVKs of an account, with their key identities.
-#[cfg(feature = "orchard")]
-type OneTimeIvks = [(KeyId, orchard::keys::PreparedIncomingViewingKey)];
-
 /// An enumeration of the possible relationships a TXO can have to the wallet.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum TransferType {
@@ -58,8 +49,6 @@ pub struct DecryptedOutput<Note, AccountId> {
     account: AccountId,
     memo: MemoBytes,
     transfer_type: TransferType,
-    #[cfg(feature = "orchard")]
-    one_time_key_id: Option<zakura_one_time_ivk::KeyId>,
 }
 
 impl<Note, AccountId> DecryptedOutput<Note, AccountId> {
@@ -78,22 +67,7 @@ impl<Note, AccountId> DecryptedOutput<Note, AccountId> {
             account,
             memo,
             transfer_type,
-            #[cfg(feature = "orchard")]
-            one_time_key_id: None,
         }
-    }
-
-    /// Retains the one-time key used for authenticated note decryption.
-    #[cfg(feature = "orchard")]
-    fn with_one_time_key_id(mut self, key_id: Option<KeyId>) -> Self {
-        self.one_time_key_id = key_id;
-        self
-    }
-
-    /// The one-time key that decrypted this output, relative to its account.
-    #[cfg(feature = "orchard")]
-    pub fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
-        self.one_time_key_id
     }
 
     /// The index of the output within the shielded outputs of the Sapling bundle or the actions of
@@ -161,71 +135,6 @@ pub fn decrypt_transaction<'a, P: consensus::Parameters, AccountId: Copy>(
     chain_tip_height: Option<BlockHeight>,
     tx: &'a Transaction,
     ufvks: &HashMap<AccountId, UnifiedFullViewingKey>,
-) -> DecryptedTransaction<'a, Transaction, AccountId> {
-    decrypt_transaction_inner(
-        params,
-        mined_height,
-        chain_tip_height,
-        tx,
-        ufvks,
-        #[cfg(feature = "orchard")]
-        &|_| &[],
-    )
-}
-
-/// [`decrypt_transaction`], also trial-decrypting Ironwood actions with one-time keys.
-///
-/// Each key is tried after its account's ordinary incoming viewing keys and before its
-/// outgoing viewing key, so an output paid to it is one incoming output carrying its
-/// [`DecryptedOutput::one_time_key_id`], even when the account also funded it. A key whose
-/// account has no Orchard key in `ufvks` is not tried. The result reports
-/// [`DecryptedTransaction::one_time_ivks_applied`].
-#[cfg(feature = "orchard")]
-pub fn decrypt_transaction_with_one_time_ivks<
-    'a,
-    P: consensus::Parameters,
-    AccountId: Copy + Eq + Hash,
->(
-    params: &P,
-    mined_height: Option<BlockHeight>,
-    chain_tip_height: Option<BlockHeight>,
-    tx: &'a Transaction,
-    ufvks: &HashMap<AccountId, UnifiedFullViewingKey>,
-    one_time_keys: impl IntoIterator<Item = OneTimeScanningKey<AccountId>>,
-) -> DecryptedTransaction<'a, Transaction, AccountId> {
-    let mut by_account = HashMap::<_, Vec<_>>::new();
-    for key in one_time_keys {
-        let ivk = key.full_viewing_key().to_ivk(Scope::External);
-        by_account.entry(*key.account_id()).or_default().push((
-            key.key_id(),
-            orchard::keys::PreparedIncomingViewingKey::new(&ivk),
-        ));
-    }
-    decrypt_transaction_inner(
-        params,
-        mined_height,
-        chain_tip_height,
-        tx,
-        ufvks,
-        &|account| by_account.get(account).map_or(&[], Vec::as_slice),
-    )
-    .with_one_time_ivks_applied()
-}
-
-/// The trial decryption shared by [`decrypt_transaction`] and, with `one_time_ivks`
-/// returning each account's one-time keys, [`decrypt_transaction_with_one_time_ivks`].
-fn decrypt_transaction_inner<
-    'a,
-    #[cfg(feature = "orchard")] 'k,
-    P: consensus::Parameters,
-    AccountId: Copy,
->(
-    params: &P,
-    mined_height: Option<BlockHeight>,
-    chain_tip_height: Option<BlockHeight>,
-    tx: &'a Transaction,
-    ufvks: &HashMap<AccountId, UnifiedFullViewingKey>,
-    #[cfg(feature = "orchard")] one_time_ivks: &dyn Fn(&AccountId) -> &'k OneTimeIvks,
 ) -> DecryptedTransaction<'a, Transaction, AccountId> {
     let zip212_enforcement = zip212_enforcement(
         params,
@@ -298,16 +207,14 @@ fn decrypt_transaction_inner<
     // (selected by `V`: version 2 for [`OrchardVersion`], version 3 for [`IronwoodVersion`]) and
     // in the value pool their notes belong to. Decrypting a bundle under the other kind's domain
     // would silently detect nothing.
-    // An account's `one_time_ivks` are tried after its ordinary incoming viewing keys.
     #[cfg(feature = "orchard")]
-    fn decrypt_orchard_protocol_bundle<'k, V: DomainVersion, AccountId: Copy>(
+    fn decrypt_orchard_protocol_bundle<V: DomainVersion, AccountId: Copy>(
         ufvks: &HashMap<AccountId, UnifiedFullViewingKey>,
         bundle: &orchard::bundle::Bundle<
             orchard::bundle::Authorized,
             zcash_protocol::value::ZatBalance,
         >,
         pool: orchard::ValuePool,
-        one_time_ivks: &dyn Fn(&AccountId) -> &'k OneTimeIvks,
     ) -> impl Iterator<Item = DecryptedOutput<(orchard::Note, orchard::ValuePool), AccountId>> {
         let shielded_pool = crate::wallet::shielded_pool_for_value_pool(pool);
         ufvks
@@ -332,14 +239,6 @@ fn decrypt_transaction_inner<
                                 try_note_decryption(&domain, &ivk_internal, action)
                                     .map(|ret| (ret, TransferType::AccountInternal))
                             });
-                        let mut one_time_key_id = None;
-                        let decrypted = decrypted.or_else(|| {
-                            one_time_ivks(&account).iter().find_map(|(key_id, ivk)| {
-                                let ret = try_note_decryption(&domain, ivk, action)?;
-                                one_time_key_id = Some(*key_id);
-                                Some((ret, TransferType::Incoming))
-                            })
-                        });
                         decrypted
                             .or_else(|| {
                                 try_output_recovery_with_ovk(
@@ -361,7 +260,6 @@ fn decrypt_transaction_inner<
                                     MemoBytes::from_bytes(&memo).expect("correct length"),
                                     transfer_type,
                                 )
-                                .with_one_time_key_id(one_time_key_id)
                             })
                     })
             })
@@ -376,7 +274,6 @@ fn decrypt_transaction_inner<
                 ufvks,
                 bundle,
                 orchard::ValuePool::Orchard,
-                &|_| &[],
             )
         })
         .collect();
@@ -390,7 +287,6 @@ fn decrypt_transaction_inner<
                 ufvks,
                 bundle,
                 orchard::ValuePool::Ironwood,
-                one_time_ivks,
             )
         })
         .collect();
@@ -426,8 +322,7 @@ mod tests {
         value::ZatBalance,
     };
 
-    use super::{TransferType, decrypt_transaction, decrypt_transaction_with_one_time_ivks};
-    use crate::scanning::one_time_ivk::OneTimeScanningKey;
+    use super::{TransferType, decrypt_transaction};
 
     /// An Ironwood transaction paying `outputs`, with placeholder proof and signatures.
     fn ironwood_tx(
@@ -470,8 +365,9 @@ mod tests {
         .unwrap()
     }
 
+    /// Ordinary decryption finds outgoing metadata without scanning one-time receivers.
     #[test]
-    fn one_time_keys_tag_payments_and_self_payments() {
+    fn ordinary_decryption_does_not_discover_one_time_payments() {
         let usk =
             UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &[1; 32], zip32::AccountId::ZERO).unwrap();
         let fvk = FullViewingKey::from(usk.orchard());
@@ -487,28 +383,9 @@ mod tests {
         ]);
 
         let plain = decrypt_transaction(&MAIN_NETWORK, None, None, &tx, &ufvks);
-        assert!(!plain.one_time_ivks_applied());
         let outputs = plain.ironwood_outputs();
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].note().0.recipient(), address(receive));
         assert_eq!(outputs[0].transfer_type(), TransferType::Outgoing);
-        assert_eq!(outputs[0].one_time_key_id(), None);
-
-        let keys = [refund, receive].map(|id| OneTimeScanningKey::derive(0u32, id, &fvk).unwrap());
-        let decrypted =
-            decrypt_transaction_with_one_time_ivks(&MAIN_NETWORK, None, None, &tx, &ufvks, keys);
-        assert!(decrypted.one_time_ivks_applied());
-        let outputs = decrypted.ironwood_outputs();
-        assert_eq!(outputs.len(), 2);
-        for id in [refund, receive] {
-            let output = outputs
-                .iter()
-                .find(|o| o.note().0.recipient() == address(id))
-                .unwrap();
-            assert_eq!(output.one_time_key_id(), Some(id));
-            assert_eq!(output.transfer_type(), TransferType::Incoming);
-            assert_eq!(output.account(), &0);
-            assert_eq!(output.memo().as_array(), &[7; 512]);
-        }
     }
 }

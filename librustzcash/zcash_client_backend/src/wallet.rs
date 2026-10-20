@@ -649,7 +649,8 @@ pub type WalletOrchardSpend<AccountId> = WalletSpend<orchard::note::Nullifier, A
 #[cfg(feature = "orchard")]
 pub type WalletIronwoodSpend<AccountId> = WalletSpend<orchard::note::Nullifier, AccountId>;
 
-/// An output that was successfully decrypted in the process of wallet scanning.
+/// An output that wallet scanning decrypted, or that targeted PIR admission authenticated
+/// with a one-time key.
 #[derive(Clone)]
 pub struct WalletOutput<Note, Nullifier, AccountId> {
     index: usize,
@@ -665,7 +666,8 @@ pub struct WalletOutput<Note, Nullifier, AccountId> {
     one_time_key_id: Option<zakura_one_time_ivk::KeyId>,
 }
 
-/// Compact action encryption fields retained from scanning for later enhancement.
+/// Compact action encryption fields retained from a compact scan or a PIR-returned payment
+/// for later enhancement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompactEncryptionFields {
     pub ephemeral_key: [u8; 32],
@@ -713,13 +715,13 @@ impl<Note, Nullifier, AccountId> WalletOutput<Note, Nullifier, AccountId> {
         self.one_time_key_id
     }
 
-    /// Attaches the compact encryption prefix retained by scanning.
+    /// Attaches the compact encryption prefix a compact scan or PIR admission retained.
     pub fn with_compact_ciphertext(mut self, ciphertext: [u8; 52]) -> Self {
         self.compact_ciphertext = Some(ciphertext);
         self
     }
 
-    /// Compact ciphertext when this output came from a compact scan.
+    /// Compact ciphertext when this output came from a compact scan or PIR admission.
     pub fn compact_ciphertext(&self) -> Option<&[u8; 52]> {
         self.compact_ciphertext.as_ref()
     }
@@ -766,14 +768,16 @@ impl<Note, Nullifier, AccountId> WalletOutput<Note, Nullifier, AccountId> {
 pub type WalletSaplingOutput<AccountId> =
     WalletOutput<sapling::Note, sapling::Nullifier, AccountId>;
 
-/// The output part of an Orchard [`Action`] that was decrypted in the process of scanning.
+/// The output part of an Orchard-shaped [`Action`] that scanning decrypted, or that PIR
+/// admission authenticated with a one-time key.
 ///
 /// [`Action`]: orchard::Action
 #[cfg(feature = "orchard")]
 pub type WalletOrchardOutput<AccountId> =
     WalletOutput<(orchard::note::Note, orchard::ValuePool), orchard::note::Nullifier, AccountId>;
 
-/// The output part of an Ironwood [`Action`] that was decrypted in the process of scanning.
+/// The output part of an Ironwood [`Action`] that scanning decrypted, or that PIR admission
+/// authenticated with a one-time key.
 ///
 /// [`Action`]: orchard::Action
 #[cfg(feature = "orchard")]

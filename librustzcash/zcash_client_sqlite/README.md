@@ -17,26 +17,13 @@ an SQLite database.
 
 ## One-time IVKs
 
-With the `orchard` feature, `WalletDb` keeps one-time IVKs: a durable registry of
-derived refund and incoming keys, their scanning, discovery of a restored seed's keys
-through a receiver directory, and spending. `WalletDb` implements the backend's
-`OneTimeIvkRead` and `OneTimeIvkWrite`, so a wallet scans with
-`scan_cached_blocks_with_one_time_ivks`, and the restore protocol's
-`OneTimeIvkRestoreRead` and `OneTimeIvkRestoreWrite`. Compact scanning and software
-spending retain each note's derived key; change uses ordinary account keys. The
-`wallet::one_time_ivk` rustdoc lists the calls a wallet makes; swap issuance,
-operations and closing are in `wallet::one_time_ivk::swap`. The
-[`zakura-one-time-ivk` README](../../zakura/one-time-ivk/README.md) describes the
-key derivation and refund memo.
+With the `orchard` feature, `WalletDb` stores derived refund and receive keys and recovers their payments through a durable PIR queue. Ordinary block and transaction scanning uses account keys. Returned payments are authenticated with the specific derived key and credited only after local inclusion and spend checks pass. The spend journal retains nullifiers from recognized wallet transactions so a late recovered note cannot resurrect spent funds.
 
-Discovery turns each payment a directory reports into a scan hint, so the scan finds
-the note itself, or, if the scan already passed its block, into a late candidate. The
-wallet admits a late candidate only after it authenticates the ciphertext, verifies the
-note's inclusion and position against its own chain, and its scan has covered every
-block from the payment on for the account. The spend journal, which keeps every
-Ironwood nullifier of the wallet's own transactions, then says whether it was spent.
-Until then the payment adds nothing to balance. `zakura-pir-receiver` runs discovery
-against a receiver directory.
+Enable recovery per account with `set_one_time_recovery_enabled`. Read bounded work with `one_time_recovery`, perform network requests without a database lock, and commit through `record_one_time_lookup` and `record_one_time_witness`. Rolling filter matches enqueue the same work with `record_one_time_filters`. Filters only reduce network cost. They do not establish ownership. The `zakura-pir-receiver` adapter performs bounded network steps and never owns the wallet database.
+
+Seed recovery stops after four complete empty receive histories. Confirmed payments extend the four-index issuance window, unpaid holes are recycled, and authenticated funding memos identify refund keys. `check_one_time_history` explicitly checks older addresses, supports an exclusive receive bound, and can be cancelled and resumed. Turning discovery off preserves owned funds and permits repair of already-owned receipts after a reorg.
+
+See `wallet::one_time_ivk::restore` for the queue contract and `wallet::one_time_ivk::swap` for quote ownership and funding. The [`zakura-one-time-ivk` README](../../zakura/one-time-ivk/README.md) describes key derivation and the refund memo.
 
 ## License
 

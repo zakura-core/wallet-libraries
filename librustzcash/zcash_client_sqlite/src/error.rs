@@ -86,11 +86,6 @@ pub enum SqliteClientError {
     #[cfg(feature = "transparent-inputs")]
     TransparentActivationBlocked(Vec<RecoveryBlocker>),
 
-    /// Blocks or a transaction were processed without the wallet's open one-time IVKs.
-    /// Scan with `scan_cached_blocks_with_one_time_ivks` and decrypt with
-    /// `decrypt_and_store_transaction_with_one_time_ivks`, which need `orchard`.
-    OneTimeIvksNotUsed,
-
     /// A one-time IVK call's input was invalid, such as a passed deadline, a deposit address
     /// for another network, a key, reservation or operation the account does not have, or
     /// directory data that contradicts the wallet's own.
@@ -490,10 +485,6 @@ impl fmt::Display for SqliteClientError {
             SqliteClientError::EnhancementModeNotConfigured => write!(
                 f,
                 "Enhancement mode is not configured; call set_enhancement_mode before enumerating enhancement work"
-            ),
-            SqliteClientError::OneTimeIvksNotUsed => write!(
-                f,
-                "This wallet has open one-time IVKs; scan and decrypt with the one-time IVK entry points"
             ),
             #[cfg(feature = "orchard")]
             SqliteClientError::InvalidOneTimeIvkInput(reason) => {

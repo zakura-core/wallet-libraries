@@ -41,12 +41,7 @@ fn main() {
             if db.get_account_ids().unwrap().is_empty() {
                 use zcash_client_backend::data_api::{AccountBirthday, chain::ChainState};
                 use zcash_primitives::block::BlockHash;
-                // A one-time IVK writer issues keys only once scanning reaches the tip, so its
-                // birthday is the fixture's tip (see `one_time_seed`).
-                #[cfg(not(feature = "one-time"))]
                 let parent = 1_200_000;
-                #[cfg(feature = "one-time")]
-                let parent = TIP - 1;
                 db.create_account(
                     "old wallet fixture",
                     &secrecy::SecretVec::new(vec![7; 32]),
@@ -138,150 +133,9 @@ fn main() {
                 db.put_received_transparent_utxo(&output).unwrap();
             }
         }
-        #[cfg(feature = "one-time")]
-        "one-time" => {
-            // Scans the empty tip block, then reserves and starts an incoming swap and
-            // reserves a refund key bound to a deposit, using the published one-time IVK
-            // API. Prints the request, refund deposit and refund index for "one-time-use".
-            use zcash_client_backend::data_api::chain::{ChainState, scan_cached_blocks};
-            use zcash_client_backend::proto::compact_formats::{ChainMetadata, CompactBlock};
-            use zcash_client_sqlite::wallet::one_time_ivk::swap::{
-                OperationOutcome, ReceiveDeposit,
-            };
-            use zcash_primitives::block::BlockHash;
-
-            let now = unix_now();
-            let tip = BlockHeight::from_u32(TIP);
-            let block = CompactBlock {
-                height: TIP.into(),
-                hash: vec![1; 32],
-                prev_hash: vec![0; 32],
-                time: now as u32,
-                chain_metadata: Some(ChainMetadata::default()),
-                ..Default::default()
-            };
-            let parent = ChainState::empty(tip - 1, BlockHash([0; 32]));
-            scan_cached_blocks(
-                &Network::MainNetwork,
-                &Blocks(vec![block]),
-                &mut db,
-                tip,
-                &parent,
-                1,
-            )
-            .unwrap();
-            let account = db.get_account_ids().unwrap()[0];
-            db.mark_one_time_account_fresh(account).unwrap();
-            let key = db
-                .prepare_receive_reservation(account, now, tip, None)
-                .unwrap()
-                .unwrap();
-            let deadline = now + 86_400;
-            let request = db
-                .begin_receive_operation(account, key.key_id().index(), deadline, now)
-                .unwrap()
-                .unwrap();
-            let deposit = ReceiveDeposit {
-                address: INCOMING_DEPOSIT.to_owned(),
-                memo: None,
-                deadline,
-            };
-            db.finish_receive_operation(
-                account,
-                &request,
-                &OperationOutcome::Accepted(deposit.clone()),
-            )
-            .unwrap();
-            assert_eq!(
-                db.start_receive_operation(account, &request, now)
-                    .unwrap()
-                    .unwrap(),
-                deposit
-            );
-            let refund = db.reserve_refund_key(account, tip, None).unwrap().unwrap();
-            let receiver = *db
-                .get_transparent_receivers(account, false, false)
-                .unwrap()
-                .keys()
-                .next()
-                .unwrap();
-            #[allow(deprecated)]
-            let refund_deposit = zcash_client_backend::encoding::encode_transparent_address_p(
-                &Network::MainNetwork,
-                &receiver,
-            );
-            let refund = refund.key_id().index();
-            db.record_refund_operation(account, refund, &refund_deposit, deadline, now)
-                .unwrap();
-            println!("{request} {refund_deposit} {refund}");
-        }
-        #[cfg(feature = "current")]
-        "one-time-use" => {
-            // Uses the state "one-time" left, after the current library upgraded it.
-            use zcash_client_backend::data_api::one_time_ivk::restore::OneTimeIvkRestoreRead;
-
-            let (request, refund_deposit, refund) = (&args[4], &args[5], &args[6]);
-            let now = unix_now();
-            let account = db.get_account_ids().unwrap()[0];
-            // A fresh account has no discovery to run.
-            assert_eq!(db.one_time_discovery(account, now).unwrap(), None);
-            let deposit = db
-                .start_receive_operation(account, request, now)
-                .unwrap()
-                .unwrap();
-            assert_eq!(deposit.address, INCOMING_DEPOSIT);
-            db.refund_funding_memo(account, refund.parse().unwrap(), refund_deposit)
-                .unwrap();
-            // Both keys still have an operation in progress.
-            let closed = db
-                .close_finished_one_time_keys(account, now, BlockHeight::from_u32(TIP))
-                .unwrap();
-            assert_eq!(closed, 0);
-        }
         _ => panic!("unexpected command"),
     }
 }
 
 /// The fixture's chain tip and mined height.
 const TIP: u32 = 3_483_367;
-
-/// The provider deposit address of the fixture's incoming swap.
-#[cfg(any(feature = "one-time", feature = "current"))]
-const INCOMING_DEPOSIT: &str = "incoming-deposit";
-
-/// Seconds since the Unix epoch.
-#[cfg(any(feature = "one-time", feature = "current"))]
-fn unix_now() -> i64 {
-    std::time::UNIX_EPOCH.elapsed().unwrap().as_secs() as i64
-}
-
-/// Compact blocks held in memory.
-#[cfg(feature = "one-time")]
-struct Blocks(Vec<zcash_client_backend::proto::compact_formats::CompactBlock>);
-
-#[cfg(feature = "one-time")]
-impl zcash_client_backend::data_api::chain::BlockSource for Blocks {
-    type Error = std::convert::Infallible;
-
-    fn with_blocks<F, WalletErrT>(
-        &self,
-        from_height: Option<BlockHeight>,
-        limit: Option<usize>,
-        mut with_block: F,
-    ) -> Result<(), zcash_client_backend::data_api::chain::error::Error<WalletErrT, Self::Error>>
-    where
-        F: FnMut(
-            zcash_client_backend::proto::compact_formats::CompactBlock,
-        ) -> Result<
-            (),
-            zcash_client_backend::data_api::chain::error::Error<WalletErrT, Self::Error>,
-        >,
-    {
-        let from = from_height.map_or(0, u64::from);
-        self.0
-            .iter()
-            .filter(|block| block.height >= from)
-            .take(limit.unwrap_or(usize::MAX))
-            .try_for_each(|block| with_block(block.clone()))
-    }
-}

@@ -29,7 +29,7 @@ fn one_time_funded(value: u64) -> State {
     let start = st.sapling_activation_height();
     let refund = reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, start);
     pay(&mut st, refund.full_viewing_key(), value);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(2);
+    st.generate_and_scan_empty_blocks(2);
     st
 }
 
@@ -37,7 +37,7 @@ fn one_time_funded(value: u64) -> State {
 /// account's ordinary keys alone decrypt as account-internal, as a restore would see them.
 fn markers(st: &mut State, txid: TxId) -> Vec<u64> {
     let (height, _) = st.generate_next_block_including(txid);
-    st.scan_cached_blocks_with_one_time_ivks(height, 1);
+    scan_and_recover(st, height, 1);
     let account = st.test_account().cloned().unwrap();
     let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
     let ufvks = HashMap::from([(account.id(), account.usk().to_unified_full_viewing_key())]);

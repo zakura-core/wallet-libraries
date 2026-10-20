@@ -1,4 +1,7 @@
-pub(super) use std::sync::{Arc, Barrier};
+pub(super) use std::{
+    borrow::Borrow,
+    sync::{Arc, Barrier},
+};
 
 pub(super) use orchard::{
     note::Note,
@@ -11,12 +14,8 @@ pub(super) use zakura_one_time_ivk::swap::{Observation, OperationStatus};
 pub(super) use zcash_client_backend::{
     data_api::{
         WalletRead, WalletWrite,
-        one_time_ivk::{
-            OneTimeIvkRead as _,
-            restore::{
-                DirectoryPayment, EnumerationCursor, FilterCheck, OneTimeIvkRestoreRead as _,
-                OneTimeIvkRestoreWrite as _, PublicationEnd, recovery::EncryptedNote,
-            },
+        one_time_ivk::restore::{
+            DirectoryPayment, DirectoryRecord, PublicationEnd, recovery::EncryptedNote,
         },
         testing::{AddressType, IronwoodFvk, TestBuilder, TestRng, TestState},
         transparent_ledger::ChainPoint,
@@ -28,6 +27,7 @@ pub(super) use zcash_primitives::block::BlockHash;
 pub(super) use zcash_protocol::{local_consensus::LocalNetwork, value::Zatoshis};
 
 pub(super) use super::{restore::payments::PendingPayment, swap::*, *};
+pub(super) use crate::WalletDb;
 pub(super) use crate::testing::db::{TestDb, TestDbFactory, test_clock, test_rng};
 pub(super) use crate::util::testing::FixedClock;
 /// The module under test, whose submodule names the test modules shadow.
@@ -79,7 +79,7 @@ pub(super) fn scanned_wallet() -> State {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
-    db.mark_one_time_account_fresh(account).unwrap();
+    db.set_one_time_recovery_enabled(account, true).unwrap();
     st
 }
 
@@ -87,7 +87,7 @@ pub(super) fn scanned_wallet() -> State {
 /// issuance waits for its discovery.
 pub(super) fn restored_wallet() -> State {
     let mut st = ironwood_wallet();
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    st.generate_and_scan_empty_blocks(1);
     st
 }
 
@@ -95,7 +95,7 @@ pub(super) fn start() -> BlockHeight {
     BlockHeight::from_u32(100)
 }
 
-/// The test clock's time, which registration stamps on keys.
+/// The test clock's time.
 pub(super) fn clock_now() -> i64 {
     unix_now(&test_clock())
 }
@@ -129,18 +129,29 @@ pub(super) fn reserve_in(
     from: BlockHeight,
     now: i64,
 ) -> Result<OneTimeKey, SqliteClientError> {
+    let (owner, _) = account_key(c, p, account)?;
+    let last: Option<Vec<u8>> = c.query_row(
+        "SELECT MAX(key_index) FROM ironwood_one_time_keys
+        WHERE account_id = ?1 AND purpose = ?2 AND reserved_at IS NOT NULL",
+        rusqlite::params![owner.0, purpose_code(purpose)?],
+        |r| r.get(0),
+    )?;
     let index = if purpose == Purpose::Refund {
-        let seen = Some(&empty_seen(now));
-        store::swap::funding::next_refund_index(c, p, account, seen, now)?.unwrap()
+        store::swap::funding::next_refund_index(c, p, account)?
     } else {
-        let sql = "SELECT MAX(k.key_index) FROM ironwood_one_time_keys k
-                   JOIN accounts a ON a.id = k.account_id
-                   WHERE a.uuid = ?1 AND k.purpose = 1 AND k.advances_allocation = 1";
-        let last: Option<Vec<u8>> = c.query_row(sql, [account.0], |r| r.get(0))?;
-        last.map_or(Ok(0), |bytes| index_after(decode_index(bytes)?, 1))?
+        last.map(|bytes| index_after(decode_index(bytes)?, 1))
+            .transpose()?
+            .unwrap_or(0)
     };
-    let key = KeyId::new(purpose, index);
-    register(c, p, account, key, from, true, Discovery::Scan, now).map(|(_, key)| key)
+    let (id, key) = register(c, p, account, KeyId::new(purpose, index))?;
+    c.execute(
+        "UPDATE ironwood_one_time_keys SET reserved_at = ?2 WHERE id = ?1",
+        rusqlite::params![id, now],
+    )?;
+    if purpose == Purpose::Refund {
+        store::restore::queue::funded(c, id, from)?;
+    }
+    Ok(key)
 }
 
 /// [`reserve`], expecting a key.
@@ -153,24 +164,6 @@ pub(crate) fn reserve_key(
     reserve(db, account, purpose, from).unwrap()
 }
 
-/// Runs a whole discovery pass for `account` against a publication ending at the scanned
-/// tip, with incoming `checks` and no refund key used, and returns the publication.
-pub(super) fn discover(
-    st: &mut State,
-    account: AccountUuid,
-    checks: &[FilterCheck],
-) -> PublicationEnd {
-    use store::restore::tests::discovery::{publication_at, run_pass};
-    let publication = publication_at(st, tip(st).height);
-    assert!(run_pass(
-        st.wallet_mut().db_mut(),
-        account,
-        publication,
-        checks
-    ));
-    publication
-}
-
 /// Registers `key` as a restore discovers it, from `from`, with its history due for a
 /// lookup unless this wallet scanned it.
 pub(super) fn recover(
@@ -179,77 +172,23 @@ pub(super) fn recover(
     key: KeyId,
     from: BlockHeight,
 ) -> OneTimeKey {
-    let (lookup, now) = (Discovery::Lookup, clock_now());
     tx(db, |c, p| {
-        register(c, p, account, key, from, true, lookup, now)
+        let (id, key) = register(c, p, account, key)?;
+        if key.key_id().purpose() == Purpose::Refund {
+            store::restore::queue::funded(c, id, from)?;
+        }
+        Ok(key)
     })
     .unwrap()
-    .1
 }
 
-/// Answers that a seen set holds none of `receivers`.
-pub(super) fn holds_nothing(receivers: &[[u8; 43]]) -> Vec<bool> {
-    vec![false; receivers.len()]
-}
-
-/// A seen set read at `now` that holds nothing and covers no quote: fresh at `now`, yet
-/// every quote still counts as seen, as without a set.
-pub(super) fn empty_seen(now: i64) -> ProviderSeen<'static> {
-    ProviderSeen {
-        since: now,
-        until: now,
-        contains: &holds_nothing,
-    }
-}
-
-/// Reserves `account`'s next refund key at the test clock's time, with an empty seen set
-/// read then (see [`empty_seen`]).
+/// Reserves the next refund identity using ordinary funding history.
 pub(super) fn reserve_refund(
     db: &mut Db,
     account: AccountUuid,
     tip: BlockHeight,
 ) -> Policy<OneTimeKey> {
-    let now = clock_now();
-    db.reserve_refund_key(account, now, tip, Some(&empty_seen(now)))
-}
-
-/// Reserves like `WalletDb::prepare_receive_reservation`, scanning a new key from `from`,
-/// without readiness checks, reaping or lookahead registration.
-pub(super) fn prepare_from(
-    db: &mut Db,
-    account: AccountUuid,
-    now: i64,
-    from: BlockHeight,
-    seen: Option<&ProviderSeen<'_>>,
-) -> Policy<OneTimeKey> {
-    tx(db, |c, p| {
-        if let Some(seen) = seen {
-            let (owner, _) = account_key(c, p, account)?;
-            store::swap::reservations::record_seen(c, owner.0, seen)?;
-        }
-        store::swap::reservations::prepare(c, p, account, now, from, seen)
-    })
-}
-
-/// Starts or extends trial decryption of `key` from `from`, as registration and a stored
-/// refund funding transaction do.
-pub(super) fn activate_key(db: &mut Db, account: AccountUuid, key: KeyId, from: BlockHeight) {
-    tx(db, |c, _| activate(c, key_ref(c, account, key)?, from)).unwrap();
-}
-
-/// `account`'s queued candidates for `key`, in position order.
-pub(super) fn pending(db: &Db, account: AccountUuid, key: KeyId) -> Vec<PendingPayment> {
-    let id = key_ref(&db.conn, account, key).unwrap();
-    db.conn
-        .prepare(
-            "SELECT txid, action_index, height, block_hash, tx_index, position, encrypted_note
-             FROM ironwood_one_time_payment_recovery WHERE one_time_key_id = ?1 ORDER BY position",
-        )
-        .unwrap()
-        .query_map([id], store::restore::payments::payment)
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap()
+    db.reserve_refund_key(account, tip)
 }
 
 /// Records `observation` for `key`'s operation `reference` at `now`, adding the
@@ -280,12 +219,12 @@ pub(super) fn observe_with(
                 |r| r.get(0),
             )?,
         };
-        store::swap::lifecycle::record(c, id, observation, now).map(|_| ())
+        store::swap::lifecycle::record(c, id, &observation, now).map(|_| ())
     })
 }
 
 /// Records `status`, without a deposit, for `key`'s operation `reference` at `now`,
-/// adding it with the deadline registration time if new.
+/// adding it with the test clock's time as its deadline if new.
 pub(super) fn observe(
     db: &mut Db,
     account: AccountUuid,
@@ -297,17 +236,10 @@ pub(super) fn observe(
     let observation = Observation {
         status,
         funded: false,
+        receipts: vec![],
     };
     let operation = (reference, clock_now());
     observe_with(db, account, key, operation, observation, now)
-}
-
-/// [`WalletDb::close_finished_one_time_keys`] with `tip`'s block time set to `now`, as
-/// when the caller's clock agrees with the chain.
-pub(super) fn close_at(db: &mut Db, account: AccountUuid, now: i64, tip: BlockHeight) -> usize {
-    let sql = "UPDATE blocks SET time = ?2 WHERE height = ?1";
-    exec(&db.conn, sql, rusqlite::params![u32::from(tip), now]);
-    db.close_finished_one_time_keys(account, now, tip).unwrap()
 }
 
 /// Sets the latest block's time to `now`, as when the caller's clock agrees with the
@@ -343,14 +275,21 @@ pub(super) fn get_key(
     )
 }
 
-/// `key`'s stored scan start and whether it advances allocation.
-pub(super) fn key_state(db: &Db, key: KeyId) -> (BlockHeight, bool) {
-    let sql = "SELECT scan_from, advances_allocation FROM ironwood_one_time_keys
-               WHERE purpose = ?1 AND key_index = ?2";
-    let purpose = purpose_code(key.purpose()).unwrap();
-    let params = rusqlite::params![purpose, key.index().to_be_bytes()];
-    let (from, advances): (u32, bool) = row(&db.conn, sql, params);
-    (from.into(), advances)
+/// The key registered to `account` for `receiver`, re-derived and checked.
+pub(super) fn key_for_receiver(
+    db: &Db,
+    account: AccountUuid,
+    receiver: &orchard::Address,
+) -> Result<Option<OneTimeKey>, SqliteClientError> {
+    let selected = "k.receiver = ?2";
+    let receiver = receiver.to_raw_address_bytes();
+    key_matching(
+        &db.conn,
+        &db.params,
+        account,
+        selected,
+        rusqlite::params![account.0, receiver],
+    )
 }
 
 /// An accepted operation outcome with these deposit instructions.
@@ -375,12 +314,6 @@ pub(super) fn tip(st: &State) -> ChainPoint {
 pub(super) fn unspent_keys(st: &State, height: BlockHeight) -> Vec<Option<KeyId>> {
     let notes = notes(st, height);
     notes.iter().map(|n| n.one_time_key_id()).collect()
-}
-
-/// Keys the scanner trial-decrypts with.
-pub(super) fn scanning_keys(st: &State) -> Vec<KeyId> {
-    let keys = st.wallet().get_one_time_scanning_keys().unwrap();
-    keys.iter().map(|k| k.key_id()).collect()
 }
 
 /// The first output to `fvk`'s external address in cached block `height`, as a directory
@@ -450,7 +383,7 @@ pub(super) fn external_payment_with(
         .create_account("funder", &SecretVec::new(vec![7; 32]), &birthday, None)
         .unwrap();
     pay(&mut funder, &FullViewingKey::from(usk.orchard()), 1_000_000);
-    funder.generate_and_scan_empty_blocks_with_one_time_ivks(5);
+    funder.generate_and_scan_empty_blocks(5);
     let payments = std::iter::once(payment(&unified(to), 50_000, Some(memo)));
     let change = (None, zcash_protocol::ShieldedPool::Orchard);
     let (_, txid) = transfer(
@@ -515,8 +448,58 @@ pub(super) fn pay(st: &mut State, fvk: &FullViewingKey, value: u64) -> BlockHeig
     let recipient = IronwoodFvk(fvk.clone());
     let value = Zatoshis::const_from_u64(value);
     let (height, _, _) = st.generate_next_block(&recipient, AddressType::DefaultExternal, value);
-    st.scan_cached_blocks_with_one_time_ivks(height, 1);
+    scan_and_recover(st, height, 1);
     height
+}
+
+/// Gives synthetic payment transactions non-coinbase indexes before either scanner sees them.
+pub(super) fn payment_indexes(st: &State, from: BlockHeight, count: usize) {
+    let blocks: Vec<(u32, Vec<u8>)> = rows(
+        &st.cache().0,
+        "SELECT height, data FROM compactblocks WHERE height >= ?1 ORDER BY height LIMIT ?2",
+        rusqlite::params![u32::from(from), count],
+    );
+    for (height, bytes) in blocks {
+        let mut block = CompactBlock::decode(bytes.as_slice()).unwrap();
+        if block.vtx.iter().any(|tx| tx.index == 0) {
+            for transaction in &mut block.vtx {
+                transaction.index += 1;
+            }
+            exec(
+                &st.cache().0,
+                "UPDATE compactblocks SET data = ?1 WHERE height = ?2",
+                rusqlite::params![block.encode_to_vec(), height],
+            );
+        }
+    }
+}
+
+/// Scans ordinary keys, then supplies independently built directory answers for registered receivers.
+/// Feature scenario tests separately exercise the actual encrypted transport and publisher.
+pub(crate) fn scan_and_recover(st: &mut State, from: BlockHeight, count: usize) {
+    payment_indexes(st, from, count);
+    st.scan_cached_blocks(from, count);
+    let accounts: Vec<AccountUuid> = column(st.wallet().conn(), "SELECT uuid FROM accounts", [])
+        .into_iter()
+        .map(AccountUuid)
+        .collect();
+    for account in accounts {
+        let publication = store::restore::tests::discovery::publication_at(st, tip(st).height);
+        let db = st.wallet_mut().db_mut();
+        db.set_one_time_recovery_enabled(account, true).unwrap();
+        assert!(
+            db.begin_one_time_recovery(account, publication, false)
+                .unwrap()
+        );
+        tx(db, |conn, _| {
+            let ids: Vec<i64> = conn.prepare("SELECT k.id FROM ironwood_one_time_keys k JOIN accounts a ON a.id = k.account_id
+                WHERE a.uuid = ?1 AND (k.purpose = 1 OR k.funding_height IS NOT NULL)")?
+                .query_map([account.0], |r| r.get(0))?.collect::<Result<_, _>>()?;
+            for id in ids { store::restore::queue::enqueue(conn, id, u32::from(publication.end.height), 1)?; }
+            Ok(())
+        }).unwrap();
+        store::restore::tests::discovery::drain(st, account, publication);
+    }
 }
 
 /// `receiver` as a unified address.
@@ -612,7 +595,7 @@ pub(super) fn spend_to_foreign(st: &mut State, value: u64) -> (Proposal, BlockHe
     let change = (None, zcash_protocol::ShieldedPool::Orchard);
     let (proposal, txid) = transfer(st, (account.id(), account.usk()), vec![to], change);
     let (height, _) = st.generate_next_block_including(txid.unwrap());
-    st.scan_cached_blocks_with_one_time_ivks(height, 1);
+    scan_and_recover(st, height, 1);
     (proposal, height)
 }
 
@@ -708,7 +691,7 @@ fn reservations_survive_reopen_and_keep_purposes_and_accounts_separate() {
     let (other, _) = db.create_account("other", &seed, &birthday, None).unwrap();
     for key in [&refund, &incoming] {
         assert!(get_key(db, other, key.key_id()).unwrap().is_none());
-        let found = db.get_one_time_key_for_receiver(other, &key.receiver());
+        let found = key_for_receiver(db, other, &key.receiver());
         assert!(found.unwrap().is_none());
     }
     let key = reserve_key(db, other, Purpose::Refund, start());
@@ -730,6 +713,8 @@ fn a_payment_matches_the_key_of_its_own_account() {
     let mine = reserve_key(db, account, Purpose::Receive, from);
     let theirs = reserve_key(db, other, Purpose::Receive, from);
     assert_eq!(mine.key_id(), theirs.key_id());
+    // Adding an account schedules its birthday history before it can have a fully scanned tip.
+    st.scan_cached_blocks(BlockHeight::from_u32(100_000), 1);
     pay(&mut st, theirs.full_viewing_key(), 10_000);
     let sql = "SELECT a.uuid = ?1, k.account_id = n.account_id, n.value
                FROM ironwood_received_notes n JOIN accounts a ON a.id = n.account_id
@@ -853,7 +838,7 @@ fn a_key_with_notes_is_deleted_only_with_its_account() {
         if e.code == rusqlite::ErrorCode::ConstraintViolation));
     conn.execute_batch("SAVEPOINT s; DELETE FROM accounts; ROLLBACK TO s; RELEASE s;")
         .unwrap();
-    assert_eq!(count(&st, "ironwood_one_time_keys"), 1);
+    assert_eq!(count(&st, "ironwood_one_time_keys"), 5);
     st.wallet_mut().delete_account(account).unwrap();
     assert_eq!(count(&st, "ironwood_one_time_keys"), 0);
     assert_eq!(count(&st, "ironwood_received_notes"), 0);

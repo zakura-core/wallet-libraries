@@ -38,6 +38,7 @@ mod note_locking;
 mod nullifier_map;
 mod one_time_ivk;
 mod one_time_ivk_discovery;
+mod one_time_pir;
 mod orchard_ironwood_migration_anchor_interval;
 mod orchard_ironwood_migration_tables;
 mod orchard_ironwood_migration_unsatisfiability;
@@ -159,6 +160,7 @@ pub mod ids {
         ivk_item_cache::MIGRATION_ID as IVK_ITEM_CACHE, note_locking::MIGRATION_ID as NOTE_LOCKING,
         nullifier_map::MIGRATION_ID as NULLIFIER_MAP, one_time_ivk::MIGRATION_ID as ONE_TIME_IVK,
         one_time_ivk_discovery::MIGRATION_ID as ONE_TIME_IVK_DISCOVERY,
+        one_time_pir::MIGRATION_ID as ONE_TIME_PIR,
         orchard_ironwood_migration_anchor_interval::MIGRATION_ID as ORCHARD_IRONWOOD_MIGRATION_ANCHOR_INTERVAL,
         orchard_ironwood_migration_tables::MIGRATION_ID as ORCHARD_IRONWOOD_MIGRATION_TABLES,
         orchard_ironwood_migration_unsatisfiability::MIGRATION_ID as ORCHARD_IRONWOOD_MIGRATION_UNSATISFIABILITY,
@@ -440,6 +442,7 @@ pub(super) fn all_migrations<
         Box::new(transparent_txid_enhancement::Migration),
         Box::new(transparent_detail_content_failures::Migration),
         Box::new(one_time_ivk_discovery::Migration),
+        Box::new(one_time_pir::Migration),
     ]
 }
 
@@ -701,7 +704,7 @@ pub(crate) fn forget_txid_enhancement(conn: &rusqlite::Connection) {
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     transparent_detail_content_failures::MIGRATION_ID,
-    one_time_ivk_discovery::MIGRATION_ID,
+    one_time_pir::MIGRATION_ID,
 ];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
@@ -831,6 +834,7 @@ pub(crate) mod tests {
             ids::NULLIFIER_MAP,
             ids::ONE_TIME_IVK,
             ids::ONE_TIME_IVK_DISCOVERY,
+            ids::ONE_TIME_PIR,
             ids::ORCHARD_IRONWOOD_MIGRATION_ANCHOR_INTERVAL,
             ids::ORCHARD_IRONWOOD_MIGRATION_TABLES,
             ids::ORCHARD_IRONWOOD_MIGRATION_UNSATISFIABILITY,

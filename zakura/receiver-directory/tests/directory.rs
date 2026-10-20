@@ -33,7 +33,7 @@ fn records_are_carried_without_cryptographic_checks() {
     r.receiver = [255; 43];
     let p = &mut r.payment;
     (p.action_nullifier, p.cmx, p.ephemeral_key) = ([255; 32], [255; 32], [255; 32]);
-    let s = Snapshot::build(manifest(8), &[r.clone()], &[]).unwrap();
+    let s = Snapshot::build(manifest(8), &[r.clone()]).unwrap();
     s.validate().unwrap();
     assert_eq!(
         lookup_row(&s.manifest, &r.receiver, 0, row(&s, &r.receiver, 0)).unwrap(),
@@ -42,20 +42,20 @@ fn records_are_carried_without_cryptographic_checks() {
 }
 
 /// A manifest with a field this version does not know is refused, and the revision
-/// binds every field, including each set's optional ones.
+/// binds the payment history and chain coverage.
 #[test]
 fn manifests_refuse_unknown_fields_and_bind_every_field() {
     use receiver_directory::snapshot::Manifest;
-    let s = Snapshot::build(manifest(8), &[record(0, 1)], &[]).unwrap();
+    let s = Snapshot::build(manifest(8), &[record(0, 1)]).unwrap();
     let json = serde_json::to_value(&s.manifest).unwrap();
     let read: Manifest = serde_json::from_value(json.clone()).unwrap();
     assert_eq!(read.revision().unwrap(), s.manifest.revision().unwrap());
     let mut added = json.clone();
     added["added"] = 1.into();
     assert!(serde_json::from_value::<Manifest>(added).is_err());
-    let mut nested = json;
-    nested["filters"][0]["note"] = "later".into();
-    assert!(serde_json::from_value::<Manifest>(nested).is_err());
+    let mut obsolete = json;
+    obsolete["filters"] = serde_json::json!([]);
+    assert!(serde_json::from_value::<Manifest>(obsolete).is_err());
     let mut other = s.manifest.clone();
     other.records += 1;
     assert_ne!(other.revision().unwrap(), s.manifest.revision().unwrap());
@@ -64,9 +64,8 @@ fn manifests_refuse_unknown_fields_and_bind_every_field() {
 #[test]
 fn pages_share_one_revision_and_build_order_is_stable() {
     let records = [record(0, 2), record(1, 2)];
-    let s = Snapshot::build(manifest(8), &records, &[]).unwrap();
-    let reversed =
-        Snapshot::build(manifest(8), &[records[1].clone(), records[0].clone()], &[]).unwrap();
+    let s = Snapshot::build(manifest(8), &records).unwrap();
+    let reversed = Snapshot::build(manifest(8), &[records[1].clone(), records[0].clone()]).unwrap();
     assert_eq!(
         s.manifest.revision().unwrap(),
         reversed.manifest.revision().unwrap()
@@ -83,7 +82,7 @@ fn pages_share_one_revision_and_build_order_is_stable() {
             Some(r.clone())
         );
     }
-    let empty = Snapshot::build(manifest(8), &[], &[]).unwrap();
+    let empty = Snapshot::build(manifest(8), &[]).unwrap();
     assert!(lookup_row(
         &empty.manifest,
         &records[0].receiver,
@@ -101,10 +100,10 @@ fn pages_share_one_revision_and_build_order_is_stable() {
         ),
         Err(Error::MissingPage)
     ));
-    assert!(Snapshot::build(manifest(8), &records[..1], &[]).is_err());
-    assert!(Snapshot::build(manifest(8), &records[1..], &[]).is_err());
-    assert!(Snapshot::build(manifest(8), &[record(0, 1), record(1, 2)], &[]).is_err());
-    assert!(Snapshot::build(manifest(8), &[record(0, 1), record(0, 1)], &[]).is_err());
+    assert!(Snapshot::build(manifest(8), &records[..1]).is_err());
+    assert!(Snapshot::build(manifest(8), &records[1..]).is_err());
+    assert!(Snapshot::build(manifest(8), &[record(0, 1), record(1, 2)]).is_err());
+    assert!(Snapshot::build(manifest(8), &[record(0, 1), record(0, 1)]).is_err());
 }
 
 /// Valid Ironwood receivers, pinned in `fixtures/receivers.json` (see
@@ -135,80 +134,6 @@ fn other_receiver() -> ReceiverBytes {
 }
 
 #[test]
-fn publications_commit_to_their_filters() {
-    use receiver_directory::{
-        filter::{Filters, PAID},
-        snapshot::ProviderSet,
-    };
-    use sha2::{Digest, Sha256};
-    let (paid, provider) = (receiver(), other_receiver());
-    let sets = [
-        ProviderSet {
-            label: "near-intents/recent".into(),
-            window_secs: Some(86_400),
-            since_unix: 1_000,
-            until_unix: 90_000,
-            receivers: vec![provider],
-        },
-        ProviderSet {
-            label: "near-intents/seen".into(),
-            window_secs: None,
-            since_unix: 1_000,
-            until_unix: 90_000,
-            receivers: vec![provider],
-        },
-    ];
-    let s = Snapshot::build(manifest(8), &[record(0, 1)], &sets).unwrap();
-    assert_eq!(
-        <[u8; 32]>::from(Sha256::digest(&s.filters)),
-        s.manifest.filters_sha256
-    );
-    let filters = Filters::decode(&s.filters).unwrap();
-    s.manifest.check_filters(&filters).unwrap();
-    let labels: Vec<_> = s
-        .manifest
-        .filters
-        .iter()
-        .map(|f| f.label.as_str())
-        .collect();
-    assert_eq!(labels, ["near-intents/recent", "near-intents/seen", PAID]);
-    assert_eq!(s.manifest.filters[0].window_secs, Some(86_400));
-    assert_eq!(s.manifest.filters[0].until_unix, Some(90_000));
-    assert_eq!(s.manifest.filters[2].since_unix, None);
-    assert_eq!(s.manifest.filters[2].until_unix, None);
-    let key = s.manifest.salt;
-    let set = |label| filters.get(label).unwrap().matches(&key, &[paid, provider]);
-    assert_eq!(set(PAID), [true, false]);
-    assert_eq!(set("near-intents/recent"), [false, true]);
-    assert_eq!(set("near-intents/seen"), [false, true]);
-    // The provider's data is part of the revision.
-    let without = Snapshot::build(manifest(8), &[record(0, 1)], &[]).unwrap();
-    assert_ne!(
-        without.manifest.revision().unwrap(),
-        s.manifest.revision().unwrap()
-    );
-    // A filter file is checked against the sets its manifest declares.
-    let only_paid = Filters::decode(&without.filters).unwrap();
-    assert!(s.manifest.check_filters(&only_paid).is_err());
-    // A recent set must declare its window, labels must be known kinds, and a feed
-    // cannot end before it started.
-    for (label, window_secs, until_unix) in [
-        ("near-intents/recent", None, 90_000),
-        ("near-intents/other", None, 90_000),
-        ("near-intents/seen", None, 999),
-    ] {
-        let bad = [ProviderSet {
-            label: label.into(),
-            window_secs,
-            since_unix: 1_000,
-            until_unix,
-            receivers: vec![provider],
-        }];
-        assert!(Snapshot::build(manifest(8), &[record(0, 1)], &bad).is_err());
-    }
-}
-
-#[test]
 fn coverage_anchor_and_position_are_required() {
     let m = manifest(8);
     m.accept([1; 32], 100, 101, [3; 32]).unwrap();
@@ -222,17 +147,14 @@ fn coverage_anchor_and_position_are_required() {
     }
     let mut r = record(0, 1);
     r.payment.position = 300;
-    assert!(Snapshot::build(m.clone(), &[r], &[]).is_err());
+    assert!(Snapshot::build(m.clone(), &[r]).is_err());
     let mut r = record(0, 1);
     r.payment.block_hash = [9; 32];
-    assert!(Snapshot::build(m.clone(), &[r], &[]).is_err());
+    assert!(Snapshot::build(m.clone(), &[r]).is_err());
     // Transaction zero is the coinbase, whose recipients the directory excludes.
     let mut r = record(0, 1);
     r.payment.tx_index = 0;
-    assert!(matches!(
-        Snapshot::build(m, &[r], &[]),
-        Err(Error::Malformed)
-    ));
+    assert!(matches!(Snapshot::build(m, &[r]), Err(Error::Malformed)));
 }
 
 /// A manifest cannot claim more records than its span has note positions.
@@ -249,7 +171,7 @@ fn records_fit_the_covered_positions() {
 /// malformed.
 #[test]
 fn a_total_beyond_the_record_count_is_malformed() {
-    let s = Snapshot::build(manifest(8), &[record(0, 1)], &[]).unwrap();
+    let s = Snapshot::build(manifest(8), &[record(0, 1)]).unwrap();
     let r = receiver();
     let mut b = row(&s, &r, 0).to_vec();
     assert!(lookup_row(&s.manifest, &r, 0, &b).unwrap().is_some());
@@ -282,13 +204,10 @@ fn overflow_and_bad_padding_fail_closed() {
     let mut m = manifest(4);
     let overflow = (0..100).any(|i| {
         m.salt[0] = i;
-        matches!(
-            Snapshot::build(m.clone(), &records, &[]),
-            Err(Error::Capacity)
-        )
+        matches!(Snapshot::build(m.clone(), &records), Err(Error::Capacity))
     });
     assert!(overflow);
-    let s = Snapshot::build(manifest(8), &[record(0, 1)], &[]).unwrap();
+    let s = Snapshot::build(manifest(8), &[record(0, 1)]).unwrap();
     let r = receiver();
     let mut b = row(&s, &r, 0).to_vec();
     b[ROW_BYTES - 1] = 1;
@@ -300,15 +219,15 @@ fn overflow_and_bad_padding_fail_closed() {
 #[test]
 fn records_beyond_the_slots_are_a_capacity_failure() {
     let records = |n: u32| (0..n).map(|p| record(p, n)).collect::<Vec<_>>();
-    let full = Snapshot::build(manifest(1), &records(SLOTS as u32), &[]).unwrap();
+    let full = Snapshot::build(manifest(1), &records(SLOTS as u32)).unwrap();
     assert_eq!(full.manifest.records, SLOTS as u64);
     assert!(matches!(
-        Snapshot::build(manifest(1), &records(SLOTS as u32 + 1), &[]),
+        Snapshot::build(manifest(1), &records(SLOTS as u32 + 1)),
         Err(Error::Capacity)
     ));
     for rows in [0, 3, MAX_ROWS * 2] {
         assert!(matches!(
-            Snapshot::build(manifest(rows), &records(SLOTS as u32 + 1), &[]),
+            Snapshot::build(manifest(rows), &records(SLOTS as u32 + 1)),
             Err(Error::Malformed)
         ));
     }
@@ -332,7 +251,6 @@ fn records_beyond_the_slots_are_a_capacity_failure() {
 fn rehash(s: &mut Snapshot) {
     use sha2::{Digest, Sha256};
     s.manifest.data_sha256 = Sha256::digest(&s.data).into();
-    s.manifest.filters_sha256 = Sha256::digest(&s.filters).into();
 }
 
 /// The byte offset of `r`'s slot in `s`'s rows.
@@ -359,7 +277,7 @@ fn records_share_no_output_or_position() {
     b.receiver = other_receiver();
     (b.payment.txid, b.payment.tx_index, b.payment.position) = ([9; 32], 9, 210);
     let records = [a0.clone(), a1, b];
-    let valid = Snapshot::build(manifest(8), &records, &[]).unwrap();
+    let valid = Snapshot::build(manifest(8), &records).unwrap();
     valid.validate().unwrap();
     // `a0`'s output at a later position, by `a0`'s receiver and by `b`'s, and `b` at
     // `a0`'s position.
@@ -373,7 +291,7 @@ fn records_share_no_output_or_position() {
         let mut edited = records.clone();
         edited[i] = repeated.clone();
         assert!(matches!(
-            Snapshot::build(manifest(8), &edited, &[]),
+            Snapshot::build(manifest(8), &edited),
             Err(Error::Malformed)
         ));
         let mut s = valid.clone();
@@ -385,7 +303,7 @@ fn records_share_no_output_or_position() {
 }
 
 /// A supplied publication is checked as a whole: digests, placement, count, pages,
-/// padding, coverage and the paid set, each edit rehashed so the digests
+/// padding and coverage, each edit rehashed so the digests
 /// alone cannot catch it.
 #[test]
 fn supplied_publications_are_validated_record_by_record() {
@@ -393,9 +311,9 @@ fn supplied_publications_are_validated_record_by_record() {
     let mut b = record(0, 1);
     b.receiver = other_receiver();
     (b.payment.txid, b.payment.tx_index, b.payment.position) = ([9; 32], 9, 210);
-    let valid = Snapshot::build(manifest(8), &[a0.clone(), a1.clone(), b.clone()], &[]).unwrap();
+    let valid = Snapshot::build(manifest(8), &[a0.clone(), a1.clone(), b.clone()]).unwrap();
     valid.validate().unwrap();
-    Snapshot::build(manifest(8), &[], &[])
+    Snapshot::build(manifest(8), &[])
         .unwrap()
         .validate()
         .unwrap();
@@ -451,14 +369,6 @@ fn supplied_publications_are_validated_record_by_record() {
         outside.payment.position = s.manifest.end_position;
         put(s, slot_of(s, &b), Some(&outside));
     });
-
-    // A paid set of the declared size but other receivers.
-    refused(&|s| {
-        use receiver_directory::filter::{Filter, Filters};
-        let third = pinned("third")[0];
-        let paid = Filter::build(&s.manifest.salt, &[receiver(), third]);
-        s.filters = Filters::new(paid, []).unwrap().encode().unwrap();
-    });
 }
 
 /// `n` distinct valid receivers, at most 16.
@@ -505,7 +415,7 @@ fn a_populated_largest_table_validates() {
     let mut m = manifest(MAX_ROWS);
     m.end_position = 200 + u64::from(n * pages);
     let records = spread(&receivers(n), pages);
-    let s = Snapshot::build(m, &records, &[]).unwrap();
+    let s = Snapshot::build(m, &records).unwrap();
     drop(records);
     assert_eq!(s.manifest.records, u64::from(2 * MAX_ROWS));
     let fullest = s
@@ -548,7 +458,7 @@ fn pages_continue_in_chain_order() {
         r
     };
     let within_tx = next(|p| p.action_index = 2);
-    let valid = Snapshot::build(m.clone(), &[first.clone(), within_tx.clone()], &[]).unwrap();
+    let valid = Snapshot::build(m.clone(), &[first.clone(), within_tx.clone()]).unwrap();
     valid.validate().unwrap();
 
     let continuing: [fn(&mut Payment); 3] = [
@@ -584,7 +494,7 @@ fn pages_continue_in_chain_order() {
     // A build and a supplied publication apply the same rule.
     let earlier_action = next(broken[0]);
     assert!(matches!(
-        Snapshot::build(m, &[first.clone(), earlier_action.clone()], &[]),
+        Snapshot::build(m, &[first.clone(), earlier_action.clone()]),
         Err(Error::Malformed)
     ));
     let mut s = valid;
@@ -609,7 +519,7 @@ fn pages_continue_in_chain_order() {
 /// A same-chain indexing correction changes the immutable PIR publication identity.
 #[test]
 fn corrections_change_publication_identity() {
-    let first = Snapshot::build(manifest(8), &[], &[]).unwrap();
+    let first = Snapshot::build(manifest(8), &[]).unwrap();
     let mut corrected = first.manifest.clone();
     corrected.history_revision += 1;
     assert_ne!(

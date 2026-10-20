@@ -2723,7 +2723,7 @@ fn one_time_key_notes_bind_metadata_without_private_memos_after_reopen() {
                 rusqlite::params![block.encode_to_vec(), u32::from(height)],
             )
             .unwrap();
-        st.scan_cached_blocks_with_one_time_ivks(height, 1);
+        crate::wallet::one_time_ivk::tests::scan_and_recover(&mut st, height, 1);
         let reopened = WalletDb::for_path(
             st.wallet().data_file_path(),
             *st.network(),

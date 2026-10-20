@@ -1,7 +1,7 @@
 //! Durable ownership-checked candidates. These rows never contribute to balance.
 use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::data_api::one_time_ivk::restore::{
-    DirectoryPayment, PublicationEnd,
+    DirectoryPayment,
     recovery::{EncryptedNote, RecoveredNote},
 };
 use zcash_primitives::{block::BlockHash, transaction::TxId};
@@ -111,17 +111,13 @@ pub(in crate::wallet::one_time_ivk) fn pending_payment(
         .optional()?)
 }
 
-/// Authenticates and queues one candidate from the directory revision ending at
-/// `publication`, idempotently and without crediting it: a scan hint if `hint`, else a
-/// late candidate.
+/// Authenticates and queues one candidate idempotently without crediting it.
 pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     key: KeyId,
     candidate: &PendingPayment,
-    publication: PublicationEnd,
-    hint: bool,
 ) -> Result<(), SqliteClientError> {
     let (id, _) = authenticate(conn, params, account, key, candidate)?;
     if wallet::get_block_hash(conn, candidate.height)?
@@ -150,8 +146,8 @@ pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
     conn.execute(
         "INSERT INTO ironwood_one_time_payment_recovery (
             one_time_key_id, txid, action_index, height, block_hash, tx_index, position,
-            encrypted_note, publication_height, publication_hash, scan_hint
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            encrypted_note
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             id,
             candidate.txid.as_ref(),
@@ -161,9 +157,6 @@ pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
             candidate.tx_index,
             candidate.position,
             candidate.encrypted_note.to_bytes().as_slice(),
-            u32::from(publication.height),
-            publication.hash,
-            hint
         ],
     )?;
     Ok(())

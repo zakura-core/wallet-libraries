@@ -3,7 +3,6 @@ use crate::{
     public_bytes, response_bytes, AcceptedCoverage, Client, Error, Manifest, MAX_MANIFEST_BYTES,
 };
 use receiver_directory::{RawRecord, ReceiverBytes};
-use sha2::{Digest, Sha256};
 
 /// Hosts supply their route policy, cancellation, and timeout for every request.
 /// Enforce `limit` while streaming, reject non-success responses, and map HTTP
@@ -128,32 +127,6 @@ impl<T: Transport> DirectoryClient<T> {
         let batch = receiver_directory::blocks::Batch::decode(&bytes)?;
         batch.check(head, from, limit)?;
         Ok(batch)
-    }
-
-    /// Downloads `manifest`'s filters, identical for every wallet, so a wallet can test its
-    /// receivers before deciding whether to look any up. The file must hold exactly the
-    /// sets the manifest declares.
-    pub async fn fetch_filters(
-        origin: &str,
-        http: &T,
-        manifest: &Manifest,
-    ) -> Result<receiver_directory::filter::Filters, Error> {
-        let bytes = http
-            .get(
-                &format!(
-                    "{}/v1/receiver/filters/{}",
-                    origin.trim_end_matches('/'),
-                    hex::encode(manifest.id()?)
-                ),
-                receiver_directory::filter::MAX_FILTERS_BYTES,
-            )
-            .await?;
-        if <[u8; 32]>::from(Sha256::digest(&bytes)) != manifest.directory.filters_sha256 {
-            return Err(Error::Malformed);
-        }
-        let filters = receiver_directory::filter::Filters::decode(&bytes)?;
-        manifest.directory.check_filters(&filters)?;
-        Ok(filters)
     }
 
     /// The session manifest.

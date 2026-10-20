@@ -192,9 +192,6 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::EnhancementModeNotConfigured => {
             unreachable!("we don't enumerate enhancement requests in migrations")
         }
-        SqliteClientError::OneTimeIvksNotUsed => {
-            unreachable!("migrations do not use one-time IVKs")
-        }
         #[cfg(feature = "orchard")]
         SqliteClientError::InvalidOneTimeIvkInput(_) => {
             unreachable!("migrations do not use one-time IVKs")
@@ -982,14 +979,12 @@ mod tests {
             db::TABLE_IRONWOOD_ENHANCE_ROUTING,
             db::TABLE_IRONWOOD_JOURNAL_COVERAGE,
             db::TABLE_IRONWOOD_MEMO_RETRIEVAL_QUEUE,
-            db::TABLE_IRONWOOD_ONE_TIME_DISCOVERY,
-            db::TABLE_IRONWOOD_ONE_TIME_FRESH_ACCOUNTS,
             db::TABLE_IRONWOOD_ONE_TIME_KEYS,
-            db::TABLE_IRONWOOD_ONE_TIME_LOOKUP_READS,
             db::TABLE_IRONWOOD_ONE_TIME_LOOKUPS,
+            db::TABLE_IRONWOOD_ONE_TIME_OPERATION_RECEIPTS,
             db::TABLE_IRONWOOD_ONE_TIME_OPERATIONS,
             db::TABLE_IRONWOOD_ONE_TIME_PAYMENT_RECOVERY,
-            db::TABLE_IRONWOOD_ONE_TIME_PUBLICATIONS,
+            db::TABLE_IRONWOOD_ONE_TIME_RECOVERY,
             db::TABLE_IRONWOOD_RECEIVED_NOTE_SPENDS,
             db::TABLE_IRONWOOD_RECEIVED_NOTES,
             db::TABLE_IRONWOOD_SPEND_JOURNAL,
@@ -1069,8 +1064,6 @@ mod tests {
             db::INDEX_ADDRESSES_INDICES,
             db::INDEX_ADDRESSES_PUBKEYS,
             db::INDEX_ADDRESSES_T_INDICES,
-            db::INDEX_IRONWOOD_ONE_TIME_KEYS_ACCOUNT_RECEIVER,
-            db::INDEX_IRONWOOD_ONE_TIME_KEYS_SCANNING,
             db::INDEX_IRONWOOD_ONE_TIME_OPERATIONS_KEY,
             db::INDEX_IRONWOOD_RNS_NOTE,
             db::INDEX_IRONWOOD_RNS_TX,

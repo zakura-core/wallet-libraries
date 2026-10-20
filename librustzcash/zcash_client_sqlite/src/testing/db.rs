@@ -57,27 +57,6 @@ use crate::{
     wallet::init::WalletMigrator,
 };
 
-// The delegated one-time IVK traits' signatures name these.
-#[cfg(feature = "orchard")]
-use {
-    zakura_one_time_ivk::{KeyId, Purpose},
-    zcash_client_backend::{
-        data_api::{
-            one_time_ivk::{
-                OneTimeIvkRead, OneTimeIvkWrite, ambassador_impl_OneTimeIvkRead,
-                ambassador_impl_OneTimeIvkWrite,
-                restore::{
-                    DirectoryPayment, DiscoveryStatus, DiscoveryWork, EnumerationCursor,
-                    FilterCheck, OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite, PublicationEnd,
-                    ambassador_impl_OneTimeIvkRestoreRead, ambassador_impl_OneTimeIvkRestoreWrite,
-                },
-            },
-            transparent_ledger::ChainPoint,
-        },
-        scanning::one_time_ivk::OneTimeScanningKey,
-    },
-};
-
 #[cfg(feature = "transparent-inputs")]
 use {
     crate::TransparentAddressMetadata,
@@ -110,13 +89,6 @@ pub(crate) fn test_rng() -> TestRng {
 #[delegate(WalletCommitmentTrees, target = "wallet_db")]
 #[delegate(EnhancePirRead, target = "wallet_db")]
 #[delegate(TransactionStatusRead, target = "wallet_db")]
-#[cfg_attr(
-    feature = "orchard",
-    delegate(OneTimeIvkRead, target = "wallet_db"),
-    delegate(OneTimeIvkWrite, target = "wallet_db"),
-    delegate(OneTimeIvkRestoreRead, target = "wallet_db"),
-    delegate(OneTimeIvkRestoreWrite, target = "wallet_db")
-)]
 pub struct TestDb {
     wallet_db: WalletDb<Connection, LocalNetwork, FixedClock, TestRng>,
     data_file: Option<NamedTempFile>,

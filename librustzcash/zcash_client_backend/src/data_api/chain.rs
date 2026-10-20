@@ -176,9 +176,6 @@ use {
     super::scanning::ScanPriority, crate::data_api::scanning::ScanRange, async_trait::async_trait,
 };
 
-#[cfg(feature = "orchard")]
-use super::one_time_ivk::OneTimeIvkWrite;
-
 pub mod error;
 use error::Error;
 
@@ -850,63 +847,8 @@ impl DecryptedBlock {
     }
 }
 
-/// [`scan_cached_blocks`], also trial-decrypting with the wallet's one-time keys.
-///
-/// The keys come from [`OneTimeIvkRead::get_one_time_scanning_keys_for_range`] for the
-/// `limit` blocks from `from_height`, and the blocks are
-/// stored with [`OneTimeIvkWrite::put_blocks_with_one_time_ivks`]. A wallet with open
-/// one-time keys must be scanned with this function rather than [`scan_cached_blocks`].
-///
-/// [`OneTimeIvkRead::get_one_time_scanning_keys_for_range`]: super::one_time_ivk::OneTimeIvkRead::get_one_time_scanning_keys_for_range
-#[cfg(feature = "orchard")]
-#[tracing::instrument(skip(params, block_source, data_db, from_state))]
-#[allow(clippy::type_complexity)]
-pub fn scan_cached_blocks_with_one_time_ivks<ParamsT, DbT, BlockSourceT>(
-    params: &ParamsT,
-    block_source: &BlockSourceT,
-    data_db: &mut DbT,
-    from_height: BlockHeight,
-    from_state: &ChainState,
-    limit: usize,
-) -> Result<ScanSummary, Error<<DbT as WalletRead>::Error, BlockSourceT::Error>>
-where
-    ParamsT: consensus::Parameters + Send + 'static,
-    BlockSourceT: BlockSource,
-    DbT: OneTimeIvkWrite,
-    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
-{
-    assert_eq!(from_height, from_state.block_height + 1);
-
-    let account_ufvks = data_db
-        .get_unified_full_viewing_keys()
-        .map_err(Error::Wallet)?;
-    let end = u32::from(from_height).saturating_add(u32::try_from(limit).unwrap_or(u32::MAX));
-    let one_time_keys = data_db
-        .get_one_time_scanning_keys_for_range(from_height..BlockHeight::from(end))
-        .map_err(Error::Wallet)?;
-    let one_time_key_ids = one_time_keys
-        .iter()
-        .map(|key| (*key.account_id(), key.key_id()))
-        .collect::<Vec<_>>();
-    let scanning_keys =
-        ScanningKeys::from_account_ufvks(account_ufvks).with_one_time_ivks(one_time_keys);
-    let (scan_summary, scanned_blocks) = scan_blocks(
-        params,
-        block_source,
-        data_db,
-        from_height,
-        limit,
-        &scanning_keys,
-    )?;
-
-    data_db
-        .put_blocks_with_one_time_ivks(from_state, scanned_blocks, &one_time_key_ids)
-        .map_err(Error::Wallet)?;
-    Ok(scan_summary)
-}
-
 /// Scans at most `limit` blocks from `from_height` with `scanning_keys`, for
-/// [`scan_cached_blocks`] and its one-time IVK twin, returning the blocks to store.
+/// [`scan_cached_blocks`], returning the blocks to store.
 #[allow(clippy::type_complexity)]
 fn scan_blocks<ParamsT, DbT, BlockSourceT, IvkTag>(
     params: &ParamsT,

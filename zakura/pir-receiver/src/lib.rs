@@ -1,39 +1,21 @@
-//! Discovery of a restored seed's one-time keys through a receiver directory over PIR.
+//! Private receiver lookups over caller-owned transports.
 //!
-//! A restored wallet cannot rescan public history for every key its seed may have used,
-//! so it checks candidate receivers against a receiver directory's public filters and
-//! looks up the paid ones: the directory is a public index of Ironwood payments sent with
-//! the zero outgoing viewing key, keyed by receiver. Lookups use PIR, so a lookup does not
-//! reveal which receiver it reads. Whether and when the wallet looks up is not hidden: it
-//! follows the publication's paid filter and retries failed lookups, so a dishonest
-//! directory that changes what it serves can test whether the wallet holds a receiver it
-//! chose. The wallet judges each publication against its own chain and authenticates every
-//! payment with its derived key before crediting it.
-//!
-//! Once the wallet holds a payment discovery found, it is an ordinary note: its
-//! enhancement, scan priority and any rebroadcast follow as for any note. So when a
-//! directory's answer is wrong, traffic to the wallet's other services can differ from an
-//! honest answer's, another route to the test above.
-//!
-//! `fetch_seen` downloads the swap provider seen sets that a wallet checks before issuing
-//! a swap address. The `wallet` feature adds `discover`, which runs discovery for any
-//! wallet store that implements the backend's `OneTimeIvkRestoreWrite`. The caller
-//! supplies transports, which carry its route policy, cancellation and timeouts, and a
-//! `WriteLock` that serializes wallet writes with its other writers. Dropping a `discover`
-//! future at any await is safe: each wallet step commits on its own.
+//! Rolling GCS hints are an optional bandwidth optimization. Matches trigger PIR rather
+//! than compact scanning. PIR hides the queried address, but query timing is visible.
+//! All returned payments require wallet authentication, inclusion and spend checks.
+//! Network futures hold no database handle. The caller commits results through the
+//! wallet's recovery queue, which fences stale callbacks and enforces the feature toggle.
 
 #[cfg(feature = "wallet")]
 mod discovery;
-mod seen;
 #[cfg(feature = "wallet")]
-pub use discovery::{Discovered, Error, FIRST_WINDOW, GAP, KEYS_PER_RUN, WriteLock, discover};
-pub use seen::{Seen, fetch_seen};
+pub use discovery::{lookup, publication, witnesses};
 
 pub use receiver_pir::{Error as DirectoryError, transport::Transport};
 /// The directory format and client underneath, for callers that need them directly.
 /// They parse records and witness files structurally only: records from
 /// `DirectoryClient::page` and the bytes from `DirectoryClient::witnesses` are
-/// unchecked. Validate them with `zakura-receiver-crypto`, as `discover` does, before use.
+/// unchecked. Commit them through the wallet recovery queue before crediting funds.
 pub use {receiver_directory, receiver_pir};
 
 /// The directory error for data a receiver check refuses: the same error the

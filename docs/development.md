@@ -22,6 +22,8 @@ python3 scripts/dev.py verify
 | Configuration | Packages and features |
 | --- | --- |
 | `default` | Workspace except the facade, Enhance PIR, the transparent PIR adapter, receiver PIR and the one-time IVK scenarios; default features |
+| `sync` | Ordinary sync with Orchard and Ironwood enabled |
+| `zewif` | Wallet interchange import and atomic rollback, with the SQLite test fixtures |
 | `orchard` | Backend + SQLite; `orchard,test-dependencies` |
 | `transparent` | Backend + SQLite; `orchard,transparent-inputs,test-dependencies,unstable` |
 | `transparent-import` | Backend + SQLite; transparent features plus `transparent-key-import` |
@@ -46,7 +48,7 @@ python3 scripts/dev.py verify
 | `transaction-status-lightwalletd` | Status policy plus the explicit lightwalletd adapter, including payload validation and cancellation |
 | `receiver-wire` | Library-owned receiver codec with default features disabled |
 | `receiver-pir-server` | Receiver PIR client with the `server` evaluator, which the golden client/evaluator vectors need |
-| `one-time-ivk-scenarios` | One-time IVK scenario suite (see its README); `ONE_TIME_IVK_SLOW=1` adds the scenarios that wait months of chain time. CI runs it nightly, not on PRs |
+| `one-time-ivk-scenarios` | PIR-only wallet scenarios with an independent chain oracle (see its README). CI runs it nightly, not on PRs |
 
 `default` builds the backend and SQLite crates without Orchard or transparent
 inputs, which `orchard` and `transparent` test, so items used only under those

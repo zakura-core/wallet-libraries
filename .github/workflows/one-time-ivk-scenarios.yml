@@ -1,7 +1,6 @@
 name: One-time IVK scenarios
 
-# The full scenario suite takes about 45 minutes on a hosted runner, three times
-# the slowest PR lane, so it runs nightly and on request instead of on every PR.
+# Real encrypted PIR and transaction proof scenarios run nightly and on request.
 on:
   schedule:
     # Scheduled runs only fire on the default branch.
@@ -22,8 +21,6 @@ jobs:
     timeout-minutes: 120
     env:
       WALLET_LIB_BUILD_ROOT: ${{ github.workspace }}/target/dev-lanes
-      ONE_TIME_IVK_REPORT_DIR: ${{ github.workspace }}/target/one-time-ivk-scenarios-report
-      ONE_TIME_IVK_SLOW: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup show
@@ -31,7 +28,10 @@ jobs:
         with:
           key: tests-one-time-ivk-scenarios
           workspaces: . -> target/dev-lanes
-      - run: python3 scripts/dev.py test --config one-time-ivk-scenarios
+      - run: |
+          mkdir -p target/one-time-ivk-scenarios-report
+          set -o pipefail
+          python3 scripts/dev.py test --config one-time-ivk-scenarios 2>&1 | tee target/one-time-ivk-scenarios-report/results.log
       - name: Retain the scenario report
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

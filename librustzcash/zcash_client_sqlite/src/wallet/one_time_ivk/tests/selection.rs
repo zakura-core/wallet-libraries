@@ -65,7 +65,7 @@ fn funding(specs: &[(u64, bool, At)], target: u64) -> Vec<u64> {
     }
     mine(&mut st, true);
     let tip = st.generate_empty_block().0;
-    st.scan_cached_blocks_with_one_time_ivks(first, specs.len() + 12);
+    scan_and_recover(&mut st, first, specs.len() + 12);
 
     let (owner, foreign) = (LockOwner::new([1; 32]), LockOwner::new([2; 32]));
     let mut exclude = vec![];
@@ -214,8 +214,8 @@ fn spend(
         let value = Zatoshis::const_from_u64(*value);
         st.generate_next_block(&IronwoodFvk(fvk), AddressType::DefaultExternal, value);
     }
-    st.scan_cached_blocks_with_one_time_ivks(first, ordinary.len() + one_time.len() + 1);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(5);
+    scan_and_recover(&mut st, first, ordinary.len() + one_time.len() + 1);
+    st.generate_and_scan_empty_blocks(5);
 
     let to = payment(&unified(foreign_receiver()), value, None);
     let request = zip321::TransactionRequest::new(vec![to]).unwrap();
@@ -253,7 +253,7 @@ fn spend(
     let tx = st.wallet().get_transaction(created[0]).unwrap().unwrap();
     let actions = tx.ironwood_bundle().unwrap().actions().len();
     let (height, _) = st.generate_next_block_including(created[0]);
-    st.scan_cached_blocks_with_one_time_ivks(height, 1);
+    scan_and_recover(&mut st, height, 1);
     (inputs, actions, fee, unspent_keys(&st, height))
 }
 
@@ -360,7 +360,7 @@ fn funding_without_one_time_state_stops_at_the_covering_note() {
         st.generate_empty_block();
     }
     let tip = st.generate_empty_block().0;
-    st.scan_cached_blocks_with_one_time_ivks(first, values.count() + 12);
+    st.scan_cached_blocks(first, values.count() + 12);
 
     // SQLite VM steps spent selecting funding, which walking the uncovered notes would add to.
     let steps = |st: &State| {
@@ -436,7 +436,7 @@ fn ordinary_consolidation_candidates_stay_within_the_spare_slots() {
     }
     let tip = st.generate_empty_block().0;
     let blocks = u32::from(tip) - u32::from(first) + 1;
-    st.scan_cached_blocks_with_one_time_ivks(first, blocks as usize);
+    scan_and_recover(&mut st, first, blocks as usize);
     // Reconstructing an unconfirmed note now fails, so selection must not reach them.
     let sql = "UPDATE ironwood_received_notes SET rho = ?1 WHERE value = 100000";
     exec(st.wallet().conn(), sql, [[0xff; 32]]);

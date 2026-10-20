@@ -1,6 +1,5 @@
 //! Pinned bytes for what receiver PIR adds to the shared `pir-native` profile (seeds,
-//! session ID, framing and row placement), from a request built without `Client`; a
-//! change that alters one needs a new protocol name, not a new pin.
+//! session ID, framing and row placement), from a request built without `Client`.
 mod common;
 use common::{manifest, receiver, record};
 use ipir_sp::bits::u64s_to_contiguous_bytes;
@@ -35,7 +34,7 @@ fn round(x: u64, bits: usize) -> u64 {
 #[test]
 fn the_protocol_reproduces_its_pinned_bytes() {
     let records = [record(0, 2), record(1, 2)];
-    let snapshot = Snapshot::build(manifest(MIN_ROWS), &records, &[]).unwrap();
+    let snapshot = Snapshot::build(manifest(MIN_ROWS), &records).unwrap();
     let (rows, cols) = (MIN_ROWS as usize, ROW_BYTES / 2);
     let target = row_for(&snapshot.manifest, &receiver(), 1).unwrap();
     let server = Server::new(snapshot.clone()).unwrap();
@@ -105,13 +104,13 @@ fn the_protocol_reproduces_its_pinned_bytes() {
         ("response", digest(&response)),
         ("row", digest(&row)),
     ];
-    // The correction revision changes the session header and its framed digests only.
+    // The manifest format changes the session header and its framed digests only.
     // Native setup, row placement and row bytes retain their independent golden values.
     let want = [
         ("row index", "2600"),
         (
             "session",
-            "fdcdbb7ac3303d82a516050f036ef25aeab02e75e614de7bdcb8248996367c35",
+            "766661f33f8a10fdc40909a5ece47b5c0f1dd6e1c5bf5d2f48b5a1901ecab746",
         ),
         (
             "public",
@@ -119,90 +118,16 @@ fn the_protocol_reproduces_its_pinned_bytes() {
         ),
         (
             "request",
-            "f93ef6e515eae32680ca7e50567d8b9bf31ace8b2005e53a3fea02e07ca7b16d",
+            "4b684be5d8ffd9c95eef419884fac680829bab40b1acb07227ae3d5bfda5a329",
         ),
         (
             "response",
-            "8b00631bc12b1dab1c4218ad36bd19af96a76db206606faac086a91defe1ce92",
+            "05fbdbd2b7a3e57f4d92be76f638b97cf67351ccb5f1f2c7116ec58d07de08be",
         ),
         (
             "row",
             "6ac822f39e11fac5980508721afdd3fa8f3774ec01cdc7a2eb2e265a7cd82f44",
         ),
     ];
-    for ((name, got), (_, want)) in got.iter().zip(want) {
-        assert_eq!(got, want, "{name}");
-    }
-}
-
-/// Sharing public preprocessing must not share a session, skip validation, or
-/// answer changed rows with the previous publication's database.
-#[test]
-fn reused_rows_keep_fresh_sessions_and_changed_rows_rebuild() {
-    let records = [record(0, 2), record(1, 2)];
-    let snapshot = Snapshot::build(manifest(MIN_ROWS), &records, &[]).unwrap();
-    let original = Server::new(snapshot.clone()).unwrap();
-    let accepted = AcceptedCoverage {
-        genesis: [1; 32],
-        required_start: 100,
-        height: 101,
-        hash: [3; 32],
-    };
-    let old_client = Client::new(original.manifest().clone(), original.public(), accepted).unwrap();
-    let old_query = old_client.prepare(receiver(), 1).unwrap();
-    let mut advanced = snapshot.clone();
-    advanced.manifest.end_height = 102;
-    advanced.manifest.end_hash = [4; 32];
-    let reused = Server::new_reusing_rows(advanced.clone(), &original).unwrap();
-    assert!(std::ptr::eq(
-        original.public().as_ptr(),
-        reused.public().as_ptr()
-    ));
-    assert_ne!(original.id(), reused.id());
-    assert!(matches!(
-        reused.respond(old_query.body()),
-        Err(receiver_pir::Error::Revision)
-    ));
-    let fresh = Server::new(advanced).unwrap();
-    assert_eq!(reused.public(), fresh.public());
-    let accepted = AcceptedCoverage {
-        height: 102,
-        hash: [4; 32],
-        ..accepted
-    };
-    let client = Client::new(reused.manifest().clone(), reused.public(), accepted).unwrap();
-    let query = client.prepare(receiver(), 1).unwrap();
-    let response = reused.respond(query.body()).unwrap();
-    assert_eq!(response, fresh.respond(query.body()).unwrap());
-    assert_eq!(
-        client.decode(query, &response).unwrap(),
-        Some(records[1].clone())
-    );
-
-    let mut changed_records = records;
-    changed_records[1].payment.txid[0] ^= 0x80;
-    let changed = Snapshot::build(manifest(MIN_ROWS), &changed_records, &[]).unwrap();
-    let rebuilt = Server::new_reusing_rows(changed, &original).unwrap();
-    assert!(!std::ptr::eq(
-        original.public().as_ptr(),
-        rebuilt.public().as_ptr()
-    ));
-    let accepted = AcceptedCoverage {
-        height: 101,
-        hash: [3; 32],
-        ..accepted
-    };
-    let client = Client::new(rebuilt.manifest().clone(), rebuilt.public(), accepted).unwrap();
-    let query = client.prepare(receiver(), 1).unwrap();
-    let response = rebuilt.respond(query.body()).unwrap();
-    assert_eq!(
-        client.decode(query, &response).unwrap(),
-        Some(changed_records[1].clone())
-    );
-    let mut corrupt = snapshot.clone();
-    corrupt.data[0] ^= 1;
-    assert!(Server::new_reusing_rows(corrupt, &original).is_err());
-    let mut corrupt = snapshot;
-    corrupt.filters.push(1);
-    assert!(Server::new_reusing_rows(corrupt, &original).is_err());
+    assert_eq!(got, want.map(|(name, value)| (name, value.to_owned())));
 }

@@ -37,8 +37,6 @@ use orchard::note_encryption::OrchardDomain;
 
 pub(crate) mod compact;
 pub mod full;
-#[cfg(feature = "orchard")]
-pub mod one_time_ivk;
 
 /// A key that can be used to perform trial decryption and nullifier
 /// computation for a [`CompactSaplingOutput`] or [`CompactOrchardAction`].
@@ -67,12 +65,6 @@ pub trait ScanningKeyOps<D: Domain, AccountId, Nf> {
     /// Returns the [`zip32::Scope`] for which this key was derived, if known.
     fn key_scope(&self) -> Option<Scope>;
 
-    /// The one-time key that decrypted this output, relative to its account.
-    #[cfg(feature = "orchard")]
-    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
-        None
-    }
-
     /// Produces the nullifier for the specified note and witness, if possible.
     ///
     /// IVK-based implementations of this trait cannot successfully derive
@@ -95,11 +87,6 @@ impl<D: Domain, AccountId, Nf, K: ScanningKeyOps<D, AccountId, Nf>> ScanningKeyO
         (*self).key_scope()
     }
 
-    #[cfg(feature = "orchard")]
-    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
-        (*self).one_time_key_id()
-    }
-
     fn nf(&self, note: &D::Note, note_position: Position) -> Option<Nf> {
         (*self).nf(note, note_position)
     }
@@ -120,11 +107,6 @@ impl<D: Domain, AccountId, Nf> ScanningKeyOps<D, AccountId, Nf>
         self.as_ref().key_scope()
     }
 
-    #[cfg(feature = "orchard")]
-    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
-        self.as_ref().one_time_key_id()
-    }
-
     fn nf(&self, note: &D::Note, note_position: Position) -> Option<Nf> {
         self.as_ref().nf(note, note_position)
     }
@@ -143,11 +125,6 @@ impl<D: Domain, AccountId: Send + Sync, Nf> ScanningKeyOps<D, AccountId, Nf>
 
     fn key_scope(&self) -> Option<Scope> {
         self.as_ref().key_scope()
-    }
-
-    #[cfg(feature = "orchard")]
-    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
-        self.as_ref().one_time_key_id()
     }
 
     fn nf(&self, note: &D::Note, note_position: Position) -> Option<Nf> {
@@ -382,7 +359,7 @@ impl<AccountId, IvkTag> ScanningKeys<AccountId, IvkTag> {
 
 #[cfg(feature = "orchard")]
 impl<AccountId: Copy + PartialEq, IvkTag> ScanningKeys<AccountId, IvkTag> {
-    /// Returns each account that has an ordinary (not one-time) internal-scope Ironwood key,
+    /// Returns each account that has an internal-scope Ironwood key,
     /// once. A block scan records them as [`ScannedBlock::scanned_accounts`]. Only that key
     /// decrypts the marker output every one-time spend sends to the account's internal
     /// address, so a scan without it does not cover the account.
@@ -391,10 +368,7 @@ impl<AccountId: Copy + PartialEq, IvkTag> ScanningKeys<AccountId, IvkTag> {
     pub(crate) fn ordinary_ironwood_accounts(&self) -> Vec<AccountId> {
         let mut accounts: Vec<AccountId> = vec![];
         for key in self.ironwood.values() {
-            if key.one_time_key_id().is_none()
-                && key.key_scope() == Some(Scope::Internal)
-                && !accounts.contains(key.account_id())
-            {
+            if key.key_scope() == Some(Scope::Internal) && !accounts.contains(key.account_id()) {
                 accounts.push(*key.account_id());
             }
         }
@@ -1023,10 +997,6 @@ fn find_received<
             // - Notes created by consolidation transactions.
             // - Notes sent from one account to itself.
             let is_change = spent_from_accounts.contains(key.account_id());
-            // A one-time-key payment is incoming even when its account funded it, as in
-            // `decrypt_transaction_with_one_time_ivks`. The store never lowers the flag.
-            #[cfg(feature = "orchard")]
-            let is_change = is_change && key.one_time_key_id().is_none();
             let note_commitment_tree_position = note_position(output_idx);
             let nf = key.nf(&note, note_commitment_tree_position);
 
@@ -1045,8 +1015,6 @@ fn find_received<
                     .try_into()
                     .expect("compact ciphertext prefix"),
             );
-            #[cfg(feature = "orchard")]
-            let output = output.with_one_time_key_id(key.one_time_key_id());
             shielded_outputs.push(output);
         }
 

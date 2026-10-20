@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Remove the aggregate paid/seen/recent filter envelope and manifest fields. Snapshots retain the complete payment rows and coverage checks.
+
 ### Added
 
 - Bind the required history correction generation into PIR publication identity so unfinished work can fence older answers after a same-chain correction.

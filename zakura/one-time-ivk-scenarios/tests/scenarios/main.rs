@@ -1,296 +1,617 @@
-//! The one-time IVK scenario suite. Runs every scenario in the catalog against a
-//! simulated chain, NEAR and receiver directory, then writes `report.json` and
-//! `report.md`. See the crate README for options.
-
-mod catalog;
+//! End-to-end PIR-only stories with independent chain accounting and real encrypted queries.
 mod harness;
-
-use std::{
-    cell::RefCell,
-    panic::{self, AssertUnwindSafe},
-    path::{Path, PathBuf},
-    process::Command,
-    sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::{Instant, SystemTime, UNIX_EPOCH},
+use harness::{
+    chain::{ACTIVATION, Chain, GENESIS, Payer},
+    device::Device,
+    directory::{Directory, ORIGIN},
+};
+use orchard::keys::Scope;
+use receiver_pir::transport::DirectoryClient;
+use zakura_one_time_ivk::{KeyId, Purpose};
+use zcash_client_backend::{
+    data_api::{WalletRead as _, WalletWrite as _, transparent_ledger::ChainPoint},
+    wallet::OvkPolicy,
 };
 
-use zakura_one_time_ivk_scenarios::{Meta, Outcome, Report, ScenarioResult, render_markdown};
-
-use catalog::Scenario;
-use harness::Ctx;
-
-/// Command-line options. Output flags `cargo test` users commonly pass are ignored, and
-/// any other flag is rejected, so a harness option such as `--skip` or `--test-threads`
-/// can't be misread as a filter.
-struct Args {
-    filter: Option<String>,
-    exact: bool,
-    list: bool,
-    slow: bool,
-    jobs: usize,
-    report: PathBuf,
+/// Runs deterministic async network steps without giving the future a database lock.
+fn run(future: impl std::future::Future<Output = ()>) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future);
 }
 
-impl Args {
-    fn parse() -> Self {
-        let default_jobs = std::thread::available_parallelism()
-            .map_or(4, |n| n.get() / 2)
-            .max(1);
-        let mut args = Self {
-            filter: None,
-            exact: false,
-            list: false,
-            slow: std::env::var_os("ONE_TIME_IVK_SLOW").is_some(),
-            jobs: default_jobs,
-            report: std::env::var_os("ONE_TIME_IVK_REPORT_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    Path::new(env!("CARGO_TARGET_TMPDIR")).join("one-time-ivk-scenarios")
-                }),
-        };
-        let mut it = std::env::args().skip(1);
-        while let Some(arg) = it.next() {
-            match arg.as_str() {
-                "--list" => args.list = true,
-                "--exact" => args.exact = true,
-                "--slow" => args.slow = true,
-                "--jobs" => {
-                    args.jobs = it
-                        .next()
-                        .and_then(|n| n.parse().ok())
-                        .expect("--jobs takes a number")
-                }
-                "--report" => {
-                    args.report = PathBuf::from(it.next().expect("--report takes a directory"))
-                }
-                "--nocapture" | "--no-capture" | "--show-output" | "-q" | "--quiet" => {}
-                flag if flag.starts_with('-') => usage(&format!("unsupported flag {flag}")),
-                filter if args.filter.is_none() => args.filter = Some(filter.into()),
-                filter => usage(&format!("a second filter {filter:?}; pass one")),
+/// New seed recovery stops at four empty histories, then recycles the lowest unused hole.
+#[test]
+fn seed_gap_and_recycled_hole() {
+    run(async {
+        let mut chain = Chain::new();
+        let mut desktop = Device::new(&mut chain, [1; 32], ACTIVATION.into());
+        for index in [0, 3, 3, 40] {
+            chain.pay(
+                &[(desktop.key(Purpose::Receive, index), 100_000)],
+                Payer::Near,
+            );
+        }
+        chain.mine(12);
+        desktop.scan(&chain);
+        assert_eq!(desktop.unspent_one_time_value(), 0);
+        let directory = Directory::publish(&chain, 0, 0, 256, 0);
+        desktop.recover(&chain, &directory).await;
+        assert_eq!(desktop.unspent_one_time_value(), 300_000);
+        assert_eq!(desktop.status(&chain).restore_next, 8);
+        assert_eq!(directory.counts().0, 9);
+        desktop.reopen();
+        let next = desktop
+            .db
+            .prepare_receive_reservation(desktop.account, chain.now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.key_id().index(), 1);
+        let client = desktop.connect(&directory).await;
+        desktop
+            .db
+            .check_one_time_history(
+                desktop.account,
+                zakura_pir_receiver::publication(client.manifest()).unwrap(),
+                Some(42),
+            )
+            .unwrap();
+        desktop.drain(&chain, &client).await;
+        assert_eq!(desktop.unspent_one_time_value(), 400_000);
+    });
+}
+
+/// Filters stay optional for sync, negatives make no PIR query, positives use PIR only.
+#[test]
+fn live_filters_and_late_publication() {
+    run(async {
+        let mut chain = Chain::new();
+        let mut desktop = Device::new(&mut chain, [2; 32], ACTIVATION.into());
+        desktop.scan(&chain);
+        let initial = Directory::publish(&chain, 0, 0, 256, 0);
+        desktop.recover(&chain, &initial).await;
+        let floor = chain.tip();
+        chain.mine(2);
+        desktop.scan(&chain);
+        let empty = Directory::publish(&chain, 0, 0, 256, 0);
+        hints(&mut desktop, &empty).await;
+        assert_eq!(empty.counts().0, 0);
+        let payment = chain
+            .pay(&[(desktop.key(Purpose::Receive, 0), 100_000)], Payer::Near)
+            .remove(0);
+        desktop.scan(&chain);
+        assert_eq!(desktop.unspent_one_time_value(), 0);
+        let lagged = Directory::publish(&chain, 2, 0, 256, 0);
+        hints(&mut desktop, &lagged).await;
+        let work = desktop.status(&chain).lookups[0].clone();
+        assert!(work.through >= payment.height);
+        let client = desktop.connect(&lagged).await;
+        assert!(zakura_pir_receiver::lookup(&client, &work).await.is_err());
+        assert_eq!(lagged.counts().0, 0);
+        chain.mine(4);
+        desktop.scan(&chain);
+        desktop.reopen();
+        let current = Directory::publish(&chain, 0, 0, 256, 0);
+        let client = desktop.connect(&current).await;
+        desktop.drain(&chain, &client).await;
+        assert_eq!(desktop.unspent_one_time_value(), 100_000);
+        assert!(current.counts().0 > 0);
+        assert!(
+            desktop
+                .db
+                .block_fully_scanned()
+                .unwrap()
+                .unwrap()
+                .block_height()
+                > floor
+        );
+    });
+}
+
+/// Downloads real GCS bodies and atomically records only locally matched receiver obligations.
+async fn hints(device: &mut Device, directory: &Directory) {
+    let head = DirectoryClient::fetch_block_head(ORIGIN, &directory, &GENESIS)
+        .await
+        .unwrap();
+    let state = device.db.one_time_recovery(device.account, 0).unwrap();
+    let from = state
+        .filter_frontier
+        .map_or(ACTIVATION, |p| u32::from(p.height) + 1);
+    let (token, receivers) = device.db.one_time_receivers(device.account).unwrap();
+    let batch = DirectoryClient::fetch_block_batch(ORIGIN, &directory, &head, from, 256)
+        .await
+        .unwrap();
+    let bytes: Vec<_> = receivers.iter().map(|r| r.receiver).collect();
+    let mut hits = Vec::new();
+    let mut blocks = Vec::new();
+    for (index, filter) in batch.filters().iter().enumerate() {
+        for (work, matched) in receivers.iter().zip(batch.matches(index, &bytes).unwrap()) {
+            if matched && !hits.contains(&work.key) {
+                hits.push(work.key);
             }
         }
-        args
+        blocks.push(ChainPoint {
+            height: filter.block().height.into(),
+            hash: zcash_primitives::block::BlockHash(filter.block().hash),
+        });
     }
-
-    fn selects(&self, scenario: &Scenario) -> bool {
-        let named = match &self.filter {
-            Some(f) if self.exact => scenario.id == *f,
-            Some(f) => scenario.id.contains(f.as_str()),
-            None => true,
-        };
-        // A filter that names a slow scenario runs it.
-        named && (self.slow || !scenario.slow || self.filter.is_some())
-    }
+    assert!(
+        device
+            .db
+            .record_one_time_filters(device.account, token, head.revision, &blocks, &hits)
+            .unwrap()
+    );
+    device.assert_no_stall();
 }
 
-/// Reports a command-line error and exits with status 2, as `dev.py` does for an empty
-/// selection.
-fn usage(error: &str) -> ! {
-    eprintln!(
-        "{error}\nusage: scenarios [FILTER] [--exact] [--list] [--slow] [--jobs N] [--report DIR]"
-    );
-    std::process::exit(2);
-}
-
-fn main() {
-    let args = Args::parse();
-    let scenarios: Vec<Scenario> = catalog::all()
-        .into_iter()
-        .filter(|s| args.selects(s))
-        .collect();
-    if args.list {
-        for scenario in &scenarios {
-            println!("{}: test", scenario.id);
-        }
-        return;
-    }
-    // A misspelled filter would otherwise report a pass without running anything.
-    if scenarios.is_empty() {
-        eprintln!("no scenarios selected by {:?}", args.filter);
-        std::process::exit(2);
-    }
-    let started = Instant::now();
-    let started_unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
-    // Read before running, so a commit made during a long run doesn't relabel it.
-    let revisions = revisions();
-    println!(
-        "running {} one-time IVK scenarios on {} threads",
-        scenarios.len(),
-        args.jobs
-    );
-    let results = run_all(&scenarios, args.jobs);
-    let report = Report {
-        meta: Meta {
-            started_unix,
-            duration_ms: started.elapsed().as_millis() as u64,
-            revisions,
-            filter: args.filter.clone(),
-            jobs: args.jobs,
-        },
-        scenarios: results,
-    };
-    std::fs::create_dir_all(&args.report).expect("the report directory");
-    let json = serde_json::to_string_pretty(&report).expect("the report serializes");
-    std::fs::write(args.report.join("report.json"), json).expect("report.json");
-    std::fs::write(args.report.join("report.md"), render_markdown(&report)).expect("report.md");
-    let totals = report.totals();
-    println!(
-        "\n{} passed, {} failed, {} errors in {:.1} s",
-        totals.passed,
-        totals.failed,
-        totals.errors,
-        report.meta.duration_ms as f64 / 1000.0
-    );
-    println!("report: {}", args.report.join("report.md").display());
-    if totals.failed + totals.errors > 0 {
-        std::process::exit(1);
-    }
-}
-
-/// Runs `scenarios` on `jobs` threads, keeping catalog order. Cost scenarios measure
-/// time, so they run afterwards, one at a time.
-fn run_all(scenarios: &[Scenario], jobs: usize) -> Vec<ScenarioResult> {
-    let alone = |s: &Scenario| s.group == catalog::COST;
-    let next = AtomicUsize::new(0);
-    let results: Mutex<Vec<Option<ScenarioResult>>> =
-        Mutex::new((0..scenarios.len()).map(|_| None).collect());
-    // Panics become scenario errors carrying their message and location.
-    let default = panic::take_hook();
-    panic::set_hook(Box::new(|info| {
-        LAST_PANIC.with(|last| *last.borrow_mut() = Some(info.to_string()));
-    }));
-    let report = |i: usize, result: ScenarioResult| {
-        let mark = match result.outcome {
-            Outcome::Pass => "ok",
-            Outcome::Fail => "FAIL",
-            Outcome::Error => "ERROR",
-        };
-        println!(
-            "{mark:>5}  {}  ({} ms)",
-            scenarios[i].id, result.duration_ms
+/// Catch-up omits completed old keys, while the explicit settings action can recover a repeat.
+#[test]
+fn offline_repeat_requires_manual_history() {
+    run(async {
+        let mut chain = Chain::new();
+        let mut phone = Device::new(&mut chain, [3; 32], ACTIVATION.into());
+        chain.pay(&[(phone.key(Purpose::Receive, 0), 100_000)], Payer::Near);
+        chain.mine(12);
+        phone.scan(&chain);
+        phone
+            .recover(&chain, &Directory::publish(&chain, 0, 0, 256, 0))
+            .await;
+        chain.pay(
+            &[
+                (phone.key(Purpose::Receive, 0), 200_000),
+                (phone.key(Purpose::Receive, 1), 300_000),
+            ],
+            Payer::Near,
         );
-        results.lock().unwrap()[i] = Some(result);
-    };
-    std::thread::scope(|scope| {
-        for _ in 0..jobs.max(1) {
-            scope.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(scenario) = scenarios.get(i) else {
-                        break;
+        chain.mine(20);
+        phone.scan(&chain);
+        phone.reopen();
+        let directory = Directory::publish(&chain, 0, 0, 4, 0);
+        phone.recover(&chain, &directory).await;
+        assert_eq!(phone.unspent_one_time_value(), 400_000);
+        let client = phone.connect(&directory).await;
+        phone
+            .db
+            .check_one_time_history(
+                phone.account,
+                zakura_pir_receiver::publication(client.manifest()).unwrap(),
+                None,
+            )
+            .unwrap();
+        phone.drain(&chain, &client).await;
+        assert_eq!(phone.unspent_one_time_value(), 600_000);
+    });
+}
+
+/// The second device learns a funded refund from its own memo and can spend its recovered receipt.
+#[test]
+fn funded_refund_cross_device_and_spend() {
+    run(async {
+        let mut chain = Chain::new();
+        let mut phone = Device::new(&mut chain, [4; 32], ACTIVATION.into());
+        let mut desktop = Device::new(&mut chain, [4; 32], ACTIVATION.into());
+        chain.pay(&[(phone.fvk.clone(), 100_000_000)], Payer::Wallet);
+        chain.mine(12);
+        phone.scan(&chain);
+        let swap = phone.quote_refund(&chain);
+        let funding = phone.fund_refund(&swap, 20_000_000);
+        assert!(chain.accepts(&funding).is_ok());
+        chain.mine_tx(&funding);
+        chain.mine(12);
+        desktop.scan(&chain);
+        let directory = Directory::publish(&chain, 0, 0, 256, 0);
+        desktop.recover(&chain, &directory).await;
+        assert!(desktop.status(&chain).lookups.is_empty());
+        chain.pay(
+            &[(phone.key(Purpose::Refund, swap.index), 1_000_000)],
+            Payer::Near,
+        );
+        chain.mine(12);
+        desktop.scan(&chain);
+        desktop
+            .recover(&chain, &Directory::publish(&chain, 0, 0, 256, 0))
+            .await;
+        assert_eq!(desktop.unspent_one_time_value(), 1_000_000);
+        let destination = phone
+            .key(Purpose::Receive, 50)
+            .address_at(0u32, Scope::External);
+        let spend = desktop.send_to(destination, 500_000, OvkPolicy::Sender);
+        let accepted = chain
+            .accepts(&spend)
+            .expect("independent proof and signature verification");
+        assert!(accepted.actions > 0 && accepted.anchor_height >= ACTIVATION.into());
+        chain.mine_tx(&spend);
+        phone.scan(&chain);
+        phone
+            .recover(&chain, &Directory::publish(&chain, 0, 0, 256, 0))
+            .await;
+        assert_eq!(phone.unspent_one_time_value(), 0);
+    });
+}
+
+/// A refund after the birthday still needs its earlier funding memo, recovered by an ordinary rescan.
+#[test]
+fn refund_after_birthday_requires_earlier_funding_memo() {
+    run(async {
+        use std::collections::HashSet;
+        let mut chain = Chain::new();
+        let mut phone = Device::new(&mut chain, [10; 32], ACTIVATION.into());
+        chain.pay(&[(phone.fvk.clone(), 100_000_000)], Payer::Wallet);
+        chain.mine(12);
+        phone.scan(&chain);
+        let swap = phone.quote_refund(&chain);
+        let funding = phone.fund_refund(&swap, 20_000_000);
+        chain.accepts(&funding).unwrap();
+        chain.mine_tx(&funding);
+        chain.mine(12);
+        let birthday = chain.tip();
+        let mut desktop = Device::new(&mut chain, [10; 32], birthday);
+        let refund = chain.pay(
+            &[(phone.key(Purpose::Refund, swap.index), 100_000)],
+            Payer::Near,
+        );
+        chain.mine(12);
+        desktop.scan(&chain);
+        let directory = Directory::publish(&chain, 0, 0, 256, 0);
+        desktop.recover(&chain, &directory).await;
+        assert_receipts(&desktop, &[]);
+
+        // Receive-index history cannot substitute for the missing refund memo.
+        let client = desktop.connect(&directory).await;
+        assert!(
+            desktop
+                .db
+                .check_one_time_history(
+                    desktop.account,
+                    zakura_pir_receiver::publication(client.manifest()).unwrap(),
+                    None
+                )
+                .unwrap()
+        );
+        desktop.drain(&chain, &client).await;
+        assert_receipts(&desktop, &[]);
+
+        desktop
+            .db
+            .rewind_to_chain_state(
+                chain.state_below(ACTIVATION.into()),
+                HashSet::from([desktop.account]),
+            )
+            .unwrap();
+        desktop.reopen();
+        desktop.scan(&chain);
+        assert_receipts(&desktop, &[]);
+        desktop.recover(&chain, &directory).await;
+        assert_receipts(&desktop, &refund);
+    });
+}
+
+/// Separate accounts in one database keep their keys, cursors, and feature settings isolated.
+#[test]
+fn multiple_accounts_sync_independently() {
+    run(async {
+        use secrecy::SecretVec;
+        use zcash_client_backend::data_api::AccountBirthday;
+        let mut chain = Chain::new();
+        let mut wallet = Device::new(&mut chain, [5; 32], ACTIVATION.into());
+        let first = wallet.account;
+        let (second, usk) = wallet
+            .db
+            .create_account(
+                "second",
+                &SecretVec::new(vec![5; 32]),
+                &AccountBirthday::from_parts(chain.state_below(ACTIVATION.into()), None),
+                None,
+            )
+            .unwrap();
+        let parent = orchard::keys::FullViewingKey::from(usk.orchard());
+        let second_key = KeyId::new(Purpose::Receive, 0).derive(&parent).unwrap();
+        chain.pay(
+            &[
+                (wallet.key(Purpose::Receive, 0), 100_000),
+                (second_key, 200_000),
+            ],
+            Payer::Near,
+        );
+        chain.mine(12);
+        wallet.scan(&chain);
+        let directory = Directory::publish(&chain, 0, 0, 256, 0);
+        wallet.recover(&chain, &directory).await;
+        assert_eq!(wallet.unspent_one_time_value(), 100_000);
+        let second_state = wallet.db.one_time_recovery(second, chain.now()).unwrap();
+        assert!(!second_state.enabled && second_state.lookups.is_empty());
+        wallet
+            .db
+            .set_one_time_recovery_enabled(first, false)
+            .unwrap();
+        wallet
+            .db
+            .set_one_time_recovery_enabled(second, true)
+            .unwrap();
+        wallet.account = second;
+        wallet.recover(&chain, &directory).await;
+        assert_eq!(wallet.unspent_one_time_value(), 300_000);
+        assert_eq!(
+            wallet
+                .db
+                .one_time_recovery(first, chain.now())
+                .unwrap()
+                .restore_next,
+            5
+        );
+        assert_eq!(wallet.status(&chain).restore_next, 5);
+    });
+}
+
+/// Proven prebirthday payments extend seed discovery without credit until the user lowers birthday.
+#[test]
+fn lowering_birthday_recovers_an_excluded_payment_after_restart() {
+    run(async {
+        use std::collections::HashSet;
+        let mut chain = Chain::new();
+        let phone = Device::new(&mut chain, [6; 32], ACTIVATION.into());
+        chain.pay(&[(phone.key(Purpose::Receive, 0), 100_000)], Payer::Near);
+        chain.mine(12);
+        let birthday = chain.tip();
+        let mut desktop = Device::new(&mut chain, [6; 32], birthday);
+        desktop.scan(&chain);
+        let directory = Directory::publish(&chain, 0, 0, 256, 0);
+        desktop.recover(&chain, &directory).await;
+        assert_eq!(desktop.unspent_one_time_value(), 0);
+        assert_eq!(desktop.status(&chain).restore_next, 5);
+        desktop
+            .db
+            .set_one_time_recovery_enabled(desktop.account, false)
+            .unwrap();
+        desktop
+            .db
+            .rewind_to_chain_state(
+                chain.state_below(ACTIVATION.into()),
+                HashSet::from([desktop.account]),
+            )
+            .unwrap();
+        desktop.reopen();
+        desktop.scan(&chain);
+        assert_eq!(desktop.unspent_one_time_value(), 0);
+        desktop
+            .db
+            .set_one_time_recovery_enabled(desktop.account, true)
+            .unwrap();
+        desktop.recover(&chain, &directory).await;
+        assert_eq!(desktop.unspent_one_time_value(), 100_000);
+    });
+}
+
+/// Errors and canceled work never become successful empty pages or silently resume manual ranges.
+#[test]
+fn failures_and_manual_cancellation_survive_restart() {
+    run(async {
+        use std::sync::atomic::Ordering;
+        let mut chain = Chain::new();
+        let mut wallet = Device::new(&mut chain, [8; 32], ACTIVATION.into());
+        chain.pay(&[(wallet.key(Purpose::Receive, 8), 100_000)], Payer::Near);
+        chain.mine(12);
+        wallet.scan(&chain);
+        let directory = Directory::publish(&chain, 0, 0, 256, 0);
+        wallet.recover(&chain, &directory).await;
+        assert_eq!(wallet.unspent_one_time_value(), 0);
+        let client = wallet.connect(&directory).await;
+        let publication = zakura_pir_receiver::publication(client.manifest()).unwrap();
+        wallet
+            .db
+            .check_one_time_history(wallet.account, publication, Some(10))
+            .unwrap();
+        let held = wallet.status(&chain).lookups[0].clone();
+        directory.unavailable.store(true, Ordering::SeqCst);
+        assert!(zakura_pir_receiver::lookup(&client, &held).await.is_err());
+        assert_eq!(wallet.status(&chain).manual.unwrap().next, 4);
+        directory.unavailable.store(false, Ordering::SeqCst);
+        let answer = zakura_pir_receiver::lookup(&client, &held).await.unwrap();
+        wallet.db.cancel_one_time_history(wallet.account).unwrap();
+        wallet.reopen();
+        assert!(
+            !wallet
+                .db
+                .record_one_time_lookup(wallet.account, &held, &answer, chain.now())
+                .unwrap()
+        );
+        assert!(!wallet.status(&chain).manual.unwrap().active);
+        assert!(wallet.status(&chain).lookups.is_empty());
+        wallet
+            .db
+            .check_one_time_history(wallet.account, publication, None)
+            .unwrap();
+        wallet.drain(&chain, &client).await;
+        assert_eq!(wallet.unspent_one_time_value(), 100_000);
+        assert_eq!(wallet.status(&chain).manual.unwrap().next, 10);
+    });
+}
+
+/// A real receipt re-mined at a new position is repaired while off, without discovering new notes.
+#[test]
+fn known_receipt_reorg_repairs_position_while_disabled() {
+    run(async {
+        let mut chain = Chain::new();
+        let mut payer = Device::new(&mut chain, [9; 32], ACTIVATION.into());
+        let mut receiver = Device::new(&mut chain, [10; 32], ACTIVATION.into());
+        chain.pay(&[(payer.fvk.clone(), 10_000_000)], Payer::Wallet);
+        chain.mine(12);
+        payer.scan(&chain);
+        let key = receiver.key(Purpose::Receive, 0);
+        let transaction = payer.send_to(
+            key.address_at(0u32, Scope::External),
+            1_000_000,
+            OvkPolicy::custom_from_common_bytes(&[0; 32]),
+        );
+        let fork = chain.tip();
+        let height = chain.mine_tx(&transaction);
+        let original = chain.record_payment(height, &key, 1_000_000, Payer::Near);
+        chain.mine(12);
+        receiver.scan(&chain);
+        receiver
+            .recover(&chain, &Directory::publish(&chain, 0, 0, 256, 0))
+            .await;
+        assert_eq!(receiver.unspent_one_time_value(), original.value);
+        receiver
+            .db
+            .set_one_time_recovery_enabled(receiver.account, false)
+            .unwrap();
+        chain.rewind(fork);
+        chain.mine(11);
+        let height = chain.mine_tx(&transaction);
+        let replacement = chain.record_payment(height, &key, 1_000_000, Payer::Near);
+        assert_eq!(original.id(), replacement.id());
+        assert_eq!(original.nullifier, replacement.nullifier);
+        assert_eq!(original.receiver, replacement.receiver);
+        assert_eq!(original.payer, Payer::Near);
+        assert_ne!(original.position, replacement.position);
+        chain.mine(12);
+        receiver.db.truncate_to_height(fork).unwrap();
+        receiver.scan(&chain);
+        receiver.reopen();
+        receiver
+            .recover(&chain, &Directory::publish(&chain, 0, 0, 256, 0))
+            .await;
+        let position: u64 = receiver
+            .conn()
+            .query_row(
+                "SELECT commitment_tree_position FROM ironwood_received_notes n
+        JOIN transactions t ON t.id_tx=n.transaction_id WHERE t.txid=?1 AND n.action_index=?2",
+                rusqlite::params![replacement.id().0, replacement.action_index],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(position, replacement.position);
+        assert_eq!(receiver.unspent_one_time_value(), 1_000_000);
+        assert!(!receiver.status(&chain).enabled);
+    });
+}
+
+/// Compares persisted note identities and amounts with only the independently mined outputs.
+fn assert_receipts(device: &Device, expected: &[harness::chain::Mined]) {
+    use std::collections::BTreeMap;
+    let conn = device.conn();
+    let mut statement = conn
+        .prepare(
+            "SELECT t.txid, n.action_index, n.value FROM ironwood_received_notes n
+         JOIN transactions t ON t.id_tx = n.transaction_id
+         WHERE n.one_time_key_id IS NOT NULL AND t.mined_height IS NOT NULL",
+        )
+        .unwrap();
+    let actual: BTreeMap<([u8; 32], u32), u64> = statement
+        .query_map([], |row| {
+            let txid: Vec<u8> = row.get(0)?;
+            Ok((
+                (txid.try_into().expect("transaction ID"), row.get(1)?),
+                row.get(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let expected: BTreeMap<_, _> = expected
+        .iter()
+        .map(|output| (output.id(), output.value))
+        .collect();
+    assert_eq!(actual, expected);
+    assert_eq!(
+        device.unspent_one_time_value(),
+        expected.values().sum::<u64>()
+    );
+}
+
+/// Random payment identities, amounts, holes and repeats retain the accepted live/offline scope.
+#[test]
+fn randomized_cross_device_payment_oracle() {
+    use rand_core::TryRng as _;
+    use std::collections::BTreeSet;
+    use zcash_client_backend::data_api::testing::TestRng;
+    run(async {
+        for scenario in 0..3u8 {
+            let seed = [40 + scenario; 32];
+            let mut rng = TestRng::seed_from_u64(70 + u64::from(scenario));
+            let mut chain = Chain::new();
+            let mut phone = Device::new(&mut chain, seed, ACTIVATION.into());
+            let mut desktop = Device::new(&mut chain, seed, ACTIVATION.into());
+            phone.scan(&chain);
+            desktop.scan(&chain);
+            let initial = Directory::publish(&chain, 0, 0, 256, 0);
+            phone.recover(&chain, &initial).await;
+            desktop.recover(&chain, &initial).await;
+            let mut payments = Vec::new();
+            let mut desktop_receipts = Vec::new();
+            let mut completed = BTreeSet::new();
+            let mut highest = None::<u64>;
+            for round in 0..12 {
+                // Issuance is bounded by independently paid and confirmed prior rounds.
+                let upper = highest.map_or(4, |h| h + 5);
+                for _ in 0..1 + rng.try_next_u64().unwrap() % 3 {
+                    let index = if round % 4 == 0 {
+                        0
+                    } else {
+                        rng.try_next_u64().unwrap() % upper
                     };
-                    if alone(scenario) {
-                        continue;
-                    }
-                    let result = run_one(scenario);
-                    report(i, result);
+                    let value = 100_000 + rng.try_next_u64().unwrap() % 100_000;
+                    let payment = chain
+                        .pay(&[(phone.key(Purpose::Receive, index), value)], Payer::Near)
+                        .remove(0);
+                    payments.push((index, payment));
+                    highest = Some(highest.map_or(index, |h| h.max(index)));
                 }
-            });
+                chain.mine(12 + (rng.try_next_u64().unwrap() % 4) as u32);
+                phone.scan(&chain);
+                let directory = Directory::publish(&chain, 0, 0, 256, 0);
+                hints(&mut phone, &directory).await;
+                let client = phone.connect(&directory).await;
+                phone.drain(&chain, &client).await;
+                assert_receipts(
+                    &phone,
+                    &payments.iter().map(|(_, p)| p.clone()).collect::<Vec<_>>(),
+                );
+                if rng.try_next_u64().unwrap() % 2 == 0 {
+                    phone.reopen();
+                }
+                if round % 3 == 2 {
+                    // This model records completion only from prior expected payments,
+                    // never from wallet cursors or its selected query list.
+                    desktop_receipts.extend(
+                        payments
+                            .iter()
+                            .filter(|(index, _)| !completed.contains(index))
+                            .map(|(_, payment)| payment.clone()),
+                    );
+                    completed.extend(payments.iter().map(|(index, _)| *index));
+                    desktop.reopen();
+                    desktop.scan(&chain);
+                    desktop.recover(&chain, &directory).await;
+                    assert_receipts(&desktop, &desktop_receipts);
+                }
+            }
+            let all: Vec<_> = payments.iter().map(|(_, p)| p.clone()).collect();
+            assert!(
+                desktop_receipts.len() < all.len(),
+                "old repeats must need manual recovery"
+            );
+            let directory = Directory::publish(&chain, 0, 0, 256, 0);
+            let client = desktop.connect(&directory).await;
+            assert!(
+                desktop
+                    .db
+                    .check_one_time_history(
+                        desktop.account,
+                        zakura_pir_receiver::publication(client.manifest()).unwrap(),
+                        None
+                    )
+                    .unwrap()
+            );
+            desktop.drain(&chain, &client).await;
+            assert_receipts(&desktop, &all);
+            let mut restored = Device::new(&mut chain, seed, ACTIVATION.into());
+            restored.scan(&chain);
+            restored.recover(&chain, &directory).await;
+            assert_receipts(&restored, &all);
         }
     });
-    for (i, scenario) in scenarios.iter().enumerate() {
-        if alone(scenario) {
-            report(i, run_one(scenario));
-        }
-    }
-    panic::set_hook(default);
-    results
-        .into_inner()
-        .unwrap()
-        .into_iter()
-        .map(|r| r.expect("every scenario ran"))
-        .collect()
-}
-
-thread_local! {
-    /// The message and location of this thread's latest panic.
-    static LAST_PANIC: RefCell<Option<String>> = const { RefCell::new(None) };
-}
-
-/// This thread's latest panic, for a scenario error.
-fn last_panic() -> String {
-    LAST_PANIC
-        .with(|last| last.borrow_mut().take())
-        .unwrap_or_else(|| "the scenario panicked".into())
-}
-
-/// Runs one scenario, turning a panic in any phase into an error outcome.
-fn run_one(scenario: &Scenario) -> ScenarioResult {
-    let started = Instant::now();
-    let mut error = None;
-    let (timeline, payments, checks, metrics) = match panic::catch_unwind(Ctx::new) {
-        Err(_) => {
-            error = Some(format!("setting up the world: {}", last_panic()));
-            Default::default()
-        }
-        Ok(mut ctx) => {
-            let ran = panic::catch_unwind(AssertUnwindSafe(|| {
-                (scenario.run)(&mut ctx);
-                ctx.log("suite", "every wallet keeps syncing until quiet");
-                ctx.settle();
-            }));
-            if ran.is_err() {
-                error = Some(last_panic());
-            }
-            match panic::catch_unwind(AssertUnwindSafe(|| ctx.finish())) {
-                Ok(findings) => findings,
-                Err(_) => {
-                    error.get_or_insert_with(|| format!("collecting results: {}", last_panic()));
-                    Default::default()
-                }
-            }
-        }
-    };
-    let mut result = ScenarioResult {
-        id: scenario.id.clone(),
-        group: scenario.group.into(),
-        title: scenario.title.clone(),
-        summary: scenario.summary.clone(),
-        params: scenario.params.clone(),
-        outcome: Outcome::Pass,
-        error,
-        duration_ms: started.elapsed().as_millis() as u64,
-        timeline,
-        payments,
-        checks,
-        metrics,
-    };
-    result.outcome = if result.error.is_some() {
-        Outcome::Error
-    } else if result.mismatches().next().is_some() || result.checks.iter().any(|c| !c.ok) {
-        Outcome::Fail
-    } else {
-        Outcome::Pass
-    };
-    result
-}
-
-/// The revision under test: this checkout, which holds the receiver crates too.
-fn revisions() -> Vec<(String, String)> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let git = |args: &[&str]| {
-        Command::new("git")
-            .args(args)
-            .current_dir(&root)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    };
-    let mut revisions = Vec::new();
-    if let Some(head) = git(&["rev-parse", "HEAD"]) {
-        let dirty = git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
-        let value = if dirty {
-            format!("{head} (with local changes)")
-        } else {
-            head
-        };
-        revisions.push(("wallet-libraries".into(), value));
-    }
-    revisions
 }

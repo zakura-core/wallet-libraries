@@ -33,14 +33,6 @@ pub fn manifest(rows: u32) -> Manifest {
         salt: [4; 32],
         records: 0,
         data_sha256: [0; 32],
-        filters: vec![receiver_directory::snapshot::FilterSet {
-            label: receiver_directory::filter::PAID.into(),
-            count: 0,
-            window_secs: None,
-            since_unix: None,
-            until_unix: None,
-        }],
-        filters_sha256: [0; 32],
     }
 }
 

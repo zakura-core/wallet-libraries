@@ -909,10 +909,6 @@ impl<AccountId: Copy> ReceivedShieldedOutput for WalletOrchardOutput<AccountId> 
 impl<AccountId: Copy> ReceivedShieldedOutput
     for DecryptedOutput<(::orchard::Note, ::orchard::ValuePool), AccountId>
 {
-    fn one_time_key_id(&self) -> Option<zakura_one_time_ivk::KeyId> {
-        self.one_time_key_id()
-    }
-
     type AccountId = AccountId;
     type Note = ::orchard::Note;
     type Nullifier = ::orchard::note::Nullifier;

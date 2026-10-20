@@ -1,8 +1,5 @@
 //! Immutable publications: manifests, row placement and row decoding.
-use crate::{
-    filter::{self, Filter, Filters},
-    record, Error, Hash, RawRecord, ReceiverBytes, RECORD_BYTES,
-};
+use crate::{record, Error, Hash, RawRecord, ReceiverBytes, RECORD_BYTES};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -50,65 +47,13 @@ pub struct Manifest {
     pub salt: Hash,
     pub records: u64,
     pub data_sha256: Hash,
-    /// The sets in the publication's [`Filters`] file, in label order.
-    pub filters: Vec<FilterSet>,
-    /// Commits to the publication's [`Filters`] file.
-    pub filters_sha256: Hash,
-}
-
-/// One labeled set in a publication's [`Filters`] file; see [`crate::filter`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FilterSet {
-    /// [`filter::PAID`], or `<provider>/recent` or `<provider>/seen`.
-    pub label: String,
-    /// Distinct receivers in the set.
-    pub count: u32,
-    /// For a recent set, how far back the provider's swaps reach from `until_unix`, in
-    /// seconds.
-    pub window_secs: Option<u64>,
-    /// For a provider set, when the provider's feed started, in Unix seconds. Receivers
-    /// the provider was given earlier are missing from it.
-    pub since_unix: Option<i64>,
-    /// For a provider set, when the feed's last complete read of the provider began, in
-    /// Unix seconds. Receivers the provider was given later are missing from it.
-    pub until_unix: Option<i64>,
-}
-
-/// Receivers from a swap provider's feed for one labeled set; see [`FilterSet`].
-pub struct ProviderSet {
-    /// `<provider>/recent` or `<provider>/seen`.
-    pub label: String,
-    /// See [`FilterSet::window_secs`]; required for a recent set.
-    pub window_secs: Option<u64>,
-    /// See [`FilterSet::since_unix`].
-    pub since_unix: i64,
-    /// See [`FilterSet::until_unix`].
-    pub until_unix: i64,
-    pub receivers: Vec<ReceiverBytes>,
 }
 
 impl Manifest {
     /// Check the profile, coverage order and geometry bounds, at most [`MAX_ROWS`]
     /// rows.
     pub fn validate(&self) -> Result<(), Error> {
-        let labels_ordered = self
-            .filters
-            .windows(2)
-            .all(|pair| pair[0].label < pair[1].label);
-        let sets_valid = self.filters.iter().all(|set| {
-            let recent = set.label.ends_with(&format!("/{}", filter::RECENT));
-            let span = match (set.since_unix, set.until_unix) {
-                (Some(since), Some(until)) => set.label != filter::PAID && since <= until,
-                (None, None) => set.label == filter::PAID,
-                _ => false,
-            };
-            filter::valid_label(&set.label) && span && recent == set.window_secs.is_some()
-        });
         if self.profile != PROFILE
-            || !labels_ordered
-            || !sets_valid
-            || !self.filters.iter().any(|set| set.label == filter::PAID)
             || self.start_height > self.end_height
             || self.start_position > self.end_position
             || self.end_position > TREE_SIZE
@@ -121,26 +66,8 @@ impl Manifest {
         Ok(())
     }
 
-    /// Checks that `filters` holds exactly the sets this manifest declares. Its bytes must
-    /// already match [`Self::filters_sha256`].
-    pub fn check_filters(&self, filters: &Filters) -> Result<(), Error> {
-        let mut sets = filters.iter();
-        for declared in &self.filters {
-            match sets.next() {
-                Some((label, set)) if label == declared.label && set.count() == declared.count => {}
-                _ => return Err(Error::Malformed),
-            }
-        }
-        if sets.next().is_some() {
-            return Err(Error::Malformed);
-        }
-        Ok(())
-    }
-
-    /// Bind row data, coverage, network, geometry and filters into one immutable
-    /// revision: a domain-separated SHA-256 of every field at fixed width, with strings
-    /// and the set list length-prefixed and each optional value tagged, as Enhance and
-    /// Status hash their manifests.
+    /// Binds every field into one immutable revision using domain-separated SHA-256
+    /// with fixed-width fields and a length-prefixed profile string.
     pub fn revision(&self) -> Result<Hash, Error> {
         self.validate()?;
         let mut h = Sha256::new();
@@ -158,25 +85,6 @@ impl Manifest {
         h.update(self.salt);
         h.update(self.records.to_le_bytes());
         h.update(self.data_sha256);
-        h.update((self.filters.len() as u64).to_le_bytes());
-        for set in &self.filters {
-            update_str(&mut h, &set.label);
-            h.update(set.count.to_le_bytes());
-            for value in [
-                set.window_secs.map(u64::to_le_bytes),
-                set.since_unix.map(i64::to_le_bytes),
-                set.until_unix.map(i64::to_le_bytes),
-            ] {
-                match value {
-                    Some(bytes) => {
-                        h.update([1]);
-                        h.update(bytes);
-                    }
-                    None => h.update([0]),
-                }
-            }
-        }
-        h.update(self.filters_sha256);
         Ok(h.finalize().into())
     }
 
@@ -240,52 +148,21 @@ impl Placement {
     }
 }
 
-/// A manifest and the row data and filters it commits to.
+/// A manifest and the complete payment rows it commits to.
 #[derive(Clone)]
 pub struct Snapshot {
     pub manifest: Manifest,
     pub data: Vec<u8>,
-    /// The encoded [`Filters`].
-    pub filters: Vec<u8>,
 }
 
 impl Snapshot {
-    /// More records than the table has slots, or bucket overflow, fails the whole
-    /// candidate with [`Error::Capacity`]. It never drops records or coverage. A filter
-    /// file over [`filter::MAX_FILTERS_BYTES`] is [`Error::Malformed`]. The paid filter
-    /// holds the records' receivers; `provider` sets come from the publisher's swap
-    /// provider feeds (see [`crate::filter`]).
-    pub fn build(
-        mut manifest: Manifest,
-        records: &[RawRecord],
-        provider: &[ProviderSet],
-    ) -> Result<Self, Error> {
+    /// Fails the entire candidate on row overflow or invalid payment history.
+    /// Neither records nor coverage are dropped to make a publication fit.
+    pub fn build(mut manifest: Manifest, records: &[RawRecord]) -> Result<Self, Error> {
         manifest.records = records.len() as u64;
         if manifest.records > capacity(manifest.rows)? {
             return Err(Error::Capacity);
         }
-        let filters = Filters::new(
-            Filter::build(&manifest.salt, records.iter().map(|r| &r.receiver)),
-            provider.iter().map(|set| {
-                (
-                    set.label.clone(),
-                    Filter::build(&manifest.salt, &set.receivers),
-                )
-            }),
-        )?;
-        manifest.filters = filters
-            .iter()
-            .map(|(label, set)| {
-                let declared = provider.iter().find(|p| p.label == label);
-                FilterSet {
-                    label: label.to_owned(),
-                    count: set.count(),
-                    window_secs: declared.and_then(|p| p.window_secs),
-                    since_unix: declared.map(|p| p.since_unix),
-                    until_unix: declared.map(|p| p.until_unix),
-                }
-            })
-            .collect();
         let placement = Placement::new(&manifest)?;
         let mut data = vec![0; manifest.rows as usize * ROW_BYTES];
         let mut counts = vec![0; manifest.rows as usize];
@@ -303,13 +180,7 @@ impl Snapshot {
             counts[row] += 1;
         }
         manifest.data_sha256 = Sha256::digest(&data).into();
-        let filters = filters.encode()?;
-        manifest.filters_sha256 = Sha256::digest(&filters).into();
-        Ok(Self {
-            manifest,
-            data,
-            filters,
-        })
+        Ok(Self { manifest, data })
     }
 
     /// Checks a supplied publication whole, as [`Self::build`] would have made it.
@@ -318,12 +189,9 @@ impl Snapshot {
         let placement = Placement::new(m)?;
         if self.data.len() != m.rows as usize * ROW_BYTES
             || Hash::from(Sha256::digest(&self.data)) != m.data_sha256
-            || Hash::from(Sha256::digest(&self.filters)) != m.filters_sha256
         {
             return Err(Error::Malformed);
         }
-        let filters = Filters::decode(&self.filters)?;
-        m.check_filters(&filters)?;
         let mut pages = Vec::new();
         for (row, bytes) in self.data.as_chunks::<ROW_BYTES>().0.iter().enumerate() {
             for record in row_records(m, &placement, row, bytes)? {
@@ -338,10 +206,6 @@ impl Snapshot {
         }
         pages.sort_unstable_by_key(|p| (p.receiver, p.page));
         check_pages(pages.iter().copied())?;
-        let paid = pages.iter().filter(|p| p.page == 0).map(|p| &p.receiver);
-        if filters.get(filter::PAID) != Some(&Filter::build(&m.salt, paid)) {
-            return Err(Error::Malformed);
-        }
         Ok(())
     }
 }

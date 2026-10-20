@@ -3,7 +3,7 @@
 Implementation of the draft v1 one-time IVK and refund-memo
 conventions. A one-time key keeps the account's spending authority (`ak` and `nk`)
 with its own `rivk`, so each has its own incoming viewing key and address, and a
-wallet trial-decrypts with a changing set of them. Wallets use them for swap refund
+wallet authenticates individual payments returned by receiver PIR. Wallets use them for swap refund
 and incoming addresses. The derivation still requires cryptographic review before
 issuing live addresses.
 
@@ -12,7 +12,7 @@ issuing live addresses.
 1. Reserve a purpose-specific index durably before exposing an address.
 2. Call `KeyId::new(purpose, index).derive(account_external_fvk)` and select
    `address_at(0u32, Scope::External)` for the receiver.
-3. Register that FVK for scanning and retain its purpose/index with received notes.
+3. Register the receiver identity for PIR and retain its purpose/index with authenticated received notes.
 4. For a refund, encode `swap::RefundMemo` in an ordinary internal note in the
    funding transaction, whose only transparent output pays the P2PKH or P2SH
    deposit. Decode only after note authentication and verification that the
@@ -24,8 +24,8 @@ The wallet owns reservation, persistence, coverage, lifecycle, and note selectio
 There is no alternate balance store in this crate.
 
 The SQLite backend implements this contract with its `orchard` feature: durable
-key registration, scanning, completion, and the discovery that
-`zakura-pir-receiver` runs. Its rustdoc, starting at
+key registration, bounded issuance, a durable recovery queue and payment admission.
+`zakura-pir-receiver` supplies its network steps. Its rustdoc, starting at
 `zcash_client_sqlite::wallet::one_time_ivk`, documents the calls a wallet makes.
 
 Software PCZT signing of one-time-key notes works through the same builder.
@@ -35,8 +35,7 @@ hardware accounts.
 ## Layout
 
 - Crate root: `KeyId`, `Purpose`, and derivation.
-- `swap`: the refund memo, the completion limits (`RESTORE_WATCH_SECS`,
-  `COMPLETION_LIMIT_SECS`), and the provider-neutral lifecycle types
+- `swap`: the refund memo and the provider-neutral lifecycle types
   (`Observation`, `OperationStatus`, `ReceiptExpectation`) that a provider
   adapter produces; `zakura-near-intents` normalizes NEAR Intents 1Click
   statuses.
@@ -74,9 +73,10 @@ index has no valid key, and derivation returns an error.
 | 15 | 497 | Reserved: written as zero, ignored on decode |
 
 The memo does not store the deposit address. A restored refund key needs none: it
-is looked up once in the receiver directory and, if the provider was given its
-address in the last day, scans for another 24 hours, with no provider lookups. Incoming indices are
-recovered through lookahead, not this memo. `RefundMemo::decode` returns `None`
+is queried through receiver PIR until a payment is authenticated. An empty funded
+key remains unfinished even if the provider reports success without a refund.
+Further payments after completion are found by retained block filters or an explicit
+history check. Incoming indices are recovered through four-index lookahead. `RefundMemo::decode` returns `None`
 for any memo that is not a v1 record, and a wallet ignores such a memo even when it
 starts with `swap::REFUND_MEMO_MAGIC`.
 

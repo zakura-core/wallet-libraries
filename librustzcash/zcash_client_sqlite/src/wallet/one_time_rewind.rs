@@ -1,85 +1,48 @@
-//! One-time IVK state that a rewind repairs in every build. The tables exist in every
-//! build, and an `orchard` build may reopen a wallet that a build without it rewound, so
-//! the repair cannot wait for `orchard`.
-
-use rusqlite::{Connection, params};
-use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
+//! Repairs private receiver obligations in every feature configuration.
+use crate::{AccountUuid, error::SqliteClientError};
+use rusqlite::params;
 use zcash_protocol::consensus::BlockHeight;
 
-use crate::{AccountUuid, error::SqliteClientError};
-
-/// `ironwood_one_time_publications.state` until the scan stores the publication's last block.
-pub(crate) const PROVISIONAL: u8 = 0;
-/// `ironwood_one_time_publications.state` once that block matched.
-pub(crate) const ACCEPTED: u8 = 1;
-/// `ironwood_one_time_publications.state` once that block did not match.
-pub(crate) const REJECTED: u8 = 2;
-
-/// Repairs one-time IVK state for a rewind that rescans every block above `height`.
-/// Open keys start at the first rescanned block at the latest, which
-/// `wallet::truncate_to_height_internal` sets after this in every build. A closed key that
-/// scanned reopens if the rewind leaves one of its receipts short of the confirmations
-/// closing requires (see `WalletDb::close_finished_one_time_keys`), and closes again once
-/// that receipt is confirmed again. A key closed without scanning, whose note a lookup
-/// found, reopens from its first note above `height`, so the rescan finds the note again,
-/// and closes the same way.
-///
-/// Discovery is repaired too, since blocks above `height` may be replaced: a publication
-/// ending there is judged again, a late candidate there becomes a hint again (its block is
-/// rescanned), a path anchored there is requested again, and a cursor that passed a record
-/// there restarts, since the replacement chain may put a record before it.
+/// Invalidates callbacks and fork-dependent progress before ordinary notes are unmined.
+/// Completed unaffected addresses stay closed to automatic direct catch-up. Enrolled receive
+/// indexes keep their place there even if the window shrinks (see `queue::automatic_end`),
+/// so the next catch-up rechecks their invalidated history.
 pub(crate) fn truncate(
     conn: &rusqlite::Transaction<'_>,
     height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
-    let confirmed_below = u32::from(height)
-        .saturating_add(1)
-        .saturating_sub(ConfirmationsPolicy::default().untrusted().get());
-    conn.execute(
-        "UPDATE ironwood_one_time_keys SET closed_at = NULL
-         WHERE closed_at IS NOT NULL AND active_from IS NOT NULL AND id IN (
-             SELECT n.one_time_key_id FROM ironwood_received_notes n
-             JOIN transactions t ON t.id_tx = n.transaction_id
-             WHERE t.mined_height > ?1)",
-        [confirmed_below],
-    )?;
-    let note_above = "SELECT MIN(t.mined_height) FROM ironwood_received_notes n
-         JOIN transactions t ON t.id_tx = n.transaction_id
-         WHERE n.one_time_key_id = ironwood_one_time_keys.id AND t.mined_height > ?1";
-    conn.execute(
-        &format!(
-            "UPDATE ironwood_one_time_keys SET closed_at = NULL, active_from = ({note_above})
-             WHERE closed_at IS NOT NULL AND active_from IS NULL
-               AND ({note_above}) IS NOT NULL"
-        ),
-        [u32::from(height)],
-    )?;
     let floor = u32::from(height);
-    // A publication judged either way against a block the rewind replaces is judged again,
-    // so one rejected on an abandoned fork can match the fork that replaces it.
+    conn.execute("INSERT INTO ironwood_one_time_lookups(one_time_key_id, target_height, reasons)
+        SELECT k.id, COALESCE((SELECT MAX(height) FROM blocks), ?1), 1 FROM ironwood_one_time_keys k
+        WHERE k.prebirthday_height > ?1 OR EXISTS(SELECT 1 FROM ironwood_received_notes n
+            JOIN transactions t ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = k.id AND t.mined_height > ?1)
+        ON CONFLICT(one_time_key_id) DO UPDATE SET
+            target_height = MAX(COALESCE(target_height, 0), excluded.target_height), reasons = reasons | 1",
+        [floor])?;
+    conn.execute("UPDATE ironwood_one_time_recovery SET generation = generation + 1,
+        filter_height = CASE WHEN filter_height > ?1 THEN ?2 ELSE filter_height END,
+        filter_hash = CASE WHEN filter_height > ?1 THEN (SELECT hash FROM blocks WHERE height = ?2) ELSE filter_hash END,
+        restore_next = CASE WHEN restore_done = 0 AND restore_height > ?1 THEN X'0000000000000000' ELSE restore_next END,
+        restore_gap = CASE WHEN restore_done = 0 AND restore_height > ?1 THEN 0 ELSE restore_gap END,
+        manual_purpose = CASE WHEN manual_end IS NOT NULL AND manual_height > ?1 THEN 0 ELSE manual_purpose END,
+        manual_next = CASE WHEN manual_end IS NOT NULL AND manual_height > ?1 THEN X'0000000000000000' ELSE manual_next END",
+        params![floor, conn.query_row("SELECT MAX(height) FROM blocks WHERE height <= ?1", [floor], |r| r.get::<_, Option<u32>>(0))?])?;
     conn.execute(
-        "UPDATE ironwood_one_time_publications SET state = ?2
-         WHERE state IN (?3, ?4) AND height > ?1",
-        params![floor, PROVISIONAL, ACCEPTED, REJECTED],
-    )?;
-    conn.execute(
-        "UPDATE ironwood_one_time_payment_recovery
-         SET scan_hint = 1, witness = NULL, witness_height = NULL, witness_hash = NULL
-         WHERE height > ?1",
+        "UPDATE ironwood_one_time_lookups SET last_record = NULL, done_height = NULL,
+        read_complete = 0, attempts = 0, next_attempt_at = 0
+        WHERE done_height > ?1 OR target_height > ?1",
         [floor],
     )?;
     conn.execute(
-        "UPDATE ironwood_one_time_payment_recovery
-         SET witness = NULL, witness_height = NULL, witness_hash = NULL
-         WHERE witness_height > ?1",
+        "UPDATE ironwood_one_time_keys SET prebirthday_height = NULL WHERE prebirthday_height > ?1",
         [floor],
     )?;
-    restart_cursor(
-        conn,
-        "SELECT one_time_key_id FROM ironwood_one_time_lookups WHERE last_height > ?1",
-        floor,
+    conn.execute(
+        "DELETE FROM ironwood_one_time_payment_recovery WHERE height > ?1",
+        [floor],
     )?;
-    // The spend journal's entries and coverage above the floor may describe replaced blocks.
+    conn.execute("UPDATE ironwood_one_time_payment_recovery SET witness = NULL, witness_height = NULL, witness_hash = NULL
+        WHERE witness_height > ?1", [floor])?;
     conn.execute(
         "DELETE FROM ironwood_spend_journal WHERE block_height > ?1",
         [floor],
@@ -95,62 +58,32 @@ pub(crate) fn truncate(
     Ok(())
 }
 
-/// Reopens `account`'s discovery after a rewind lowered its birthday: the next pass checks
-/// every key again and every paid key's history from the start, since outcomes outside the
-/// old range no longer hold. The account is no longer treated as fresh.
+/// Lowering a birthday rechecks known histories, including excluded payments, even while disabled.
 pub(crate) fn reopen_discovery(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
 ) -> Result<(), SqliteClientError> {
-    let owner = "(SELECT id FROM accounts WHERE uuid = ?1)";
-    conn.execute(
-        &format!("DELETE FROM ironwood_one_time_discovery WHERE account_id = {owner}"),
+    let owner: i64 = conn.query_row(
+        "SELECT id FROM accounts WHERE uuid = ?1",
         [account.0],
+        |r| r.get(0),
     )?;
     conn.execute(
-        &format!("DELETE FROM ironwood_one_time_fresh_accounts WHERE account_id = {owner}"),
-        [account.0],
+        "UPDATE ironwood_one_time_recovery SET generation = generation + 1,
+        restore_next = X'0000000000000000', restore_gap = 0, restore_done = 0,
+        restore_height = NULL, filter_height = NULL, filter_hash = NULL WHERE account_id = ?1",
+        [owner],
     )?;
-    let keys = format!("SELECT id FROM ironwood_one_time_keys WHERE account_id = {owner}");
-    restart_cursor(conn, &keys, account.0)?;
-    // Until the next pass makes them due, no lookup runs.
+    conn.execute("INSERT INTO ironwood_one_time_lookups(one_time_key_id, target_height, reasons)
+        SELECT id, COALESCE((SELECT MAX(height) FROM blocks), 0), 1 FROM ironwood_one_time_keys
+        WHERE account_id = ?1 AND (purpose = 1 OR funding_height IS NOT NULL)
+        ON CONFLICT(one_time_key_id) DO UPDATE SET target_height = MAX(COALESCE(target_height, 0), excluded.target_height),
+            reasons = reasons | 1, last_record = NULL, done_height = NULL, read_complete = 0,
+            attempts = 0, next_attempt_at = 0", [owner])?;
     conn.execute(
-        &format!(
-            "UPDATE ironwood_one_time_lookups SET cutoff_height = NULL, done_height = NULL
-             WHERE one_time_key_id IN ({keys})"
-        ),
-        [account.0],
-    )?;
-    Ok(())
-}
-
-/// Restarts from page zero the lookup cursors that SQL `keys` selects, with `?1` bound to
-/// `param`, and makes each due again at the cutoff it last finished or still has.
-pub(crate) fn restart_cursor(
-    conn: &Connection,
-    keys: &str,
-    param: impl rusqlite::ToSql,
-) -> Result<(), SqliteClientError> {
-    conn.execute(
-        &format!(
-            "UPDATE ironwood_one_time_lookups
-             SET applied = 0, last_position = NULL, last_nullifier = NULL, last_height = NULL,
-                 cutoff_height = COALESCE(cutoff_height, done_height), done_height = NULL
-             WHERE one_time_key_id IN ({keys})"
-        ),
-        [&param],
-    )?;
-    conn.execute(
-        &format!("DELETE FROM ironwood_one_time_lookup_reads WHERE one_time_key_id IN ({keys})"),
-        [&param],
-    )?;
-    // Reading again from page zero replaces what the earlier reads queued, so a corrected
-    // answer is not refused as a conflict. Admitted notes stay.
-    conn.execute(
-        &format!(
-            "DELETE FROM ironwood_one_time_payment_recovery WHERE one_time_key_id IN ({keys})"
-        ),
-        [&param],
+        "DELETE FROM ironwood_one_time_payment_recovery WHERE one_time_key_id IN
+        (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
+        [owner],
     )?;
     Ok(())
 }

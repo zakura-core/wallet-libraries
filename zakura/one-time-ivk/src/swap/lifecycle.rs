@@ -1,19 +1,6 @@
-//! Shared completion policy for keys that receive swap payouts and refunds. Wallet
-//! storage owns canonical-chain validation, receipt attribution, and atomic
-//! persistence of this state with scanning. A provider adapter, such as
-//! `zakura-near-intents`, normalizes provider responses into [`Observation`].
+//! Provider observations for local quote ownership and receipt obligations.
 
-use zcash_protocol::value::Zatoshis;
-
-/// Seconds a restored wallet keeps scanning a key that discovery found in a provider's
-/// recent set, after the publication it was found in, for a payout or refund from a
-/// swap in flight at restore. Like [`COMPLETION_LIMIT_SECS`], a
-/// wallet convention, not a consensus parameter.
-pub const RESTORE_WATCH_SECS: i64 = 24 * 60 * 60;
-
-/// Seconds after the quote deadline, or after registration for a key without
-/// operations, after which a key stops scanning whatever the provider reports.
-pub const COMPLETION_LIMIT_SECS: i64 = 30 * 24 * 60 * 60;
+use zcash_protocol::{TxId, value::Zatoshis};
 
 /// The route adapter's interpretation of the expected Zcash receipt.
 /// Incoming source-chain refunds must not be interpreted as Zcash refunds.
@@ -27,7 +14,7 @@ pub enum ReceiptExpectation {
     Unknown,
 }
 
-/// Provider outcome normalized by direction. It schedules scanning but never
+/// Provider outcome normalized by direction. It describes obligations but never
 /// establishes ownership, inclusion, or an on-chain amount.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationStatus {
@@ -40,10 +27,14 @@ pub enum OperationStatus {
 }
 
 /// A normalized provider observation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Observation {
     /// The direction-specific outcome.
     pub status: OperationStatus,
     /// Whether the provider has seen a deposit.
     pub funded: bool,
+    /// Zcash transactions the provider reports as this operation's payouts or refunds.
+    /// Only a recovered note in one of these attributes a receipt to the operation. The
+    /// wallet still authenticates the note itself.
+    pub receipts: Vec<TxId>,
 }

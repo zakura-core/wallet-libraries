@@ -863,39 +863,6 @@ pub(crate) fn delete_account(
     Ok(())
 }
 
-/// Whether a one-time key is open, so that blocks scanned or transactions decrypted
-/// without it must not be stored.
-pub(crate) fn one_time_key_open(conn: &Connection) -> Result<bool, SqliteClientError> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys
-         WHERE active_from IS NOT NULL AND closed_at IS NULL)",
-        [],
-        |row| row.get(0),
-    )?)
-}
-
-/// Whether a build without `orchard` must refuse scanned blocks: a key is open (see
-/// [`one_time_key_open`]), discovery waits for the scan to judge a publication that a pass
-/// in its account's range or a lookup uses, or a payment candidate waits, whether for the
-/// scan to try its key, to cover its blocks or to judge its publication. Only an `orchard`
-/// build's scan does those (see `one_time_ivk::restore::discovery`).
-#[cfg(not(feature = "orchard"))]
-pub(crate) fn one_time_scan_required(conn: &Connection) -> Result<bool, SqliteClientError> {
-    Ok(one_time_key_open(conn)?
-        || conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_publications p WHERE p.state = ?1 AND (
-                 EXISTS(SELECT 1 FROM ironwood_one_time_discovery d
-                     JOIN accounts a ON a.id = d.account_id
-                     WHERE d.publication_height = p.height AND d.publication_hash = p.hash
-                       AND p.height >= a.birthday_height)
-                 OR EXISTS(SELECT 1 FROM ironwood_one_time_lookup_reads r
-                     WHERE r.publication_height = p.height AND r.publication_hash = p.hash)))
-             OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery)",
-            [one_time_rewind::PROVISIONAL],
-            |row| row.get(0),
-        )?)
-}
-
 /// Returns `true` if `address` (an encoded transparent receiver address) is already recorded
 /// in the `addresses` table, whether as a derived account receiver or as a prior standalone
 /// import.
@@ -4356,15 +4323,6 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     // Every block above the rescan floor may be replaced, not only those above the
     // truncation height.
     one_time_rewind::truncate(conn, rescan_floor)?;
-    // Scans take only one-time keys started by each batch's end, and the replacement chain
-    // may mine a payment below an open key's old start, so open keys, including any the
-    // repair above reopened, start at the first rescanned block at the latest.
-    conn.execute(
-        "UPDATE ironwood_one_time_keys SET active_from = ?1
-         WHERE closed_at IS NULL AND active_from > ?1",
-        [u32::from(rescan_floor + 1)],
-    )?;
-
     // Mark transparent utxos as un-mined. Since the TXO is now not mined, it would ideally be
     // considered to have been returned to the mempool; it _might_ be spendable in this state, but
     // we must also set its max_observed_unspent_height field to NULL because the transaction may
@@ -7608,8 +7566,8 @@ mod tests {
 
     /// When the rewind target is below every account's birthday but the caller acknowledges
     /// the lowering by including the account in `reset_account_birthdays`, the rewind
-    /// proceeds and the listed account's birthday is lowered to the new floor. An account
-    /// declared fresh for one-time IVK discovery is no longer, since it now has history.
+    /// proceeds and the listed account's birthday is lowered to the new floor. Completed
+    /// private receiver coverage is invalidated even while discovery is disabled.
     #[test]
     fn rewind_to_chain_state_below_all_birthdays_with_account_in_reset_succeeds() {
         let mut st = TestBuilder::new()
@@ -7623,24 +7581,10 @@ mod tests {
         // account's birthday, so the safeguard fires when the caller hasn't
         // acknowledged any reset.
         let target_height = original_birthday - 10;
-        let fresh = |st: &TestState<_, crate::testing::db::TestDb, _>| -> bool {
-            st.wallet()
-                .conn()
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_fresh_accounts)",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap()
-        };
-        st.wallet()
-            .conn()
-            .execute_batch(
-                "INSERT INTO ironwood_one_time_fresh_accounts (account_id)
-                 SELECT id FROM accounts",
-            )
-            .unwrap();
-        assert!(fresh(&st));
+        st.wallet().conn().execute_batch(
+            "INSERT INTO ironwood_one_time_recovery (account_id, restore_done, restore_next, restore_gap)
+             SELECT id, 1, X'0000000000000004', 4 FROM accounts"
+        ).unwrap();
 
         st.wallet_mut()
             .rewind_to_chain_state(
@@ -7654,7 +7598,11 @@ mod tests {
             account_birthday(st.wallet().conn(), account_id),
             Ok(b) if b == target_height + 1
         );
-        assert!(!fresh(&st));
+        let state: (bool, bool, Vec<u8>, u8) = st.wallet().conn().query_row(
+            "SELECT enabled, restore_done, restore_next, restore_gap FROM ironwood_one_time_recovery",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        ).unwrap();
+        assert_eq!(state, (false, false, 0u64.to_be_bytes().to_vec(), 0));
     }
 
     /// `rewind_to_chain_state` must reject `reset_account_birthdays` containing an

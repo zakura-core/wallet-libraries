@@ -7,6 +7,18 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- Replace one-time-key discovery passes and scan watches with a durable PIR recovery queue. Seed recovery stops after four complete empty receive histories, receive issuance recycles unpaid holes in a four-index confirmed window, and refunds use authenticated funding evidence. Manual history checks support cancellation, restart and an explicit receive bound.
+- Remove provider seen gates, broad one-time-key decryption, scan hints, replay state and their old APIs. Ordinary sync never waits for receiver discovery. Retain targeted payment authentication, chain proofs, spend-journal checks and existing note ownership. Rewinds and earlier birthdays requeue affected history even while discovery is disabled.
+- A provider's promised receipt settles only through a recovered note in a transaction the provider reported for that operation, recorded from `Observation::receipts`. Without one, the address stays in direct catch-up.
+- Rebaseline the unlaunched one-time-key schema. The cutover drops abandoned discovery progress while preserving accounts, note ownership and unrelated wallet data. Recovery starts disabled.
+
+### Removed
+
+- `WalletDb::get_one_time_key_for_receiver`, which only tests used, and its receiver index.
+- The unused `now` argument of `WalletDb::set_one_time_recovery_enabled`, `WalletDb::begin_one_time_recovery`, `WalletDb::check_one_time_history` and `WalletDb::reserve_refund_key`, and the write-only `registered_at` key column.
+
 ## [0.1.0-rc9.2] - 2026-10-20
 
 ### Changed
@@ -25,7 +37,6 @@ and this library adheres to Rust's notion of
   notes as spendable only when they are covered by the selected anchor.
 - Apply the same expiry and competing-spend rules to transparent balances,
   spendability and recovery-ledger snapshots.
-
 
 ## [0.1.0-rc9.1] - 2026-10-19
 

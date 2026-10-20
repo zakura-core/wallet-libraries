@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use zcash_client_backend::data_api::chain::scan_cached_blocks_with_one_time_ivks;
+use zcash_client_backend::data_api::chain::scan_cached_blocks;
 
 use super::{scanning::DuringScan, *};
 use crate::wallet::one_time_ivk::restore::tests::discovery::{
@@ -247,8 +247,14 @@ fn a_note_admitted_during_a_batch_is_spent_by_it() {
             let mut db = WalletDb::for_path(path_to_db, network, test_clock(), test_rng()).unwrap();
             db.record_one_time_witness(
                 account,
-                key8(),
-                candidate.position,
+                db.one_time_recovery(account, clock_now()).unwrap().token,
+                zcash_client_backend::data_api::one_time_ivk::restore::WitnessRequest {
+                    key: key8(),
+                    position: candidate.position,
+                    cmx: candidate.encrypted_note.to_bytes()[32..64]
+                        .try_into()
+                        .unwrap(),
+                },
                 anchor,
                 siblings(&path),
                 clock_now(),
@@ -256,8 +262,7 @@ fn a_note_admitted_during_a_batch_is_spent_by_it() {
             .unwrap();
         },
     };
-    scan_cached_blocks_with_one_time_ivks(&network, &source, &mut scanning_db, height, &prior, 1)
-        .unwrap();
+    scan_cached_blocks(&network, &source, &mut scanning_db, height, &prior, 1).unwrap();
     assert_eq!(source.reads.get(), 2);
     assert_eq!(one_time_notes(&st), [(100_000, true)]);
 }

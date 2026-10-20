@@ -528,33 +528,19 @@ CREATE INDEX idx_orchard_received_note_spends_transaction_id ON orchard_received
     transaction_id ASC
 )"#;
 
-/// Registered one-time keys, each with at most one incoming reservation. Empty lookahead
-/// entries do not advance allocation. `reservation_floor` is the highest operation ID on
-/// the key when its current reservation was made, so only later operations belong to it;
-/// it is NULL on a reservation made before the column existed. `pass_watch_height` is the
-/// end of the publication whose discovery pass gave the key its recent watch, so no later
-/// pass reopens it. A rewind keeps it: an open key keeps scanning from the rewind height,
-/// and the watch covered blocks after the publication, which a lower birthday does not
-/// change.
+/// Durable private receiver keys.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_KEYS: &str = "CREATE TABLE ironwood_one_time_keys (
                 id INTEGER PRIMARY KEY,
                 account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
                 purpose INTEGER NOT NULL CHECK (purpose BETWEEN 0 AND 255),
                 key_index BLOB NOT NULL CHECK (typeof(key_index) = 'blob' AND length(key_index) = 8),
                 receiver BLOB NOT NULL CHECK (typeof(receiver) = 'blob' AND length(receiver) = 43),
-                scan_from INTEGER NOT NULL CHECK (scan_from BETWEEN 0 AND 4294967295),
-                advances_allocation INTEGER NOT NULL CHECK (advances_allocation IN (0, 1)),
+                funding_height INTEGER CHECK (funding_height BETWEEN 0 AND 4294967295),
                 used INTEGER NOT NULL DEFAULT 0 CHECK (used IN (0, 1)),
-                paid_before_birthday INTEGER NOT NULL DEFAULT 0
-                    CHECK (paid_before_birthday IN (0, 1)),
-                provider_seen INTEGER NOT NULL DEFAULT 0 CHECK (provider_seen IN (0, 1)),
-                registered_at INTEGER NOT NULL DEFAULT 0,
+                prebirthday_height INTEGER CHECK (prebirthday_height BETWEEN 0 AND 4294967295),
                 reserved_at INTEGER,
                 released_at INTEGER,
-                active_from INTEGER CHECK (active_from BETWEEN 0 AND 4294967295),
-                closed_at INTEGER,
                 reservation_floor INTEGER,
-                pass_watch_height INTEGER CHECK (pass_watch_height BETWEEN 0 AND 4294967295),
                 UNIQUE (account_id, purpose, key_index)
             )";
 
@@ -1996,9 +1982,7 @@ CREATE TABLE ironwood_enhance_metadata_queue (
     CHECK (compact_bound = 0 OR commitment_tree_position IS NOT NULL)
 )";
 
-/// A directory payment to a one-time key, not yet a note: a scan hint while its block is
-/// unscanned, else a late candidate waiting for its inclusion path and the scan's coverage
-/// (see `one_time_ivk::restore`). `publication_*` names the publication it came from.
+/// Durable private receiver payment recovery.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_PAYMENT_RECOVERY: &str = "CREATE TABLE ironwood_one_time_payment_recovery (
                 one_time_key_id INTEGER NOT NULL REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
                 txid BLOB NOT NULL CHECK (length(txid) = 32),
@@ -2008,16 +1992,20 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_PAYMENT_RECOVERY: &str = "CREATE TABLE 
                 tx_index INTEGER NOT NULL CHECK (tx_index BETWEEN 0 AND 65535),
                 position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 4294967295),
                 encrypted_note BLOB NOT NULL CHECK (length(encrypted_note) = 148),
-                publication_height INTEGER NOT NULL
-                    CHECK (publication_height BETWEEN 0 AND 4294967295),
-                publication_hash BLOB NOT NULL CHECK (length(publication_hash) = 32),
-                scan_hint INTEGER NOT NULL CHECK (scan_hint IN (0, 1)),
                 witness BLOB CHECK (length(witness) = 1024),
                 witness_height INTEGER CHECK (witness_height BETWEEN 0 AND 4294967295),
                 witness_hash BLOB CHECK (length(witness_hash) = 32),
                 PRIMARY KEY (txid, action_index),
                 CHECK ((witness IS NULL) = (witness_height IS NULL)
                     AND (witness IS NULL) = (witness_hash IS NULL))
+            )";
+
+/// A Zcash transaction the provider reported as a payout or refund of an operation. Only a
+/// note in such a transaction settles the operation's promised receipt.
+pub(super) const TABLE_IRONWOOD_ONE_TIME_OPERATION_RECEIPTS: &str = "CREATE TABLE ironwood_one_time_operation_receipts (
+                operation_id INTEGER NOT NULL REFERENCES ironwood_one_time_operations(id) ON DELETE CASCADE,
+                txid BLOB NOT NULL CHECK (length(txid) = 32),
+                PRIMARY KEY (operation_id, txid)
             )";
 
 /// One provider operation on a one-time key: an incoming quote request, identified by
@@ -2041,71 +2029,16 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_OPERATIONS: &str = "CREATE TABLE ironwo
                 CHECK (request IS NOT NULL OR reference IS NOT NULL)
             )";
 
-/// A key's directory lookup: due while `cutoff_height` is set, and done through
-/// `done_height`. `applied` records are applied, the last of them at `last_position` in block
-/// `last_height` with Action nullifier `last_nullifier` (see `one_time_ivk::restore`).
+/// Durable private receiver lookups.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_LOOKUPS: &str = "CREATE TABLE ironwood_one_time_lookups (
                 one_time_key_id INTEGER PRIMARY KEY REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
-                cutoff_height INTEGER CHECK (cutoff_height BETWEEN 0 AND 4294967295),
+                target_height INTEGER CHECK (target_height BETWEEN 0 AND 4294967295),
+                reasons INTEGER NOT NULL DEFAULT 0 CHECK (reasons BETWEEN 0 AND 3),
                 done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295),
-                applied INTEGER NOT NULL DEFAULT 0 CHECK (applied BETWEEN 0 AND 4294967295),
-                last_position INTEGER CHECK (last_position >= 0),
-                last_nullifier BLOB CHECK (length(last_nullifier) = 32),
-                last_height INTEGER CHECK (last_height BETWEEN 0 AND 4294967295),
+                last_record BLOB CHECK (length(last_record) = 285),
+                read_complete INTEGER NOT NULL DEFAULT 0 CHECK (read_complete IN (0, 1)),
                 attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
-                next_attempt_at INTEGER NOT NULL DEFAULT 0,
-                CHECK ((applied = 0) = (last_position IS NULL)
-                    AND (last_position IS NULL) = (last_nullifier IS NULL)
-                    AND (last_position IS NULL) = (last_height IS NULL))
-            )";
-
-/// A directory revision a lookup's cursor read records from (see
-/// `one_time_ivk::restore`). If it fails the chain check, the cursor restarts.
-pub(super) const TABLE_IRONWOOD_ONE_TIME_LOOKUP_READS: &str =
-    "CREATE TABLE ironwood_one_time_lookup_reads (
-                one_time_key_id INTEGER NOT NULL
-                    REFERENCES ironwood_one_time_lookups(one_time_key_id) ON DELETE CASCADE,
-                publication_height INTEGER NOT NULL,
-                publication_hash BLOB NOT NULL,
-                PRIMARY KEY (one_time_key_id, publication_height, publication_hash),
-                FOREIGN KEY (publication_height, publication_hash)
-                    REFERENCES ironwood_one_time_publications(height, hash)
-            )";
-
-/// A receiver-directory publication discovery used, by its last block. `state` is 0 until
-/// the scan stores that block, then 1 if it matches the wallet's chain or 2 if not.
-pub(super) const TABLE_IRONWOOD_ONE_TIME_PUBLICATIONS: &str =
-    "CREATE TABLE ironwood_one_time_publications (
-                height INTEGER NOT NULL CHECK (height BETWEEN 0 AND 4294967295),
-                hash BLOB NOT NULL CHECK (length(hash) = 32),
-                tree_size INTEGER NOT NULL CHECK (tree_size >= 0),
-                state INTEGER NOT NULL DEFAULT 0 CHECK (state IN (0, 1, 2)),
-                PRIMARY KEY (height, hash)
-            )";
-
-/// An account's swap history discovery against a publication: how far each purpose's
-/// candidate keys were checked against its filters (see `one_time_ivk::restore`).
-pub(super) const TABLE_IRONWOOD_ONE_TIME_DISCOVERY: &str =
-    "CREATE TABLE ironwood_one_time_discovery (
-                account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
-                publication_height INTEGER NOT NULL
-                    CHECK (publication_height BETWEEN 0 AND 4294967295),
-                publication_hash BLOB NOT NULL CHECK (length(publication_hash) = 32),
-                receive_next INTEGER NOT NULL DEFAULT 0 CHECK (receive_next >= 0),
-                receive_reach INTEGER NOT NULL DEFAULT 0 CHECK (receive_reach >= 0),
-                refund_next INTEGER NOT NULL DEFAULT 0 CHECK (refund_next >= 0),
-                refund_reach INTEGER NOT NULL DEFAULT 0 CHECK (refund_reach >= 0),
-                receive_done INTEGER NOT NULL DEFAULT 0 CHECK (receive_done IN (0, 1)),
-                refund_done INTEGER NOT NULL DEFAULT 0 CHECK (refund_done IN (0, 1)),
-                FOREIGN KEY (publication_height, publication_hash)
-                    REFERENCES ironwood_one_time_publications(height, hash)
-            )";
-
-/// Accounts whose seed has no one-time key history to restore (see
-/// `WalletDb::mark_one_time_account_fresh`).
-pub(super) const TABLE_IRONWOOD_ONE_TIME_FRESH_ACCOUNTS: &str =
-    "CREATE TABLE ironwood_one_time_fresh_accounts (
-                account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE
+                next_attempt_at INTEGER NOT NULL DEFAULT 0
             )";
 
 pub(super) const TABLE_IRONWOOD_SPEND_JOURNAL: &str = "CREATE TABLE ironwood_spend_journal (
@@ -2137,14 +2070,6 @@ pub(super) const TABLE_IRONWOOD_JOURNAL_COVERAGE: &str = "CREATE TABLE ironwood_
 pub(super) const INDEX_IRONWOOD_SPEND_JOURNAL_NULLIFIERS_NF: &str =
     "CREATE INDEX idx_ironwood_spend_journal_nullifiers_nf
                 ON ironwood_spend_journal_nullifiers(nf)";
-
-pub(super) const INDEX_IRONWOOD_ONE_TIME_KEYS_ACCOUNT_RECEIVER: &str =
-    "CREATE INDEX idx_ironwood_one_time_keys_account_receiver
-                ON ironwood_one_time_keys(account_id, receiver)";
-
-pub(super) const INDEX_IRONWOOD_ONE_TIME_KEYS_SCANNING: &str =
-    "CREATE INDEX idx_ironwood_one_time_keys_scanning
-                ON ironwood_one_time_keys(closed_at, active_from)";
 
 pub(super) const INDEX_IRONWOOD_ONE_TIME_OPERATIONS_KEY: &str =
     "CREATE INDEX idx_ironwood_one_time_operations_key
@@ -2253,3 +2178,27 @@ CREATE TABLE transparent_tx_display_outputs (
     CHECK ((address_kind = 3) = (address_hash IS NULL)),
     PRIMARY KEY (transaction_id, output_index)
 )"#;
+
+/// Account cancellation, restore and manual progress. `receive_end` is the exclusive end of
+/// receive indexes enrolled for automatic discovery. It never shrinks.
+pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str = "CREATE TABLE ironwood_one_time_recovery (
+                account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+                generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+                history_revision BLOB NOT NULL DEFAULT X'0000000000000000'
+                    CHECK (length(history_revision) = 8),
+                filter_height INTEGER CHECK (filter_height BETWEEN 0 AND 4294967295),
+                filter_hash BLOB CHECK (length(filter_hash) = 32),
+                skipped_height INTEGER CHECK (skipped_height BETWEEN 0 AND 4294967295),
+                restore_height INTEGER CHECK (restore_height BETWEEN 0 AND 4294967295),
+                restore_next BLOB NOT NULL DEFAULT X'0000000000000000' CHECK (length(restore_next) = 8),
+                restore_gap INTEGER NOT NULL DEFAULT 0 CHECK (restore_gap BETWEEN 0 AND 4),
+                restore_done INTEGER NOT NULL DEFAULT 0 CHECK (restore_done IN (0, 1)),
+                manual_active INTEGER NOT NULL DEFAULT 0 CHECK (manual_active IN (0, 1)),
+                manual_purpose INTEGER NOT NULL DEFAULT 0 CHECK (manual_purpose IN (0, 1)),
+                manual_next BLOB NOT NULL DEFAULT X'0000000000000000' CHECK (length(manual_next) = 8),
+                manual_end BLOB CHECK (length(manual_end) = 8),
+                manual_height INTEGER CHECK (manual_height BETWEEN 0 AND 4294967295),
+                receive_end BLOB NOT NULL DEFAULT X'0000000000000000' CHECK (length(receive_end) = 8),
+                CHECK ((filter_height IS NULL) = (filter_hash IS NULL))
+            )";

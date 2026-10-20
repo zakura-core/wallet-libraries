@@ -1,5 +1,4 @@
 //! Refund keys, their operations, and the funding transaction's memo and shape.
-use orchard::keys::Scope;
 use rusqlite::{Connection, OptionalExtension, params};
 use zakura_one_time_ivk::swap::{Observation, OperationStatus, REFUND_MEMO_MAGIC, RefundMemo};
 use zcash_client_backend::proposal::Proposal;
@@ -11,16 +10,10 @@ use zcash_protocol::{
     memo::MemoBytes,
 };
 
-use super::{
-    ProviderSeen, ReservationPolicy, issuance_start,
-    lifecycle::record,
-    reservations::{fresh_seen, record_provider_seen},
-};
+use super::{ReservationPolicy, lifecycle::record};
 use crate::wallet::one_time_ivk::{
-    Discovery, KeyId, OneTimeKey, Purpose, account_key, activate, decode_index, index_after,
-    invalid, register,
-    restore::{discovery, recovery},
-    restore_start,
+    KeyId, OneTimeKey, Purpose, account_key, decode_index, index_after, invalid, register,
+    restore::{queue, recovery},
 };
 use crate::{AccountUuid, error::SqliteClientError};
 
@@ -30,107 +23,40 @@ pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
     params: &P,
     account: AccountUuid,
     tip: BlockHeight,
-    seen: Option<&ProviderSeen<'_>>,
-    now: i64,
 ) -> Result<Result<OneTimeKey, ReservationPolicy>, SqliteClientError> {
-    let scan_from = match issuance_start(conn, tip)? {
-        Ok(from) => from,
-        Err(policy) => return Ok(Err(policy)),
-    };
-    recovery::recover_refund_memos(conn, params, account, now)?;
+    let scanned = crate::wallet::fully_scanned_height(conn)?;
+    let tip = tip.max(crate::wallet::chain_tip_height(conn)?.unwrap_or(tip));
+    if scanned.is_none_or(|height| u32::from(tip).saturating_sub(u32::from(height)) > 10) {
+        return Ok(Err(ReservationPolicy::FundingHistory));
+    }
+    recovery::recover_refund_memos(conn, params, account)?;
     if recovery::refund_memos_pending(conn, account)? {
-        return Ok(Err(ReservationPolicy::Coverage));
+        return Ok(Err(ReservationPolicy::FundingHistory));
     }
-    // A restored account's discovery may still reveal used refund indices.
-    let (owner, _) = account_key(conn, params, account)?;
-    if !discovery::issuance_ready(conn, params, owner)? {
-        return Ok(Err(ReservationPolicy::Gap));
-    }
-    let index = match next_refund_index(conn, params, account, seen, now)? {
-        Ok(index) => index,
-        Err(policy) => return Ok(Err(policy)),
-    };
+    let index = next_refund_index(conn, params, account)?;
     let key = KeyId::new(Purpose::Refund, index);
-    let (_, key) = register(
-        conn,
-        params,
-        account,
-        key,
-        scan_from,
-        true,
-        Discovery::Funding,
-        now,
-    )?;
+    let (_, key) = register(conn, params, account, key)?;
     Ok(Ok(key))
 }
 
-/// How many unregistered refund indices one reservation checks against a seen set before
-/// giving up, so a set that holds every receiver cannot register keys without end.
-const REFUND_SEEN_PROBES: u32 = 100;
-
-/// The lowest refund index above every allocated one that no key is registered at and
-/// `seen` does not hold, refused as [`ReservationPolicy::SeenUnavailable`] unless `seen`
-/// is fresh at `now` (see [`fresh_seen`]). A held index is registered for a lookup, since
-/// a swap may have paid it, and recorded as seen, so it is never issued. After
-/// [`REFUND_SEEN_PROBES`] held indices this returns [`ReservationPolicy::Gap`]; the keys
-/// registered so far stay, so a later reservation continues past them.
+/// Allocates above locally known refund keys. Funding memos recover prior funded
+/// indexes on another device. Unfunded quotes do not require a global address feed.
 pub(in crate::wallet::one_time_ivk) fn next_refund_index<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
-    seen: Option<&ProviderSeen<'_>>,
-    now: i64,
-) -> Result<Result<u64, ReservationPolicy>, SqliteClientError> {
-    let seen = match fresh_seen(seen, now) {
-        Ok(seen) => seen,
-        Err(policy) => return Ok(Err(policy)),
-    };
-    let (account_ref, parent) = account_key(conn, params, account)?;
-    // SQLite orders fixed-width big-endian blobs numerically. Unlike INTEGER, this
-    // represents the entire u64 index space, including u64::MAX.
+) -> Result<u64, SqliteClientError> {
+    let (owner, _) = account_key(conn, params, account)?;
     let last: Option<Vec<u8>> = conn.query_row(
-        "SELECT MAX(key_index) FROM ironwood_one_time_keys
-         WHERE account_id = ?1 AND purpose = 0 AND advances_allocation = 1",
-        [account_ref.0],
-        |row| row.get(0),
+        "SELECT MAX(key_index) FROM ironwood_one_time_keys WHERE account_id = ?1 AND purpose = 0",
+        [owner.0],
+        |r| r.get(0),
     )?;
-    let mut index = match last {
-        Some(bytes) => index_after(decode_index(bytes)?, 1)?,
-        None => 0,
-    };
-    let mut probes = 0;
-    loop {
-        let registered = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys
-             WHERE account_id = ?1 AND purpose = 0 AND key_index = ?2)",
-            params![account_ref.0, index.to_be_bytes()],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if !registered {
-            if probes == REFUND_SEEN_PROBES {
-                return Ok(Err(ReservationPolicy::Gap));
-            }
-            probes += 1;
-            let key = KeyId::new(Purpose::Refund, index);
-            let receiver = key.derive(&parent)?.address_at(0u32, Scope::External);
-            if !seen.holds(&receiver.to_raw_address_bytes())? {
-                return Ok(Ok(index));
-            }
-            let from = restore_start(conn, params, account_ref)?;
-            let (id, _) = register(
-                conn,
-                params,
-                account,
-                key,
-                from,
-                false,
-                Discovery::Lookup,
-                now,
-            )?;
-            record_provider_seen(conn, id)?;
-        }
-        index = index_after(index, 1)?;
-    }
+    let index = last
+        .map(|bytes| index_after(decode_index(bytes)?, 1))
+        .transpose()?
+        .unwrap_or(0);
+    Ok(index)
 }
 
 /// See `WalletDb::refund_funding_memo`.
@@ -258,7 +184,7 @@ fn check_deposit<P: Parameters>(params: &P, deposit: &str) -> Result<(), SqliteC
     }
 }
 
-/// The ID of `account`'s refund key at `index`, reserved here and still open.
+/// The ID of an existing refund key in this account.
 fn refund_key<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -268,20 +194,17 @@ fn refund_key<P: Parameters>(
     let (account_ref, _) = account_key(conn, params, account)?;
     conn.query_row(
         "SELECT id FROM ironwood_one_time_keys
-         WHERE account_id = ?1 AND purpose = 0 AND key_index = ?2
-           AND advances_allocation = 1 AND closed_at IS NULL",
+         WHERE account_id = ?1 AND purpose = 0 AND key_index = ?2",
         params![account_ref.0, index.to_be_bytes()],
         |r| r.get(0),
     )
     .optional()?
-    .ok_or_else(|| invalid("refund key is not reserved and open in this account"))
+    .ok_or_else(|| invalid("refund key is not registered in this account"))
 }
 
-/// Starts the refund keys that `tx`, which this wallet just stored to send, funds, above
-/// the scanned blocks since those predate `tx`, and marks their operations active. A
-/// reserved key's memo funding a deposit not recorded for that key is an error, so the
-/// send is not stored.
-pub(crate) fn start_funded_refund_keys<P: Parameters>(
+/// Records the refund identity when this wallet stores its funding transaction.
+/// The deposit and internal memo must match the previously accepted local quote.
+pub(crate) fn record_funded_refund_keys<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     tx: &Transaction,
@@ -314,13 +237,13 @@ pub(crate) fn start_funded_refund_keys<P: Parameters>(
         else {
             continue;
         };
-        let Some((id, scan_from)) = conn
+        let Some(id) = conn
             .query_row(
-                "SELECT id, scan_from FROM ironwood_one_time_keys
+                "SELECT id FROM ironwood_one_time_keys
                  WHERE account_id = ?1 AND purpose = 0 AND key_index = ?2
-                   AND advances_allocation = 1",
+                  ",
                 params![account, memo.index().to_be_bytes()],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u32>(1)?)),
+                |row| row.get::<_, i64>(0),
             )
             .optional()?
         else {
@@ -331,13 +254,18 @@ pub(crate) fn start_funded_refund_keys<P: Parameters>(
                 "refund memo funds a deposit not recorded for its key",
             ));
         };
-        activate(conn, id, above_scanned.unwrap_or(scan_from).into())?;
+        let height = above_scanned
+            .map(BlockHeight::from)
+            .or_else(|| params.activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3))
+            .ok_or_else(|| invalid("Ironwood is not active"))?;
+        queue::funded(conn, id, height)?;
         // The wallet's own funding is not a provider observation, so `funded` stays unset.
         let sent = Observation {
             status: OperationStatus::Active,
             funded: false,
+            receipts: vec![],
         };
-        record(conn, operation, sent, 0)?;
+        record(conn, operation, &sent, 0)?;
     }
     Ok(())
 }

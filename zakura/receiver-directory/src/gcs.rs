@@ -4,12 +4,8 @@ use bitcoin_hashes::siphash24;
 use sha2::{Digest, Sha256};
 use zakura_filters::{read_compact_size, BitStreamReader, GcsFilterWriter};
 
-/// Legacy aggregate Golomb-Rice parameter.
-pub const P: u8 = 10;
-/// Legacy aggregate range multiplier.
-pub const M: u64 = 1_533;
-
-/// The SipHash keys of every set in a publication keyed by `key`, its salt.
+/// The SipHash keys of a set coded under caller-supplied `key`. Block filters derive it
+/// from the network, height and block hash, so each block's set has its own keys.
 pub(crate) fn keys(key: &Hash) -> (u64, u64) {
     let digest = Sha256::new()
         .chain_update(b"ironwood-receiver/v1/filter\0")
@@ -21,7 +17,7 @@ pub(crate) fn keys(key: &Hash) -> (u64, u64) {
     )
 }
 
-/// One BIP 158 Golomb-coded set of receivers, keyed by the publication salt.
+/// One BIP 158 Golomb-coded set of receivers, coded under a caller-supplied key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Filter {
     /// The encoded set: a CompactSize count, then the Golomb-Rice coded deltas.
@@ -32,11 +28,6 @@ pub struct Filter {
 }
 
 impl Filter {
-    /// Encodes the distinct `receivers` under `key`.
-    pub fn build<'a>(key: &Hash, receivers: impl IntoIterator<Item = &'a ReceiverBytes>) -> Self {
-        Self::build_with(key, receivers, P, M)
-    }
-
     /// Encodes receivers with the caller-selected fixed protocol parameters.
     pub(crate) fn build_with<'a>(
         key: &Hash,
@@ -54,11 +45,6 @@ impl Filter {
         Self::decode_with(&bytes, p, m).expect("filter the writer encoded")
     }
 
-    /// How many distinct receivers the set holds.
-    pub fn count(&self) -> u32 {
-        self.values.len() as u32
-    }
-
     /// Which of `receivers` may be in the set, in the same order.
     pub fn matches(&self, key: &Hash, receivers: &[ReceiverBytes]) -> Vec<bool> {
         let (k0, k1) = keys(key);
@@ -71,12 +57,6 @@ impl Filter {
                 self.values.binary_search(&value).is_ok()
             })
             .collect()
-    }
-
-    /// Strictly decodes one set: a minimal count no larger than a `u32`, every value in
-    /// range, zero padding and nothing after it.
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        Self::decode_with(bytes, P, M)
     }
 
     /// Returns the canonical encoded set.

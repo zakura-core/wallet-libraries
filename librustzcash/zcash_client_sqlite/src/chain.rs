@@ -582,168 +582,46 @@ mod tests {
         testing::pool::scan_cached_blocks_detects_spends_out_of_order::<OrchardPoolTester>()
     }
 
-    /// Blocks scanned and transactions decrypted without the wallet's open one-time keys
-    /// are refused, leaving the scanned chain unchanged, also in builds without `orchard`,
-    /// which cannot use them. Inactive and closed keys do not block them. Without `orchard`,
-    /// a publication discovery waits for the scan to judge does.
+    /// Ordinary sync proceeds even when receiver recovery has pending network work.
     #[test]
-    fn scanning_without_one_time_ivks_refuses_open_one_time_keys() {
-        use crate::{error::SqliteClientError, testing::db::TestDb};
-        use zcash_client_backend::data_api::{
-            WalletRead,
-            chain::error::Error,
-            testing::{AddressType, TestBuilder, TestState, pool::ShieldedPoolTester},
-            wallet::decrypt_and_store_transaction,
+    fn private_receiver_work_never_blocks_ordinary_sync() {
+        use zcash_client_backend::data_api::testing::{
+            AddressType, TestBuilder, pool::ShieldedPoolTester,
         };
-        use zcash_primitives::{
-            block::BlockHash,
-            transaction::{Authorized, TransactionData, TxVersion},
-        };
-        use zcash_protocol::{consensus::BranchId, value::Zatoshis};
-
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
         let mut st = TestBuilder::new()
             .with_data_store_factory(testing::db::TestDbFactory::default())
             .with_block_cache(testing::BlockCache::new())
             .with_account_from_sapling_activation(BlockHash([0; 32]))
             .build();
         let fvk = SaplingPoolTester::test_account_fvk(&st);
-        let (h1, _, _) = st.generate_next_block(
+        let (height, _, _) = st.generate_next_block(
             &fvk,
             AddressType::DefaultExternal,
             Zatoshis::const_from_u64(5),
         );
-        st.scan_cached_blocks(h1, 1);
         st.wallet()
             .conn()
             .execute_batch(
-                "INSERT INTO ironwood_one_time_keys
-                 (account_id, purpose, key_index, receiver, scan_from, advances_allocation, active_from)
-                 SELECT id, 1, zeroblob(8), zeroblob(43), 0, 1, 0 FROM accounts LIMIT 1;",
+                "INSERT INTO ironwood_one_time_keys(account_id, purpose, key_index, receiver)
+             SELECT id, 0, zeroblob(8), zeroblob(43) FROM accounts LIMIT 1;
+             INSERT INTO ironwood_one_time_recovery(account_id) SELECT id FROM accounts;
+             INSERT INTO ironwood_one_time_lookups(one_time_key_id, target_height, reasons)
+             SELECT id, 4000000, 1 FROM ironwood_one_time_keys;",
             )
             .unwrap();
-        let (h2, _, _) = st.generate_next_block(
-            &fvk,
-            AddressType::DefaultExternal,
-            Zatoshis::const_from_u64(5),
-        );
-        let scanned = |st: &TestState<_, TestDb, _>| {
-            let blocks: i64 = st
-                .wallet()
-                .conn()
-                .query_row("SELECT COUNT(*) FROM blocks", [], |r| r.get(0))
-                .unwrap();
-            let fully_scanned = st.wallet().block_fully_scanned().unwrap();
-            (
-                blocks,
-                fully_scanned.map(|b| (b.block_height(), b.block_hash())),
-            )
-        };
-        let before = scanned(&st);
-        assert!(matches!(
-            st.try_scan_cached_blocks(h2, 1),
-            Err(Error::Wallet(SqliteClientError::OneTimeIvksNotUsed))
-        ));
-        assert_eq!(scanned(&st), before);
-        let empty = TransactionData::<Authorized>::from_parts(
-            TxVersion::V5,
-            BranchId::Nu5,
-            0,
-            h2,
-            None,
-            None,
-            None,
-            None,
-        );
-        let network = *st.network();
-        assert!(matches!(
-            decrypt_and_store_transaction(
-                &network,
-                st.wallet_mut(),
-                &empty.freeze().unwrap(),
-                None
-            ),
-            Err(SqliteClientError::OneTimeIvksNotUsed)
-        ));
-        st.wallet()
-            .conn()
-            .execute_batch("UPDATE ironwood_one_time_keys SET active_from = NULL")
-            .unwrap();
-        st.scan_cached_blocks(h2, 1);
-        st.wallet()
-            .conn()
-            .execute_batch("UPDATE ironwood_one_time_keys SET active_from = 0, closed_at = 1")
-            .unwrap();
-        let (h3, _, _) = st.generate_next_block(
-            &fvk,
-            AddressType::DefaultExternal,
-            Zatoshis::const_from_u64(5),
-        );
-        st.scan_cached_blocks(h3, 1);
-        // Without `orchard`, which cannot settle discovery, a pass or a lookup that read a
-        // publication the scan has yet to judge refuses them too, and so does a late
-        // candidate, which waits for the scan to cover its blocks.
-        #[cfg(not(feature = "orchard"))]
-        {
-            let pending = u32::from(h3) + 10;
+        st.scan_cached_blocks(height, 1);
+        assert_eq!(
             st.wallet()
                 .conn()
-                .execute_batch(&format!(
-                    "INSERT INTO ironwood_one_time_publications (height, hash, tree_size)
-                     VALUES ({pending}, zeroblob(32), 0);
-                     INSERT INTO ironwood_one_time_lookups (one_time_key_id, done_height)
-                     SELECT id, {pending} FROM ironwood_one_time_keys;"
-                ))
-                .unwrap();
-            let (h4, _, _) = st.generate_next_block(
-                &fvk,
-                AddressType::DefaultExternal,
-                Zatoshis::const_from_u64(5),
-            );
-            for (table, waiting) in [
-                (
-                    "ironwood_one_time_discovery",
-                    "INSERT INTO ironwood_one_time_discovery
-                        (account_id, publication_height, publication_hash)
-                     SELECT id, ?1, zeroblob(32) FROM accounts",
-                ),
-                (
-                    "ironwood_one_time_lookup_reads",
-                    "INSERT INTO ironwood_one_time_lookup_reads
-                        (one_time_key_id, publication_height, publication_hash)
-                     SELECT id, ?1, zeroblob(32) FROM ironwood_one_time_keys",
-                ),
-                (
-                    "ironwood_one_time_payment_recovery",
-                    "INSERT INTO ironwood_one_time_payment_recovery
-                        (one_time_key_id, txid, action_index, height, block_hash, tx_index,
-                         position, encrypted_note, publication_height, publication_hash,
-                         scan_hint)
-                     SELECT id, zeroblob(32), 0, ?1, zeroblob(32), 0, 0, zeroblob(148), ?1,
-                         zeroblob(32), 0
-                     FROM ironwood_one_time_keys",
-                ),
-            ] {
-                st.wallet().conn().execute(waiting, [pending]).unwrap();
-                assert!(
-                    matches!(
-                        st.try_scan_cached_blocks(h4, 1),
-                        Err(Error::Wallet(SqliteClientError::OneTimeIvksNotUsed))
-                    ),
-                    "{table}"
-                );
-                st.wallet()
-                    .conn()
-                    .execute_batch(&format!("DELETE FROM {table}"))
-                    .unwrap();
-            }
-            st.scan_cached_blocks(h4, 1);
-        }
+                .query_row("SELECT MAX(height) FROM blocks", [], |r| r.get::<_, u32>(0))
+                .unwrap(),
+            u32::from(height)
+        );
     }
 
-    /// A rewind removes the spend journal above its rescan floor, has discovery judge a
-    /// publication there again, from the first replaced block, and restarts a lookup cursor
-    /// that passed a record there, in every build, since an `orchard` build may reopen the
-    /// wallet and read that state.
+    /// Reorg repair invalidates pending results and journal coverage even in feature-off builds.
     #[test]
     fn a_rewind_repairs_one_time_state_in_every_build() {
         use zcash_client_backend::data_api::{
@@ -752,17 +630,16 @@ mod tests {
         };
         use zcash_primitives::block::BlockHash;
         use zcash_protocol::value::Zatoshis;
-
         let mut st = TestBuilder::new()
             .with_data_store_factory(testing::db::TestDbFactory::default())
             .with_block_cache(testing::BlockCache::new())
             .with_account_from_sapling_activation(BlockHash([0; 32]))
             .build();
         let fvk = SaplingPoolTester::test_account_fvk(&st);
-        let value = Zatoshis::const_from_u64(5);
-        let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
-        let (h2, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
-        let (h3, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        let amount = Zatoshis::const_from_u64(5);
+        let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, amount);
+        st.generate_next_block(&fvk, AddressType::DefaultExternal, amount);
+        let (h3, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, amount);
         st.scan_cached_blocks(h1, 3);
         let conn = st.wallet().conn();
         conn.execute(
@@ -775,48 +652,31 @@ mod tests {
             [u32::from(h1), u32::from(h3) + 1],
         )
         .unwrap();
-        conn.execute(
-            "INSERT INTO ironwood_one_time_publications (height, hash, tree_size, state)
-             VALUES (?1, zeroblob(32), 0, 1), (?1, randomblob(32), 0, 2),
-                 (?2, zeroblob(32), 0, 1)",
-            [u32::from(h3), u32::from(h2)],
-        )
-        .unwrap();
-        // A lookup done through the publication, whose cursor last applied a record at h2.
         conn.execute_batch(&format!(
-            "INSERT INTO ironwood_one_time_keys
-                 (account_id, purpose, key_index, receiver, scan_from, advances_allocation)
-             SELECT id, 1, zeroblob(8), zeroblob(43), 0, 1 FROM accounts LIMIT 1;
-             INSERT INTO ironwood_one_time_lookups
-                 (one_time_key_id, done_height, applied, last_position, last_nullifier,
-                  last_height)
-             SELECT id, {h3}, 1, 0, zeroblob(32), {h2} FROM ironwood_one_time_keys;"
-        ))
-        .unwrap();
+            "INSERT INTO ironwood_one_time_keys(account_id, purpose, key_index, receiver)
+             SELECT id, 0, zeroblob(8), zeroblob(43) FROM accounts LIMIT 1;
+             INSERT INTO ironwood_one_time_recovery(account_id) SELECT id FROM accounts;
+             INSERT INTO ironwood_one_time_lookups(one_time_key_id, target_height, reasons, done_height, read_complete)
+             SELECT id, {h3}, 1, {h3}, 1 FROM ironwood_one_time_keys;")).unwrap();
         st.wallet_mut().truncate_to_height(h1).unwrap();
-        // The publications, accepted or rejected, wait to be judged again, and the journal
-        // holds nothing above the floor.
-        let repaired: (i64, i64, i64) = st
-            .wallet()
-            .conn()
+        let conn = st.wallet().conn();
+        let repaired: (u64, u64, u64) = conn
             .query_row(
-                "SELECT (SELECT MAX(state) FROM ironwood_one_time_publications),
-                    (SELECT COUNT(*) FROM ironwood_spend_journal WHERE block_height > ?1),
-                    (SELECT COUNT(*) FROM ironwood_journal_coverage WHERE end_height > ?1 + 1)",
+                "SELECT (SELECT generation FROM ironwood_one_time_recovery),
+                (SELECT COUNT(*) FROM ironwood_spend_journal WHERE block_height > ?1),
+                (SELECT COUNT(*) FROM ironwood_journal_coverage WHERE end_height > ?1 + 1)",
                 [u32::from(h1)],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(repaired, (0, 0, 0));
-        let cursor: (u32, Option<u32>, Option<u32>) = st
-            .wallet()
-            .conn()
+        assert_eq!(repaired, (1, 0, 0));
+        let cursor: (Option<u32>, Option<u32>, bool) = conn
             .query_row(
-                "SELECT applied, cutoff_height, last_height FROM ironwood_one_time_lookups",
+                "SELECT target_height, done_height, read_complete FROM ironwood_one_time_lookups",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(cursor, (0, Some(u32::from(h3)), None));
+        assert_eq!(cursor, (Some(u32::from(h3)), None, false));
     }
 }

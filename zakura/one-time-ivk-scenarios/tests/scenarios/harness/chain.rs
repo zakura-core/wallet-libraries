@@ -54,10 +54,6 @@ pub const BLOCK_SECS: i64 = 75;
 pub const T0: i64 = 1_790_000_000;
 /// The genesis hash every publication commits to.
 pub const GENESIS: [u8; 32] = [9; 32];
-pub const MINUTE: i64 = 60;
-pub const HOUR: i64 = 3_600;
-pub const DAY: i64 = 86_400;
-pub const ZEC: u64 = 100_000_000;
 
 /// The simulated network: mainnet's upgrade order with everything active at
 /// [`ACTIVATION`].
@@ -75,11 +71,6 @@ pub fn network() -> LocalNetwork {
 /// The time stamped on block `height`.
 pub fn block_time(height: BlockHeight) -> i64 {
     T0 + (i64::from(u32::from(height)) - i64::from(ACTIVATION)) * BLOCK_SECS
-}
-
-/// Days since [`T0`] at Unix time `unix`.
-pub fn day_of(unix: i64) -> f64 {
-    (unix - T0) as f64 / DAY as f64
 }
 
 /// The chain's compact blocks, in memory and shared, so a reorg can replace them.
@@ -170,16 +161,6 @@ pub enum Payer {
     /// An ordinary wallet pays with its own outgoing viewing key, which the directory
     /// cannot use.
     Wallet,
-}
-
-impl Payer {
-    /// How the timeline and report name the payer.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Near => "NEAR (zero OVK)",
-            Self::Wallet => "a wallet (own OVK)",
-        }
-    }
 }
 
 /// An Ironwood output the chain mined to a known receiver.
@@ -427,6 +408,13 @@ impl Chain {
             roots: Roots::new(),
         };
         chain.mine(1);
+        chain.states.insert(
+            ACTIVATION - 1,
+            ChainState::empty(
+                (ACTIVATION - 1).into(),
+                chain.block(ACTIVATION.into()).prev_hash(),
+            ),
+        );
         chain
     }
 
@@ -505,27 +493,6 @@ impl Chain {
                 self.advance();
             }
         }
-    }
-
-    /// Mines empty blocks until at least `secs` have passed, at least one block.
-    pub fn wait(&mut self, secs: i64) {
-        let blocks = (secs + BLOCK_SECS - 1) / BLOCK_SECS;
-        self.mine(u32::try_from(blocks.max(1)).expect("waits fit u32"));
-    }
-
-    /// Mines empty blocks until the tip's time is at least `at`.
-    pub fn mine_until(&mut self, at: i64) {
-        let behind = at - self.now();
-        if behind > 0 {
-            let blocks = (behind + BLOCK_SECS - 1) / BLOCK_SECS;
-            self.mine(u32::try_from(blocks).expect("waits fit u32"));
-        }
-    }
-
-    /// Mines empty blocks until the next block's time is at least `at`, so a payment
-    /// mined next lands at `at` or just after.
-    pub fn mine_until_next_at(&mut self, at: i64) {
-        self.mine_until(at - BLOCK_SECS);
     }
 
     /// The chain state at the end of the block below `height`, which scanning from
@@ -830,15 +797,6 @@ impl Chain {
         })
     }
 
-    /// The latest block on this branch whose final Ironwood tree root is `tx`'s Ironwood
-    /// anchor, or `None` when no block's is or `tx` has no Ironwood bundle. Unlike
-    /// [`Self::accepts`], it checks nothing else, so it covers transactions with
-    /// transparent inputs too.
-    pub fn anchor_height(&mut self, tx: &Transaction) -> Option<BlockHeight> {
-        let bundle = tx.ironwood_bundle()?;
-        self.root_height(bundle.anchor())
-    }
-
     /// The latest block whose final Ironwood tree root is `anchor`, searching the last
     /// [`RECENT_ROOTS`] blocks before the rest of the chain.
     fn root_height(&mut self, anchor: &Anchor) -> Option<BlockHeight> {
@@ -869,33 +827,6 @@ impl Chain {
             .flat_map(|block| &block.vtx)
             .flat_map(|tx| &tx.ironwood_actions)
             .map(|action| action.nullifier.as_slice().try_into().expect("32 bytes"))
-            .collect()
-    }
-
-    /// Every Ironwood nullifier the chain's blocks reveal, with the height revealing it.
-    pub fn nullifier_heights(&self) -> BTreeMap<[u8; 32], u32> {
-        let blocks = self.st.cache().0.read().unwrap();
-        blocks
-            .iter()
-            .flat_map(|(height, block)| {
-                block
-                    .vtx
-                    .iter()
-                    .flat_map(|tx| &tx.ironwood_actions)
-                    .map(move |action| {
-                        let nf: [u8; 32] =
-                            action.nullifier.as_slice().try_into().expect("32 bytes");
-                        (nf, *height)
-                    })
-            })
-            .collect()
-    }
-
-    /// Every wallet-built transaction mined on this branch, with its height.
-    pub fn mined_txs(&self) -> Vec<(Transaction, BlockHeight)> {
-        self.txs
-            .keys()
-            .filter_map(|txid| self.transaction(&TxId::from_bytes(*txid)))
             .collect()
     }
 

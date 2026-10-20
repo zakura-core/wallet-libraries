@@ -1,75 +1,41 @@
-//! Durable one-time IVKs (see [`zakura_one_time_ivk`]), each trial-decrypted while open.
-//!
-//! This module holds the key registry, scanning, spending and the storage guards.
-//! [`swap`] issues keys for swaps and closes them from provider status, `restore` discovers
-//! the keys a restored seed used through a receiver directory, and `journal` keeps the
-//! Ironwood nullifiers of the wallet's own transactions.
-//!
-//! Issued keys scan from issuance, refund keys from their stored funding transaction,
-//! until they close. Keys a restore discovers have their history looked up, then are
-//! scanned for a restore watch only while a swap may still pay them (see
-//! [`WalletDb::close_finished_one_time_keys`]). A closed key keeps its notes.
-//! One-time-key notes carry no memo the wallet reads; only internal change carries the
-//! refund marker. So neither a directory nor private Enhance retrieval stores or fetches
-//! one. A wallet drives one-time IVKs with these calls:
-//!
-//! - [`WalletDb::mark_one_time_account_fresh`] when it creates an account from a newly
-//!   generated seed.
-//! - `scan_cached_blocks_with_one_time_ivks` and
-//!   `decrypt_and_store_transaction_with_one_time_ivks` in place of the ordinary
-//!   scanning and decryption; while a key is open, the others are refused.
-//! - [`WalletDb::close_finished_one_time_keys`] once sync reaches a tip it confirmed with
-//!   the network.
-//! - For an outgoing swap, [`WalletDb::reserve_refund_key`], then
-//!   [`WalletDb::record_refund_operation`] when the quote arrives,
-//!   [`WalletDb::refund_funding_memo`] for the funding transaction and
-//!   [`swap::verify_refund_funding_proposal`] before signing.
-//! - For an incoming swap, [`WalletDb::prepare_receive_reservation`], then
-//!   [`WalletDb::begin_receive_operation`], [`WalletDb::finish_receive_operation`] and
-//!   [`WalletDb::start_receive_operation`].
-//! - [`WalletDb::record_operation_status`] for each provider status of either.
-//! - `zakura_pir_receiver::discover`, over the [`OneTimeIvkRestoreWrite`] steps, for a
-//!   restored account's discovery, and [`WalletDb::recheck_one_time_key_history`] when the
-//!   user asks to recheck swaps.
-//!
-//! [`OneTimeIvkRestoreWrite`]: zcash_client_backend::data_api::one_time_ivk::restore::OneTimeIvkRestoreWrite
+//! Derived receiver registry, payment authentication and spending.
+//! Ordinary scanning uses account keys. PIR recovery authenticates individual returned
+//! payments with these derived keys and retains their ownership for later spending.
 
 pub(crate) mod journal;
 pub(crate) mod restore;
 pub mod swap;
 
-use std::{borrow::Borrow, collections::HashSet, ops::Range, time::UNIX_EPOCH};
+use std::{ops::Range, time::UNIX_EPOCH};
 
 use orchard::keys::{FullViewingKey, Scope};
-use rusqlite::{Connection, OptionalExtension, named_params};
-use zcash_client_backend::{
-    data_api::{
-        Account as _,
-        scanning::{ScanPriority, ScanRange},
-    },
-    scanning::one_time_ivk::OneTimeScanningKey,
+use rusqlite::{Connection, OptionalExtension};
+use zcash_client_backend::data_api::{
+    Account as _,
+    scanning::{ScanPriority, ScanRange},
 };
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 pub use zakura_one_time_ivk::{KeyId, Purpose};
 
-use crate::{AccountUuid, WalletDb, error::SqliteClientError, util::Clock};
+use crate::{AccountUuid, error::SqliteClientError, util::Clock};
 
 /// A registered key, re-derived from its account's viewing key. It holds viewing
 /// material, so it deliberately does not implement `Debug`.
 pub struct OneTimeKey {
-    scanning_key: OneTimeScanningKey<AccountUuid>,
+    key_id: KeyId,
+    fvk: FullViewingKey,
 }
 
 impl OneTimeKey {
     /// The key's purpose and index.
     pub fn key_id(&self) -> KeyId {
-        self.scanning_key.key_id()
+        self.key_id
     }
 
     /// The derived FVK, for note reconstruction and spending.
     pub fn full_viewing_key(&self) -> &FullViewingKey {
-        self.scanning_key.full_viewing_key()
+        &self.fvk
     }
 
     /// The receiver at external diversifier index zero.
@@ -77,30 +43,6 @@ impl OneTimeKey {
         self.full_viewing_key().address_at(0u32, Scope::External)
     }
 }
-
-impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// The key `account` registered for `receiver`, if any.
-    pub fn get_one_time_key_for_receiver(
-        &self,
-        account: AccountUuid,
-        receiver: &orchard::Address,
-    ) -> Result<Option<OneTimeKey>, SqliteClientError> {
-        key_matching(
-            self.conn.borrow(),
-            &self.params,
-            account,
-            "k.receiver = ?2",
-            rusqlite::params![account.0, receiver.to_raw_address_bytes()],
-        )
-    }
-}
-
-/// SQL condition on key `k`: discovered by a restore, with no reservation or operation of
-/// this wallet's.
-const RESTORED: &str =
-    "EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id)
-    AND k.reserved_at IS NULL
-    AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id = k.id)";
 
 /// `account`'s keys matching `predicate` on `ironwood_one_time_keys k`, selected and
 /// decoded in one query since row IDs may be reused. Predicates are library-owned SQL;
@@ -121,7 +63,7 @@ fn keys_where<P: Parameters>(
     let mut rows = stmt.query(bindings)?;
     let mut keys = Vec::new();
     while let Some(row) = rows.next()? {
-        keys.push(registered_key(row, account, &parent)?);
+        keys.push(registered_key(row, &parent)?);
     }
     Ok(keys)
 }
@@ -156,92 +98,15 @@ fn key_by_id<P: Parameters>(
     .ok_or_else(|| corrupt("missing one-time key"))
 }
 
-/// Implements `OneTimeIvkRead::get_one_time_scanning_keys`, failing on a corrupt key.
-pub(crate) fn scanning_keys<P: Parameters>(
-    conn: &Connection,
-    params: &P,
-) -> Result<Vec<OneTimeScanningKey<AccountUuid>>, SqliteClientError> {
-    keys_by_account(conn, params, |account| {
-        let open = "k.active_from IS NOT NULL AND k.closed_at IS NULL";
-        keys_where(conn, params, account, open, [account.0])
-    })
-}
-
-/// Implements `OneTimeIvkRead::get_one_time_scanning_keys_for_range`.
-pub(crate) fn scanning_keys_for_range<P: Parameters>(
-    conn: &Connection,
-    params: &P,
-    range: Range<BlockHeight>,
-) -> Result<Vec<OneTimeScanningKey<AccountUuid>>, SqliteClientError> {
-    keys_by_account(conn, params, |account| {
-        let predicate = "(k.active_from IS NOT NULL AND k.closed_at IS NULL
-                AND k.active_from < ?2)
-            OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
-                WHERE p.one_time_key_id = k.id AND p.scan_hint = 1
-                  AND p.height >= ?3 AND p.height < ?2)";
-        let bindings = rusqlite::params![account.0, u32::from(range.end), u32::from(range.start)];
-        keys_where(conn, params, account, predicate, bindings)
-    })
-}
-
-/// The scanning keys `keys` returns for each account with an Orchard viewing key.
-fn keys_by_account<P: Parameters>(
-    conn: &Connection,
-    params: &P,
-    keys: impl Fn(AccountUuid) -> Result<Vec<OneTimeKey>, SqliteClientError>,
-) -> Result<Vec<OneTimeScanningKey<AccountUuid>>, SqliteClientError> {
-    let mut result = Vec::new();
-    for (account, ufvk) in super::get_unified_full_viewing_keys(conn, params)? {
-        if ufvk.orchard().is_some() {
-            result.extend(keys(account)?.into_iter().map(|key| key.scanning_key));
-        }
-    }
-    Ok(result)
-}
-
-/// Implements `OneTimeIvkRead::get_one_time_transaction_keys`: keys that may own outputs
-/// of `txid`, which are those its stored notes or queued payments name, open keys active
-/// by the next block (by `height` without a chain tip), and keys for `receivers`.
-pub(crate) fn transaction_keys<P: Parameters>(
-    conn: &Connection,
-    params: &P,
-    txid: zcash_primitives::transaction::TxId,
-    height: Option<BlockHeight>,
-    receivers: &[orchard::Address],
-) -> Result<Vec<OneTimeScanningKey<AccountUuid>>, SqliteClientError> {
-    let height = super::chain_tip_height(conn)?
-        .map(|h| BlockHeight::from(u32::from(h).saturating_add(1)))
-        .or(height);
-    let receivers = receivers
-        .iter()
-        .map(|r| format!("X'{}'", hex::encode(r.to_raw_address_bytes())))
-        .collect::<Vec<_>>()
-        .join(",");
-    // Only matching keys are derived, so enhancing a closed key's note does not derive
-    // the historical registry.
-    let predicate = format!(
-        "k.id IN (SELECT one_time_key_id FROM ironwood_received_notes
-                WHERE transaction_id = (SELECT id_tx FROM transactions WHERE txid = ?2)
-            UNION SELECT one_time_key_id FROM ironwood_one_time_payment_recovery
-                WHERE txid = ?2)
-         OR (k.closed_at IS NULL AND k.active_from <= COALESCE(?3, k.active_from))
-         OR k.receiver IN ({receivers})"
-    );
-    keys_by_account(conn, params, |account| {
-        let bindings = rusqlite::params![account.0, txid.as_ref(), height.map(u32::from)];
-        keys_where(conn, params, account, &predicate, bindings)
-    })
-}
-
 /// The key of a registry row selecting purpose, key_index and receiver, checked.
 fn registered_key(
     row: &rusqlite::Row<'_>,
-    account: AccountUuid,
     parent: &FullViewingKey,
 ) -> Result<OneTimeKey, SqliteClientError> {
-    let scanning_key = OneTimeScanningKey::derive(account, stored_key_id(row)?, parent)?;
-    check_receiver(row.get(2)?, scanning_key.full_viewing_key())?;
-    Ok(OneTimeKey { scanning_key })
+    let key_id = stored_key_id(row)?;
+    let fvk = key_id.derive(parent)?;
+    check_receiver(row.get(2)?, &fvk)?;
+    Ok(OneTimeKey { key_id, fvk })
 }
 
 /// Checks a stored receiver against the one `fvk` derives, which also rejects a key
@@ -300,136 +165,41 @@ fn key_ref(conn: &Connection, account: AccountUuid, key: KeyId) -> Result<i64, S
     .ok_or_else(|| invalid("unregistered one-time key"))
 }
 
-/// Where restore discovery starts: the account's birthday or Ironwood activation.
-fn restore_start<P: Parameters>(
-    conn: &Connection,
-    params: &P,
-    account: super::AccountRef,
-) -> Result<BlockHeight, SqliteClientError> {
-    let birthday: u32 = conn.query_row(
-        "SELECT birthday_height FROM accounts WHERE id = ?1",
-        [account.0],
-        |row| row.get(0),
-    )?;
-    let activation = params
-        .activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
-        .ok_or_else(|| corrupt("Ironwood inactive"))?;
-    Ok(BlockHeight::from(birthday).max(activation))
-}
-
-/// How a newly registered key's history is covered.
-#[derive(Clone, Copy)]
-enum Discovery {
-    /// Trial-decrypt from `scan_from` until the key closes.
-    Scan,
-    /// Look its history up in the receiver directory, unless the key is already scanned.
-    Lookup,
-    /// Wait for its funding transaction (see [`swap::start_funded_refund_keys`]).
-    Funding,
-}
-
-/// Registers `key_id`, expecting payments from `scan_from`, or widens its registration,
-/// and returns its row ID and key.
-#[allow(clippy::too_many_arguments)]
+/// Registers a deterministic receiver without activating any scanner or changing paid state.
 fn register<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     key_id: KeyId,
-    scan_from: BlockHeight,
-    advances_allocation: bool,
-    discovery: Discovery,
-    now: i64,
 ) -> Result<(i64, OneTimeKey), SqliteClientError> {
-    let (account_ref, parent) = account_key(conn, params, account)?;
-    let scanning_key = OneTimeScanningKey::derive(account, key_id, &parent)?;
-    let receiver = scanning_key
-        .full_viewing_key()
-        .address_at(0u32, Scope::External)
-        .to_raw_address_bytes();
-    // Repeated recovery can widen required history or promote a lookahead key. It must
-    // never forget a reservation, narrow history, or replace a receiver.
-    let (id, stored_from, active_from): (i64, u32, Option<u32>) = conn
-        .query_row(
-            "INSERT INTO ironwood_one_time_keys
-             (account_id, purpose, key_index, receiver, scan_from, advances_allocation,
-              registered_at)
-         VALUES (:account, :purpose, :index, :receiver, :scan_from, :allocated, :now)
-         ON CONFLICT (account_id, purpose, key_index) DO UPDATE SET
-             scan_from = MIN(ironwood_one_time_keys.scan_from, excluded.scan_from),
-             advances_allocation = MAX(
-                 ironwood_one_time_keys.advances_allocation, excluded.advances_allocation)
-         WHERE ironwood_one_time_keys.receiver = excluded.receiver
-         RETURNING id, scan_from, active_from",
-            named_params![
-                ":account": account_ref.0,
-                ":purpose": purpose_code(key_id.purpose())?,
-                ":index": &key_id.index().to_be_bytes(),
-                ":receiver": &receiver,
-                ":scan_from": u32::from(scan_from),
-                ":allocated": advances_allocation,
-                ":now": now,
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?
-        .ok_or_else(|| corrupt("stored one-time key receiver does not match its key"))?;
-    match discovery {
-        Discovery::Scan => {
-            activate(conn, id, scan_from)?;
-        }
-        // Only a key scanned from its earliest possible payment needs no directory history.
-        // The lookup reads through the account's current pass and every block the scan
-        // stored without the key, so it may wait for a newer publication. With neither, it
-        // waits for the next pass.
-        Discovery::Lookup if active_from.is_none_or(|start| start > stored_from) => {
-            conn.execute(
-                "INSERT INTO ironwood_one_time_lookups (one_time_key_id, cutoff_height)
-                 SELECT ?1, MAX(height) FROM (
-                     SELECT publication_height AS height FROM ironwood_one_time_discovery
-                     WHERE account_id = ?2
-                     UNION ALL SELECT MAX(height) FROM blocks)
-                 WHERE true
-                 ON CONFLICT (one_time_key_id) DO UPDATE SET
-                     cutoff_height = COALESCE(MAX(cutoff_height, excluded.cutoff_height),
-                         cutoff_height, excluded.cutoff_height)",
-                rusqlite::params![id, account_ref.0],
-            )?;
-        }
-        Discovery::Lookup | Discovery::Funding => {}
-    }
-    Ok((id, OneTimeKey { scanning_key }))
-}
-
-/// Starts or extends trial decryption of key `id` from `from`, reopening a closed key and
-/// requeuing blocks scanned without it. A pending lookup still covers the history before
-/// `from`.
-fn activate(
-    conn: &rusqlite::Transaction<'_>,
-    id: i64,
-    from: BlockHeight,
-) -> Result<(), SqliteClientError> {
-    let (active_from, closed): (Option<u32>, bool) = conn.query_row(
-        "SELECT active_from, closed_at IS NOT NULL FROM ironwood_one_time_keys WHERE id = ?1",
+    let (owner, parent) = account_key(conn, params, account)?;
+    restore::queue::ensure_account(conn, owner.0)?;
+    let fvk = key_id.derive(&parent)?;
+    let receiver = fvk.address_at(0u32, Scope::External).to_raw_address_bytes();
+    let inserted = conn.execute(
+        "INSERT OR IGNORE INTO ironwood_one_time_keys
+        (account_id, purpose, key_index, receiver) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![
+            owner.0,
+            purpose_code(key_id.purpose())?,
+            key_id.index().to_be_bytes(),
+            receiver
+        ],
+    )?;
+    let id = key_ref(conn, account, key_id)?;
+    let stored: Vec<u8> = conn.query_row(
+        "SELECT receiver FROM ironwood_one_time_keys WHERE id = ?1",
         [id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |r| r.get(0),
     )?;
-    let scanned_end = conn
-        .query_row("SELECT MAX(height) FROM blocks", [], |row| {
-            row.get::<_, Option<u32>>(0)
-        })?
-        .map_or(u32::from(from), |h| h.saturating_add(1));
-    let rescan_end = match active_from {
-        Some(start) if !closed && start <= u32::from(from) => return Ok(()),
-        // Lowering an open key's start only adds the older blocks.
-        Some(start) if !closed => start.min(scanned_end),
-        _ => scanned_end,
-    };
-    conn.execute(
-        "UPDATE ironwood_one_time_keys SET active_from = ?2, closed_at = NULL WHERE id = ?1",
-        rusqlite::params![id, u32::from(from)],
-    )?;
-    queue_rescan(conn, from..BlockHeight::from(rescan_end))
+    check_receiver(stored, &fvk)?;
+    if inserted != 0 {
+        conn.execute("UPDATE ironwood_one_time_recovery SET generation = generation + 1 WHERE account_id = ?1", [owner.0])?;
+        if key_id.purpose() == Purpose::Receive {
+            restore::queue::register_history(conn, owner.0, id)?;
+        }
+    }
+    Ok((id, OneTimeKey { key_id, fvk }))
 }
 
 /// Queues `range` for a forced rescan with historic priority.
@@ -444,33 +214,6 @@ fn queue_rescan(
             std::iter::once(ScanRange::from_parts(range.clone(), ScanPriority::Historic)),
             true,
         )?;
-    }
-    Ok(())
-}
-
-/// Requeues the part of a stored batch that open keys outside `used`, the snapshot that
-/// scanned it, missed.
-pub(crate) fn rescan_missed_keys(
-    conn: &rusqlite::Transaction<'_>,
-    used: &[(AccountUuid, KeyId)],
-    range: Range<BlockHeight>,
-) -> Result<(), SqliteClientError> {
-    let used: HashSet<_> = used.iter().copied().collect();
-    let mut stmt = conn.prepare_cached(
-        "SELECT k.purpose, k.key_index, a.uuid, k.active_from
-         FROM ironwood_one_time_keys k JOIN accounts a ON a.id = k.account_id
-         WHERE k.closed_at IS NULL AND k.active_from < ?1",
-    )?;
-    let mut rows = stmt.query([u32::from(range.end)])?;
-    let mut missed = Vec::new();
-    while let Some(row) = rows.next()? {
-        if !used.contains(&(AccountUuid(row.get(2)?), stored_key_id(row)?)) {
-            missed.push(BlockHeight::from(row.get::<_, u32>(3)?).max(range.start));
-        }
-    }
-    drop(rows);
-    if let Some(start) = missed.into_iter().min() {
-        queue_rescan(conn, start..range.end)?;
     }
     Ok(())
 }
@@ -545,9 +288,8 @@ pub(crate) fn queued_note_ivk(
     Ok(ivk)
 }
 
-/// Validates an output's one-time key before it is stored, moving a one-time-key note
-/// found here from a directory's claimed transaction (see [`adopt_found_note`]), and
-/// returns its registry ID. A stored note keeps its key identity.
+/// Validates an output's one-time key before it is stored and returns its registry ID.
+/// A stored note keeps its key identity.
 pub(super) fn received_note_key<
     P: Parameters,
     T: zcash_client_backend::data_api::ll::ReceivedOrchardOutput<AccountId = AccountUuid>,
@@ -561,9 +303,6 @@ pub(super) fn received_note_key<
     let key = validate_received_key(conn, params, pool, output)?;
     if pool != zcash_protocol::ShieldedPool::Ironwood {
         return Ok(key);
-    }
-    if let Some(nf) = output.nullifier() {
-        adopt_found_note(conn, &nf.to_bytes(), tx_ref, output.index())?;
     }
     let index = i64::try_from(output.index()).expect("output indices are representable as i64");
     let stored: Option<i64> = conn
@@ -581,9 +320,10 @@ pub(super) fn received_note_key<
     Ok(key)
 }
 
-/// Binds stored note `note` to registered key `key`, which makes the key's index used: it
-/// advances allocation and is never issued again. This commits with the note, so a
-/// restart cannot allocate the paid address again.
+/// Binds stored note `note` to registered key `key` and marks the key used, committing
+/// with the note so a restart cannot reserve the paid address again. Use alone does not
+/// widen issuance: the receive window follows confirmed payments on the current chain,
+/// and reorg repair can retire use evidence a replacement history no longer holds.
 pub(super) fn bind_received_note(
     conn: &Connection,
     key: i64,
@@ -594,7 +334,7 @@ pub(super) fn bind_received_note(
         rusqlite::params![key, note],
     )?;
     conn.execute(
-        "UPDATE ironwood_one_time_keys SET advances_allocation = 1, used = 1 WHERE id = ?1",
+        "UPDATE ironwood_one_time_keys SET used = 1 WHERE id = ?1",
         [key],
     )?;
     Ok(())
@@ -629,44 +369,6 @@ pub(super) fn validate_received_key<
         ));
     }
     Ok(Some(id))
-}
-
-/// Moves a stored one-time-key note with nullifier `nf` to `action_index` of `tx_ref`,
-/// where it was just found, from the transaction a directory claimed for it, which is
-/// deleted once nothing refers to it. Only the note itself was authenticated. An ordinary
-/// note stays put, so storing it again fails on its nullifier as without one-time keys;
-/// moved, it would keep the old transaction's memo.
-fn adopt_found_note(
-    conn: &Connection,
-    nf: &[u8; 32],
-    tx_ref: crate::TxRef,
-    action_index: usize,
-) -> Result<(), SqliteClientError> {
-    let index = i64::try_from(action_index).expect("output indices are representable as i64");
-    let stored: Option<(i64, i64)> = conn
-        .query_row(
-            "SELECT id, transaction_id FROM ironwood_received_notes
-             WHERE nf = ?1 AND one_time_key_id IS NOT NULL
-               AND (transaction_id != ?2 OR action_index != ?3)",
-            rusqlite::params![nf, tx_ref.0, index],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((id, claimed)) = stored else {
-        return Ok(());
-    };
-    conn.execute(
-        "UPDATE ironwood_received_notes SET transaction_id = ?2, action_index = ?3 WHERE id = ?1",
-        rusqlite::params![id, tx_ref.0, index],
-    )?;
-    conn.execute(
-        "DELETE FROM transactions WHERE id_tx = ?1 AND raw IS NULL
-         AND NOT EXISTS(SELECT 1 FROM v_received_outputs WHERE transaction_id = ?1)
-         AND NOT EXISTS(SELECT 1 FROM v_received_output_spends WHERE transaction_id = ?1)
-         AND NOT EXISTS(SELECT 1 FROM sent_notes WHERE transaction_id = ?1)",
-        [claimed],
-    )?;
-    Ok(())
 }
 
 /// The stored code of `purpose`, or an error for a purpose this store does not support.

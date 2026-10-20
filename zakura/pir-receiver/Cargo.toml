@@ -11,14 +11,11 @@ readme = "README.md"
 
 [features]
 default = []
-## Discovery, over a wallet store's one-time IVK traits.
-wallet = ["dep:thiserror", "dep:zakura-one-time-ivk", "dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol"]
+## Typed network steps consumed by the wallet recovery queue.
+wallet = ["dep:zcash_client_backend", "dep:zcash_protocol"]
 
 [dependencies]
-thiserror = { version = "2", optional = true }
-zakura-one-time-ivk = { version = "=0.0.1-rc2", path = "../one-time-ivk", optional = true }
 zcash_client_backend = { workspace = true, features = ["orchard"], optional = true }
-zcash_primitives = { workspace = true, optional = true }
 zcash_protocol = { workspace = true, optional = true }
 receiver-directory = { package = "zakura-receiver-directory", path = "../receiver-directory" }
 receiver-pir = { package = "zakura-receiver-pir", path = "../receiver-pir" }
