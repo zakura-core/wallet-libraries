@@ -1,0 +1,38 @@
+{
+  "steps": [
+    {
+      "name": "python-tests",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts/tests",
+        "-v"
+      ]
+    },
+    {
+      "name": "fmt",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ]
+    },
+    {
+      "name": "fmt-proto",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--manifest-path",
+        "tools/proto/Cargo.toml",
+        "--all",
+        "--",
+        "--check"
+      ]
+    }
+  ]
+}

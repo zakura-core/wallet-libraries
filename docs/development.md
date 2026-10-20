@@ -54,7 +54,8 @@ features warn as dead code in `default`.
 Node chain readers and their RPC, fixture and RocksDB checks live in wallet-pir.
 The `dependency-boundary` check rejects node and wallet-pir packages in this
 repository's declarations, resolved graphs, lockfiles and fresh wallet consumers.
-The release tooling applies the same policy before packaging.
+The release tooling applies the same policy before packaging. Lightweight CI
+and the local push self-check share `.github/preflight.json`.
 
 The Python configuration table is authoritative. `-p` replaces the package
 selection; features still come from the selected configuration. Test-name
