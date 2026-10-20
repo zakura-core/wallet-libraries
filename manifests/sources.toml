@@ -111,11 +111,9 @@ bip32 = "0.6"
 secp256k1 = "0.33"
 zcash_script = "0.6"
 
-# The Zakura node's crates. Only the server-only workspace in
-# `zakura/pir-chain/`, which has its own lockfile, may use them: a wallet build
-# must never resolve one.
-[server]
-workspace = "zakura/pir-chain"
+# Wallet-owned packages must never import the Zakura node or wallet-pir,
+# including optional, development, build and target-specific dependencies.
+[dependency_boundary]
 node_packages = [
   "zakura-chain",
   "zakura-consensus",
@@ -133,6 +131,7 @@ node_packages = [
 # respect the same one-way ownership boundary as git sources. Repository metadata
 # is checked too, so a newly named package cannot bypass this inventory.
 wallet_pir_packages = [
+  "zakura-server-chain",
   "chain-ingest",
   "combined-server",
   "commitment-ingest",

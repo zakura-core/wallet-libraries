@@ -14,7 +14,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 # Share the graph check's repository predicate, also when loaded from another directory.
 sys.path.insert(0, str(ROOT / "scripts"))
-import server_graph  # noqa: E402
+import dependency_boundary  # noqa: E402
 # Include optional and development dependencies in the order, since Cargo
 # resolves them when it prepares the package for the registry.
 ORDER = (
@@ -57,10 +57,11 @@ def dependency_tables(manifest):
             yield section.get(key, {})
 
 
-def wallet_pir_owned(root, name, dep):
-    """A wallet-libraries release never waits on wallet-pir: refuse its packages under any source."""
-    owned = tomllib.loads((root / "manifests/sources.toml").read_text())["server"]["wallet_pir_packages"]
-    return name in owned or server_graph.wallet_pir_owned(dep.get("git"))
+def forbidden_dependency(root, name, dep):
+    """Reuse the wallet graph policy before resolving or packaging any release."""
+    policy = tomllib.loads((root / "manifests/sources.toml").read_text())["dependency_boundary"]
+    return dependency_boundary.dependency_reason(name, dep.get("git"),
+        set(policy["wallet_pir_packages"]), set(policy["node_packages"]))
 
 
 def release_packages(root):
@@ -87,8 +88,9 @@ def release_packages(root):
                     if isinstance(dep, str):
                         dep = {"version": dep}
                 name = dep.get("package", alias)
-                if wallet_pir_owned(root, name, dep):
-                    raise ReleaseError(f"{package['name']} depends on the wallet-pir package {name}.")
+                reason = forbidden_dependency(root, name, dep)
+                if reason:
+                    raise ReleaseError(f"{package['name']} depends on the {reason}.")
                 if name in names:
                     version = names[name]["version"]
                     if dep.get("version", "").removeprefix("=") != version:
