@@ -1,7 +1,6 @@
 //! Incoming reservations, which live on their key's row, and their quote operations.
 use rusqlite::{Connection, OptionalExtension, named_params, params};
 use zakura_one_time_ivk::swap::Observation;
-use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_protocol::consensus::Parameters;
 
 use super::{RESERVED, ReservationPolicy, lifecycle::record};
@@ -52,24 +51,23 @@ pub(in crate::wallet::one_time_ivk) const STARTED: &str =
     "EXISTS(SELECT 1 FROM ironwood_one_time_operations o
     WHERE o.one_time_key_id = k.id AND o.id > IFNULL(k.reservation_floor, 0) AND o.started = 1)";
 
-/// The exclusive end of the four-index window justified by confirmed payments.
+/// The exclusive end of the four-index window justified by payments mined on the wallet's
+/// current chain. A payment counts from the block that mines it, so the next index is
+/// issuable as soon as a payout lands, and a reorg that drops the payment shrinks the
+/// window again.
 pub(in crate::wallet::one_time_ivk) fn recovery_end(
     conn: &Connection,
     account: i64,
 ) -> Result<u64, SqliteClientError> {
-    let confirmed_below = wallet::chain_tip_height(conn)?.map(|tip| {
-        u32::from(tip)
-            .saturating_add(1)
-            .saturating_sub(ConfirmationsPolicy::default().untrusted().get())
-    });
+    let tip = wallet::chain_tip_height(conn)?.map(u32::from);
     let paid: Option<Vec<u8>> = conn.query_row(
         "SELECT MAX(k.key_index) FROM ironwood_one_time_keys k
-         WHERE k.account_id = :account AND k.purpose = 1 AND (k.prebirthday_height <= :confirmed_below
+         WHERE k.account_id = :account AND k.purpose = 1 AND (k.prebirthday_height <= :tip
              OR EXISTS(SELECT 1 FROM ironwood_received_notes n
                  JOIN transactions t ON t.id_tx = n.transaction_id
                  JOIN blocks b ON b.height = t.mined_height
-                 WHERE n.one_time_key_id = k.id AND t.mined_height <= :confirmed_below))",
-        named_params![":account": account, ":confirmed_below": confirmed_below],
+                 WHERE n.one_time_key_id = k.id AND t.mined_height <= :tip))",
+        named_params![":account": account, ":tip": tip],
         |r| r.get(0),
     )?;
     let next = paid
@@ -348,7 +346,7 @@ pub(in crate::wallet::one_time_ivk) fn record_status<P: Parameters>(
     Ok(!operations.is_empty())
 }
 
-/// Resumes a live draft or reserves the lowest unpaid hole inside the confirmed window.
+/// Resumes a live draft or reserves the lowest unpaid hole inside the mined window.
 pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,

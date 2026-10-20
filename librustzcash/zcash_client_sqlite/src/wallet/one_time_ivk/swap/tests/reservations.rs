@@ -379,3 +379,68 @@ fn a_block_timestamp_ahead_of_the_device_clock_does_not_settle_a_quote() {
     assert!(catch_up(&mut st).contains(&0));
     assert!(!catch_up(&mut st).contains(&0));
 }
+
+/// A payout widens the window from the block that mines it. With slots 0 to 2 held by
+/// quotes, a payout to 3 that is mined but not yet confirmed makes 4 to 7 issuable at
+/// once. A reorg that drops the payout shrinks the window back to 0 to 3.
+#[test]
+fn a_mined_payout_opens_the_next_indexes_until_a_reorg_drops_it() {
+    use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let now = clock_now();
+    let floor = tip(&st).height;
+    let end = |st: &State| {
+        let owner: i64 = value(
+            st.wallet().conn(),
+            "SELECT id FROM accounts WHERE uuid = ?1",
+            [account.0],
+        );
+        crate::wallet::one_time_ivk::swap::reservations::recovery_end(st.wallet().conn(), owner)
+            .unwrap()
+    };
+    for index in 0..3 {
+        assert_eq!(
+            quote(&mut st, now, &format!("slot-{index}"), true)
+                .0
+                .index(),
+            index
+        );
+    }
+    let paid =
+        store::restore::tests::discovery::pay_candidate(&mut st, KeyId::new(Purpose::Receive, 3));
+    catch_up(&mut st);
+    assert_eq!(
+        store::restore::tests::discovery::one_time_notes(&st),
+        [(100_000, false)]
+    );
+    let depth = u32::from(tip(&st).height) - u32::from(paid.height) + 1;
+    assert!(depth < ConfirmationsPolicy::default().untrusted().get());
+    assert_eq!(end(&st), 8);
+    for index in 4..8 {
+        assert_eq!(
+            quote(&mut st, now, &format!("slot-{index}"), true)
+                .0
+                .index(),
+            index
+        );
+    }
+    assert!(matches!(
+        st.wallet_mut()
+            .db_mut()
+            .prepare_receive_reservation(account, now)
+            .unwrap(),
+        Err(ReservationPolicy::Limit)
+    ));
+
+    st.truncate_to_height(floor);
+    assert_eq!(end(&st), 4);
+    if let Ok(key) = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, now)
+        .unwrap()
+    {
+        assert!(key.key_id().index() < 4);
+    }
+}

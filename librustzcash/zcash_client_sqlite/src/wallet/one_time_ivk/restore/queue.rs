@@ -191,7 +191,7 @@ pub(crate) fn register_history(
     enqueue(conn, key, through, AUTOMATIC)
 }
 
-/// Registers only the four lookahead indexes justified by confirmed payment evidence and
+/// Registers only the four lookahead indexes justified by mined payment evidence and
 /// enrolls them for automatic discovery (see [`enroll`]).
 pub(crate) fn ensure_window<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
@@ -221,7 +221,7 @@ fn enrolled_end(conn: &Connection, owner: i64) -> Result<u64, SqliteClientError>
 }
 
 /// Enrolls registered receive indexes below `end` for automatic discovery, whether the
-/// confirmed window or the seed walk reached them. Every newly enrolled index, including
+/// mined window or the seed walk reached them. Every newly enrolled index, including
 /// one an earlier manual check already derived and completed, gets a historical target
 /// through the processed filter frontier. This shares the transaction with filter progress.
 fn enroll(conn: &Connection, owner: i64, end: u64) -> Result<(), SqliteClientError> {
@@ -250,7 +250,7 @@ fn enroll(conn: &Connection, owner: i64, end: u64) -> Result<(), SqliteClientErr
 }
 
 /// The exclusive end of receive indexes that automatic discovery keeps checking. Issuance
-/// uses the confirmed window alone, but an index once enrolled, by that window or by the
+/// uses the mined window alone, but an index once enrolled, by that window or by the
 /// seed walk, stays here even after a reorg removes the payment that justified it, since
 /// another device may have issued it.
 pub(super) fn automatic_end(conn: &Connection, owner: i64) -> Result<u64, SqliteClientError> {

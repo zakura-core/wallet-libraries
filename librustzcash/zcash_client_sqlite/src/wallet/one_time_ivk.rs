@@ -322,7 +322,7 @@ pub(super) fn received_note_key<
 
 /// Binds stored note `note` to registered key `key` and marks the key used, committing
 /// with the note so a restart cannot reserve the paid address again. Use alone does not
-/// widen issuance: the receive window follows confirmed payments on the current chain,
+/// widen issuance: the receive window follows payments mined on the current chain,
 /// and reorg repair can retire use evidence a replacement history no longer holds.
 pub(super) fn bind_received_note(
     conn: &Connection,
