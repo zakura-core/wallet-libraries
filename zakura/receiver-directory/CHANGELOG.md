@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc1] - 2026-10-20
+
+### Changed
+
+- Use `zakura-receiver-crypto 0.0.1-rc1`, which updates the Common dependency
+  family to `4.0.0-rc3`; the directory still uses only its structural wire codec.
+
 ## [0.0.1-rc0] - 2026-10-19
 
 ### Added

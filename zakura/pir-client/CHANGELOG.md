@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc1] - 2026-10-20
+
+### Changed
+
+- Update to the Common `4.0.0-rc3` dependency family and the matching protocol,
+  server and wallet release candidates. Optional wallet and SQLite integrations
+  use backend and SQLite `0.1.0-rc9.2`.
+
 ## [0.0.1-rc0] - 2026-10-19
 
 ### Added

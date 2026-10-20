@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc1] - 2026-10-20
+
+### Changed
+
+- Update Common protocol and transparent transaction types to the compatible
+  `4.0.0-rc3` dependency family.
+
 ## [0.0.1-rc0] - 2026-10-19
 
 ### Added

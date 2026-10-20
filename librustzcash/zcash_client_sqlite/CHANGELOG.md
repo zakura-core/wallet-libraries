@@ -7,6 +7,26 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9.2] - 2026-10-20
+
+### Changed
+
+- Use backend `0.1.0-rc9.2`, PCZT `0.1.0-rc8` and one-time IVK `0.0.1-rc2`,
+  with the compatible Common `4.0.0-rc3` dependency family.
+- Transaction expiry, input locks, status work and one-time-key closure follow
+  the network's NU7 expiry rules, including transactions whose expiry is not yet
+  known. Mined transaction evidence is preserved independently of expiry.
+- `WalletDb::check_witnesses` now requires its network parameter type to implement
+  `consensus::Parameters` so it can apply the network's NU7 rules.
+
+### Fixed
+
+- Select shielded anchors at the required depth behind the chain tip and report
+  notes as spendable only when they are covered by the selected anchor.
+- Apply the same expiry and competing-spend rules to transparent balances,
+  spendability and recovery-ledger snapshots.
+
+
 ## [0.1.0-rc9.1] - 2026-10-19
 
 ### Added

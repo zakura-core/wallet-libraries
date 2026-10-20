@@ -7,6 +7,8 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9.2] - 2026-10-20
+
 ### Fixed
 
 - `data_api::ll::wallet::update_tree` (and so `put_blocks`) keeps a tree it
@@ -18,6 +20,19 @@ and this library adheres to Rust's notion of
   removed this way.
 
 ### Added
+
+- `data_api::wallet::validate_transaction_for_target` checks whether a finished transaction
+  may be sent at a candidate height: it must commit to the branch active there, use a version
+  valid in that branch, not have a nonzero expiry below the height, and fit the padded NU7
+  shielded budgets. `validate_pczt_for_target` (with `pczt`) applies the same rules to a PCZT
+  before its proofs and signatures are finalized. Neither checks network freshness, proofs,
+  signatures, input availability or other consensus rules. A refusal is a typed
+  `data_api::error::AcceptanceError`, wrapped by the new `Error::Acceptance`.
+
+- `Proposal::validate_for_current_target` refuses saved proposals from a different
+  consensus branch, and `Proposal::validate_shielded_budget` checks padded NU7
+  per-pool and combined limits before inputs are locked. Refusals use the new
+  `ProposalError::ObsoleteConsensusBranch` and `ProposalError::ShieldedBudget`.
 
 - `data_api::ll::wallet::stored_root_mismatches`, the number of shards whose
   computed root differed from the stored one since the process started.
@@ -32,6 +47,14 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- Update public cryptography and protocol types to the compatible Common
+  `4.0.0-rc3` dependency family.
+- `create_proposed_transactions` and `create_pczt_from_proposal` refuse a saved proposal with
+  `Error::Acceptance` before building when the transaction's expiry (the override, the
+  canonical crossing expiry, or the default from the proposal's target height) is nonzero and
+  below the current candidate height. The proposal's target and a canonical expiry are not
+  moved; rebuild the proposal instead. `extract_and_store_transaction_from_pczt` applies
+  `validate_pczt_for_target` at the current candidate height before finalizing.
 - `data_api::ll::wallet::put_blocks` inserts a range's note commitments without
   block checkpoints when every pool's tree would prune those checkpoints in the
   same call: the tree already holds `max_checkpoints` newer checkpoints that are
@@ -72,22 +95,9 @@ and this library adheres to Rust's notion of
 - `fees::orchard::InputView::is_one_time` (with `orchard`) marks a one-time-key input. It
   defaults to false. `data_api::error::Error::OneTimeSpendWithoutMarker` reports a one-time
   spend that lacks its marker output.
-- `data_api::wallet::validate_transaction_for_target` checks whether a finished transaction
-  may be sent at a candidate height: it must commit to the branch active there, use a version
-  valid in that branch, not have a nonzero expiry below the height, and fit the padded NU7
-  shielded budgets. `validate_pczt_for_target` (with `pczt`) applies the same rules to a PCZT
-  before its proofs and signatures are finalized. Neither checks network freshness, proofs,
-  signatures, input availability or other consensus rules. A refusal is a typed
-  `data_api::error::AcceptanceError`, wrapped by the new `Error::Acceptance`.
 
 ### Changed
 
-- `create_proposed_transactions` and `create_pczt_from_proposal` refuse a saved proposal with
-  `Error::Acceptance` before building when the transaction's expiry (the override, the
-  canonical crossing expiry, or the default from the proposal's target height) is nonzero and
-  below the current candidate height. The proposal's target and a canonical expiry are not
-  moved; rebuild the proposal instead. `extract_and_store_transaction_from_pczt` applies
-  `validate_pczt_for_target` at the current candidate height before finalizing.
 - Every transaction that spends a one-time-key note now includes an Ironwood output to the
   spending account's internal address, zero-valued when there is no other change. A restore
   can then recognize the spend with the account's ordinary keys. The change strategies and

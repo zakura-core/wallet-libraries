@@ -16,7 +16,7 @@ wallet = ["dep:thiserror", "dep:zakura-one-time-ivk", "dep:zcash_client_backend"
 
 [dependencies]
 thiserror = { version = "2", optional = true }
-zakura-one-time-ivk = { version = "=0.0.1-rc1", path = "../one-time-ivk", optional = true }
+zakura-one-time-ivk = { version = "=0.0.1-rc2", path = "../one-time-ivk", optional = true }
 zcash_client_backend = { workspace = true, features = ["orchard"], optional = true }
 zcash_primitives = { workspace = true, optional = true }
 zcash_protocol = { workspace = true, optional = true }

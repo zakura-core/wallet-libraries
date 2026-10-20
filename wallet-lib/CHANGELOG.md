@@ -7,7 +7,12 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9.2] - 2026-10-20
+
 ### Changed
+
+- Use backend and SQLite `0.1.0-rc9.2` and PCZT `0.1.0-rc8` for the Zakura
+  backend, including the new scan helpers and NU7 wallet acceptance checks.
 
 - Updated the published Zakura Common dependency family to `4.0.0-rc3`.
   Compatible newer releases are allowed so consumers can share Common packages

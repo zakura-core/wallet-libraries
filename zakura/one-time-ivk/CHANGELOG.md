@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc2] - 2026-10-20
+
+### Changed
+
+- Update cryptography and protocol types to the compatible Common `4.0.0-rc3`
+  dependency family.
+
 ## [0.0.1-rc1] - 2026-10-19
 
 ### Changed

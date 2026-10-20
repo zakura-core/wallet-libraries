@@ -7,6 +7,13 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc8] - 2026-10-20
+
+### Changed
+
+- Update the public cryptography and protocol types to the compatible Common
+  `4.0.0-rc3` dependency family.
+
 ## [0.1.0-rc7] - 2026-10-19
 
 ### Changed

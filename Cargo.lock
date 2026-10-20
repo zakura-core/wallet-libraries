@@ -7520,7 +7520,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-backend"
-version = "0.1.0-rc9.1"
+version = "0.1.0-rc9.2"
 dependencies = [
  "ambassador",
  "arti-client",
@@ -7596,7 +7596,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-sqlite"
-version = "0.1.0-rc9.1"
+version = "0.1.0-rc9.2"
 dependencies = [
  "ambassador",
  "assert_matches",
@@ -7757,7 +7757,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-near-intents"
-version = "0.0.1-rc1"
+version = "0.0.1-rc2"
 dependencies = [
  "zakura-one-time-ivk",
  "zakura-protocol",
@@ -7778,7 +7778,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-one-time-ivk"
-version = "0.0.1-rc1"
+version = "0.0.1-rc2"
 dependencies = [
  "blake2b_simd",
  "ff 0.14.0",
@@ -7894,7 +7894,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pczt"
-version = "0.1.0-rc7"
+version = "0.1.0-rc8"
 dependencies = [
  "blake2b_simd",
  "document-features",
@@ -7930,7 +7930,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-client"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -7976,7 +7976,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-protocol"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "base64 0.22.1",
  "bitcoin",
@@ -8000,7 +8000,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-publisher"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "base64 0.22.1",
  "bitcoin",
@@ -8019,7 +8019,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-query-server"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "bitcoin",
  "hex",
@@ -8055,7 +8055,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-server-core"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "bitcoin",
  "hex",
@@ -8128,7 +8128,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-receiver-crypto"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "hex",
  "incrementalmerkletree 0.8.2",
@@ -8142,7 +8142,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-receiver-directory"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "bitcoin",
  "bitcoin_hashes",
@@ -8157,7 +8157,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-receiver-pir"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "hex",
  "ipir-sp",
@@ -8269,7 +8269,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-wallet-lib"
-version = "0.1.0-rc9"
+version = "0.1.0-rc9.2"
 dependencies = [
  "orchard",
  "pczt",
