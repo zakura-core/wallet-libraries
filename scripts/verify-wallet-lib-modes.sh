@@ -279,7 +279,6 @@ expected = {
     "zakura-bellman",
     "zakura-bls12-381",
     "zakura-halo2-gadgets",
-    "zakura-halo2-legacy-pdqsort",
     "zakura-halo2-poseidon",
     "zakura-halo2-proofs",
     "zakura-jubjub",
