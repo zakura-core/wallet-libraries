@@ -2137,11 +2137,15 @@ fn a_raw_transaction_without_the_claimed_action_disputes_the_label() {
 
 /// A receipt admitted under a wrong label funds an unmined send before raw bytes disprove the
 /// label. Disputing it keeps the note row and its spend, so the note stays unavailable and the
-/// balance unchanged, and the true record moves that same row to its own transaction with
-/// the spend intact, with discovery enabled and disabled.
+/// balance unchanged, while history, transaction outputs and transaction details stop
+/// attributing it to the disproven transaction. The true record moves that same row to its
+/// own transaction with the spend intact, and history shows it received there, with
+/// discovery enabled and disabled.
 #[test]
 fn a_disputed_label_keeps_the_receipts_pending_spend() {
-    use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
+    use zcash_client_backend::data_api::{
+        transparent_ledger::TransparentDetailRead as _, wallet::decrypt_and_store_transaction,
+    };
     for enabled in [true, false] {
         let Mislabeled {
             mut st,
@@ -2188,6 +2192,21 @@ fn a_disputed_label_keeps_the_receipts_pending_spend() {
             "the pending spend survives"
         );
         assert_eq!(one_time_notes(&st), [(50_000, true)], "still unavailable");
+        // The disproven transaction no longer shows the receipt, while the send that spends
+        // it still counts the input.
+        assert_eq!(
+            received_in(&st, account.id()),
+            [(send.as_ref().to_vec(), 0, 50_000)],
+            "enabled {enabled}: history during the dispute"
+        );
+        assert!(outputs_of(&st, forged.txid).is_empty());
+        assert!(
+            st.wallet()
+                .db()
+                .transparent_display_view(account.id(), forged.txid)
+                .unwrap()
+                .is_none()
+        );
 
         let publication = publication_at(&st, tip(&st).height);
         if enabled {
@@ -2207,11 +2226,55 @@ fn a_disputed_label_keeps_the_receipts_pending_spend() {
         );
         assert_eq!(spends(&st), [send.as_ref().to_vec()]);
         assert_eq!(one_time_notes(&st), [(50_000, true)]);
+        let mut history = received_in(&st, account.id());
+        history.sort();
+        let mut expected = vec![
+            (candidate.txid.as_ref().to_vec(), 50_000, 0),
+            (send.as_ref().to_vec(), 0, 50_000),
+        ];
+        expected.sort();
+        assert_eq!(
+            history, expected,
+            "enabled {enabled}: history after relabeling"
+        );
+        assert_eq!(outputs_of(&st, candidate.txid), [50_000]);
     }
 }
 
+/// Each transaction in `account`'s history summaries with its recorded received and spent
+/// values, excluding change.
+fn received_in(st: &State, account: AccountUuid) -> Vec<(Vec<u8>, u64, u64)> {
+    st.wallet()
+        .db()
+        .transaction_history_summaries(account)
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.total_received != 0 || s.total_spent != 0)
+        .map(|s| {
+            let change: u64 = if s.has_change { s.total_received } else { 0 };
+            (
+                s.txid.as_ref().to_vec(),
+                s.total_received - change,
+                s.total_spent,
+            )
+        })
+        .collect()
+}
+
+/// The values of `txid`'s received outputs in `v_tx_outputs`.
+fn outputs_of(st: &State, txid: zcash_primitives::transaction::TxId) -> Vec<i64> {
+    column(
+        st.wallet().conn(),
+        "SELECT value FROM v_tx_outputs WHERE txid = ?1 AND to_account_uuid IS NOT NULL",
+        [txid.as_ref()],
+    )
+}
+
 /// The blocks the cache holds above `height`, as filter progress names them.
-fn blocks_above(st: &State, height: BlockHeight) -> Vec<ChainPoint> {
+pub(in crate::wallet::one_time_ivk) fn blocks_above(
+    st: &State,
+    height: BlockHeight,
+) -> Vec<ChainPoint> {
     let blocks: Vec<Vec<u8>> = column(
         &st.cache().0,
         "SELECT data FROM compactblocks WHERE height > ?1 ORDER BY height",

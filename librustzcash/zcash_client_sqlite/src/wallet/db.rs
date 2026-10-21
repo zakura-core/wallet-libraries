@@ -1633,7 +1633,10 @@ WITH unioned AS (
            ro.is_change                 AS is_change,
            ro.memo                      AS memo,
            a.key_scope                  AS recipient_key_scope
-    FROM v_received_outputs ro
+    -- A private receipt whose transaction label raw bytes disproved is not an output of it.
+    FROM (SELECT * FROM v_received_outputs
+          WHERE NOT (pool = 4 AND id_within_pool_table IN
+              (SELECT note_id FROM ironwood_one_time_disputed_receipts))) ro
     JOIN transactions t
         ON t.id_tx = ro.transaction_id
     LEFT JOIN addresses a ON a.id = ro.address_id
@@ -2050,7 +2053,7 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_OPERATIONS: &str = "CREATE TABLE ironwo
 pub(super) const TABLE_IRONWOOD_ONE_TIME_LOOKUPS: &str = "CREATE TABLE ironwood_one_time_lookups (
                 one_time_key_id INTEGER PRIMARY KEY REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
                 target_height INTEGER CHECK (target_height BETWEEN 0 AND 4294967295),
-                reasons INTEGER NOT NULL DEFAULT 0 CHECK (reasons BETWEEN 0 AND 3),
+                reasons INTEGER NOT NULL DEFAULT 0 CHECK (reasons BETWEEN 0 AND 7),
                 done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295),
                 last_record BLOB CHECK (length(last_record) = 289),
                 read_complete INTEGER NOT NULL DEFAULT 0 CHECK (read_complete IN (0, 1)),
