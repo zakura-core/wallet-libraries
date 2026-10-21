@@ -15,6 +15,9 @@ and this library adheres to Rust's notion of
 - `WalletDb::record_one_time_witness` takes a companion witness answer instead of a full path, and `WalletDb::refresh_one_time_witness` re-reads a payment whose session can no longer serve its witness. A provisional witness is checked against the wallet's own tree at exactly its construction block; a final one (its Ironwood shard full) at the scanned tip. The accepted root is read before any returned node is used, and an unusable or missing witness leaves the payment pending and reads it again, never completing an empty address.
 - A provider's promised receipt settles only through a recovered note in a transaction the provider reported for that operation, recorded from `Observation::receipts`. Without one, the address stays in direct catch-up.
 - Rebaseline the unlaunched one-time-key schema. The cutover drops abandoned discovery progress while preserving accounts, note ownership and unrelated wallet data. Recovery starts disabled.
+- `WalletDb::get_wallet_summary` computes scan and recovery progress without looking up
+  each scanned block in the scan queue, which made it slow on wallets with millions of
+  scanned blocks. The reported progress is unchanged.
 
 ### Removed
 
