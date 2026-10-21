@@ -14,7 +14,8 @@ fn memo_fixture() -> rusqlite::Connection {
     conn.execute_batch(
         "CREATE TABLE v_received_outputs (
             account_id INTEGER, transaction_id INTEGER, pool INTEGER,
-            output_index INTEGER, memo BLOB);
+            output_index INTEGER, memo BLOB, id_within_pool_table INTEGER);
+         CREATE TABLE ironwood_one_time_disputed_receipts (note_id INTEGER PRIMARY KEY);
          CREATE TABLE sent_notes (
             from_account_id INTEGER, transaction_id INTEGER, output_pool INTEGER,
             output_index INTEGER, memo BLOB);
@@ -29,7 +30,7 @@ fn recovered_memo_requires_the_same_account_transaction_pool_and_index() {
     for received_identity in [(9, 2, 4, 3), (1, 9, 4, 3), (1, 2, 3, 3), (1, 2, 4, 9)] {
         let conn = memo_fixture();
         conn.execute(
-            "INSERT INTO v_received_outputs VALUES (?1, ?2, ?3, ?4, X'F6')",
+            "INSERT INTO v_received_outputs (account_id, transaction_id, pool, output_index, memo) VALUES (?1, ?2, ?3, ?4, X'F6')",
             rusqlite::params![
                 received_identity.0,
                 received_identity.1,
@@ -52,13 +53,13 @@ fn matching_recovered_memos_work_in_every_shielded_pool_but_do_not_hide_other_mi
         conn.execute("UPDATE sent_notes SET output_pool = ?", [pool])
             .unwrap();
         conn.execute(
-            "INSERT INTO v_received_outputs VALUES (1, 2, ?1, 3, X'F6')",
+            "INSERT INTO v_received_outputs (account_id, transaction_id, pool, output_index, memo) VALUES (1, 2, ?1, 3, X'F6')",
             [pool],
         )
         .unwrap();
         assert!(!has_unretrieved_memo(&conn, 1, 2).unwrap());
         conn.execute(
-            "INSERT INTO v_received_outputs VALUES (1, 2, ?1, 4, NULL)",
+            "INSERT INTO v_received_outputs (account_id, transaction_id, pool, output_index, memo) VALUES (1, 2, ?1, 4, NULL)",
             [pool],
         )
         .unwrap();
