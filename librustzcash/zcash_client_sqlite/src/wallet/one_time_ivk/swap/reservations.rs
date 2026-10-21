@@ -385,6 +385,20 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
         return Ok(Err(ReservationPolicy::Limit));
     }
     let (id, key) = register(conn, params, account, KeyId::new(Purpose::Receive, next))?;
+    // A restored seed may have paid this address before the wallet knew it, so it is
+    // handed out only after its own history was read to completion with nothing pending.
+    let checked: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
+             WHERE l.one_time_key_id = ?1 AND l.target_height IS NULL AND l.read_complete = 1
+               AND l.done_height IS NOT NULL)
+         AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
+             WHERE p.one_time_key_id = ?1)",
+        [id],
+        |r| r.get(0),
+    )?;
+    if !checked {
+        return Ok(Err(ReservationPolicy::ReceiveHistory));
+    }
     conn.execute(
         "UPDATE ironwood_one_time_keys SET reserved_at = ?2, released_at = NULL,
             reservation_floor = IFNULL((SELECT MAX(id) FROM ironwood_one_time_operations

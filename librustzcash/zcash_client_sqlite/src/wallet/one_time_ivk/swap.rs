@@ -32,6 +32,9 @@ pub enum ReservationPolicy {
     Stale,
     /// Ordinary history must catch up before allocating another refund index.
     FundingHistory,
+    /// Automatic discovery has not finished checking the next receive address's history,
+    /// which a restored seed may already have paid. Run recovery, then ask again.
+    ReceiveHistory,
 }
 
 impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
@@ -79,7 +82,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     }
 
     /// Resumes a live draft or recycles the lowest unpaid eligible receive index.
-    /// Payment evidence alone extends the four-index window. No network check gates issuance.
+    /// Payment evidence alone extends the four-index window. A new index is issued only
+    /// once its own automatic history lookup completed, never waiting on other indexes.
     pub fn prepare_receive_reservation(
         &mut self,
         account: AccountUuid,
