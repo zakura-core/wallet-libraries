@@ -91,6 +91,21 @@ impl Segment {
     }
 }
 
+/// Why a capture failed: a check of a saved descriptor, or of data this capture fetched.
+enum Fetched {
+    Cached(Error),
+    Fresh(Error),
+}
+
+impl Fetched {
+    /// The underlying error.
+    fn into_error(self) -> Error {
+        match self {
+            Fetched::Cached(e) | Fetched::Fresh(e) => e,
+        }
+    }
+}
+
 /// Bounded public reads of one network's inventory, before any PIR session opens.
 pub struct Inventories;
 
@@ -131,7 +146,9 @@ impl Inventories {
         head: Head,
         budget: usize,
     ) -> Result<Inventory, Error> {
-        Self::fetch(origin, http, head, budget, None).await
+        Self::fetch(origin, http, head, budget, None)
+            .await
+            .map_err(Fetched::into_error)
     }
 
     /// [`Self::capture`], reusing settled shard descriptors from `store` for whole chunks
@@ -166,10 +183,18 @@ impl Inventories {
             {
                 Ok(inventory) => inventory,
                 // Neither comes from a cached descriptor, so a full capture would repeat it.
-                Err(e @ (Error::Transport(_) | Error::Unsupported)) => return Err(e),
-                Err(_) => Self::fetch(origin, http, head, budget, None).await?,
+                Err(Fetched::Fresh(e @ (Error::Transport(_) | Error::Unsupported))) => {
+                    return Err(e);
+                }
+                // Anything else may come from the saved descriptors, which a full capture
+                // replaces once verified.
+                Err(_) => Self::fetch(origin, http, head, budget, None)
+                    .await
+                    .map_err(Fetched::into_error)?,
             },
-            None => Self::fetch(origin, http, head, budget, None).await?,
+            None => Self::fetch(origin, http, head, budget, None)
+                .await
+                .map_err(Fetched::into_error)?,
         };
         if let Ok(bytes) = DescriptorCache::of(&inventory).encode() {
             if saved.as_deref() != Some(&bytes[..]) {
@@ -187,13 +212,15 @@ impl Inventories {
         head: Head,
         budget: usize,
         cache: Option<&DescriptorCache>,
-    ) -> Result<Inventory, Error> {
+    ) -> Result<Inventory, Fetched> {
         let origin = origin.trim_end_matches('/');
         let inventory = hex::encode(head.inventory);
-        let mut capture = Capture::new(head.clone(), budget)?;
+        let mut capture = Capture::new(head.clone(), budget).map_err(Fetched::Fresh)?;
+        let mut cached = false;
         while let Some(index) = capture.next_chunk() {
             if let Some(shards) = cache.and_then(|cache| cache.chunk(&head, index)) {
-                capture.push_cached(shards)?;
+                capture.push_cached(shards).map_err(Fetched::Cached)?;
+                cached = true;
                 continue;
             }
             let bytes = http
@@ -201,10 +228,18 @@ impl Inventories {
                     &format!("{origin}/v1/receiver/inventory/{inventory}/{index}"),
                     MAX_CHUNK_BYTES,
                 )
-                .await?;
-            capture.push(&bytes)?;
+                .await
+                .map_err(Fetched::Fresh)?;
+            capture.push(&bytes).map_err(Fetched::Fresh)?;
         }
-        capture.finish()
+        // The identity check covers cached descriptors too.
+        capture.finish().map_err(|e| {
+            if cached {
+                Fetched::Cached(e)
+            } else {
+                Fetched::Fresh(e)
+            }
+        })
     }
 
     /// Downloads rolling-hint availability without opening or waiting for a PIR session.

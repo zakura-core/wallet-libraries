@@ -310,3 +310,48 @@ fn a_corrupted_cache_recaptures_every_chunk() {
     );
     assert_eq!(capture(&server, &store, &MAIN.inventory(32, settled)), 1);
 }
+
+/// A saved descriptor whose payment or witness protocol was altered is a bad cache, not an
+/// upgrade: capture falls back to every chunk, succeeds without `Unsupported`, and the
+/// verified inventory replaces the saved value. A served inventory in an unknown protocol
+/// still surfaces `Unsupported`, with a cache or without one.
+#[test]
+fn an_altered_cached_protocol_recaptures_and_replaces_the_cache() {
+    for field in ["payments", "witnesses"] {
+        let (server, store) = (Server::default(), Store::default());
+        let inventory = MAIN.inventory(32, settled);
+        assert_eq!(capture(&server, &store, &inventory), 3);
+        let verified = store.load().unwrap();
+        let mut saved: serde_json::Value = serde_json::from_slice(&verified).unwrap();
+        saved["shards"][3]["segments"][0][field]["protocol"] = "future-protocol".into();
+        store.save(&serde_json::to_vec(&saved).unwrap());
+        // The altered descriptor is in the first chunk, refused before any download.
+        assert_eq!(capture(&server, &store, &inventory), 3, "{field}");
+        assert_eq!(store.load().unwrap(), verified, "{field}");
+        assert_eq!(capture(&server, &store, &inventory), 1, "{field}");
+    }
+
+    let (server, store) = (Server::default(), Store::default());
+    let inventory = MAIN.inventory(32, settled);
+    assert_eq!(capture(&server, &store, &inventory), 3);
+    let head = server.publish(&inventory);
+    let key = hex::encode(head.inventory);
+    let last = server.chunks.borrow()[&key].len() - 1;
+    for cached in [true, false] {
+        if !cached {
+            *store.0.borrow_mut() = None;
+        }
+        let mut chunk: serde_json::Value =
+            serde_json::from_slice(&server.chunks.borrow()[&key][last]).unwrap();
+        chunk["shards"][0]["segments"][0]["payments"]["protocol"] = "future-protocol".into();
+        server.chunks.borrow_mut().get_mut(&key).unwrap()[last] =
+            serde_json::to_vec(&chunk).unwrap();
+        let result = ready(Inventories::capture_cached(
+            "https://receiver/",
+            &server,
+            head.clone(),
+            &store,
+        ));
+        assert!(matches!(result, Err(Error::Unsupported)), "cached {cached}");
+    }
+}
