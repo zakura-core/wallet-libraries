@@ -312,6 +312,10 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         spent_in,
     )?;
     wallet::enhance_pir::finish_private_receipt(conn, sessions.enhance, tx_ref)?;
+    conn.execute(
+        "DELETE FROM ironwood_one_time_owed_receipts WHERE one_time_key_id = ?1 AND nf = ?2",
+        params![key_ref, recovered.nullifier().to_bytes()],
+    )?;
     dequeue()?;
     Ok(Admission::Admitted)
 }

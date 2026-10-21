@@ -35,10 +35,13 @@ const STEP_BUDGET: usize = 64;
 /// mined while a sibling receipt still waits for its own position and witness.
 const UNPLACED: &str = "(t.mined_height IS NULL OR n.commitment_tree_position IS NULL)";
 
-/// SQL over key alias `k`: an already-owned receipt is [`UNPLACED`] and needs repair.
-const REPAIR_KEY: &str = "EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
+/// SQL over key alias `k`: an already-owned receipt is [`UNPLACED`], or one whose
+/// transaction label was refused is still owed (see [`check_raw_receipts`]), so it needs
+/// repair.
+const REPAIR_KEY: &str = "(EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
     ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = k.id
-    AND (t.mined_height IS NULL OR n.commitment_tree_position IS NULL))";
+    AND (t.mined_height IS NULL OR n.commitment_tree_position IS NULL))
+    OR EXISTS(SELECT 1 FROM ironwood_one_time_owed_receipts o WHERE o.one_time_key_id = k.id))";
 
 /// SQL over key alias `k`: a local operation promises a receipt not yet attributed to it.
 /// Only a mined note in a transaction the provider reported for that operation counts.
@@ -70,7 +73,31 @@ fn known_receipt(
         params![key, txid.as_ref(), action], |r| r.get(0))?)
 }
 
-/// Allows disabled accounts to repair only keys with an already-owned unmined receipt.
+/// Whether disabled discovery may still admit `candidate` for key `id`: the exact output
+/// was already admitted, or its authenticated note is owed a repair after its transaction
+/// label was refused (see [`check_raw_receipts`]).
+fn repairable<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    account: AccountUuid,
+    key: KeyId,
+    id: i64,
+    candidate: &super::PendingPayment,
+) -> Result<bool, SqliteClientError> {
+    if known_receipt(conn, id, candidate.txid, candidate.action_index)? {
+        return Ok(true);
+    }
+    let (_, note) = authenticate(conn, params, account, key, candidate)?;
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_owed_receipts
+             WHERE one_time_key_id = ?1 AND nf = ?2)",
+        params![id, note.nullifier().to_bytes()],
+        |r| r.get(0),
+    )?)
+}
+
+/// Allows disabled accounts to repair only keys with a receipt that needs it (see
+/// [`REPAIR_KEY`]).
 fn can_lookup(
     conn: &Connection,
     owner: i64,
@@ -812,7 +839,8 @@ pub(crate) fn status<P: Parameters>(
         FROM ironwood_one_time_payment_recovery p JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
         WHERE k.account_id = ?1 AND p.witness IS NULL
         AND (?2 OR EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t ON t.id_tx = n.transaction_id
-            WHERE n.one_time_key_id = k.id AND t.txid = p.txid AND n.action_index = p.action_index AND {UNPLACED}))
+            WHERE n.one_time_key_id = k.id AND t.txid = p.txid AND n.action_index = p.action_index AND {UNPLACED})
+            OR EXISTS(SELECT 1 FROM ironwood_one_time_owed_receipts o WHERE o.one_time_key_id = k.id))
         AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id AND l.reasons != 0
             AND l.next_attempt_at <= ?3)
         ORDER BY p.height, p.position LIMIT 64"))?
@@ -914,7 +942,7 @@ pub(crate) fn record_lookup<P: Parameters>(
     let discovery_enabled = token(conn, owner.0)?.0;
     for record in &page.records {
         let candidate = directory_candidate(&record.payment).expect("validated above");
-        if discovery_enabled || known_receipt(conn, id, candidate.txid, candidate.action_index)? {
+        if discovery_enabled || repairable(conn, params, account, work.work.key, id, &candidate)? {
             queue_payment(conn, params, account, work.work.key, &candidate)?;
         }
     }
@@ -992,7 +1020,10 @@ pub(crate) fn record_witness<P: Parameters>(
         let known: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
             JOIN transactions t ON t.txid = p.txid JOIN ironwood_received_notes n ON n.transaction_id = t.id_tx
             WHERE p.one_time_key_id = ?1 AND p.position = ?2 AND substr(p.encrypted_note, 33, 32) = ?3
-                AND n.one_time_key_id = p.one_time_key_id AND n.action_index = p.action_index AND {UNPLACED})"),
+                AND n.one_time_key_id = p.one_time_key_id AND n.action_index = p.action_index AND {UNPLACED})
+            OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
+                JOIN ironwood_one_time_owed_receipts o ON o.one_time_key_id = p.one_time_key_id
+                WHERE p.one_time_key_id = ?1 AND p.position = ?2 AND substr(p.encrypted_note, 33, 32) = ?3)"),
             params![id, request.position, request.cmx], |r| r.get(0))?;
         if !known {
             return Ok(false);
@@ -1035,8 +1066,9 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
 /// transaction: its claimed action must carry the note's rho, ephemeral key and ciphertext
 /// prefix. The directory authenticates the note and its position but not its transaction
 /// label, so a mismatch is handled like a rejected admission: the note is dropped, crediting
-/// nothing to `tx`, and its key's history is read again. Returns whether an admitted note
-/// still belongs to `tx`.
+/// nothing to `tx`, and its key's history is read again. The note stays owed by nullifier, so
+/// that read repairs it under its true label even while discovery is disabled. Returns
+/// whether an admitted note still belongs to `tx`.
 pub(crate) fn check_raw_receipts(
     conn: &Connection,
     tx: &zcash_primitives::transaction::Transaction,
@@ -1078,6 +1110,12 @@ pub(crate) fn check_raw_receipts(
             kept = true;
             continue;
         }
+        // The note stays owed under its true label, so even disabled discovery repairs it.
+        conn.execute(
+            "INSERT OR IGNORE INTO ironwood_one_time_owed_receipts (one_time_key_id, nf)
+             SELECT one_time_key_id, nf FROM ironwood_received_notes WHERE id = ?1 AND nf IS NOT NULL",
+            [note],
+        )?;
         conn.execute("DELETE FROM ironwood_received_notes WHERE id = ?1", [note])?;
         conn.execute(
             "UPDATE ironwood_one_time_lookups SET last_record = NULL, done_height = NULL,
@@ -1145,12 +1183,12 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
         })?
         .collect::<Result<_, _>>()?;
     for (id, key, txid, action, witness, anchor_height, anchor_hash) in waiting {
-        if !token(conn, owner.0)?.0 && !known_receipt(conn, id, txid, action)? {
-            continue;
-        }
         let Some(candidate) = pending_payment(conn, txid, action)? else {
             continue;
         };
+        if !token(conn, owner.0)?.0 && !repairable(conn, params, account, key, id, &candidate)? {
+            continue;
+        }
         let anchor = ChainPoint {
             height: BlockHeight::from(anchor_height),
             hash: BlockHash(anchor_hash),
