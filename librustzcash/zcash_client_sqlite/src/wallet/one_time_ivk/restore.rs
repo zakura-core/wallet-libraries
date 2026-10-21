@@ -113,7 +113,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
         work: &LookupWork,
         now: i64,
     ) -> Result<(), SqliteClientError> {
-        self.transactionally(|db| queue::defer(db.conn.0, account, work, now))
+        self.transactionally(|db| queue::defer(db.conn.0, db.params, account, work, now))
     }
 
     /// Applies a candidate through the normal note, inclusion and spend-evidence checks.
