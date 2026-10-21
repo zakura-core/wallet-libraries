@@ -43,6 +43,11 @@ impl RusqliteMigration for Migration {
                 operation_id INTEGER NOT NULL REFERENCES ironwood_one_time_operations(id) ON DELETE CASCADE,
                 txid BLOB NOT NULL CHECK (length(txid) = 32),
                 PRIMARY KEY (operation_id, txid)
+             );
+             CREATE TABLE ironwood_one_time_owed_receipts (
+                one_time_key_id INTEGER NOT NULL REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
+                nf BLOB NOT NULL CHECK (length(nf) = 32),
+                PRIMARY KEY (one_time_key_id, nf)
              );",
         )?;
         Ok(())
