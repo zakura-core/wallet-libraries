@@ -9,7 +9,7 @@
 
 ### Removed
 
-- Remove the aggregate paid/seen/recent filter envelope and manifest fields. Snapshots retain the complete payment rows and coverage checks.
+- Remove the aggregate paid/seen/recent filter envelope and manifest fields, with the `filter` module (`Filters`, `FilterSet`, `ProviderSet`, `PAID`, `SEEN`, `RECENT`, `MAX_FILTERS_BYTES`, `check_filters` and `valid_label`). Snapshots retain the complete payment rows and coverage checks.
 
 ### Added
 

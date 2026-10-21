@@ -1217,3 +1217,175 @@ async fn a_blind_restore_reopens_segments_beyond_the_session_budget() {
         "evicted sessions reopen: {setups}"
     );
 }
+
+/// The key's due lookup in `r`'s wallet.
+fn due(
+    r: &Restored,
+    key: KeyId,
+) -> zcash_client_backend::data_api::one_time_ivk::restore::LookupWork {
+    r.st.wallet()
+        .db()
+        .one_time_recovery(r.account, NOW)
+        .unwrap()
+        .lookups
+        .into_iter()
+        .find(|work| work.work.key == key)
+        .unwrap()
+}
+
+/// A lookup resumed from a cursor its inventory no longer serves starts over. An incomplete
+/// inventory listed key 0's payment B as its first page, and the wallet saved a cursor
+/// after it. The replacement inventory lists the earlier payment A first and B second. The
+/// saved cursor names the old inventory, so the lookup reads the key's history again from
+/// its start without counting the mismatch as empty history or moving completion progress,
+/// and finds both payments.
+#[tokio::test]
+async fn a_lookup_whose_cursor_record_changed_starts_over() {
+    use zcash_client_backend::data_api::one_time_ivk::restore::{LookupCursor, LookupPage};
+    let mut r = restored(&[0, 0]);
+    let directory = serve(&r.st, &r.records, r.through);
+    let old = connect(&directory, r.through).await;
+    begin(&mut r, &old, true);
+    let key = KeyId::new(Purpose::Receive, 0);
+    let work = due(&r, key);
+    let read = lookup(&old, &work).await.unwrap();
+    let mut second = r.records[1].clone();
+    second.page = 0;
+    let first = RawRecord::decode(&second.encode().unwrap())
+        .unwrap()
+        .unwrap();
+    let incomplete = LookupPage {
+        records: vec![first.clone()],
+        checked_through: None,
+        next: Some(LookupCursor {
+            inventory: read.publication.id,
+            shard: 0,
+            segment: 0,
+            last: Some(first.clone()),
+        }),
+        ..read
+    };
+    assert!(
+        r.st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(r.account, &work, &incomplete, NOW)
+            .unwrap()
+    );
+    let resumed = due(&r, key);
+    assert_eq!(resumed.cursor.as_ref().unwrap().last, Some(first));
+    let before =
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, NOW)
+            .unwrap();
+
+    r.st.generate_and_scan_empty_blocks(1);
+    let end = tip(&r.st);
+    directory.replace(publish_with(
+        &r.st,
+        &r.records,
+        &[Plan::recent(end.height)],
+        &|_| 0,
+    ));
+    let current = connect(&directory, end).await;
+    let page = lookup(&current, &resumed).await.unwrap();
+    assert_eq!(page.records.len(), 2);
+    assert!(page.complete());
+    assert!(
+        r.st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(r.account, &resumed, &page, NOW)
+            .unwrap()
+    );
+    let after =
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, NOW)
+            .unwrap();
+    assert_eq!(
+        (
+            after.restore_next,
+            after.restore_gap,
+            after.restore_complete
+        ),
+        (
+            before.restore_next,
+            before.restore_gap,
+            before.restore_complete
+        )
+    );
+    begin(&mut r, &current, true);
+    drain(&mut r.st, r.account, &current).await;
+    assert_eq!(one_time_value(&r.st), 2 * VALUE);
+}
+
+/// A lookup the wallet refuses is deferred with a backoff, without counting it as empty
+/// history: it is not due again until the delay has passed.
+#[tokio::test]
+async fn a_refused_lookup_backs_off_before_its_retry() {
+    let mut r = restored(&[1]);
+    r.records[0].receiver = receiver(&r.st, 0);
+    let directory = serve(&r.st, &r.records, r.through);
+    let client = connect(&directory, r.through).await;
+    begin(&mut r, &client, true);
+    let key = KeyId::new(Purpose::Receive, 0);
+    let work = due(&r, key);
+    let page = lookup(&client, &work).await.unwrap();
+    assert!(
+        r.st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(r.account, &work, &page, NOW)
+            .is_err()
+    );
+    r.st.wallet_mut()
+        .db_mut()
+        .defer_one_time_lookup(r.account, &work, NOW)
+        .unwrap();
+    let due_at = |r: &Restored, now: i64| {
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, now)
+            .unwrap()
+            .lookups
+            .iter()
+            .any(|w| w.work.key == key)
+    };
+    assert!(!due_at(&r, NOW));
+    assert!(!due_at(&r, NOW + 59));
+    assert!(due_at(&r, NOW + 60));
+    assert_eq!(
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, NOW)
+            .unwrap()
+            .restore_gap,
+        0
+    );
+}
+
+/// An inventory ending above the wallet's scanned tip waits for the wallet to learn that
+/// tip: it starts no recovery work.
+#[tokio::test]
+async fn a_publication_ahead_of_the_wallet_waits() {
+    let mut r = restored(&[0]);
+    for _ in 0..5 {
+        r.st.generate_empty_block();
+    }
+    let height = r.through.height + 5;
+    let ahead = ChainPoint {
+        height,
+        hash: BlockHash(cached(&r.st, height).hash().0),
+    };
+    let directory = serve(&r.st, &r.records, ahead);
+    let client = connect(&directory, ahead).await;
+    let db = r.st.wallet_mut().db_mut();
+    db.set_one_time_recovery_enabled(r.account, true).unwrap();
+    let before = db.one_time_recovery(r.account, NOW).unwrap();
+    assert!(
+        !db.begin_one_time_recovery(r.account, wallet_publication(client.inventory()), true)
+            .unwrap()
+    );
+    let after = db.one_time_recovery(r.account, NOW).unwrap();
+    assert_eq!(after, before);
+    assert!(after.filter_frontier.is_none() && after.witnesses.is_empty());
+}

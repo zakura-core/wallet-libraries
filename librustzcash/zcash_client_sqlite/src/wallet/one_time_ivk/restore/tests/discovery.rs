@@ -3594,3 +3594,460 @@ fn a_refund_paid_while_its_key_was_retired_is_found_after_a_newer_status() {
     drain(&mut st, account, current);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
+
+/// Registers `key` from `from`, starts recovery at the tip without direct catch-up, and
+/// answers `key`'s lookup with `payments` as one complete page.
+fn answer_with(
+    st: &mut State,
+    key: KeyId,
+    from: BlockHeight,
+    payments: &[DirectoryPayment],
+) -> Result<bool, SqliteClientError> {
+    let account = st.test_account().unwrap().id();
+    recover(st.wallet_mut().db_mut(), account, key, from);
+    let publication = publication_at(st, tip(st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.begin_one_time_recovery(account, publication, false)
+            .unwrap()
+    );
+    let work = work_of(st, key);
+    let receiver = work.work.receiver;
+    let total = payments.len() as u32;
+    let page = whole(
+        publication,
+        (0..)
+            .zip(payments)
+            .map(|(page, payment)| DirectoryRecord {
+                receiver,
+                page,
+                total,
+                payment: payment.clone(),
+                ordinal: page,
+            })
+            .collect(),
+    );
+    let db = st.wallet_mut().db_mut();
+    db.record_one_time_lookup(account, &work, &page, clock_now())
+}
+
+/// The number of queued payment candidates.
+fn candidates(st: &State) -> u32 {
+    value(
+        st.wallet().conn(),
+        "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery",
+        [],
+    )
+}
+
+/// A late payment already admitted under one action of its transaction is redundant when
+/// the directory later names another action for the same note: its path dequeues it, and
+/// the stored receipt keeps its label.
+#[test]
+fn a_late_payment_already_admitted_under_another_action_is_dequeued() {
+    let (mut st, candidate, _) = late_fixture();
+    let account = st.test_account().unwrap().id();
+    send_witness(&mut st, key8(), &candidate);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    let label = |st: &State| -> Vec<(Vec<u8>, u32)> {
+        rows(
+            st_conn(st),
+            "SELECT t.txid, n.action_index FROM ironwood_received_notes n
+             JOIN transactions t ON t.id_tx = n.transaction_id WHERE n.one_time_key_id IS NOT NULL",
+            [],
+        )
+    };
+    let before = label(&st);
+    exec(
+        st.wallet().conn(),
+        "INSERT INTO ironwood_one_time_payment_recovery
+             (one_time_key_id, txid, action_index, height, block_hash, tx_index, position,
+              encrypted_note, payments, witnesses, ordinal)
+         SELECT k.id, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?9, ?10, 0 FROM ironwood_one_time_keys k
+         WHERE k.purpose = 1 AND k.key_index = ?8",
+        rusqlite::params![
+            candidate.txid.as_ref(),
+            candidate.action_index + 1,
+            u32::from(candidate.height),
+            candidate.block_hash.0,
+            candidate.tx_index,
+            candidate.position,
+            candidate.encrypted_note.to_bytes().to_vec(),
+            key8().index().to_be_bytes(),
+            [1u8; 32],
+            [7u8; 32]
+        ],
+    );
+    exec(
+        st.wallet().conn(),
+        "UPDATE ironwood_one_time_lookups SET reasons = 1, target_height = ?1, read_complete = 0
+         WHERE one_time_key_id = (SELECT id FROM ironwood_one_time_keys
+             WHERE purpose = 1 AND key_index = ?2)",
+        rusqlite::params![u32::from(tip(&st).height), key8().index().to_be_bytes()],
+    );
+    let claimed = PendingPayment {
+        action_index: candidate.action_index + 1,
+        ..candidate.clone()
+    };
+    send_witness(&mut st, key8(), &claimed);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    assert_eq!(candidates(&st), 0);
+    assert_eq!(label(&st), before);
+    let _ = account;
+}
+
+/// `st`'s wallet connection, for closures that cannot borrow `st` mutably.
+fn st_conn(st: &State) -> &Connection {
+    st.wallet().conn()
+}
+
+/// A publication whose last block or tree size differs from the wallet's is refused: it
+/// changes no recovery state, so it sets no filter frontier, and cannot answer a lookup the
+/// wallet holds, which stays due. A publication matching the chain is taken.
+#[test]
+fn a_publication_off_the_wallets_chain_is_rejected() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let good = publication_at(&st, tip(&st).height);
+    let before = status(st.wallet().db(), account);
+    let mut off_chain = good;
+    off_chain.end.hash = [9; 32];
+    let mut other_tree = good;
+    other_tree.end.tree_size += 1;
+    for bad in [off_chain, other_tree] {
+        assert!(
+            !st.wallet_mut()
+                .db_mut()
+                .begin_one_time_recovery(account, bad, true)
+                .unwrap()
+        );
+        assert_eq!(status(st.wallet().db(), account), before);
+        assert!(before.filter_frontier.is_none());
+    }
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, good, true)
+            .unwrap()
+    );
+    let held = status(st.wallet().db(), account).lookups[0].clone();
+    let page = whole(off_chain, vec![]);
+    assert!(
+        !st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, &held, &page, clock_now())
+            .unwrap()
+    );
+    assert_eq!(status(st.wallet().db(), account).lookups[0], held);
+}
+
+/// A page refused for a bad record keeps nothing it would have queued before that record,
+/// and its lookup stays due from the start, so the corrected page is taken.
+#[test]
+fn a_refused_page_queues_nothing() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    let good = directory_answer(&candidate);
+    let beyond = DirectoryPayment {
+        height: u32::from(tip(&st).height) + 1,
+        position: good.position + 1,
+        ..good.clone()
+    };
+    assert!(answer_with(&mut st, key8(), candidate.height, &[good.clone(), beyond]).is_err());
+    assert_eq!(candidates(&st), 0);
+    let (due, last): (bool, Option<Vec<u8>>) = row(
+        st.wallet().conn(),
+        "SELECT target_height IS NOT NULL AND read_complete = 0, last_record
+         FROM ironwood_one_time_lookups WHERE one_time_key_id =
+             (SELECT id FROM ironwood_one_time_keys WHERE purpose = 1 AND key_index = ?1)",
+        [key8().index().to_be_bytes()],
+    );
+    assert!(due && last.is_none());
+    assert!(answer_with(&mut st, key8(), candidate.height, &[good]).unwrap());
+    assert_eq!(status(st.wallet().db(), account).witnesses.len(), 1);
+}
+
+/// A record outside the publication, or one the chain contradicts, refuses the whole page
+/// and queues nothing: below the publication's start, at or past its tree size, at
+/// transaction index 0, which only a coinbase holds, or in a block other than the wallet's
+/// at its height. The true record is then taken.
+#[test]
+fn a_page_with_an_out_of_range_or_off_chain_record_is_refused() {
+    let mut st = scanned_wallet();
+    let candidate = pay_candidate(&mut st, key8());
+    let good = directory_answer(&candidate);
+    let publication = publication_at(&st, tip(&st).height);
+    let refused = [
+        DirectoryPayment {
+            height: u32::from(publication.start_height) - 1,
+            ..good.clone()
+        },
+        DirectoryPayment {
+            position: publication.end.tree_size,
+            ..good.clone()
+        },
+        DirectoryPayment {
+            tx_index: 0,
+            ..good.clone()
+        },
+        DirectoryPayment {
+            block_hash: [7; 32],
+            ..good.clone()
+        },
+    ];
+    for (i, record) in refused.iter().enumerate() {
+        assert!(
+            matches!(
+                answer_with(&mut st, key8(), candidate.height, &[record.clone()]),
+                Err(SqliteClientError::InvalidOneTimeIvkInput(_))
+            ),
+            "record {i}"
+        );
+        assert_eq!(candidates(&st), 0, "record {i}");
+    }
+    assert!(answer_with(&mut st, key8(), candidate.height, &[good]).unwrap());
+    assert_eq!(candidates(&st), 1);
+}
+
+/// A rewind below a payment still waiting for its path drops it, since its block may be
+/// gone, and recovery over the replacement chain finds it again at its mined height.
+#[test]
+fn a_rewind_below_a_waiting_payment_drops_it_until_recovery_finds_it_again() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key0 = KeyId::new(Purpose::Receive, 0);
+    let candidate = pay_candidate(&mut st, key0);
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    answer_lookups(&mut st, account, publication);
+    assert_eq!(candidates(&st), 1);
+    assert!(one_time_notes(&st).is_empty());
+    let end = tip(&st).height;
+    st.truncate_to_height_retaining_cache(candidate.height - 1);
+    assert_eq!(candidates(&st), 0);
+    reopen(&mut st);
+    st.scan_cached_blocks(candidate.height, (end - candidate.height + 1) as usize);
+    let publication = publication_at(&st, end);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    let mined: Option<u32> = value(
+        st.wallet().conn(),
+        "SELECT mined_height FROM transactions WHERE txid = ?1",
+        [candidate.txid.as_ref()],
+    );
+    assert_eq!(mined, Some(u32::from(candidate.height)));
+}
+
+/// An unknown account is an error, not an account with nothing to recover.
+#[test]
+fn an_unknown_accounts_recovery_is_an_error() {
+    let mut st = scanned_wallet();
+    let unknown = crate::AccountUuid::from_uuid(uuid::Uuid::nil());
+    let publication = publication_at(&st, tip(&st).height);
+    let unknown_account =
+        |r: Result<(), SqliteClientError>| matches!(r, Err(SqliteClientError::AccountUnknown));
+    let token = status(st.wallet().db(), st.test_account().unwrap().id()).token;
+    let db = st.wallet_mut().db_mut();
+    assert!(unknown_account(
+        db.one_time_recovery(unknown, clock_now()).map(drop)
+    ));
+    assert!(unknown_account(db.one_time_receivers(unknown).map(drop)));
+    assert!(unknown_account(
+        db.begin_one_time_recovery(unknown, publication, true)
+            .map(drop)
+    ));
+    let work = LookupWork {
+        token,
+        work: zcash_client_backend::data_api::one_time_ivk::restore::DiscoveryWork {
+            key: key8(),
+            receiver: [0; 43],
+        },
+        from: publication.start_height,
+        through: publication.end.height,
+        cursor: None,
+    };
+    let db = st.wallet_mut().db_mut();
+    assert!(unknown_account(db.defer_one_time_lookup(
+        unknown,
+        &work,
+        clock_now()
+    )));
+}
+
+/// A publication above the wallet's scanned chain, one older than the correction the
+/// account already took, or one starting after Ironwood activation, is refused.
+#[test]
+fn stale_future_and_partial_publications_are_refused() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let begin = |st: &mut State, publication: RecoveryPublication| {
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    };
+
+    let (future, _) = st.generate_empty_block();
+    let ahead = publication_at(&st, future);
+    assert!(!begin(&mut st, ahead));
+    st.scan_cached_blocks(future, 1);
+    assert!(begin(&mut st, ahead));
+
+    let corrected = RecoveryPublication {
+        history_revision: 1,
+        ..ahead
+    };
+    assert!(begin(&mut st, corrected));
+    assert!(!begin(&mut st, ahead), "an older correction is stale");
+
+    let activation = st
+        .network()
+        .activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+        .unwrap();
+    let late_start = RecoveryPublication {
+        start_height: activation + 1,
+        ..corrected
+    };
+    assert!(!begin(&mut st, late_start));
+    let from_activation = RecoveryPublication {
+        start_height: activation,
+        ..corrected
+    };
+    assert!(begin(&mut st, from_activation));
+}
+
+/// A payment before the account's birthday must precede the birthday block's first
+/// Ironwood output. A genuine one marks its key paid before the birthday, untracked like
+/// any note there. A later note a directory claims at a height before the birthday is
+/// refused and dropped, and marks nothing.
+#[test]
+fn a_payment_claimed_before_the_birthday_must_precede_the_birthday_block() {
+    for genuine in [true, false] {
+        let mut st = scanned_wallet();
+        let account = st.test_account().unwrap().id();
+        let mut candidate = pay_candidate(&mut st, key8());
+        st.generate_and_scan_empty_blocks(1);
+        let birthday = if genuine {
+            u32::from(candidate.height) + 1
+        } else {
+            let hash: Vec<u8> = value(
+                st.wallet().conn(),
+                "SELECT hash FROM blocks WHERE height = ?1",
+                [u32::from(candidate.height) - 1],
+            );
+            candidate.height = candidate.height - 1;
+            candidate.block_hash = BlockHash(hash.try_into().unwrap());
+            u32::from(candidate.height) + 1
+        };
+        exec(
+            st.wallet().conn(),
+            "UPDATE accounts SET birthday_height = ?1",
+            [birthday],
+        );
+        let publication = queue_late(&mut st, key8(), &candidate);
+        send_witness(&mut st, key8(), &candidate);
+        drain(&mut st, account, publication);
+        assert!(one_time_notes(&st).is_empty());
+        assert_eq!(candidates(&st), 0);
+        let marked: Option<u32> = value(
+            st.wallet().conn(),
+            "SELECT prebirthday_height FROM ironwood_one_time_keys
+             WHERE purpose = 1 AND key_index = ?1",
+            [key8().index().to_be_bytes()],
+        );
+        assert_eq!(marked, genuine.then_some(birthday), "genuine {genuine}");
+    }
+}
+
+/// A refund key with several local operations retires only once every one is conclusive,
+/// and an expected refund is settled by the sum of the receipts the provider reported for
+/// it, not by any one of them.
+#[test]
+fn a_refund_key_retires_only_once_every_operation_settles() {
+    use zakura_one_time_ivk::swap::{
+        Observation,
+        OperationStatus::{Active, Terminal},
+        ReceiptExpectation,
+    };
+    let refund = |i| KeyId::new(Purpose::Refund, i);
+    let watched = |st: &State, i: u64| -> bool {
+        let account = st.test_account().unwrap().id();
+        let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
+        receivers.iter().any(|w| w.key == refund(i))
+    };
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let now = clock_now();
+    let height = tip(&st).height;
+    for i in 0..2 {
+        recover(st.wallet_mut().db_mut(), account, refund(i), height);
+    }
+    let observe = |st: &mut State, i: u64, deposit: &str, status, receipts, at| {
+        observe_with(
+            st.wallet_mut().db_mut(),
+            account,
+            refund(i),
+            (deposit, now + 3_600),
+            Observation {
+                status,
+                funded: true,
+                receipts,
+            },
+            at,
+        )
+        .unwrap();
+    };
+    // R0 has two swaps: one ending with no refund leaves it watched for the other.
+    observe(&mut st, 0, "a", Active, vec![], now);
+    observe(&mut st, 0, "b", Active, vec![], now);
+    observe(
+        &mut st,
+        0,
+        "a",
+        Terminal(ReceiptExpectation::None),
+        vec![],
+        now + 60,
+    );
+    assert!(watched(&st, 0), "the other swap may still refund");
+    observe(
+        &mut st,
+        0,
+        "b",
+        Terminal(ReceiptExpectation::None),
+        vec![],
+        now + 60,
+    );
+    assert!(!watched(&st, 0));
+
+    // R1 expects 150,000 and receives two reported refunds of 100,000.
+    let first = pay_candidate(&mut st, refund(1));
+    let second = pay_candidate(&mut st, refund(1));
+    let owed = Terminal(ReceiptExpectation::Positive(Some(
+        Zatoshis::const_from_u64(150_000),
+    )));
+    observe(&mut st, 1, "c", owed, vec![first.txid], now);
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
+    assert!(watched(&st, 1), "one reported refund falls short");
+    observe(&mut st, 1, "c", owed, vec![second.txid], now + 60);
+    assert!(!watched(&st, 1));
+}

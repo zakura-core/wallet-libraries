@@ -1442,19 +1442,16 @@ pub(crate) fn require_upgrade<P: Parameters>(
 }
 
 /// Backs off a failed request without counting it as an empty or completed history.
-pub(crate) fn defer(
+pub(crate) fn defer<P: Parameters>(
     conn: &Connection,
+    params: &P,
     account: AccountUuid,
     work: &LookupWork,
     now: i64,
 ) -> Result<(), SqliteClientError> {
-    let owner: i64 = conn.query_row(
-        "SELECT id FROM accounts WHERE uuid = ?1",
-        [account.0],
-        |r| r.get(0),
-    )?;
+    let (owner, _) = account_key(conn, params, account)?;
     let id = key_ref(conn, account, work.work.key)?;
-    if !can_lookup(conn, owner, id, work.token)? {
+    if !can_lookup(conn, owner.0, id, work.token)? {
         return Ok(());
     }
     #[allow(clippy::type_complexity)]
