@@ -280,37 +280,20 @@ fn enrolled_end(conn: &Connection, owner: i64) -> Result<u64, SqliteClientError>
 }
 
 /// Enrolls registered receive indexes below `end` for automatic discovery, whether the
-/// mined window or the seed walk reached them. Every newly enrolled index, including
-/// one an earlier manual check already derived and completed, gets a historical target
-/// through the processed filter frontier. This shares the transaction with filter progress.
-///
-/// Growing the automatic set advances the generation, as every change to the filter
-/// receiver set must: a filter request captured before it never matched the new keys, so
-/// its callback must not move the frontier past their blocks.
+/// mined window or the seed walk reached them. Each newly enrolled index, including one an
+/// earlier manual check already derived and completed, enters monitoring, which queues its
+/// history and advances the generation (see [`fencing_monitoring`]).
 fn enroll(conn: &Connection, owner: i64, end: u64) -> Result<(), SqliteClientError> {
-    let enrolled = enrolled_end(conn, owner)?;
-    if end <= enrolled {
+    if end <= enrolled_end(conn, owner)? {
         return Ok(());
     }
-    let exposed: Vec<i64> = conn
-        .prepare(
-            "SELECT id FROM ironwood_one_time_keys
-            WHERE account_id = ?1 AND purpose = 1 AND key_index >= ?2 AND key_index < ?3",
-        )?
-        .query_map(
-            params![owner, enrolled.to_be_bytes(), end.to_be_bytes()],
-            |r| r.get(0),
-        )?
-        .collect::<Result<_, _>>()?;
-    for id in exposed {
-        register_history(conn, owner, id)?;
-    }
-    conn.execute(
-        "UPDATE ironwood_one_time_recovery SET receive_end = ?2, generation = generation + 1
-        WHERE account_id = ?1",
-        params![owner, end.to_be_bytes()],
-    )?;
-    Ok(())
+    fencing_monitoring(conn, &[owner], || {
+        conn.execute(
+            "UPDATE ironwood_one_time_recovery SET receive_end = ?2 WHERE account_id = ?1",
+            params![owner, end.to_be_bytes()],
+        )?;
+        Ok(())
+    })
 }
 
 /// The exclusive end of receive indexes that automatic discovery keeps checking. Issuance
@@ -329,30 +312,26 @@ pub(super) fn automatic_end(conn: &Connection, owner: i64) -> Result<u64, Sqlite
     Ok(super::super::swap::reservations::recovery_end(conn, owner)?.max(enrolled))
 }
 
-/// Records funded refund evidence and queues its history even if ordinary sync passed it.
+/// Records funded refund evidence. A key it brings into monitoring has its history queued
+/// even if ordinary sync passed it (see [`fencing_monitoring`]).
 pub(crate) fn funded(
     conn: &Connection,
     key: i64,
     height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
-    let changed = conn.execute(
-        "UPDATE ironwood_one_time_keys SET funding_height = ?2
-        WHERE id = ?1 AND (funding_height IS NULL OR funding_height > ?2)",
-        params![key, u32::from(height)],
-    )?;
-    if changed == 0 {
-        return Ok(());
-    }
     let owner = conn.query_row(
         "SELECT account_id FROM ironwood_one_time_keys WHERE id = ?1",
         [key],
         |r| r.get(0),
     )?;
-    conn.execute(
-        "UPDATE ironwood_one_time_recovery SET generation = generation + 1 WHERE account_id = ?1",
-        [owner],
-    )?;
-    register_history(conn, owner, key)
+    fencing_monitoring(conn, &[owner], || {
+        conn.execute(
+            "UPDATE ironwood_one_time_keys SET funding_height = ?2
+            WHERE id = ?1 AND (funding_height IS NULL OR funding_height > ?2)",
+            params![key, u32::from(height)],
+        )?;
+        Ok(())
+    })
 }
 
 /// Pauses work and invalidates in-flight responses without deleting notes or pending requests.
@@ -557,6 +536,11 @@ fn monitored_keys(conn: &Connection, owner: i64) -> Result<Vec<i64>, SqliteClien
 
 /// Runs `change` and advances the generation of each account whose monitored keys it
 /// changed, so a filter request captured with the old receiver set cannot commit.
+///
+/// Every key `change` adds to monitoring, by enrollment, funding evidence, a newer status,
+/// a dispute or any other path, gets its history queued through the processed frontier
+/// (see [`register_history`]) in the same transaction. Filters already passed blocks where
+/// it was not watched, such as a payment to a refund key while it was retired.
 pub(in crate::wallet::one_time_ivk) fn fencing_monitoring<T>(
     conn: &Connection,
     owners: &[i64],
@@ -568,7 +552,11 @@ pub(in crate::wallet::one_time_ivk) fn fencing_monitoring<T>(
         .collect::<Result<Vec<_>, _>>()?;
     let result = change()?;
     for (owner, before) in owners.iter().zip(before) {
-        if monitored_keys(conn, *owner)? != before {
+        let after = monitored_keys(conn, *owner)?;
+        for key in after.iter().filter(|k| before.binary_search(k).is_err()) {
+            register_history(conn, *owner, *key)?;
+        }
+        if after != before {
             conn.execute(
                 "UPDATE ironwood_one_time_recovery SET generation = generation + 1
                  WHERE account_id = ?1",
