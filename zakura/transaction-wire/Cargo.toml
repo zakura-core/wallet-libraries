@@ -24,7 +24,9 @@ name = "zcash_transaction_wire"
 [dependencies]
 blake2b_simd = { version = "1", default-features = false }
 sha2 = { version = "0.10", default-features = false }
-zcash_protocol.workspace = true
+# The wire reader uses protocol APIs available since RC1. Keep it consumable by
+# services pinned to that protocol family while allowing current Common releases.
+zcash_protocol = { package = "zakura-protocol", version = "4.0.0-rc1", default-features = false }
 
 # The existing typed decoder is the differential oracle. It is only a test
 # dependency, so it never enters a normal consumer's dependency graph.

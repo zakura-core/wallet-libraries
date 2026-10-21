@@ -47,6 +47,10 @@ Amounts use `zakura-protocol`'s `Zatoshis` (`0..=MAX_MONEY`) and `ZatBalance`
 field types. Only the per-element metadata vectors allocate, and each element
 count is checked against the remaining input before allocating.
 
+The normal dependency accepts Common protocol releases from `4.0.0-rc1` onward.
+Consumers can retain that protocol pin; the typed-decoder tests use the current
+Common family selected by this workspace.
+
 ## Trust boundary
 
 A successful parse means the bytes follow the wire grammar, nothing more.
