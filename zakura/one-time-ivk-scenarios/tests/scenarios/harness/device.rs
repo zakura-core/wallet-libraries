@@ -142,9 +142,33 @@ impl Device {
     /// recovery is complete, exposes a lookup or witness, or waits only on time (a backoff,
     /// made due here by a far-future clock), a publication or ordinary sync, or the user
     /// (feature or manual search paused, which leaves a cancelled search's lookups without
-    /// a reason).
+    /// a reason). A reserved receiver held by invalidated history must have a runnable
+    /// lookup that can lift the hold, or a payment candidate in progress.
     pub fn assert_no_stall(&self) {
         let state = self.db.one_time_recovery(self.account, i64::MAX).unwrap();
+        if state.enabled {
+            let held: bool = self
+                .conn()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys k JOIN accounts a ON a.id = k.account_id
+                     WHERE a.uuid = ?1 AND k.purpose = 1 AND k.used = 0
+                       AND k.reserved_at IS NOT NULL AND k.released_at IS NULL
+                       AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
+                           WHERE l.one_time_key_id = k.id AND l.reasons & 4 != 0)
+                       AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
+                           WHERE l.one_time_key_id = k.id AND l.target_height IS NOT NULL
+                             AND l.reasons & 3 != 0 AND l.read_complete = 0)
+                       AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
+                           WHERE p.one_time_key_id = k.id))",
+                    [self.account.expose_uuid()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                !held,
+                "a reserved receiver is held with no work to release it"
+            );
+        }
         if !state.enabled || !state.lookups.is_empty() || !state.witnesses.is_empty() {
             return;
         }

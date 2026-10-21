@@ -67,6 +67,33 @@ pub(crate) fn truncate(
         "UPDATE ironwood_journal_coverage SET end_height = ?1 + 1 WHERE end_height > ?1 + 1",
         [floor],
     )?;
+    // Blocks above the floor are about to go, and filters resume above it.
+    queue_invalidated(conn, Some(floor))
+}
+
+/// Gives every invalidated lookup (reason bit 4, see `restore::queue::INVALIDATED`) of an
+/// automatically monitored key a runnable automatic target through its account's frontier,
+/// capped at `cap`, so a reservation hold never stands without work that can lift it. Every
+/// site that sets the bit calls this. A manual-only key keeps the bit alone, since nothing
+/// reserves it.
+pub(crate) fn queue_invalidated(
+    conn: &rusqlite::Connection,
+    cap: Option<u32>,
+) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE ironwood_one_time_lookups SET reasons = reasons | 1, read_complete = 0,
+            target_height = MAX(COALESCE(target_height, 0), MIN(COALESCE(?1, 4294967295),
+                (SELECT MAX(COALESCE(r.filter_height, 0), COALESCE((SELECT MAX(height) FROM blocks), 0))
+                 FROM ironwood_one_time_keys k
+                 JOIN ironwood_one_time_recovery r ON r.account_id = k.account_id
+                 WHERE k.id = ironwood_one_time_lookups.one_time_key_id)))
+        WHERE reasons & 4 != 0 AND (target_height IS NULL OR reasons & 3 = 0)
+          AND one_time_key_id IN (SELECT k.id FROM ironwood_one_time_keys k
+              WHERE (k.purpose = 1 AND k.key_index < (SELECT r.receive_end
+                  FROM ironwood_one_time_recovery r WHERE r.account_id = k.account_id))
+                 OR k.funding_height IS NOT NULL)",
+        [cap],
+    )?;
     Ok(())
 }
 
@@ -97,5 +124,5 @@ pub(crate) fn reopen_discovery(
         (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
         [owner],
     )?;
-    Ok(())
+    queue_invalidated(conn, None)
 }
