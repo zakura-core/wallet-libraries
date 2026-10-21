@@ -60,6 +60,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     }
 
     /// Accepts a chain-compatible publication and optionally queues unfinished direct catch-up.
+    /// Direct catch-up skips paid keys whose history is complete: a repeat payment to one is
+    /// found automatically only inside the rolling filter window (see
+    /// `record_one_time_filters`), and otherwise only by [`Self::check_one_time_history`].
     pub fn begin_one_time_recovery(
         &mut self,
         account: AccountUuid,
