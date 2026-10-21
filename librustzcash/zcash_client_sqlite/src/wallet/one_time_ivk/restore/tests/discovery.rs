@@ -21,12 +21,33 @@ pub(in crate::wallet::one_time_ivk) fn whole(
     }
 }
 
+/// [`whole`] for `work`, or the step that reads nothing when its first unchecked height is
+/// past the publication's end.
+pub(in crate::wallet::one_time_ivk) fn whole_for(
+    work: &LookupWork,
+    publication: RecoveryPublication,
+    records: Vec<DirectoryRecord>,
+) -> LookupPage {
+    if work.from > publication.end.height {
+        LookupPage {
+            shards: vec![],
+            segment: None,
+            records: vec![],
+            checked_through: None,
+            ..whole(publication, vec![])
+        }
+    } else {
+        whole(publication, records)
+    }
+}
+
 /// The fixture publication's only shard, read rather than filtered.
 pub(in crate::wallet::one_time_ivk) fn only_shard(
     publication: RecoveryPublication,
 ) -> Vec<StepShard> {
     vec![StepShard {
         index: 0,
+        start_height: publication.start_height,
         end_height: publication.end.height,
         segments: 1,
         excluded: false,
@@ -360,19 +381,30 @@ fn answer_lookup(st: &mut State, account: AccountUuid, publication: RecoveryPubl
         .and_then(|c| c.last.as_ref())
         .map_or(0, |r| r.page as usize + 1);
     let end = (start + 32).min(records.len());
-    let page = LookupPage {
-        publication,
-        inventory_shards: 1,
-        shards: only_shard(publication),
-        segment: Some(segment_ref(publication)),
-        records: records[start..end].to_vec(),
-        checked_through: (end == records.len()).then_some(publication.end.height),
-        next: (end < records.len()).then(|| LookupCursor {
-            inventory: publication.id,
-            shard: 0,
-            segment: 0,
-            last: records[..end].last().cloned(),
-        }),
+    // Nothing is required past the inventory's end, so the step reads no shard.
+    let page = if work.from > publication.end.height {
+        LookupPage {
+            shards: vec![],
+            segment: None,
+            records: vec![],
+            checked_through: None,
+            ..whole(publication, vec![])
+        }
+    } else {
+        LookupPage {
+            publication,
+            inventory_shards: 1,
+            shards: only_shard(publication),
+            segment: Some(segment_ref(publication)),
+            records: records[start..end].to_vec(),
+            checked_through: (end == records.len()).then_some(publication.end.height),
+            next: (end < records.len()).then(|| LookupCursor {
+                inventory: publication.id,
+                shard: 0,
+                segment: 0,
+                last: records[..end].last().cloned(),
+            }),
+        }
     };
     assert!(
         st.wallet_mut()
@@ -1498,6 +1530,7 @@ fn shard_progress_survives_recapture_but_cursors_do_not() {
         inventory_shards: 2,
         shards: vec![StepShard {
             index: 0,
+            start_height: first.start_height,
             end_height: sealed_end,
             segments: 1,
             excluded: true,
@@ -2535,7 +2568,12 @@ fn rewind_and_search(st: &mut State, account: AccountUuid, depth: u32, end: u64,
         assert!(
             st.wallet_mut()
                 .db_mut()
-                .record_one_time_lookup(account, &work, &whole(surviving, records), clock_now())
+                .record_one_time_lookup(
+                    account,
+                    &work,
+                    &whole_for(&work, surviving, records),
+                    clock_now()
+                )
                 .unwrap()
         );
     }
@@ -4136,8 +4174,9 @@ fn malformed_lookup_steps_cannot_advance_coverage() {
         let records = oracle(&st, work.work.receiver, fvk.full_viewing_key());
         assert_eq!(records.len(), 2);
         let end = publication.end.height;
-        let shard = |index: u32, end_height, excluded| StepShard {
+        let shard = |index: u32, start_height, end_height, excluded| StepShard {
             index,
+            start_height,
             end_height,
             segments: 1,
             excluded,
@@ -4163,7 +4202,7 @@ fn malformed_lookup_steps_cannot_advance_coverage() {
             "jump" => {
                 let read = LookupPage {
                     inventory_shards: 3,
-                    shards: vec![shard(0, end - 2, false)],
+                    shards: vec![shard(0, publication.start_height, end - 2, false)],
                     records: vec![],
                     checked_through: Some(end - 2),
                     next: cursor(2, None),
@@ -4178,7 +4217,10 @@ fn malformed_lookup_steps_cannot_advance_coverage() {
             _ => {
                 let reading = LookupPage {
                     inventory_shards: 3,
-                    shards: vec![shard(0, end - 2, true), shard(1, end - 1, false)],
+                    shards: vec![
+                        shard(0, publication.start_height, end - 2, true),
+                        shard(1, end - 1, end - 1, false),
+                    ],
                     segment: Some(SegmentRef {
                         shard: 1,
                         ..segment_ref(publication)
@@ -4265,6 +4307,11 @@ fn drain_sharded(
                 inventory_shards: 2,
                 shards: vec![StepShard {
                     index: shard,
+                    start_height: if shard == 0 {
+                        publication.start_height
+                    } else {
+                        split + 1
+                    },
                     end_height: ends[shard as usize],
                     segments: 1,
                     excluded: false,
@@ -4342,4 +4389,107 @@ fn a_dispute_after_its_label_moved_rereads_the_whole_history() {
         receipts(&st),
         [(note, candidate.txid.as_ref().to_vec(), false)]
     );
+}
+
+/// A fresh request, and one whose cursor names a replaced inventory, must start at the shard
+/// holding its first unchecked height. A step that visits only the last shard, excluded by
+/// its filter, and claims the history complete would skip the shards before it, so the
+/// wallet refuses it and keeps its progress, in both cases.
+#[test]
+fn a_step_that_skips_the_required_shards_is_refused() {
+    for replaced in [false, true] {
+        let mut st = scanned_wallet();
+        let account = st.test_account().unwrap().id();
+        pay_candidate(&mut st, key8());
+        st.generate_and_scan_empty_blocks(3);
+        let height = tip(&st).height;
+        recover(st.wallet_mut().db_mut(), account, key8(), height - 1);
+        let publication = publication_at(&st, height);
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .begin_one_time_recovery(account, publication, false)
+                .unwrap()
+        );
+        let end = publication.end.height;
+        let shard = |index: u32, start_height, end_height, excluded| StepShard {
+            index,
+            start_height,
+            end_height,
+            segments: 1,
+            excluded,
+        };
+        let mut work = work_of(&st, key8());
+        let mut current = publication;
+        if replaced {
+            // The first shard is excluded under one inventory, leaving a cursor there.
+            let first = LookupPage {
+                inventory_shards: 3,
+                shards: vec![shard(0, publication.start_height, end - 2, true)],
+                segment: None,
+                records: vec![],
+                checked_through: Some(end - 2),
+                next: Some(LookupCursor {
+                    inventory: publication.id,
+                    shard: 1,
+                    segment: 0,
+                    last: None,
+                }),
+                ..whole(publication, vec![])
+            };
+            assert!(
+                st.wallet_mut()
+                    .db_mut()
+                    .record_one_time_lookup(account, &work, &first, clock_now())
+                    .unwrap()
+            );
+            // The saved position: shard 1 of that inventory, from the height after shard 0.
+            work = LookupWork {
+                from: end - 1,
+                cursor: Some(LookupCursor {
+                    inventory: publication.id,
+                    shard: 1,
+                    segment: 0,
+                    last: None,
+                }),
+                ..work
+            };
+            current = RecoveryPublication {
+                id: [0xb2; 32],
+                ..publication
+            };
+        }
+        let id = key_ref(&st.wallet().db().conn, account, key8()).unwrap();
+        let progress = |st: &State| -> (Option<u32>, Option<Vec<u8>>, Option<u32>, bool) {
+            row(
+                st.wallet().conn(),
+                "SELECT checked_height, inventory, done_height, read_complete
+                 FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+                [id],
+            )
+        };
+        let before = progress(&st);
+        let skipping = LookupPage {
+            publication: current,
+            inventory_shards: 3,
+            shards: vec![shard(2, end, end, true)],
+            segment: None,
+            records: vec![],
+            checked_through: Some(end),
+            next: None,
+        };
+        assert!(
+            matches!(
+                st.wallet_mut().db_mut().record_one_time_lookup(
+                    account,
+                    &work,
+                    &skipping,
+                    clock_now()
+                ),
+                Err(SqliteClientError::InvalidOneTimeIvkInput(_))
+            ),
+            "replaced {replaced}"
+        );
+        assert_eq!(progress(&st), before, "replaced {replaced}");
+    }
 }

@@ -94,6 +94,7 @@ pub struct SegmentRef {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StepShard {
     pub index: u32,
+    pub start_height: BlockHeight,
     pub end_height: BlockHeight,
     pub segments: u32,
     /// The shard's validated filter excluded the receiver, so it was covered unread.
@@ -127,9 +128,11 @@ impl LookupPage {
     }
 
     /// Whether this step is the only one `work` can take from its position: its visited
-    /// shards continue that position in order, every shard before the last was covered by
-    /// filter, and `checked_through` and `next` are exactly the coverage the visited shards
-    /// and the records read justify. `checked_through` is the end of the last shard the
+    /// shards continue that position in order, starting at the saved cursor or, for a fresh
+    /// request or one whose cursor names another inventory, at the shard holding
+    /// `work.from` (the first shard ending at or after it), every shard before the last was
+    /// covered by filter, and `checked_through` and `next` are exactly the coverage the
+    /// visited shards and the records read justify. `checked_through` is the end of the last shard the
     /// step completed, or unset if it completed none. `next` continues the read segment
     /// after a record that is not its last page, or else moves to the next segment, the
     /// next shard, or completion at the inventory's last shard. Record contents are checked
@@ -145,17 +148,32 @@ impl LookupPage {
                 && self.checked_through.is_none()
                 && self.next.is_none();
         };
-        let first = cursor.map_or(self.shards[0].index, |c| c.shard);
+        let first = match cursor {
+            Some(c) => c.shard,
+            None => {
+                // The shards are contiguous, so the first one starting at or before
+                // `work.from` and ending at or after it is the one required first; only the
+                // inventory's first shard may start after it.
+                let start = &self.shards[0];
+                if start.end_height < work.from
+                    || (start.index > 0 && start.start_height > work.from)
+                {
+                    return false;
+                }
+                start.index
+            }
+        };
         let resumes = |index: u32| cursor.filter(|c| c.shard == index);
         let ordered = (first..).zip(&self.shards).all(|(index, shard)| {
             shard.index == index
                 && index < self.inventory_shards
                 && shard.segments > 0
                 && shard.end_height <= self.publication.end.height
-        }) && self
-            .shards
-            .windows(2)
-            .all(|w| w[0].end_height < w[1].end_height && w[0].excluded);
+        }) && self.shards.iter().all(|s| s.start_height <= s.end_height)
+            && self.shards.windows(2).all(|w| {
+                u32::from(w[0].end_height).checked_add(1) == Some(u32::from(w[1].start_height))
+                    && w[0].excluded
+            });
         if !ordered {
             return false;
         }
@@ -303,10 +321,11 @@ mod tests {
         }
     }
 
-    /// A shard of an inventory whose shard `i` ends at height `10 * (i + 1)`.
+    /// A shard of an inventory whose shard `i` covers heights `10 * i + 1` to `10 * (i + 1)`.
     fn shard(index: u32, segments: u32, excluded: bool) -> StepShard {
         StepShard {
             index,
+            start_height: BlockHeight::from(10 * index + 1),
             end_height: BlockHeight::from(10 * (index + 1)),
             segments,
             excluded,
@@ -315,6 +334,11 @@ mod tests {
 
     /// Work at `cursor` in an inventory, from height 1.
     fn work(cursor: Option<LookupCursor>) -> LookupWork {
+        work_from(1, cursor)
+    }
+
+    /// Work at `cursor` in an inventory, from height `from`.
+    fn work_from(from: u32, cursor: Option<LookupCursor>) -> LookupWork {
         LookupWork {
             token: RecoveryToken {
                 generation: 0,
@@ -324,7 +348,7 @@ mod tests {
                 key: KeyId::new(Purpose::Receive, 0),
                 receiver: [1; 43],
             },
-            from: BlockHeight::from(1),
+            from: BlockHeight::from(from),
             through: BlockHeight::from(1),
             cursor,
         }
@@ -459,6 +483,42 @@ mod tests {
         assert!(!unfinished.valid_step(&resumed));
     }
 
+    /// A fresh request, or one whose cursor names a replaced inventory, starts at the shard
+    /// holding its first unchecked height. A step from 1 that visits only shard 2, excluded
+    /// by its filter, and claims the request complete would skip shards 0 and 1, so it is
+    /// refused, as is one that starts at shard 1. The step that starts at shard 0 is valid,
+    /// and a request from 15 starts at shard 1.
+    #[test]
+    fn a_fresh_step_cannot_skip_the_shards_before_it() {
+        let replaced = Some(LookupCursor {
+            inventory: [9; 32],
+            ..at(1, 0, None)
+        });
+        for cursor in [None, replaced] {
+            let skipped = step(3, vec![shard(2, 1, true)], None, vec![], Some(30), None);
+            assert!(!skipped.valid_step(&work_from(1, cursor.clone())));
+            let late = step(
+                3,
+                vec![shard(1, 1, true), shard(2, 1, true)],
+                None,
+                vec![],
+                Some(30),
+                None,
+            );
+            assert!(!late.valid_step(&work_from(1, cursor.clone())));
+            assert!(late.valid_step(&work_from(15, cursor.clone())));
+            let whole = step(
+                3,
+                vec![shard(0, 1, true), shard(1, 1, true), shard(2, 1, true)],
+                None,
+                vec![],
+                Some(30),
+                None,
+            );
+            assert!(whole.valid_step(&work_from(1, cursor)));
+        }
+    }
+
     /// One reference step of an inventory where `excluded[i]` says shard `i`'s filter
     /// excludes the receiver and `histories[i][s]` is its page count in segment `s`, from
     /// `start`, reading at most `limit` pages: what the network step computes.
@@ -466,12 +526,13 @@ mod tests {
         excluded: &[bool],
         histories: &[Vec<u32>],
         start: Option<LookupCursor>,
+        from: u32,
         limit: u32,
     ) -> (LookupWork, LookupPage) {
         let n = excluded.len() as u32;
         let (mut index, segment, last) = start
             .clone()
-            .map_or((0, 0, None), |c| (c.shard, c.segment, c.last));
+            .map_or(((from - 1) / 10, 0, None), |c| (c.shard, c.segment, c.last));
         let mut shards = vec![];
         let mut checked = None;
         loop {
@@ -492,7 +553,7 @@ mod tests {
                         next: None,
                         ..step(n, shards, None, vec![], None, None)
                     };
-                    return (work(start), page);
+                    return (work_from(from, start), page);
                 }
                 continue;
             }
@@ -506,9 +567,9 @@ mod tests {
                 .clone()
                 .filter(|_| Some(index) == start.as_ref().map(|c| c.shard));
             let total = histories[index as usize][segment as usize];
-            let from = prior.as_ref().map_or(0, |r| r.page + 1);
-            let to = (from + limit).min(total);
-            let records: Vec<_> = (from..to).map(|p| record(p, total)).collect();
+            let first_page = prior.as_ref().map_or(0, |r| r.page + 1);
+            let to = (first_page + limit).min(total);
+            let records: Vec<_> = (first_page..to).map(|p| record(p, total)).collect();
             let finished = to == total;
             let next = if !finished {
                 Some(at(index, segment, records.last().cloned().or(prior)))
@@ -520,7 +581,7 @@ mod tests {
             };
             let page = step(n, shards, Some(segment), records, None, next);
             return (
-                work(start),
+                work_from(from, start),
                 LookupPage {
                     checked_through: checked,
                     ..page
@@ -544,8 +605,10 @@ mod tests {
         (page.checked_through, next)
     }
 
-    /// Random malformed versions of valid steps never advance coverage or position past
-    /// what the step read: any mutation the validator accepts leaves both unchanged.
+    /// Random malformed versions of valid steps, from random first unchecked heights, never
+    /// advance coverage or position past what the step read: any mutation the validator
+    /// accepts leaves both unchanged, and one that drops the step's leading shards is never
+    /// accepted.
     #[test]
     fn mutated_steps_never_advance_past_what_was_read() {
         let mut state = 0x9e37_79b9_7f4a_7c15u64;
@@ -569,10 +632,23 @@ mod tests {
                     .then(|| record(below(u64::from(total - 1)) as u32, total));
                 at(shard, segment, last)
             });
-            let (work, valid) = reference(&excluded, &histories, start, 1 + below(2) as u32);
-            assert!(valid.valid_step(&work), "{valid:?} from {:?}", work.cursor);
+            let from = 1 + below(u64::from(10 * n)) as u32;
+            let (work, valid) = reference(&excluded, &histories, start, from, 1 + below(2) as u32);
+            assert!(
+                valid.valid_step(&work),
+                "{valid:?} from {from} at {:?}",
+                work.cursor
+            );
             let mut mutated = valid.clone();
-            match below(7) {
+            match below(8) {
+                7 => {
+                    // Drop leading shards, as a step that skips history would: never valid.
+                    let drop = 1 + below(mutated.shards.len() as u64) as usize;
+                    if drop < mutated.shards.len() {
+                        mutated.shards.drain(..drop);
+                        assert!(!mutated.valid_step(&work), "{mutated:?} skips shards");
+                    }
+                }
                 0 => {
                     mutated.checked_through = Some(BlockHeight::from(below(50) as u32));
                 }
