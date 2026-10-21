@@ -3488,3 +3488,36 @@ fn a_witness_with_a_wrong_construction_size_is_refused() {
         );
     }
 }
+
+/// A final witness is checked at the scanned tip whatever its construction height. The
+/// payment's shard is full in the wallet's own tree, and the companion was built at a quiet
+/// block the scan has not reached, so the wallet admits the payment at once rather than
+/// waiting for the scan to reach that block.
+#[test]
+fn a_final_witness_built_ahead_of_the_scanned_tip_is_admitted() {
+    let prefix = distinct_leaves(65_534);
+    let mut st = wallet_after_leaves(&prefix);
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    assert_eq!(candidate.position, 65_534);
+    // Leaf 65,535 completes shard zero and 65,536 starts shard one.
+    foreign_blocks(&mut st, 2);
+    queue_late(&mut st, key8(), &candidate);
+    let scanned = tip(&st).height;
+    for _ in 0..3 {
+        st.generate_empty_block();
+    }
+    let ahead = scanned + 3;
+    let request = request_for(&st, key8(), &candidate);
+    let path = path_after(&st, &prefix, candidate.position);
+    let complete = answer(&request, &path, publication_at(&st, ahead).end);
+    let token = status(st.wallet().db(), account).token;
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_witness(account, token, request, &complete, clock_now())
+            .unwrap()
+    );
+    assert_eq!(tip(&st).height, scanned);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
