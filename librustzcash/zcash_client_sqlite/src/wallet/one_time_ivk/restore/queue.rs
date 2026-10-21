@@ -38,13 +38,13 @@ const STEP_BUDGET: usize = 64;
 /// mined while a sibling receipt still waits for its own position and witness.
 const UNPLACED: &str = "(t.mined_height IS NULL OR n.commitment_tree_position IS NULL)";
 
-/// SQL over key alias `k`: an already-owned receipt is [`UNPLACED`], or one whose
-/// transaction label was refused is still owed (see [`check_raw_receipts`]), so it needs
-/// repair.
+/// SQL over key alias `k`: an already-owned receipt is [`UNPLACED`], or its transaction
+/// label is disputed (see [`check_raw_receipts`]), so it needs repair.
 const REPAIR_KEY: &str = "(EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
     ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = k.id
     AND (t.mined_height IS NULL OR n.commitment_tree_position IS NULL))
-    OR EXISTS(SELECT 1 FROM ironwood_one_time_owed_receipts o WHERE o.one_time_key_id = k.id))";
+    OR EXISTS(SELECT 1 FROM ironwood_one_time_disputed_receipts d
+        JOIN ironwood_received_notes n ON n.id = d.note_id WHERE n.one_time_key_id = k.id))";
 
 /// SQL over key alias `k`: a local operation owes a receipt not yet attributed to it, either
 /// a promised one or the possible one of a funded operation that ended inconclusively.
@@ -56,7 +56,9 @@ const UNSETTLED: &str = "EXISTS(SELECT 1 FROM ironwood_one_time_operations o
     AND COALESCE(o.expected_value, 1) > COALESCE((SELECT SUM(n.value)
         FROM ironwood_received_notes n JOIN transactions t ON t.id_tx = n.transaction_id
         JOIN ironwood_one_time_operation_receipts r ON r.operation_id = o.id AND r.txid = t.txid
-        WHERE n.one_time_key_id = k.id AND t.mined_height IS NOT NULL), 0))";
+        WHERE n.one_time_key_id = k.id AND t.mined_height IS NOT NULL
+          AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_disputed_receipts d
+              WHERE d.note_id = n.id)), 0))";
 
 /// SQL over key alias `k`: a complete lookup checked the key through `:height` and left no
 /// candidate waiting for admission.
@@ -78,8 +80,8 @@ fn known_receipt(
 }
 
 /// Whether disabled discovery may still admit `candidate` for key `id`: the exact output
-/// was already admitted, or its authenticated note is owed a repair after its transaction
-/// label was refused (see [`check_raw_receipts`]).
+/// was already admitted, or its authenticated note is a stored receipt whose transaction
+/// label is disputed (see [`check_raw_receipts`]), so the candidate may carry its true label.
 fn repairable<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -93,8 +95,9 @@ fn repairable<P: Parameters>(
     }
     let (_, note) = authenticate(conn, params, account, key, candidate)?;
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_owed_receipts
-             WHERE one_time_key_id = ?1 AND nf = ?2)",
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_disputed_receipts d
+             JOIN ironwood_received_notes n ON n.id = d.note_id
+             WHERE n.one_time_key_id = ?1 AND n.nf = ?2)",
         params![id, note.nullifier().to_bytes()],
         |r| r.get(0),
     )?)
@@ -856,7 +859,8 @@ pub(crate) fn status<P: Parameters>(
         WHERE k.account_id = ?1 AND p.witness IS NULL
         AND (?2 OR EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t ON t.id_tx = n.transaction_id
             WHERE n.one_time_key_id = k.id AND t.txid = p.txid AND n.action_index = p.action_index AND {UNPLACED})
-            OR EXISTS(SELECT 1 FROM ironwood_one_time_owed_receipts o WHERE o.one_time_key_id = k.id))
+            OR EXISTS(SELECT 1 FROM ironwood_one_time_disputed_receipts d
+                JOIN ironwood_received_notes n ON n.id = d.note_id WHERE n.one_time_key_id = k.id))
         AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id AND l.reasons != 0
             AND l.next_attempt_at <= ?3)
         ORDER BY p.height, p.position LIMIT 64"))?
@@ -1038,7 +1042,8 @@ pub(crate) fn record_witness<P: Parameters>(
             WHERE p.one_time_key_id = ?1 AND p.position = ?2 AND substr(p.encrypted_note, 33, 32) = ?3
                 AND n.one_time_key_id = p.one_time_key_id AND n.action_index = p.action_index AND {UNPLACED})
             OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
-                JOIN ironwood_one_time_owed_receipts o ON o.one_time_key_id = p.one_time_key_id
+                JOIN ironwood_received_notes n ON n.one_time_key_id = p.one_time_key_id
+                JOIN ironwood_one_time_disputed_receipts d ON d.note_id = n.id
                 WHERE p.one_time_key_id = ?1 AND p.position = ?2 AND substr(p.encrypted_note, 33, 32) = ?3)"),
             params![id, request.position, request.cmx], |r| r.get(0))?;
         if !known {
@@ -1081,9 +1086,10 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
 /// Checks every one-time note admitted from the directory under `tx`'s ID against the raw
 /// transaction with `action_holds`, the check admission applies when the raw transaction
 /// arrives first. The directory authenticates the note and its position but not its transaction
-/// label, so a mismatch is handled like a rejected admission: the note is dropped, crediting
-/// nothing to `tx`, and its key's history is read again. The note stays owed by nullifier, so
-/// that read repairs it under its true label even while discovery is disabled. The caller
+/// label, so a mismatch disputes the receipt's label: the note row stays with its spends,
+/// witness and position, nothing that trusts a transaction ID counts it, and its key's history
+/// is read again, even while discovery is disabled, until admission moves it to its true
+/// transaction (see `apply::apply_payment`). The caller
 /// keeps `tx`'s raw bytes either way, so a repeated mislabeled record is refused at
 /// admission.
 pub(crate) fn check_raw_receipts(
@@ -1103,7 +1109,7 @@ pub(crate) fn check_raw_receipts(
         })?
         .collect::<Result<_, _>>()?;
     let mut kept = false;
-    let mut dropped = false;
+    let mut disputed = false;
     for (note, key, owner) in notes {
         let carried = stored_action(conn, note)?
             .is_some_and(|(action, stored)| action_holds(tx, action, &stored));
@@ -1111,13 +1117,20 @@ pub(crate) fn check_raw_receipts(
             kept = true;
             continue;
         }
-        // The note stays owed under its true label, so even disabled discovery repairs it.
+        // Inclusion authenticates the note's value and nullifier, so its row, spends, witness
+        // and position stay; only its label is disputed until its history yields the true one.
         conn.execute(
-            "INSERT OR IGNORE INTO ironwood_one_time_owed_receipts (one_time_key_id, nf)
-             SELECT one_time_key_id, nf FROM ironwood_received_notes WHERE id = ?1 AND nf IS NOT NULL",
+            "INSERT OR IGNORE INTO ironwood_one_time_disputed_receipts (note_id) VALUES (?1)",
             [note],
         )?;
-        conn.execute("DELETE FROM ironwood_received_notes WHERE id = ?1", [note])?;
+        // Private enhancement bound to this output trusts the disputed label.
+        conn.execute(
+            "UPDATE ironwood_enhance_metadata_queue SET commitment_tree_position = NULL,
+                output_index = NULL, compact_bound = 0
+             WHERE (transaction_id, output_index) =
+                 (SELECT transaction_id, action_index FROM ironwood_received_notes WHERE id = ?1)",
+            [note],
+        )?;
         conn.execute(
             "UPDATE ironwood_one_time_lookups SET last_record = NULL, done_height = NULL,
                 read_complete = 0, attempts = 0, next_attempt_at = 0
@@ -1125,11 +1138,11 @@ pub(crate) fn check_raw_receipts(
             [key],
         )?;
         register_history(conn, owner, key)?;
-        dropped = true;
+        disputed = true;
     }
-    if dropped && !kept {
-        // The transaction no longer holds a private receipt, so its private enhancement
-        // work goes too.
+    if disputed && !kept {
+        // Nothing trusts this transaction as a private receipt any more, so its private
+        // enhancement work goes too.
         let tx_ref: Option<i64> = conn
             .query_row(
                 "SELECT id_tx FROM transactions WHERE txid = ?1",
