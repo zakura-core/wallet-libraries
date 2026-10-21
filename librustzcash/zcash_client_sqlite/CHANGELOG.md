@@ -19,6 +19,14 @@ and this library adheres to Rust's notion of
 - `WalletDb::get_one_time_key_for_receiver`, which only tests used, and its receiver index.
 - The unused `now` argument of `WalletDb::set_one_time_recovery_enabled`, `WalletDb::begin_one_time_recovery`, `WalletDb::check_one_time_history` and `WalletDb::reserve_refund_key`, and the write-only `registered_at` key column.
 
+## [0.1.0-rc9.3] - 2026-10-20
+
+### Changed
+
+- Use the stable Common `4.0.0` dependency family, with compatible requirements
+  for downstream consumers.
+- Use backend `0.1.0-rc9.3` and one-time IVK `0.0.1-rc3`.
+
 ## [0.1.0-rc9.2] - 2026-10-20
 
 ### Changed

@@ -10,6 +10,13 @@
 
 - Provider-read freshness and scan-watch completion limits. Quote ownership and receipt expectations remain independent of PIR discovery scheduling.
 
+## [0.0.1-rc3] - 2026-10-20
+
+### Changed
+
+- Use the stable Common `4.0.0` dependency family, with compatible requirements
+  for downstream consumers.
+
 ## [0.0.1-rc2] - 2026-10-20
 
 ### Changed
