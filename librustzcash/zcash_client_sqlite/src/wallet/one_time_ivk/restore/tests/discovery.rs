@@ -1011,6 +1011,90 @@ fn disabled_repair_does_not_consume_future_discovery_pages() {
     assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
 }
 
+/// A late payment waits while the scan's coverage ends one block short of its scanned tip,
+/// since a spend of the note there may be missing from the journal. That block is queued
+/// for a rescan, which covers it, and the payment is admitted spent, never unspent.
+#[test]
+fn a_late_payment_waits_for_coverage_of_the_scanned_tip() {
+    let mut st = scanned_wallet();
+    let candidate = pay_candidate(&mut st, key8());
+    let note = candidate
+        .encrypted_note
+        .decrypt(&parent(&st), key8())
+        .unwrap();
+    let spender = IronwoodFvk(parent(&st));
+    let (height, _) = st.generate_next_block_spending(
+        &spender,
+        (*note.nullifier(), Zatoshis::const_from_u64(100_000)),
+        unified(foreign_receiver()),
+        Zatoshis::const_from_u64(20_000),
+    );
+    st.scan_cached_blocks(height, 1);
+    queue_late(&mut st, key8(), &candidate);
+    // The spending block was stored without coverage, so without its journal entry.
+    let tip = u32::from(height);
+    for sql in [
+        "UPDATE ironwood_journal_coverage SET end_height = ?1 WHERE end_height > ?1",
+        "DELETE FROM ironwood_spend_journal_nullifiers WHERE block_height = ?1",
+        "DELETE FROM ironwood_spend_journal WHERE block_height = ?1",
+    ] {
+        exec(st.wallet().conn(), sql, [tip]);
+    }
+    send_witness(&mut st, key8(), &candidate);
+    assert!(one_time_notes(&st).is_empty(), "admission waits");
+    assert!(
+        rescans(&st).contains(&(tip, tip + 1)),
+        "the uncovered tip is queued"
+    );
+    st.scan_cached_blocks(height, 1);
+    assert_eq!(one_time_notes(&st), [(100_000, true)]);
+}
+
+/// A late payment over a one-block hole in the scan's coverage waits, has that block queued
+/// for a rescan, and is admitted once the rescan covers it.
+#[test]
+fn a_late_payment_over_a_one_block_coverage_hole_is_rescanned() {
+    let (mut st, candidate, _) = late_fixture();
+    st.generate_and_scan_empty_blocks(2);
+    let hole = u32::from(candidate.height) + 1;
+    let conn = st.wallet().conn();
+    exec(
+        conn,
+        "INSERT INTO ironwood_journal_coverage (account_id, start_height, end_height)
+         SELECT account_id, ?1 + 1, end_height FROM ironwood_journal_coverage
+         WHERE start_height <= ?1 AND end_height > ?1 + 1",
+        [hole],
+    );
+    let split = conn
+        .execute(
+            "UPDATE ironwood_journal_coverage SET end_height = ?1
+             WHERE start_height <= ?1 AND end_height > ?1 + 1",
+            [hole],
+        )
+        .unwrap();
+    assert_eq!(split, 1, "the hole splits the coverage");
+    send_witness(&mut st, key8(), &candidate);
+    assert!(one_time_notes(&st).is_empty(), "admission waits");
+    assert!(
+        rescans(&st).contains(&(hole, hole + 1)),
+        "{:?}",
+        rescans(&st)
+    );
+    st.scan_cached_blocks(BlockHeight::from(hole), 1);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// The block ranges the scan queue still has to scan.
+fn rescans(st: &State) -> Vec<(u32, u32)> {
+    rows(
+        st.wallet().conn(),
+        "SELECT block_range_start, block_range_end FROM scan_queue WHERE priority != ?1",
+        [crate::wallet::scanning::priority_code(
+            &zcash_client_backend::data_api::scanning::ScanPriority::Scanned,
+        )],
+    )
+}
+
 /// Birthday changes cannot enroll incoming-only or Sapling-only accounts in receiver recovery.
 #[test]
 fn birthday_rewind_keeps_ineligible_accounts_out_of_receiver_recovery() {
