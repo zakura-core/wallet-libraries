@@ -14,6 +14,8 @@ and this library adheres to Rust's notion of
 - `WalletDb::record_one_time_witness` takes a companion witness answer instead of a full path, and `WalletDb::refresh_one_time_witness` re-reads a payment whose session can no longer serve its witness. A provisional witness is checked against the wallet's own tree at exactly its construction block; a final one (its Ironwood shard full) at the scanned tip. The accepted root is read before any returned node is used, and an unusable or missing witness leaves the payment pending and reads it again, never completing an empty address.
 - A provider's promised receipt settles only through a recovered note in a transaction the provider reported for that operation, recorded from `Observation::receipts`. Without one, the address stays in direct catch-up.
 - Rebaseline the unlaunched one-time-key schema. The cutover drops abandoned discovery progress while preserving accounts, note ownership and unrelated wallet data. Recovery starts disabled.
+- One-time IVK issuance no longer reads a provider seen set. `WalletDb::prepare_receive_reservation`, `WalletDb::begin_receive_operation` and `WalletDb::reserve_refund_key` drop their `seen` argument, and keys no longer stop being watched `COMPLETION_LIMIT_SECS` after their last deadline. `ReservationPolicy` gains `Disabled`, `FundingHistory` and `ReceiveHistory`.
+- A build without `orchard` that stores a transaction holding a private one-time receipt keeps that receipt's private enhancement work and leaves its raw-transaction check to an Orchard build, which runs it when it next stores blocks.
 - `WalletDb::get_wallet_summary` computes scan and recovery progress without looking up
   each scanned block in the scan queue, which made it slow on wallets with millions of
   scanned blocks. The reported progress is unchanged.
@@ -21,6 +23,8 @@ and this library adheres to Rust's notion of
 ### Removed
 
 - `WalletDb::get_one_time_key_for_receiver`, which only tests used, and its receiver index.
+- `ReservationPolicy::Coverage`, `ReservationPolicy::SeenUnavailable`, `ProviderSeen`, `ISSUANCE_TIP_LAG`, `RECEIVE_GAP_LIMIT`, `RECEIVE_RECLAIM_SECONDS` and `SEEN_SLACK_SECONDS`.
+- `WalletDb::close_finished_one_time_keys`, `WalletDb::mark_one_time_account_fresh` and `WalletDb::recheck_one_time_key_history`. `WalletDb::check_one_time_history` replaces the recheck.
 - The unused `now` argument of `WalletDb::set_one_time_recovery_enabled`, `WalletDb::begin_one_time_recovery`, `WalletDb::check_one_time_history` and `WalletDb::reserve_refund_key`, and the write-only `registered_at` key column.
 
 ## [0.1.0-rc9.3] - 2026-10-20
