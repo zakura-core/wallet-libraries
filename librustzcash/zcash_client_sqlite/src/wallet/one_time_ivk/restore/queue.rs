@@ -28,17 +28,18 @@ use crate::wallet::one_time_ivk::{
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 const AUTOMATIC: u8 = 1;
-/// Lookup reason bit marking a positive filter hint: the key may have been paid since its
-/// history was read, so its receiver is not reused until the lookup settles (see
-/// [`RECEIVE_PENDING`]). It is set only together with [`AUTOMATIC`].
-const HINT: u8 = 4;
+/// Lookup reason bit marking history an event invalidated: a positive filter hint, a
+/// correction, a rewind below the settled height, a disputed receipt label, a rejected
+/// payment claim or a lowered birthday. The key may have been paid in what was read before,
+/// so its receiver is not reused until the lookup settles (see [`RECEIVE_PENDING`]), which
+/// clears the bit. Reading new blocks never sets it.
+pub(crate) const INVALIDATED: u8 = 4;
 
-/// SQL over key alias `k`: a recorded positive hint or a payment candidate on the key is
-/// unresolved, so the key may already be paid. Ordinary catch-up targets do not count, so
-/// this never waits for coverage to reach the chain tip.
+/// SQL over key alias `k`: history an event invalidated (see [`INVALIDATED`]) or a payment
+/// candidate on the key is unresolved, so the key may already be paid. Ordinary catch-up
+/// does not count, so this never waits for coverage to reach the chain tip.
 pub(in crate::wallet::one_time_ivk) const RECEIVE_PENDING: &str = "(EXISTS(SELECT 1
-        FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id
-        AND l.reasons & 4 != 0 AND l.target_height IS NOT NULL)
+        FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id AND l.reasons & 4 != 0)
     OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = k.id))";
 const MANUAL: u8 = 2;
 /// Local cursor entries one progress step may advance, keeping each transaction short. A
@@ -128,7 +129,7 @@ fn admitted(
 }
 
 /// Makes `key`'s lookup read its history again from the shard holding `height`, keeping
-/// its reasons: checked progress, any cursor and a completion reaching that height are
+/// its reasons (callers whose event invalidates settled history add [`INVALIDATED`]): checked progress, any cursor and a completion reaching that height are
 /// void. `retry_at` delays the next attempt.
 fn rewind_lookup(
     conn: &Connection,
@@ -187,6 +188,15 @@ fn repairable<P: Parameters>(
         params![id, note.nullifier().to_bytes()],
         |r| r.get(0),
     )?)
+}
+
+/// Marks `key`'s lookup with [`INVALIDATED`] after an event voided its settled history.
+fn invalidate(conn: &Connection, key: i64) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE ironwood_one_time_lookups SET reasons = reasons | ?2 WHERE one_time_key_id = ?1",
+        params![key, INVALIDATED],
+    )?;
+    Ok(())
 }
 
 /// Drops a candidate's session binding and witness and reads its key's history again, so a
@@ -297,9 +307,11 @@ pub(crate) fn enqueue(
         None if covered.is_some_and(|d| d >= through) && !candidates(conn, key)? => {
             // Completed coverage already answers the request: settle it here, since nothing
             // would query or clear a target for it.
+            // Settled history answers any invalidation too (see `INVALIDATED`).
             conn.execute(
-                "UPDATE ironwood_one_time_lookups SET read_complete = 1 WHERE one_time_key_id = ?1",
-                [key],
+                "UPDATE ironwood_one_time_lookups SET read_complete = 1, reasons = reasons & ?2
+                 WHERE one_time_key_id = ?1",
+                params![key, AUTOMATIC | MANUAL],
             )?;
             return Ok(true);
         }
@@ -570,7 +582,9 @@ pub(crate) fn begin<P: Parameters>(
                 "UPDATE ironwood_one_time_lookups SET {CURSOR_RESET}, checked_height = NULL,
             start_height = CASE WHEN target_height IS NOT NULL THEN MIN(start_height, ?2)
                 ELSE start_height END,
-            done_height = NULL, done_from = NULL, read_complete = 0
+            done_height = NULL, done_from = NULL, read_complete = 0,
+            reasons = CASE WHEN done_height IS NOT NULL OR checked_height IS NOT NULL
+                THEN reasons | 4 ELSE reasons END
             WHERE one_time_key_id IN (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)"
             ),
             params![owner.0, activation(params)],
@@ -589,7 +603,13 @@ pub(crate) fn begin<P: Parameters>(
             .query_map([owner.0], |r| r.get::<_, i64>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         for key in keys {
-            enqueue(conn, key, activation(params), height, AUTOMATIC)?;
+            enqueue(
+                conn,
+                key,
+                activation(params),
+                height,
+                AUTOMATIC | INVALIDATED,
+            )?;
         }
     }
     if !enabled {
@@ -721,7 +741,7 @@ pub(crate) fn record_filters<P: Parameters>(
             id,
             previous + 1,
             u32::from(end.height),
-            AUTOMATIC | HINT,
+            AUTOMATIC | INVALIDATED,
         )?;
     }
     conn.execute("UPDATE ironwood_one_time_recovery SET filter_height = ?2, filter_hash = ?3 WHERE account_id = ?1",
@@ -884,7 +904,7 @@ pub(crate) fn cancel_manual<P: Parameters>(
     conn.execute(
         "UPDATE ironwood_one_time_lookups SET reasons = reasons & ?2
         WHERE one_time_key_id IN (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
-        params![owner.0, AUTOMATIC | HINT],
+        params![owner.0, AUTOMATIC | INVALIDATED],
     )?;
     Ok(())
 }
@@ -1563,6 +1583,7 @@ pub(crate) fn check_raw_receipts(
         // Its pages were already read past it, so that coverage is undone from its height,
         // and its settled history is queued again through the current frontier.
         rewind_lookup(conn, key, height, 0)?;
+        invalidate(conn, key)?;
         register_history(conn, owner, key, height)?;
         disputed = true;
     }
@@ -1673,6 +1694,7 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
                     u32::from(candidate.height),
                     now.saturating_add(60),
                 )?;
+                invalidate(conn, id)?;
             }
         }
     }

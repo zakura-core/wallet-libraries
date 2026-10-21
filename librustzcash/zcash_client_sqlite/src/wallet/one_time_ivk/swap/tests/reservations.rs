@@ -634,77 +634,133 @@ fn hint(st: &mut State, index: u64) {
     );
 }
 
-/// A positive filter hint recorded after index 0 was reserved may mean another device paid
-/// it. Resuming the reservation, beginning a quote on it and starting an accepted quote each
-/// wait with `ReceiveHistory` until the hinted lookup settles, then proceed. Routine catch-up
-/// raising the key's target does not hold the reservation.
-#[test]
-fn a_positive_hint_after_reservation_holds_its_receiver() {
-    for step in ["resume", "begin", "start"] {
-        let mut st = scanned_wallet();
-        let account = st.test_account().unwrap().id();
-        let now = clock_now();
-        check_window(&mut st);
-        let key = st
-            .wallet_mut()
+/// Runs recovery at the tip under the account's current correction generation until every
+/// due lookup and witness is answered, so invalidated histories settle again.
+fn settle(st: &mut State) {
+    let account = st.test_account().unwrap().id();
+    let revision = st
+        .wallet()
+        .db()
+        .one_time_recovery(account, clock_now())
+        .unwrap()
+        .token
+        .history_revision;
+    let publication = zcash_client_backend::data_api::one_time_ivk::restore::RecoveryPublication {
+        history_revision: revision,
+        ..store::restore::tests::discovery::publication_at(st, tip(st).height)
+    };
+    assert!(
+        st.wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, now)
+            .begin_one_time_recovery(account, publication, true)
             .unwrap()
-            .unwrap();
-        assert_eq!(key.key_id().index(), 0);
-        // Routine catch-up reads the unused key again without holding it.
-        st.generate_and_scan_empty_blocks(1);
-        let publication = store::restore::tests::discovery::publication_at(&st, tip(&st).height);
-        assert!(
-            st.wallet_mut()
-                .db_mut()
-                .begin_one_time_recovery(account, publication, true)
-                .unwrap()
-        );
-        assert_eq!(
-            st.wallet_mut()
+    );
+    store::restore::tests::discovery::drain(st, account, publication);
+}
+
+/// An event that invalidates index 0's settled history after it was reserved, a positive
+/// filter hint, a history correction or a rewind below the height it was checked through,
+/// may hide a payment another device received there. Resuming the reservation, beginning a
+/// quote on it and starting an accepted quote each wait with `ReceiveHistory` until the
+/// re-check settles, then proceed. Routine catch-up raising the key's target never holds it.
+#[test]
+fn an_invalidating_event_after_reservation_holds_its_receiver() {
+    for event in ["hint", "correction", "rewind"] {
+        for step in ["resume", "begin", "start"] {
+            let mut st = scanned_wallet();
+            let account = st.test_account().unwrap().id();
+            let now = clock_now();
+            check_window(&mut st);
+            let key = st
+                .wallet_mut()
                 .db_mut()
                 .prepare_receive_reservation(account, now)
                 .unwrap()
-                .unwrap()
-                .key_id()
-                .index(),
-            0
-        );
-        let request = (step == "start").then(|| {
-            let db = st.wallet_mut().db_mut();
-            let request = db
-                .begin_receive_operation(account, 0, now + 60, now)
-                .unwrap()
                 .unwrap();
-            db.finish_receive_operation(account, &request, &accepted("deposit", None, now + 60))
-                .unwrap();
-            request
-        });
-        hint(&mut st, 0);
-        let attempt = |st: &mut State| -> Result<(), ReservationPolicy> {
-            let db = st.wallet_mut().db_mut();
-            match step {
-                "resume" => db
+            assert_eq!(key.key_id().index(), 0);
+            // Routine catch-up reads the unused key again without holding it.
+            st.generate_and_scan_empty_blocks(1);
+            let publication =
+                store::restore::tests::discovery::publication_at(&st, tip(&st).height);
+            assert!(
+                st.wallet_mut()
+                    .db_mut()
+                    .begin_one_time_recovery(account, publication, true)
+                    .unwrap()
+            );
+            assert_eq!(
+                st.wallet_mut()
+                    .db_mut()
                     .prepare_receive_reservation(account, now)
                     .unwrap()
-                    .map(|key| assert_eq!(key.key_id().index(), 0)),
-                "begin" => db
+                    .unwrap()
+                    .key_id()
+                    .index(),
+                0
+            );
+            settle(&mut st);
+            let request = (step == "start").then(|| {
+                let db = st.wallet_mut().db_mut();
+                let request = db
                     .begin_receive_operation(account, 0, now + 60, now)
                     .unwrap()
-                    .map(drop),
-                _ => db
-                    .start_receive_operation(account, request.as_ref().unwrap(), now)
-                    .unwrap()
-                    .map(drop),
+                    .unwrap();
+                db.finish_receive_operation(
+                    account,
+                    &request,
+                    &accepted("deposit", None, now + 60),
+                )
+                .unwrap();
+                request
+            });
+            match event {
+                "hint" => hint(&mut st, 0),
+                "correction" => {
+                    let corrected =
+                        zcash_client_backend::data_api::one_time_ivk::restore::RecoveryPublication {
+                            history_revision: 1,
+                            ..store::restore::tests::discovery::publication_at(
+                                &st,
+                                tip(&st).height,
+                            )
+                        };
+                    assert!(
+                        st.wallet_mut()
+                            .db_mut()
+                            .begin_one_time_recovery(account, corrected, true)
+                            .unwrap()
+                    );
+                }
+                _ => {
+                    let floor = tip(&st).height - 1;
+                    st.truncate_to_height(floor);
+                    st.generate_and_scan_empty_blocks(2);
+                }
             }
-        };
-        assert_eq!(
-            attempt(&mut st),
-            Err(ReservationPolicy::ReceiveHistory),
-            "{step}"
-        );
-        check_window(&mut st);
-        assert_eq!(attempt(&mut st), Ok(()), "{step}");
+            let attempt = |st: &mut State| -> Result<(), ReservationPolicy> {
+                let db = st.wallet_mut().db_mut();
+                match step {
+                    "resume" => db
+                        .prepare_receive_reservation(account, now)
+                        .unwrap()
+                        .map(|key| assert_eq!(key.key_id().index(), 0)),
+                    "begin" => db
+                        .begin_receive_operation(account, 0, now + 60, now)
+                        .unwrap()
+                        .map(drop),
+                    _ => db
+                        .start_receive_operation(account, request.as_ref().unwrap(), now)
+                        .unwrap()
+                        .map(drop),
+                }
+            };
+            assert_eq!(
+                attempt(&mut st),
+                Err(ReservationPolicy::ReceiveHistory),
+                "{event} {step}"
+            );
+            settle(&mut st);
+            assert_eq!(attempt(&mut st), Ok(()), "{event} {step}");
+        }
     }
 }
