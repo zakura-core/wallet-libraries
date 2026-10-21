@@ -164,7 +164,7 @@ pub(in crate::wallet::one_time_ivk) fn assert_no_stall(db: &Db, account: Account
         "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
              JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
              JOIN accounts a ON a.id = k.account_id
-             WHERE a.uuid = ?1 AND l.target_height IS NOT NULL AND l.read_complete = 0 AND l.reasons != 0)",
+             WHERE a.uuid = ?1 AND l.target_height IS NOT NULL AND l.read_complete = 0 AND l.reasons & 3 != 0)",
         [account.0],
     );
     let manual = state.manual.is_some_and(|m| m.active);
@@ -660,7 +660,7 @@ fn manual_history_does_not_expand_automatic_catch_up() {
     );
     let queued: Vec<Vec<u8>> = column(st.wallet().conn(),
         "SELECT k.key_index FROM ironwood_one_time_keys k JOIN ironwood_one_time_lookups l
-         ON l.one_time_key_id = k.id WHERE l.target_height IS NOT NULL AND l.reasons != 0 ORDER BY k.key_index", []);
+         ON l.one_time_key_id = k.id WHERE l.target_height IS NOT NULL AND l.reasons & 3 != 0 ORDER BY k.key_index", []);
     let queued: Vec<_> = queued
         .into_iter()
         .map(|b| u64::from_be_bytes(b.try_into().unwrap()))
@@ -2094,4 +2094,104 @@ fn a_correction_recovers_a_payment_it_adds_to_a_used_receiver() {
     );
     drain(&mut st, account, corrected);
     assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
+}
+
+/// A correction invalidates a completed manual-only index 4, and a resumed manual search
+/// queues it again. Cancelling that search must stop it: the invalidation only holds
+/// reservations and never makes a lookup runnable on its own. The hold still applies to the
+/// reserved automatic index 0 until its corrected history settles.
+#[test]
+fn a_cancelled_search_stops_an_invalidated_manual_only_lookup() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let now = clock_now();
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, publication, Some(10))
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    let reserved = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, now)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reserved.key_id().index(), 0);
+
+    let corrected = RecoveryPublication {
+        history_revision: 1,
+        ..publication
+    };
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, corrected, true)
+            .unwrap()
+    );
+    assert!(
+        matches!(
+            st.wallet_mut()
+                .db_mut()
+                .prepare_receive_reservation(account, now)
+                .unwrap(),
+            Err(crate::wallet::one_time_ivk::swap::ReservationPolicy::ReceiveHistory)
+        ),
+        "the corrected reservation waits"
+    );
+    drain(&mut st, account, corrected);
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .prepare_receive_reservation(account, now)
+            .unwrap()
+            .unwrap()
+            .key_id()
+            .index(),
+        0
+    );
+
+    let key4 = KeyId::new(Purpose::Receive, 4);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, corrected, Some(10))
+            .unwrap()
+    );
+    assert!(
+        status(st.wallet().db(), account)
+            .lookups
+            .iter()
+            .any(|w| w.work.key == key4)
+    );
+    st.wallet_mut()
+        .db_mut()
+        .cancel_one_time_history(account)
+        .unwrap();
+    let paused = status(st.wallet().db(), account);
+    assert!(paused.lookups.is_empty(), "no requests while paused");
+    assert!(paused.witnesses.is_empty());
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, corrected, None)
+            .unwrap()
+    );
+    assert!(
+        status(st.wallet().db(), account)
+            .lookups
+            .iter()
+            .any(|w| w.work.key == key4)
+    );
+    drain(&mut st, account, corrected);
+    assert!(!status(st.wallet().db(), account).manual.unwrap().active);
 }

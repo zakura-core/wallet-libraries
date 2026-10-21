@@ -158,7 +158,7 @@ impl Device {
                     EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
                         JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
                         WHERE k.account_id = r.account_id
-                          AND l.target_height IS NOT NULL AND l.read_complete = 0 AND l.reasons != 0)
+                          AND l.target_height IS NOT NULL AND l.read_complete = 0 AND l.reasons & 3 != 0)
                  FROM ironwood_one_time_recovery r JOIN accounts a ON a.id = r.account_id
                  WHERE a.uuid = ?1",
                 [self.account.expose_uuid()],

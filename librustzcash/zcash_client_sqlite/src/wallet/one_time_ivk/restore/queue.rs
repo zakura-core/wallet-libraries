@@ -31,7 +31,9 @@ const AUTOMATIC: u8 = 1;
 /// correction, a rewind below the settled height, a disputed receipt label, a rejected
 /// payment claim or a lowered birthday. The key may have been paid in what was read before,
 /// so its receiver is not reused until the lookup settles (see [`RECEIVE_PENDING`]), which
-/// clears the bit. Reading new blocks never sets it.
+/// clears the bit. Reading new blocks never sets it. It only holds reservations: a lookup is
+/// exposed and processed only while it has an active [`AUTOMATIC`] or [`MANUAL`] reason
+/// (`reasons & 3`), so cancelling a manual search pauses an invalidated manual-only lookup.
 pub(crate) const INVALIDATED: u8 = 4;
 
 /// SQL over key alias `k`: history an event invalidated (see [`INVALIDATED`]) or a payment
@@ -860,7 +862,7 @@ pub(crate) fn status<P: Parameters>(
     })?;
     status.lookups = conn.prepare(&format!("SELECT k.purpose, k.key_index, k.receiver, l.target_height, l.last_record
         FROM ironwood_one_time_lookups l JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
-        WHERE k.account_id = ?1 AND l.target_height IS NOT NULL AND l.reasons != 0
+        WHERE k.account_id = ?1 AND l.target_height IS NOT NULL AND l.reasons & 3 != 0
             AND (?3 OR {REPAIR_KEY})
             AND l.read_complete = 0 AND l.next_attempt_at <= ?2 ORDER BY l.next_attempt_at, k.id LIMIT 4"))?
         .query_and_then(params![owner.0, now, enabled], |r| Ok::<_, SqliteClientError>(LookupWork {
@@ -875,7 +877,7 @@ pub(crate) fn status<P: Parameters>(
             WHERE n.one_time_key_id = k.id AND t.txid = p.txid AND n.action_index = p.action_index AND {UNPLACED})
             OR EXISTS(SELECT 1 FROM ironwood_one_time_disputed_receipts d
                 JOIN ironwood_received_notes n ON n.id = d.note_id WHERE n.one_time_key_id = k.id))
-        AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id AND l.reasons != 0
+        AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id AND l.reasons & 3 != 0
             AND l.next_attempt_at <= ?3)
         ORDER BY p.height, p.position LIMIT 64"))?
         .query_and_then(params![owner.0, enabled, now], |r| Ok::<_, SqliteClientError>(WitnessRequest {
@@ -913,7 +915,7 @@ pub(crate) fn record_lookup<P: Parameters>(
         return Err(invalid("lookup receiver does not belong to the key"));
     }
     let current: Option<(Option<u32>, Option<Vec<u8>>, bool)> = conn.query_row(
-        "SELECT target_height, last_record, read_complete FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1 AND reasons != 0",
+        "SELECT target_height, last_record, read_complete FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1 AND reasons & 3 != 0",
         [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
     let Some((Some(target), last, false)) = current else {
         return Ok(false);
@@ -1015,7 +1017,7 @@ pub(crate) fn defer(
     let current: Option<(u32, Option<Vec<u8>>)> = conn
         .query_row(
             "SELECT attempts, last_record FROM ironwood_one_time_lookups
-         WHERE one_time_key_id = ?1 AND target_height = ?2 AND reasons != 0 AND read_complete = 0",
+         WHERE one_time_key_id = ?1 AND target_height = ?2 AND reasons & 3 != 0 AND read_complete = 0",
             params![id, u32::from(work.through)],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -1195,7 +1197,7 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
              JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
              WHERE k.account_id = ?1 AND p.witness IS NOT NULL
                AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
-                   WHERE l.one_time_key_id = k.id AND l.reasons != 0)
+                   WHERE l.one_time_key_id = k.id AND l.reasons & 3 != 0)
              ORDER BY p.height, p.position",
         )?
         .query_and_then([owner.0], |r| {
