@@ -29,9 +29,16 @@ const MANUAL: u8 = 2;
 /// step that runs out with work left hands it to the worker (see [`hand_off`]).
 const STEP_BUDGET: usize = 64;
 
-/// SQL over key alias `k`: an already-owned receipt needs its chain placement repaired.
+/// SQL over receipt alias `n` and its transaction `t`: the receipt's own chain placement is
+/// not restored. Placement is per receipt: a rewind clears each private receipt's position
+/// (see `one_time_rewind::truncate`), and repairing one receipt marks its whole transaction
+/// mined while a sibling receipt still waits for its own position and witness.
+const UNPLACED: &str = "(t.mined_height IS NULL OR n.commitment_tree_position IS NULL)";
+
+/// SQL over key alias `k`: an already-owned receipt is [`UNPLACED`] and needs repair.
 const REPAIR_KEY: &str = "EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
-    ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = k.id AND t.mined_height IS NULL)";
+    ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = k.id
+    AND (t.mined_height IS NULL OR n.commitment_tree_position IS NULL))";
 
 /// SQL over key alias `k`: a local operation promises a receipt not yet attributed to it.
 /// Only a mined note in a transaction the provider reported for that operation counts.
@@ -801,14 +808,14 @@ pub(crate) fn status<P: Parameters>(
                 receiver: r.get::<_, Vec<u8>>(2)?.try_into().map_err(|_| corrupt("invalid receiver"))? },
             through: BlockHeight::from(r.get::<_, u32>(3)?), last: decode_record(r.get(4)?)?
         }))?.collect::<Result<_, _>>()?;
-    status.witnesses = conn.prepare("SELECT k.purpose, k.key_index, p.position, substr(p.encrypted_note, 33, 32)
+    status.witnesses = conn.prepare(&format!("SELECT k.purpose, k.key_index, p.position, substr(p.encrypted_note, 33, 32)
         FROM ironwood_one_time_payment_recovery p JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
         WHERE k.account_id = ?1 AND p.witness IS NULL
         AND (?2 OR EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t ON t.id_tx = n.transaction_id
-            WHERE n.one_time_key_id = k.id AND t.txid = p.txid AND n.action_index = p.action_index AND t.mined_height IS NULL))
+            WHERE n.one_time_key_id = k.id AND t.txid = p.txid AND n.action_index = p.action_index AND {UNPLACED}))
         AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id AND l.reasons != 0
             AND l.next_attempt_at <= ?3)
-        ORDER BY p.height, p.position LIMIT 64")?
+        ORDER BY p.height, p.position LIMIT 64"))?
         .query_and_then(params![owner.0, enabled, now], |r| Ok::<_, SqliteClientError>(WitnessRequest {
             key: stored_key_id(r)?, position: r.get(2)?, cmx: r.get(3)?
         }))?.collect::<Result<_, _>>()?;
@@ -982,10 +989,10 @@ pub(crate) fn record_witness<P: Parameters>(
     }
     let id = key_ref(conn, account, request.key)?;
     if !enabled {
-        let known: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
+        let known: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
             JOIN transactions t ON t.txid = p.txid JOIN ironwood_received_notes n ON n.transaction_id = t.id_tx
             WHERE p.one_time_key_id = ?1 AND p.position = ?2 AND substr(p.encrypted_note, 33, 32) = ?3
-                AND n.one_time_key_id = p.one_time_key_id AND n.action_index = p.action_index AND t.mined_height IS NULL)",
+                AND n.one_time_key_id = p.one_time_key_id AND n.action_index = p.action_index AND {UNPLACED})"),
             params![id, request.position, request.cmx], |r| r.get(0))?;
         if !known {
             return Ok(false);

@@ -1698,3 +1698,96 @@ fn enrollment_invalidates_a_held_filter_request() {
     drain(&mut st, account, current);
     assert_eq!(mined_receipt_indexes(&st), [0, 4]);
 }
+
+/// One transaction pays two private receipts. A reorg moves it to later positions. Each
+/// receipt keeps its own repair eligibility until its own position and witness are
+/// restored, so repairing the first, which marks the transaction mined, cannot leave the
+/// second at its stale position, with recovery enabled or disabled.
+#[test]
+fn a_reorg_repairs_each_private_receipt_of_one_transaction() {
+    for enabled in [true, false] {
+        let mut st = scanned_wallet();
+        let account = st.test_account().unwrap().id();
+        let publication = publication_at(&st, tip(&st).height);
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .begin_one_time_recovery(account, publication, true)
+                .unwrap()
+        );
+        drain(&mut st, account, publication);
+        let floor = tip(&st).height;
+        let keys = [0, 1].map(|i| KeyId::new(Purpose::Receive, i));
+        let fvks = keys.map(|key| derive(&st, key));
+        let second = payment(
+            &unified(fvks[1].address_at(0u32, Scope::External)),
+            30_000,
+            None,
+        );
+        let tx = external_payment_with(
+            fvks[0].address_at(0u32, Scope::External),
+            &zcash_protocol::memo::MemoBytes::empty(),
+            vec![second],
+        );
+        let mine = |st: &mut State| {
+            let (height, _) = st.generate_next_block_from_tx(1, &tx);
+            payment_indexes(st, height, 1);
+            st.scan_cached_blocks(height, 1);
+            let positions = fvks
+                .clone()
+                .map(|fvk| candidate_at(st, height, &fvk).position);
+            let current = publication_at(st, height);
+            assert!(
+                st.wallet_mut()
+                    .db_mut()
+                    .begin_one_time_recovery(account, current, true)
+                    .unwrap()
+            );
+            drain(st, account, current);
+            (height, positions)
+        };
+        let placed = |st: &State| -> Vec<(Option<u32>, Option<u32>)> {
+            rows(
+                st.wallet().conn(),
+                "SELECT t.mined_height, n.commitment_tree_position FROM ironwood_received_notes n
+                 JOIN transactions t ON t.id_tx = n.transaction_id
+                 WHERE n.one_time_key_id IS NOT NULL ORDER BY n.action_index",
+                [],
+            )
+        };
+        let (height, positions) = mine(&mut st);
+        let mut expected: Vec<_> = positions
+            .iter()
+            .map(|p| (Some(u32::from(height)), Some(*p)))
+            .collect();
+        expected.sort_by_key(|(_, p)| *p);
+        let mut got = placed(&st);
+        got.sort_by_key(|(_, p)| *p);
+        assert_eq!(got, expected);
+
+        if !enabled {
+            st.wallet_mut()
+                .db_mut()
+                .set_one_time_recovery_enabled(account, false)
+                .unwrap();
+        }
+        st.truncate_to_height(floor);
+        // Another payment first moves the transaction's outputs to later positions.
+        pay(
+            &mut st,
+            &FullViewingKey::from(&orchard::keys::SpendingKey::from_bytes([3; 32]).unwrap()),
+            10_000,
+        );
+        let (height, moved) = mine(&mut st);
+        assert_ne!(moved, positions);
+        let mut expected: Vec<_> = moved
+            .iter()
+            .map(|p| (Some(u32::from(height)), Some(*p)))
+            .collect();
+        expected.sort_by_key(|(_, p)| *p);
+        let mut got = placed(&st);
+        got.sort_by_key(|(_, p)| *p);
+        assert_eq!(got, expected, "enabled {enabled}");
+        assert_eq!(one_time_notes(&st).len(), 2);
+    }
+}
