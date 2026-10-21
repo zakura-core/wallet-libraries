@@ -4227,3 +4227,119 @@ fn malformed_lookup_steps_cannot_advance_coverage() {
         );
     }
 }
+
+/// Answers due lookups as a two-shard inventory whose sealed shard 0 ends at `split` and
+/// whose recent shard 1 runs to the publication's end, the way the network step reads it:
+/// from the shard reaching the request's first unchecked height, each shard's records
+/// numbered within it. Witnesses are answered as `drain` answers them.
+fn drain_sharded(
+    st: &mut State,
+    account: AccountUuid,
+    publication: RecoveryPublication,
+    split: BlockHeight,
+) {
+    let ends = [split, publication.end.height];
+    for _ in 0..256 {
+        let state = status(st.wallet().db(), account);
+        if let Some(work) = state.lookups.first() {
+            let shard = match &work.cursor {
+                Some(c) if c.inventory == publication.id => c.shard,
+                _ => u32::from(work.from > split),
+            };
+            let fvk = get_key(st.wallet().db(), account, work.work.key)
+                .unwrap()
+                .unwrap();
+            let lower = if shard == 0 { 0 } else { u32::from(split) + 1 };
+            let upper = u32::from(ends[shard as usize]);
+            let mut records: Vec<DirectoryRecord> =
+                oracle(st, work.work.receiver, fvk.full_viewing_key())
+                    .into_iter()
+                    .filter(|r| (lower..=upper).contains(&r.payment.height))
+                    .collect();
+            let total = records.len() as u32;
+            for (page, record) in (0..).zip(records.iter_mut()) {
+                (record.page, record.total, record.ordinal) = (page, total, page);
+            }
+            let page = LookupPage {
+                publication,
+                inventory_shards: 2,
+                shards: vec![StepShard {
+                    index: shard,
+                    end_height: ends[shard as usize],
+                    segments: 1,
+                    excluded: false,
+                }],
+                segment: Some(SegmentRef {
+                    shard,
+                    ..segment_ref(publication)
+                }),
+                records,
+                checked_through: Some(ends[shard as usize]),
+                next: (shard == 0).then(|| LookupCursor {
+                    inventory: publication.id,
+                    shard: 1,
+                    segment: 0,
+                    last: None,
+                }),
+            };
+            assert!(
+                st.wallet_mut()
+                    .db_mut()
+                    .record_one_time_lookup(account, work, &page, clock_now())
+                    .unwrap()
+            );
+            continue;
+        }
+        if let Some(request) = state.witnesses.first() {
+            let answer = witness_answer(st, request, tip(st).height);
+            assert!(
+                st.wallet_mut()
+                    .db_mut()
+                    .record_one_time_witness(account, state.token, *request, &answer, clock_now())
+                    .unwrap()
+            );
+            continue;
+        }
+        return;
+    }
+    panic!("fixture recovery did not converge");
+}
+
+/// A genuine receipt admitted under a wrong label is disputed after a status update moved
+/// that label's transaction to a later height. The true record lies in a sealed shard
+/// ending before that height, so the repair reads the key's history again from
+/// activation, not from the label's mutable height, and the receipt moves to its true
+/// transaction with the dispute cleared.
+#[test]
+fn a_dispute_after_its_label_moved_rereads_the_whole_history() {
+    use zcash_client_backend::data_api::{
+        TransactionStatus, wallet::decrypt_and_store_transaction,
+    };
+    let Mislabeled {
+        mut st,
+        candidate,
+        forged,
+        wrong,
+    } = mislabeled(Mislabel::OtherTransaction);
+    let account = st.test_account().unwrap().id();
+    let network = *st.network();
+    let [(note, _, false)] = receipts(&st)[..] else {
+        panic!("one receipt under the wrong label");
+    };
+    st.generate_and_scan_empty_blocks(3);
+    // A later mined status for the label's transaction moves it, as status updates do for
+    // a transaction the wallet does not hold.
+    exec(
+        st.wallet().conn(),
+        "UPDATE transactions SET mined_height = ?2, block = ?2 WHERE txid = ?1",
+        rusqlite::params![forged.txid.as_ref(), u32::from(tip(&st).height)],
+    );
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &wrong, None).unwrap();
+    assert_eq!(receipts(&st), [(note, forged.txid.as_ref().to_vec(), true)]);
+    let publication = publication_at(&st, tip(&st).height);
+    drain_sharded(&mut st, account, publication, candidate.height);
+    assert_eq!(
+        receipts(&st),
+        [(note, candidate.txid.as_ref().to_vec(), false)]
+    );
+}
