@@ -7,7 +7,7 @@ use zcash_client_backend::data_api::one_time_ivk::restore::{
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
-use crate::wallet::one_time_ivk::{KeyId, account_key, invalid, key_ref};
+use crate::wallet::one_time_ivk::{KeyId, account_key, corrupt, invalid, key_ref};
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 /// A directory payment awaiting inclusion and spend checks; its metadata is unchecked.
@@ -160,4 +160,98 @@ pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
         ],
     )?;
     Ok(())
+}
+
+/// Whether `tx`'s action `action_index` is exactly the action `note` describes: the same
+/// action nullifier, note commitment, ephemeral key and ciphertext prefix. A directory
+/// authenticates a note and its position but not the transaction or action it names, so
+/// every check of that claim against raw bytes uses this, whether the raw transaction
+/// arrives before admission or after it.
+pub(in crate::wallet::one_time_ivk) fn action_holds(
+    tx: &zcash_primitives::transaction::Transaction,
+    action_index: u32,
+    note: &EncryptedNote,
+) -> bool {
+    tx.ironwood_bundle()
+        .and_then(|b| b.actions().get(usize::try_from(action_index).ok()?))
+        .is_some_and(|a| {
+            note.matches_compact(
+                a.nullifier().to_bytes(),
+                a.cmx().to_bytes(),
+                a.encrypted_note().epk_bytes,
+                a.encrypted_note().enc_ciphertext[..52]
+                    .try_into()
+                    .expect("52-byte prefix"),
+            )
+        })
+}
+
+/// The action index and compact action of stored private receipt `note`, rebuilt from the
+/// stored note itself so its commitment is the one admission authenticated, or `None` for
+/// a receipt stored without its compact ciphertext.
+pub(in crate::wallet::one_time_ivk) fn stored_action(
+    conn: &Connection,
+    note: i64,
+) -> Result<Option<(u32, EncryptedNote)>, SqliteClientError> {
+    #[allow(clippy::type_complexity)]
+    let row: Option<(
+        u32,
+        [u8; 32],
+        [u8; 32],
+        i64,
+        i64,
+        [u8; 32],
+        Vec<u8>,
+        Vec<u8>,
+    )> = conn
+        .query_row(
+            "SELECT n.action_index, n.rho, n.rseed, n.value, n.note_version, n.ephemeral_key,
+                 n.compact_ciphertext, k.receiver
+             FROM ironwood_received_notes n
+             JOIN ironwood_one_time_keys k ON k.id = n.one_time_key_id
+             WHERE n.id = ?1 AND n.compact_ciphertext IS NOT NULL",
+            [note],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((action, rho, rseed, value, version, epk, prefix, receiver)) = row else {
+        return Ok(None);
+    };
+    let bad = || corrupt("invalid stored one-time-key note");
+    let receiver: [u8; 43] = receiver.try_into().map_err(|_| bad())?;
+    let recipient =
+        Option::from(orchard::Address::from_raw_address_bytes(&receiver)).ok_or_else(bad)?;
+    let rho = Option::from(orchard::note::Rho::from_bytes(&rho)).ok_or_else(bad)?;
+    let rseed = Option::from(orchard::note::RandomSeed::from_bytes(rseed, &rho)).ok_or_else(bad)?;
+    let version = wallet::orchard::parse_note_version(version).ok_or_else(bad)?;
+    let value = u64::try_from(value).map_err(|_| bad())?;
+    let note: orchard::Note = Option::from(orchard::Note::from_parts(
+        recipient,
+        orchard::value::NoteValue::from_raw(value),
+        rho,
+        rseed,
+        version,
+    ))
+    .ok_or_else(bad)?;
+    let cmx = orchard::note::ExtractedNoteCommitment::from(note.commitment()).to_bytes();
+    Ok(Some((
+        action,
+        EncryptedNote::from_parts(
+            rho.to_bytes(),
+            cmx,
+            epk,
+            prefix.try_into().map_err(|_| bad())?,
+        ),
+    )))
 }
