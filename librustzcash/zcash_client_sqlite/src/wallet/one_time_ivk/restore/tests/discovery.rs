@@ -2559,3 +2559,51 @@ fn a_raw_transaction_without_the_claimed_action_drops_the_admitted_note() {
     );
     assert_eq!(txids, [candidate.txid.as_ref().to_vec()]);
 }
+
+/// A final lookup step that does not prove coverage through the inventory's end, by an
+/// absent or short checked height, is refused and leaves the history unchecked, so a
+/// partial answer cannot mark the rest of history as read.
+#[test]
+fn a_final_step_short_of_the_inventory_end_is_refused() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    st.generate_and_scan_empty_blocks(3);
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    let work = status(st.wallet().db(), account).lookups[0].clone();
+    let id = key_ref(&st.wallet().db().conn, account, work.work.key).unwrap();
+    let progress = |st: &State| -> (Option<u32>, Option<u32>, bool) {
+        row(
+            st.wallet().conn(),
+            "SELECT checked_height, done_height, read_complete FROM ironwood_one_time_lookups
+             WHERE one_time_key_id = ?1",
+            [id],
+        )
+    };
+    let before = progress(&st);
+    for checked in [None, Some(publication.end.height - 1)] {
+        let partial = LookupPage {
+            checked_through: checked,
+            ..whole(publication, vec![])
+        };
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .record_one_time_lookup(account, &work, &partial, clock_now())
+                .is_err()
+        );
+        assert_eq!(progress(&st), before);
+    }
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, &work, &whole(publication, vec![]), clock_now())
+            .unwrap()
+    );
+    assert_eq!(progress(&st).1, Some(u32::from(publication.end.height)));
+}
