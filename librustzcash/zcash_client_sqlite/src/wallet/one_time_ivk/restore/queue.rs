@@ -27,6 +27,18 @@ use crate::wallet::one_time_ivk::{
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 const AUTOMATIC: u8 = 1;
+/// Lookup reason bit marking a positive filter hint: the key may have been paid since its
+/// history was read, so its receiver is not reused until the lookup settles (see
+/// [`RECEIVE_PENDING`]). It is set only together with [`AUTOMATIC`].
+const HINT: u8 = 4;
+
+/// SQL over key alias `k`: a recorded positive hint or a payment candidate on the key is
+/// unresolved, so the key may already be paid. Ordinary catch-up targets do not count, so
+/// this never waits for coverage to reach the chain tip.
+pub(in crate::wallet::one_time_ivk) const RECEIVE_PENDING: &str = "(EXISTS(SELECT 1
+        FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id
+        AND l.reasons & 4 != 0 AND l.target_height IS NOT NULL)
+    OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = k.id))";
 const MANUAL: u8 = 2;
 /// Local cursor entries one progress step may advance, keeping each transaction short. A
 /// step that runs out with work left hands it to the worker (see [`hand_off`]).
@@ -520,7 +532,7 @@ pub(crate) fn record_filters<P: Parameters>(
         if !eligible {
             return Err(invalid("filter hit for a key outside automatic monitoring"));
         }
-        enqueue(conn, id, u32::from(end.height), AUTOMATIC)?;
+        enqueue(conn, id, u32::from(end.height), AUTOMATIC | HINT)?;
     }
     conn.execute("UPDATE ironwood_one_time_recovery SET filter_height = ?2, filter_hash = ?3 WHERE account_id = ?1",
         params![owner.0, u32::from(end.height), end.hash.0])?;
@@ -676,7 +688,7 @@ pub(crate) fn cancel_manual<P: Parameters>(
     conn.execute(
         "UPDATE ironwood_one_time_lookups SET reasons = reasons & ?2
         WHERE one_time_key_id IN (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
-        params![owner.0, AUTOMATIC],
+        params![owner.0, AUTOMATIC | HINT],
     )?;
     Ok(())
 }

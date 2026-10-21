@@ -1789,7 +1789,10 @@ fn a_disputed_label_keeps_the_receipts_pending_spend() {
 }
 
 /// The blocks the cache holds above `height`, as filter progress names them.
-fn blocks_above(st: &State, height: BlockHeight) -> Vec<ChainPoint> {
+pub(in crate::wallet::one_time_ivk) fn blocks_above(
+    st: &State,
+    height: BlockHeight,
+) -> Vec<ChainPoint> {
     let blocks: Vec<Vec<u8>> = column(
         &st.cache().0,
         "SELECT data FROM compactblocks WHERE height > ?1 ORDER BY height",

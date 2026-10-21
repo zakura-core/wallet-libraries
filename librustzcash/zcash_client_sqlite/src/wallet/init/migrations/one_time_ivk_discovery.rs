@@ -105,7 +105,7 @@ impl RusqliteMigration for Migration {
             CREATE TABLE ironwood_one_time_lookups (
                 one_time_key_id INTEGER PRIMARY KEY REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
                 target_height INTEGER CHECK (target_height BETWEEN 0 AND 4294967295),
-                reasons INTEGER NOT NULL DEFAULT 0 CHECK (reasons BETWEEN 0 AND 3),
+                reasons INTEGER NOT NULL DEFAULT 0 CHECK (reasons BETWEEN 0 AND 7),
                 done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295),
                 last_record BLOB CHECK (length(last_record) = 285),
                 read_complete INTEGER NOT NULL DEFAULT 0 CHECK (read_complete IN (0, 1)),
