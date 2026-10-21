@@ -165,9 +165,6 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         return Ok(Admission::StaleWitness);
     };
     let context = witness.context;
-    if context.height > through.height {
-        return Ok(Admission::Waiting);
-    }
     // The service's construction size is untrusted. Where the wallet holds the
     // construction block, the payload must describe that block's own tree.
     let local: Option<([u8; 32], u64)> = conn
@@ -193,10 +190,15 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     let final_path = witness_is_final(position, witness.tree_size)
         && tip_size.is_some_and(|size| witness_is_final(position, size));
     let anchor = if final_path {
+        // Checked at the scanned tip whatever its construction height, even one the scan
+        // has not reached.
         through
     } else {
         // A provisional path is usable only at its own construction block, which the
         // wallet must hold with the same tree.
+        if context.height > through.height {
+            return Ok(Admission::Waiting);
+        }
         if through.height - context.height > crate::PRUNING_DEPTH {
             return Ok(Admission::StaleWitness);
         }
