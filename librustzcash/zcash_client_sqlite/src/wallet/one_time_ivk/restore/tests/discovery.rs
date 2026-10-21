@@ -3395,3 +3395,81 @@ fn conclusive_refund_keys_leave_automatic_monitoring() {
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
     assert_eq!(watched(&st), (vec![1, 2], vec![1, 2]));
 }
+
+/// R0's empty history is checked through the tip and a "no refund" status retires it. A
+/// refund then reaches R0 while rolling filters, no longer watching it, pass that block. A
+/// newer status reports the refund, returning R0 to monitoring, and that alone queues its
+/// skipped history: recovery finds the refund through rolling filters, with no direct
+/// catch-up.
+#[test]
+fn a_refund_paid_while_its_key_was_retired_is_found_after_a_newer_status() {
+    use zakura_one_time_ivk::swap::{
+        Observation,
+        OperationStatus::{Active, Terminal},
+        ReceiptExpectation,
+    };
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let now = clock_now();
+    let r0 = KeyId::new(Purpose::Refund, 0);
+    let funded_at = tip(&st).height;
+    recover(st.wallet_mut().db_mut(), account, r0, funded_at);
+    let observe = |st: &mut State, status, at| {
+        observe_with(
+            st.wallet_mut().db_mut(),
+            account,
+            r0,
+            ("deposit-0", now + 3_600),
+            Observation {
+                status,
+                funded: true,
+                receipts: vec![],
+            },
+            at,
+        )
+        .unwrap();
+    };
+    observe(&mut st, Active, now);
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    observe(&mut st, Terminal(ReceiptExpectation::None), now + 60);
+    let watched = |st: &State| {
+        let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
+        receivers.iter().any(|w| w.key == r0)
+    };
+    assert!(!watched(&st), "the no-refund status retires R0");
+
+    // The refund lands, and filters without R0 pass its block and one more.
+    let frontier = status(st.wallet().db(), account)
+        .filter_frontier
+        .unwrap()
+        .height;
+    pay_candidate(&mut st, r0);
+    st.generate_and_scan_empty_blocks(1);
+    let (token, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    let passed = blocks_above(&st, frontier);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_filters(account, token, 0, &passed, &[])
+            .unwrap()
+    );
+
+    observe(
+        &mut st,
+        Terminal(ReceiptExpectation::Positive(Some(
+            Zatoshis::const_from_u64(100_000),
+        ))),
+        now + 120,
+    );
+    assert!(watched(&st), "the newer status returns R0 to monitoring");
+    let current = publication_at(&st, tip(&st).height);
+    drain(&mut st, account, current);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}

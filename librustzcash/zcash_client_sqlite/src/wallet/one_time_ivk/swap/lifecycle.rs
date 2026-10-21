@@ -1,5 +1,8 @@
 //! Provider observations preserve local operation ownership and receipt obligations.
-use crate::{error::SqliteClientError, wallet::one_time_ivk::invalid};
+use crate::{
+    error::SqliteClientError,
+    wallet::one_time_ivk::{invalid, restore::queue::fencing_monitoring},
+};
 use rusqlite::{Connection, params};
 use zakura_one_time_ivk::swap::{Observation, OperationStatus, ReceiptExpectation};
 
@@ -11,6 +14,8 @@ use zakura_one_time_ivk::swap::{Observation, OperationStatus, ReceiptExpectation
 /// inconclusive, 4 awaiting a deposit. Between observations requested in the same second,
 /// whichever arrives last cannot replace a stored receipt with a status that expects none
 /// or less, or an inconclusive end with no receipt, either of which could discard an obligation.
+/// A status can retire a refund key or return it to automatic monitoring, so it runs inside
+/// the monitoring fence (see `restore::queue::fencing_monitoring`).
 pub(in crate::wallet::one_time_ivk) fn record(
     conn: &Connection,
     id: i64,
@@ -31,24 +36,32 @@ pub(in crate::wallet::one_time_ivk) fn record(
         .map(|v| i64::try_from(u64::from(v)).ok().filter(|v| *v > 0))
         .map(|v| v.ok_or_else(|| invalid("expected receipt must be positive")))
         .transpose()?;
-    conn.execute(
-        "UPDATE ironwood_one_time_operations SET funded = MAX(funded, ?2) WHERE id = ?1",
-        params![id, observation.funded],
+    let owner: i64 = conn.query_row(
+        "SELECT k.account_id FROM ironwood_one_time_operations o
+         JOIN ironwood_one_time_keys k ON k.id = o.one_time_key_id WHERE o.id = ?1",
+        [id],
+        |r| r.get(0),
     )?;
-    for txid in &observation.receipts {
+    fencing_monitoring(conn, &[owner], || {
         conn.execute(
-            "INSERT OR IGNORE INTO ironwood_one_time_operation_receipts (operation_id, txid)
-             VALUES (?1, ?2)",
-            params![id, txid.as_ref()],
+            "UPDATE ironwood_one_time_operations SET funded = MAX(funded, ?2) WHERE id = ?1",
+            params![id, observation.funded],
         )?;
-    }
-    let current = conn.execute(
-        "UPDATE ironwood_one_time_operations SET
-            observed_at = ?2, expectation = ?3, expected_value = ?4
-         WHERE id = ?1 AND (observed_at < ?2 OR (observed_at = ?2 AND NOT (
-             (expectation = 2 AND (?3 != 2 OR COALESCE(?4, 1) < COALESCE(expected_value, 1)))
-             OR (expectation = 3 AND ?3 = 1))))",
-        params![id, now, expectation, amount],
-    )?;
-    Ok(current > 0)
+        for txid in &observation.receipts {
+            conn.execute(
+                "INSERT OR IGNORE INTO ironwood_one_time_operation_receipts (operation_id, txid)
+                 VALUES (?1, ?2)",
+                params![id, txid.as_ref()],
+            )?;
+        }
+        let current = conn.execute(
+            "UPDATE ironwood_one_time_operations SET
+                observed_at = ?2, expectation = ?3, expected_value = ?4
+             WHERE id = ?1 AND (observed_at < ?2 OR (observed_at = ?2 AND NOT (
+                 (expectation = 2 AND (?3 != 2 OR COALESCE(?4, 1) < COALESCE(expected_value, 1)))
+                 OR (expectation = 3 AND ?3 = 1))))",
+            params![id, now, expectation, amount],
+        )?;
+        Ok(current > 0)
+    })
 }
