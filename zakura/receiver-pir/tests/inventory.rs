@@ -288,3 +288,42 @@ fn a_capture_stops_at_its_byte_budget() {
     .is_err());
     assert_eq!(http.requests.get(), 2);
 }
+
+/// A witness request finds its segment by payment session in the index the client builds
+/// once per capture: every segment of every shard is found at its own coordinates, the
+/// first a linear scan of the inventory would reach, and an unknown session is not.
+#[test]
+fn witness_requests_find_their_segment_by_payment_session() {
+    use receiver_pir::transport::InventoryClient;
+    let mut listed = shards(3);
+    for (i, shard) in listed.iter_mut().enumerate() {
+        *shard = Shard {
+            segments: (0..3u8)
+                .map(|s| {
+                    let mut segment = shard.segments[0].clone();
+                    segment.payments.public_digest = [i as u8 * 3 + s; 32];
+                    segment
+                })
+                .collect(),
+            ..shard.clone()
+        };
+    }
+    let inventory = Inventory::build([1; 32], 0, listed).unwrap();
+    let (_, http) = served(|_, _| {});
+    let client = InventoryClient::new("https://receiver", http, inventory.clone(), true);
+    for shard in inventory.shards() {
+        for (s, segment) in shard.segments.iter().enumerate() {
+            let id = segment.payments.id().unwrap();
+            let scanned = inventory.shards().iter().find_map(|shard| {
+                shard
+                    .segments
+                    .iter()
+                    .position(|segment| segment.payments.id().unwrap() == id)
+                    .map(|segment| (shard.index, segment as u32))
+            });
+            assert_eq!(client.find_segment(&id), Some((shard.index, s as u32)));
+            assert_eq!(client.find_segment(&id), scanned);
+        }
+    }
+    assert_eq!(client.find_segment(&[0xee; 32]), None);
+}

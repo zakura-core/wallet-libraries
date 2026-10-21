@@ -198,6 +198,8 @@ pub struct InventoryClient<T> {
     filters: bool,
     segments: Mutex<Lru<(u32, u32), Segment>>,
     filter_cache: Mutex<Lru<u32, ShardFilter>>,
+    /// Each segment's coordinates by its payment session, built once per capture.
+    sessions: HashMap<Hash, (u32, u32)>,
 }
 
 /// Default bound on the encoded shard filters one client keeps in memory.
@@ -260,7 +262,17 @@ impl<T: Transport> InventoryClient<T> {
     /// [`Inventory::accept`]. With `filters`, sealed shards' filters may stand in for PIR
     /// when they exclude a receiver; without, every required segment is read blind.
     pub fn new(origin: &str, http: T, inventory: Inventory, filters: bool) -> Self {
+        let mut sessions = HashMap::new();
+        for shard in inventory.shards() {
+            for (segment, publication) in shard.segments.iter().enumerate() {
+                // Capture validated every session, so each has an identity.
+                if let Ok(id) = publication.payments.id() {
+                    sessions.entry(id).or_insert((shard.index, segment as u32));
+                }
+            }
+        }
         Self {
+            sessions,
             origin: origin.trim_end_matches('/').to_owned(),
             http,
             inventory,
@@ -379,15 +391,10 @@ impl<T: Transport> InventoryClient<T> {
         segment.client.decode(query, &body)
     }
 
-    /// The segment whose payment session is `payments`, if this inventory holds it.
+    /// The segment whose payment session is `payments`, if this inventory holds it: the
+    /// first in chain order, found in the index built at construction.
     pub fn find_segment(&self, payments: &Hash) -> Option<(u32, u32)> {
-        self.inventory.shards().iter().find_map(|shard| {
-            shard
-                .segments
-                .iter()
-                .position(|segment| segment.payments.id().ok().as_ref() == Some(payments))
-                .map(|segment| (shard.index, segment as u32))
-        })
+        self.sessions.get(payments).copied()
     }
 
     /// Reads the companion witness payload for `ordinal` in one segment over PIR. The
