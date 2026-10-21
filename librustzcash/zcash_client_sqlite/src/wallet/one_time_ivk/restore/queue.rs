@@ -46,12 +46,13 @@ const REPAIR_KEY: &str = "(EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN t
     AND (t.mined_height IS NULL OR n.commitment_tree_position IS NULL))
     OR EXISTS(SELECT 1 FROM ironwood_one_time_owed_receipts o WHERE o.one_time_key_id = k.id))";
 
-/// SQL over key alias `k`: a local operation promises a receipt not yet attributed to it.
+/// SQL over key alias `k`: a local operation owes a receipt not yet attributed to it, either
+/// a promised one or the possible one of a funded operation that ended inconclusively.
 /// Only a mined note in a transaction the provider reported for that operation counts.
 /// Chain timing and the absence of other local quotes cannot attribute a payment, since
 /// another device's quote may share the address.
 const UNSETTLED: &str = "EXISTS(SELECT 1 FROM ironwood_one_time_operations o
-    WHERE o.one_time_key_id = k.id AND o.expectation = 2
+    WHERE o.one_time_key_id = k.id AND (o.expectation = 2 OR (o.expectation = 3 AND o.funded = 1))
     AND COALESCE(o.expected_value, 1) > COALESCE((SELECT SUM(n.value)
         FROM ironwood_received_notes n JOIN transactions t ON t.id_tx = n.transaction_id
         JOIN ironwood_one_time_operation_receipts r ON r.operation_id = o.id AND r.txid = t.txid
