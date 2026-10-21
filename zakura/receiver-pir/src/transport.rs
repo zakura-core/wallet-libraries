@@ -336,10 +336,9 @@ impl<T: Transport> InventoryClient<T> {
             .await
             .ok()
             .filter(|bytes| bytes.len() == reference.bytes as usize)
-            .and_then(|bytes| ShardFilter::decode(&bytes).ok())
+            .and_then(|bytes| ShardFilter::decode_named(&bytes, &reference.digest).ok())
             .filter(|filter| {
-                filter.digest() == reference.digest
-                    && filter.receivers() == u64::from(reference.receivers)
+                filter.receivers() == u64::from(reference.receivers)
                     && filter
                         .check(
                             &self.inventory.head().genesis,

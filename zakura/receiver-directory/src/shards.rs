@@ -93,6 +93,19 @@ impl ShardFilter {
         Self::decode(&bytes)
     }
 
+    /// [`Self::decode`] for a body a shard descriptor names by `digest`. The digest is
+    /// checked first, so a substituted body costs one hash, never a decode of its set: a
+    /// mismatch is [`Error::Coverage`]. The caller must still check coverage.
+    pub fn decode_named(bytes: &[u8], digest: &Hash) -> Result<Self, Error> {
+        if bytes.len() > MAX_FILTER_BYTES {
+            return Err(Error::Capacity);
+        }
+        if &<[u8; 32]>::from(Sha256::digest(bytes)) != digest {
+            return Err(Error::Coverage);
+        }
+        Self::decode(bytes)
+    }
+
     /// Strictly parses a filter, validating every bit with bounded memory. The caller must
     /// still check [`Self::digest`] and coverage against the shard it captured.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
