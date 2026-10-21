@@ -1633,7 +1633,7 @@ fn check_deferred_receipts<P: Parameters>(
         .collect::<Result<_, _>>()?;
     for (id, txid) in deferred {
         if let Some((_, tx)) = crate::wallet::get_transaction(conn, params, txid)? {
-            check_raw_receipts(conn, &tx)?;
+            check_raw_receipts(conn, params, &tx)?;
             crate::wallet::ironwood_hooks::clear_ironwood_enhancement_work(conn, crate::TxRef(id))?;
         }
         conn.execute(
@@ -1653,8 +1653,9 @@ fn check_deferred_receipts<P: Parameters>(
 /// transaction (see `apply::apply_payment`). The caller
 /// keeps `tx`'s raw bytes either way, so a repeated mislabeled record is refused at
 /// admission.
-pub(crate) fn check_raw_receipts(
+pub(crate) fn check_raw_receipts<P: Parameters>(
     conn: &Connection,
+    params: &P,
     tx: &zcash_primitives::transaction::Transaction,
 ) -> Result<(), SqliteClientError> {
     // A disputed refund receipt returns its key to automatic monitoring.
@@ -1667,30 +1668,32 @@ pub(crate) fn check_raw_receipts(
         )?
         .query_map([tx.txid().as_ref()], |r| r.get(0))?
         .collect::<Result<_, _>>()?;
-    fencing_monitoring(conn, &owners, || dispute_raw_receipts(conn, tx))
+    fencing_monitoring(conn, &owners, || {
+        dispute_raw_receipts(conn, activation(params), tx)
+    })
 }
 
 /// [`check_raw_receipts`] without the monitoring fence.
 fn dispute_raw_receipts(
     conn: &Connection,
+    activation: u32,
     tx: &zcash_primitives::transaction::Transaction,
 ) -> Result<(), SqliteClientError> {
-    let notes: Vec<(i64, i64, i64, u32)> = conn
+    let notes: Vec<(i64, i64, i64)> = conn
         .prepare(
-            "SELECT n.id, n.one_time_key_id, k.account_id,
-                 COALESCE(t.mined_height, (SELECT MAX(height) FROM blocks), 0)
+            "SELECT n.id, n.one_time_key_id, k.account_id
              FROM ironwood_received_notes n
              JOIN transactions t ON t.id_tx = n.transaction_id
              JOIN ironwood_one_time_keys k ON k.id = n.one_time_key_id
              WHERE t.txid = ?1 AND n.compact_ciphertext IS NOT NULL",
         )?
         .query_map([tx.txid().as_ref()], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?
         .collect::<Result<_, _>>()?;
     let mut kept = false;
     let mut disputed = false;
-    for (note, key, owner, height) in notes {
+    for (note, key, owner) in notes {
         let carried = stored_action(conn, note)?
             .is_some_and(|(action, stored)| action_holds(tx, action, &stored));
         if carried {
@@ -1711,11 +1714,12 @@ fn dispute_raw_receipts(
                  (SELECT transaction_id, action_index FROM ironwood_received_notes WHERE id = ?1)",
             [note],
         )?;
-        // Its pages were already read past it, so that coverage is undone from its height,
-        // and its settled history is queued again through the current frontier.
-        rewind_lookup(conn, key, height, 0)?;
+        // Where the true record lies is unknown: the label's mined height is a mutable
+        // claim about the disputed transaction, not the note's placement. So the key's
+        // whole history is read again from activation, through the current frontier.
+        rewind_lookup(conn, key, activation, 0)?;
         invalidate(conn, key)?;
-        register_history(conn, owner, key, height)?;
+        register_history(conn, owner, key, activation)?;
         crate::wallet::one_time_rewind::queue_invalidated(conn, None)?;
         disputed = true;
     }
@@ -1835,13 +1839,9 @@ fn admit_waiting<P: Parameters>(
                     params![txid.as_ref(), action],
                 )?;
                 // Its pages were already read past it, so the coverage that read claimed
-                // must be undone before the key can complete.
-                rewind_lookup(
-                    conn,
-                    id,
-                    u32::from(candidate.height),
-                    now.saturating_add(60),
-                )?;
+                // must be undone before the key can complete. The refused claim's height is
+                // unauthenticated, so the key's history is read again from activation.
+                rewind_lookup(conn, id, activation(params), now.saturating_add(60))?;
                 invalidate(conn, id)?;
                 crate::wallet::one_time_rewind::queue_invalidated(conn, None)?;
             }
