@@ -1022,8 +1022,8 @@ async fn a_payment_in_a_shard_straddling_the_completion_point_is_found() {
     drain(&mut r.st, r.account, &client).await;
     assert_eq!(one_time_value(&r.st), VALUE);
     // I0 reads the straddling shard, the recent tier and its witness; I1 to I3 only the
-    // recent tier. I4 waits for the payment to confirm.
-    assert_eq!(lookups(&directory), 3 + 3);
+    // recent tier. I4 joins the window once the payment is mined and reads the recent tier.
+    assert_eq!(lookups(&directory), 3 + 4);
 }
 
 /// An inventory replaced between reading a payment and reading its witness: the old
