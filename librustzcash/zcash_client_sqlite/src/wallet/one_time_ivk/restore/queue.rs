@@ -391,7 +391,7 @@ pub(crate) fn ensure_window<P: Parameters>(
     for index in end.saturating_sub(RECEIVE_GAP)..end {
         register(conn, params, account, KeyId::new(Purpose::Receive, index))?;
     }
-    enroll(conn, owner.0, end, activation(params))
+    enroll(conn, owner.0, end)
 }
 
 /// The stored exclusive end of receive indexes enrolled for automatic discovery.
@@ -405,38 +405,20 @@ fn enrolled_end(conn: &Connection, owner: i64) -> Result<u64, SqliteClientError>
 }
 
 /// Enrolls registered receive indexes below `end` for automatic discovery, whether the
-/// mined window or the seed walk reached them. Every newly enrolled index, including
-/// one an earlier manual check already derived and completed, gets a historical target
-/// through the processed filter frontier from `from`. This shares the transaction with
-/// filter progress.
-///
-/// Growing the automatic set advances the generation, as every change to the filter
-/// receiver set must: a filter request captured before it never matched the new keys, so
-/// its callback must not move the frontier past their blocks.
-fn enroll(conn: &Connection, owner: i64, end: u64, from: u32) -> Result<(), SqliteClientError> {
-    let enrolled = enrolled_end(conn, owner)?;
-    if end <= enrolled {
+/// mined window or the seed walk reached them. Each newly enrolled index, including one an
+/// earlier manual check already derived and completed, enters monitoring, which queues its
+/// history and advances the generation (see [`fencing_monitoring`]).
+fn enroll(conn: &Connection, owner: i64, end: u64) -> Result<(), SqliteClientError> {
+    if end <= enrolled_end(conn, owner)? {
         return Ok(());
     }
-    let exposed: Vec<i64> = conn
-        .prepare(
-            "SELECT id FROM ironwood_one_time_keys
-            WHERE account_id = ?1 AND purpose = 1 AND key_index >= ?2 AND key_index < ?3",
-        )?
-        .query_map(
-            params![owner, enrolled.to_be_bytes(), end.to_be_bytes()],
-            |r| r.get(0),
-        )?
-        .collect::<Result<_, _>>()?;
-    for id in exposed {
-        register_history(conn, owner, id, from)?;
-    }
-    conn.execute(
-        "UPDATE ironwood_one_time_recovery SET receive_end = ?2, generation = generation + 1
-        WHERE account_id = ?1",
-        params![owner, end.to_be_bytes()],
-    )?;
-    Ok(())
+    fencing_monitoring(conn, &[owner], || {
+        conn.execute(
+            "UPDATE ironwood_one_time_recovery SET receive_end = ?2 WHERE account_id = ?1",
+            params![owner, end.to_be_bytes()],
+        )?;
+        Ok(())
+    })
 }
 
 /// The exclusive end of receive indexes that automatic discovery keeps checking. Issuance
@@ -455,30 +437,30 @@ pub(super) fn automatic_end(conn: &Connection, owner: i64) -> Result<u64, Sqlite
     Ok(super::super::swap::reservations::recovery_end(conn, owner)?.max(enrolled))
 }
 
-/// Records funded refund evidence and queues its history even if ordinary sync passed it.
+/// Records funded refund evidence. A key it brings into monitoring has its history queued
+/// from that height even if ordinary sync passed it (see [`fencing_monitoring`]), and an
+/// earlier funding height queues the history it adds.
 pub(crate) fn funded(
     conn: &Connection,
     key: i64,
     height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
-    let changed = conn.execute(
-        "UPDATE ironwood_one_time_keys SET funding_height = ?2
-        WHERE id = ?1 AND (funding_height IS NULL OR funding_height > ?2)",
+    let (owner, lowered): (i64, bool) = conn.query_row(
+        "SELECT account_id, funding_height > ?2 FROM ironwood_one_time_keys WHERE id = ?1",
         params![key, u32::from(height)],
+        |r| Ok((r.get(0)?, r.get::<_, Option<bool>>(1)?.unwrap_or(false))),
     )?;
-    if changed == 0 {
-        return Ok(());
-    }
-    let owner = conn.query_row(
-        "SELECT account_id FROM ironwood_one_time_keys WHERE id = ?1",
-        [key],
-        |r| r.get(0),
-    )?;
-    conn.execute(
-        "UPDATE ironwood_one_time_recovery SET generation = generation + 1 WHERE account_id = ?1",
-        [owner],
-    )?;
-    register_history(conn, owner, key, u32::from(height))
+    fencing_monitoring(conn, &[owner], || {
+        conn.execute(
+            "UPDATE ironwood_one_time_keys SET funding_height = ?2
+            WHERE id = ?1 AND (funding_height IS NULL OR funding_height > ?2)",
+            params![key, u32::from(height)],
+        )?;
+        if lowered {
+            register_history(conn, owner, key, u32::from(height))?;
+        }
+        Ok(())
+    })
 }
 
 /// Pauses work and invalidates in-flight responses without deleting notes or pending requests.
@@ -704,6 +686,11 @@ fn monitored_keys(conn: &Connection, owner: i64) -> Result<Vec<i64>, SqliteClien
 
 /// Runs `change` and advances the generation of each account whose monitored keys it
 /// changed, so a filter request captured with the old receiver set cannot commit.
+///
+/// Every key `change` adds to monitoring, by enrollment, funding evidence, a newer status,
+/// a dispute or any other path, gets its history queued through the processed frontier
+/// (see [`register_history`]) in the same transaction. Filters already passed blocks where
+/// it was not watched, such as a payment to a refund key while it was retired.
 pub(in crate::wallet::one_time_ivk) fn fencing_monitoring<T>(
     conn: &Connection,
     owners: &[i64],
@@ -715,7 +702,11 @@ pub(in crate::wallet::one_time_ivk) fn fencing_monitoring<T>(
         .collect::<Result<Vec<_>, _>>()?;
     let result = change()?;
     for (owner, before) in owners.iter().zip(before) {
-        if monitored_keys(conn, *owner)? != before {
+        let after = monitored_keys(conn, *owner)?;
+        for key in after.iter().filter(|k| before.binary_search(k).is_err()) {
+            register_history(conn, *owner, *key, history_start(conn, *key)?)?;
+        }
+        if after != before {
             conn.execute(
                 "UPDATE ironwood_one_time_recovery SET generation = generation + 1
                  WHERE account_id = ?1",
@@ -724,6 +715,21 @@ pub(in crate::wallet::one_time_ivk) fn fencing_monitoring<T>(
         }
     }
     Ok(result)
+}
+
+/// Where a key's automatic history starts: a refund key's funding height, or the start of
+/// the history a receive key was registered with (see `one_time_ivk::register`), kept by
+/// its lookup's request or completed coverage.
+fn history_start(conn: &Connection, key: i64) -> Result<u32, SqliteClientError> {
+    let start: Option<u32> = conn.query_row(
+        "SELECT COALESCE(k.funding_height, (SELECT MIN(l.start_height,
+            COALESCE(l.done_from, l.start_height)) FROM ironwood_one_time_lookups l
+            WHERE l.one_time_key_id = k.id))
+         FROM ironwood_one_time_keys k WHERE k.id = ?1",
+        [key],
+        |r| r.get(0),
+    )?;
+    start.ok_or_else(|| invalid("monitored key has no history start"))
 }
 
 /// Returns all known eligible receivers with the generation that makes the set current.
@@ -854,7 +860,7 @@ fn progress<P: Parameters>(
         let (id, _) = register(conn, params, account, KeyId::new(Purpose::Receive, next))?;
         // The walk advances on authenticated use before confirmation, so its reach must
         // outlast a reorg that removes that use.
-        enroll(conn, owner.0, index_after(next, 1)?, activation(params))?;
+        enroll(conn, owner.0, index_after(next, 1)?)?;
         // An empty counts only with complete history from activation through the frontier,
         // so the four empties share compatible captured coverage.
         let checked: Option<bool> = conn.query_row("SELECT k.used FROM ironwood_one_time_keys k
