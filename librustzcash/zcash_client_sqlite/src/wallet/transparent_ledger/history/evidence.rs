@@ -189,7 +189,9 @@ pub(super) fn known_amounts(
     let mut stmt = conn.prepare_cached(
         "SELECT pool, SUM(received), SUM(spent) FROM (
              SELECT ro.pool, ro.value AS received, 0 AS spent
-             FROM v_received_outputs ro
+             FROM (SELECT * FROM v_received_outputs
+          WHERE NOT (pool = 4 AND id_within_pool_table IN
+              (SELECT note_id FROM ironwood_one_time_disputed_receipts))) ro
              WHERE ro.account_id = :account_id AND ro.transaction_id = :transaction_id
              UNION ALL
              SELECT ro.pool, 0, ro.value

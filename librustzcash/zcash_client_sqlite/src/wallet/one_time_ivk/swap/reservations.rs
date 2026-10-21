@@ -4,6 +4,7 @@ use zakura_one_time_ivk::swap::Observation;
 use zcash_protocol::consensus::Parameters;
 
 use super::{RESERVED, ReservationPolicy, lifecycle::record};
+use crate::wallet::one_time_ivk::restore::queue::RECEIVE_PENDING;
 use crate::wallet::one_time_ivk::{
     KeyId, OneTimeKey, Purpose, account_key, decode_index, index_after, invalid, key_by_id,
     register,
@@ -151,22 +152,25 @@ pub(in crate::wallet::one_time_ivk) fn begin(
     if deadline <= now {
         return Err(invalid("operation deadline has passed"));
     }
-    let (key, owner, open, latest): (i64, i64, bool, Option<i64>) = conn
+    let (key, owner, open, latest, pending): (i64, i64, bool, Option<i64>, bool) = conn
         .query_row(
             &format!(
                 "SELECT k.id, k.account_id, {RESERVED} AND k.used = 0 AND NOT {STARTED},
-            {LATEST_DEADLINE} FROM ironwood_one_time_keys k
+            {LATEST_DEADLINE}, {RECEIVE_PENDING} FROM ironwood_one_time_keys k
             JOIN accounts a ON a.id = k.account_id
             WHERE a.uuid = ?1 AND k.purpose = 1 AND k.key_index = ?2"
             ),
             params![account.0, index.to_be_bytes()],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?
         .ok_or_else(|| invalid("unknown receive reservation"))?;
     let clock = deadline_clock(conn, now)?;
     if !open || latest.is_some_and(|deadline| deadline <= clock) {
         return Ok(Err(ReservationPolicy::Stale));
+    }
+    if pending {
+        return Ok(Err(ReservationPolicy::ReceiveHistory));
     }
     if index >= recovery_end(conn, owner)? {
         return Ok(Err(ReservationPolicy::Gap));
@@ -274,24 +278,31 @@ pub(in crate::wallet::one_time_ivk) fn start(
     let deposit = conn
         .query_row(
             &format!(
-                "SELECT o.reference, o.memo, o.deadline FROM ironwood_one_time_operations o
+                "SELECT o.reference, o.memo, o.deadline, {RECEIVE_PENDING}
+                 FROM ironwood_one_time_operations o
                  JOIN ironwood_one_time_keys k ON k.id = o.one_time_key_id
                  WHERE o.id = ?1 AND o.reference IS NOT NULL AND {RESERVED}
                      AND o.id > IFNULL(k.reservation_floor, 0) AND k.used = 0"
             ),
             [id],
             |r| {
-                Ok(ReceiveDeposit {
-                    address: r.get(0)?,
-                    memo: r.get(1)?,
-                    deadline: r.get(2)?,
-                })
+                Ok((
+                    ReceiveDeposit {
+                        address: r.get(0)?,
+                        memo: r.get(1)?,
+                        deadline: r.get(2)?,
+                    },
+                    r.get::<_, bool>(3)?,
+                ))
             },
         )
         .optional()?;
-    let Some(deposit) = deposit else {
+    let Some((deposit, pending)) = deposit else {
         return Ok(Err(ReservationPolicy::Stale));
     };
+    if pending {
+        return Ok(Err(ReservationPolicy::ReceiveHistory));
+    }
     // Instructions are shown for one request per reservation, since its receiver takes
     // one quote, and only while the provider still takes a deposit.
     let other_started: bool = conn.query_row(
@@ -358,15 +369,17 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     let clock = deadline_clock(conn, now)?;
     let rows = conn.prepare(&format!(
         "SELECT k.id, k.key_index, k.used, {RESERVED}, {STARTED}, {LATEST_DEADLINE},
-            EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = k.id)
+            EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = k.id),
+            {RECEIVE_PENDING}
          FROM ironwood_one_time_keys k
          WHERE k.account_id = ?1 AND k.purpose = 1 AND k.key_index < ?2 ORDER BY k.key_index"
     ))?.query_map(params![owner.0, end.to_be_bytes()], |r| Ok((
         r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, bool>(2)?,
-        r.get::<_, bool>(3)?, r.get::<_, bool>(4)?, r.get::<_, Option<i64>>(5)?, r.get::<_, bool>(6)?
+        r.get::<_, bool>(3)?, r.get::<_, bool>(4)?, r.get::<_, Option<i64>>(5)?, r.get::<_, bool>(6)?,
+        r.get::<_, bool>(7)?
     )))?.collect::<Result<Vec<_>, _>>()?;
     let mut next = 0;
-    for (id, index, paid, reserved, started, deadline, candidate) in rows {
+    for (id, index, paid, reserved, started, deadline, candidate, pending) in rows {
         let index = decode_index(index)?;
         if index > next {
             break;
@@ -376,6 +389,10 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
                 break;
             }
             if !started && deadline.is_none_or(|deadline| deadline > clock) {
+                // A positive hint since it was reserved may mean another device paid it.
+                if pending {
+                    return Ok(Err(ReservationPolicy::ReceiveHistory));
+                }
                 return key_by_id(conn, params, account, id).map(Ok);
             }
         }

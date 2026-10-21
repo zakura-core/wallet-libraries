@@ -194,6 +194,9 @@ fn participation(
                  UNION ALL
                  SELECT 1 FROM ironwood_received_notes n
                  WHERE n.transaction_id = t.id_tx AND n.account_id = :account
+                 AND NOT EXISTS (
+                     SELECT 1 FROM ironwood_one_time_disputed_receipts d WHERE d.note_id = n.id
+                 )
                  UNION ALL
                  SELECT 1 FROM sapling_received_note_spends s
                  JOIN sapling_received_notes n ON n.id = s.sapling_received_note_id
