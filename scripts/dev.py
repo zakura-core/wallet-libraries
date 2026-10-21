@@ -46,6 +46,8 @@ CONFIGS = {
     "receiver-wire": (["-p", "zakura-receiver-crypto", "--no-default-features"], []),
     "receiver-pir-server": (["-p", "zakura-receiver-pir"], ["server"]),
     "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
+    # Unpublished borrowed transaction reader; its typed oracles are dev-only.
+    "transaction-wire": (["-p", "zakura-transaction-wire"], []),
     # Role lanes cover formats and server-only helpers independently.
     "pir-protocol": (["-p", "zakura-pir-protocol"], ["enhance", "status", "transparent-inputs", "native", "http-endpoint"]),
     "pir-server": (["-p", "zakura-pir-server-core", "-p", "zakura-pir-publisher", "-p", "zakura-pir-query-server"], ["enhance", "status", "transparent"]),
