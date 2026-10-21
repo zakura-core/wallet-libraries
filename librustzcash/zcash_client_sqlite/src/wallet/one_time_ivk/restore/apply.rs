@@ -99,22 +99,32 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     };
     // The proof authenticates the note but not the transaction label a record claims. An
     // earlier admission of the same note under another label already owns it, and
-    // relabeling it could drop that label's spend state, so this answer is redundant.
-    let stored_elsewhere: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n
+    // relabeling it could drop that label's spend state, so this answer is redundant. Only
+    // a label raw bytes disputed (see `queue::check_raw_receipts`) moves, in place, to this
+    // one once it passes every check below.
+    let elsewhere: Option<(i64, bool)> = conn
+        .query_row(
+            "SELECT n.id, EXISTS(SELECT 1 FROM ironwood_one_time_disputed_receipts d
+                 WHERE d.note_id = n.id)
+             FROM ironwood_received_notes n
              JOIN transactions t ON t.id_tx = n.transaction_id
-             WHERE n.nf = ?1 AND (t.txid != ?2 OR n.action_index != ?3))",
-        params![
-            recovered.nullifier().to_bytes(),
-            candidate.txid.as_ref(),
-            candidate.action_index
-        ],
-        |r| r.get(0),
-    )?;
-    if stored_elsewhere {
-        dequeue()?;
-        return Ok(Admission::Admitted);
-    }
+             WHERE n.nf = ?1 AND (t.txid != ?2 OR n.action_index != ?3)",
+            params![
+                recovered.nullifier().to_bytes(),
+                candidate.txid.as_ref(),
+                candidate.action_index
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let relabel = match elsewhere {
+        Some((_, false)) => {
+            dequeue()?;
+            return Ok(Admission::Admitted);
+        }
+        Some((note, true)) => Some(note),
+        None => None,
+    };
     let birthday: u32 = conn.query_row(
         "SELECT birthday_height FROM accounts WHERE uuid = ?1",
         [account.0],
@@ -350,21 +360,41 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     )
     .with_one_time_key_id(Some(key))
     .with_compact_ciphertext(encrypted[96..].try_into().unwrap());
-    wallet::orchard::put_received_note(
-        conn,
-        sessions.tpir,
-        params,
-        ShieldedPool::Ironwood,
-        &output,
-        tx_ref,
-        Some(candidate.height),
-        spent_in,
-    )?;
+    match relabel {
+        // The disputed receipt moves to its true transaction in place, so its spends,
+        // including any unmined one, and its witness stay with it.
+        Some(note) => {
+            conn.execute(
+                "UPDATE ironwood_received_notes SET transaction_id = ?2, action_index = ?3,
+                 commitment_tree_position = ?4 WHERE id = ?1",
+                params![note, tx_ref.0, candidate.action_index, position],
+            )?;
+            if let Some(spent) = spent_in {
+                conn.execute(
+                    "INSERT OR IGNORE INTO ironwood_received_note_spends
+                     (ironwood_received_note_id, transaction_id) VALUES (?1, ?2)",
+                    params![note, spent.0],
+                )?;
+            }
+            conn.execute(
+                "DELETE FROM ironwood_one_time_disputed_receipts WHERE note_id = ?1",
+                [note],
+            )?;
+        }
+        None => {
+            wallet::orchard::put_received_note(
+                conn,
+                sessions.tpir,
+                params,
+                ShieldedPool::Ironwood,
+                &output,
+                tx_ref,
+                Some(candidate.height),
+                spent_in,
+            )?;
+        }
+    }
     wallet::enhance_pir::finish_private_receipt(conn, sessions.enhance, tx_ref)?;
-    conn.execute(
-        "DELETE FROM ironwood_one_time_owed_receipts WHERE one_time_key_id = ?1 AND nf = ?2",
-        params![key_ref, recovered.nullifier().to_bytes()],
-    )?;
     dequeue()?;
     Ok(Admission::Admitted)
 }
