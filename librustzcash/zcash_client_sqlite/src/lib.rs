@@ -3662,9 +3662,10 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
                 [d_tx.tx().txid().as_ref()],
                 |r| r.get(0),
             )?;
-            if known_receipt
-                && wallet::one_time_ivk::restore::queue::check_raw_receipts(self.conn.0, d_tx.tx())?
-            {
+            if known_receipt {
+                // The raw bytes are kept even when they refute a receipt's label, so a
+                // repeated mislabeled record is then refused at admission.
+                wallet::one_time_ivk::restore::queue::check_raw_receipts(self.conn.0, d_tx.tx())?;
                 self.put_tx_data(
                     d_tx.tx(),
                     None,

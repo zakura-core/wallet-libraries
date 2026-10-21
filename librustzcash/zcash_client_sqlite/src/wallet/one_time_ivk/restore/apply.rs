@@ -18,7 +18,10 @@ use zcash_protocol::{
     consensus::{BlockHeight, Parameters},
 };
 
-use super::{PendingPayment, payments::authenticate};
+use super::{
+    PendingPayment,
+    payments::{action_holds, authenticate},
+};
 use crate::wallet::one_time_ivk::{KeyId, corrupt};
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
@@ -278,23 +281,12 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         ],
         |r| r.get(0),
     )?;
-    // A stored raw transaction must hold the claimed action. Without raw bytes only the label
-    // is unverified (value, position and nullifier are authenticated); relabeling once raw
-    // arrives could drop spend state.
+    // A stored raw transaction must hold the claimed action (see `action_holds`). Without
+    // raw bytes only the label is unverified (value, position and nullifier are
+    // authenticated); the raw check runs again when the transaction is fetched.
     let contradicted =
         wallet::get_transaction(conn, params, candidate.txid)?.is_some_and(|(_, tx)| {
-            let action = tx.ironwood_bundle().and_then(|b| {
-                b.actions()
-                    .get(usize::try_from(candidate.action_index).ok()?)
-            });
-            !action.is_some_and(|a| {
-                candidate.encrypted_note.matches_compact(
-                    a.nullifier().to_bytes(),
-                    a.cmx().to_bytes(),
-                    a.encrypted_note().epk_bytes,
-                    a.encrypted_note().enc_ciphertext[..52].try_into().unwrap(),
-                )
-            })
+            !action_holds(&tx, candidate.action_index, &candidate.encrypted_note)
         });
     if conflict || contradicted {
         return Ok(Admission::Rejected);
