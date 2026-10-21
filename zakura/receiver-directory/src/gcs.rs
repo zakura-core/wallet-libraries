@@ -2,6 +2,7 @@
 use crate::{Error, Hash, ReceiverBytes};
 use bitcoin_hashes::siphash24;
 use sha2::{Digest, Sha256};
+use std::ops::ControlFlow;
 use zakura_filters::{read_compact_size, BitStreamReader, GcsFilterWriter};
 
 /// The SipHash keys of a set coded under caller-supplied `key`. Block filters derive it
@@ -67,7 +68,10 @@ impl Filter {
     /// Strictly decodes a set using fixed protocol parameters, validating all bits.
     pub(crate) fn decode_with(bytes: &[u8], p: u8, m: u64) -> Result<Self, Error> {
         let mut values = Vec::new();
-        visit(bytes, p, m, u64::from(u32::MAX), |value| values.push(value))?;
+        visit(bytes, p, m, u64::from(u32::MAX), |value| {
+            values.push(value);
+            ControlFlow::Continue(())
+        })?;
         Ok(Self {
             bytes: bytes.to_vec(),
             values,
@@ -78,13 +82,15 @@ impl Filter {
 
 /// Strictly decodes an encoded set, passing each value in ascending order to `each`
 /// without holding them, and returns the count. Validates every bit, the padding and a
-/// count of at most `max`, bounding the count by the bits present before decoding.
+/// count of at most `max`, bounding the count by the bits present before decoding. When
+/// `each` breaks, decoding stops there and the rest of the set is left unchecked, so only
+/// a set validated earlier may be visited that way.
 pub(crate) fn visit(
     bytes: &[u8],
     p: u8,
     m: u64,
     max: u64,
-    mut each: impl FnMut(u64),
+    mut each: impl FnMut(u64) -> ControlFlow<()>,
 ) -> Result<u64, Error> {
     let mut rest = bytes;
     let count = read_compact_size(&mut rest).map_err(|_| Error::Malformed)?;
@@ -109,7 +115,10 @@ pub(crate) fn visit(
             .checked_add((quotient << p) + remainder)
             .filter(|v| *v < range)
             .ok_or(Error::Malformed)?;
-        each(value);
+        if each(value).is_break() {
+            // The caller needs no later value; the rest of the set stays unchecked.
+            return Ok(count);
+        }
     }
     let padding = ((8 - used % 8) % 8) as u8;
     if padding > 0 && read(padding)? != 0 {

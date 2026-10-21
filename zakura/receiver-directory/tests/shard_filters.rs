@@ -106,3 +106,29 @@ fn malformed_filters_are_refused() {
         Err(Error::Capacity)
     ));
 }
+
+/// A body a shard descriptor names by digest is hashed before its set is decoded. A
+/// substituted body of the named length, here one whose set is a single long unary run that
+/// a decode would walk bit by bit, is refused as another filter, not as a malformed one,
+/// so it was never decoded. The named body decodes.
+#[test]
+fn a_substituted_filter_body_is_refused_before_decoding() {
+    let filter = ShardFilter::build([1; 32], 7, coverage(), &receivers(1_000)).unwrap();
+    let named = filter.digest();
+    let mut substituted = filter.bytes().to_vec();
+    // Header: magic, genesis, generation, coverage and the set length.
+    let header = 8 + 32 + 8 + 4 + 4 + 32 + 4;
+    substituted[header..].fill(0xff);
+    assert!(matches!(
+        ShardFilter::decode(&substituted),
+        Err(Error::Malformed)
+    ));
+    assert!(matches!(
+        ShardFilter::decode_named(&substituted, &named),
+        Err(Error::Coverage)
+    ));
+    assert_eq!(
+        ShardFilter::decode_named(filter.bytes(), &named).unwrap(),
+        filter
+    );
+}

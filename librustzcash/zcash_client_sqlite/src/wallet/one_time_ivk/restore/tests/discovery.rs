@@ -1,7 +1,7 @@
 //! Queue behavior using an independent compact-block oracle and Merkle witness builder.
 use super::*;
 use zcash_client_backend::data_api::one_time_ivk::restore::{
-    LookupCursor, RecoveryStatus, SegmentRef, WitnessAnswer, WitnessRequest,
+    LookupCursor, RecoveryStatus, SegmentRef, StepShard, WitnessAnswer, WitnessRequest,
 };
 
 /// A fixture publication's whole history for one receiver: one shard of one segment,
@@ -12,11 +12,25 @@ pub(in crate::wallet::one_time_ivk) fn whole(
 ) -> LookupPage {
     LookupPage {
         publication,
+        inventory_shards: 1,
+        shards: only_shard(publication),
         segment: Some(segment_ref(publication)),
         records,
         checked_through: Some(publication.end.height),
         next: None,
     }
+}
+
+/// The fixture publication's only shard, read rather than filtered.
+pub(in crate::wallet::one_time_ivk) fn only_shard(
+    publication: RecoveryPublication,
+) -> Vec<StepShard> {
+    vec![StepShard {
+        index: 0,
+        end_height: publication.end.height,
+        segments: 1,
+        excluded: false,
+    }]
 }
 
 /// The fixture publication's only segment: its payment session is the publication's
@@ -352,6 +366,8 @@ fn answer_lookup(st: &mut State, account: AccountUuid, publication: RecoveryPubl
     let end = (start + 32).min(records.len());
     let page = LookupPage {
         publication,
+        inventory_shards: 1,
+        shards: only_shard(publication),
         segment: Some(segment_ref(publication)),
         records: records[start..end].to_vec(),
         checked_through: (end == records.len()).then_some(publication.end.height),
@@ -1483,6 +1499,13 @@ fn shard_progress_survives_recapture_but_cursors_do_not() {
     // A sealed shard was excluded by its filter; the step stopped at the recent tier.
     let step = LookupPage {
         publication: first,
+        inventory_shards: 2,
+        shards: vec![StepShard {
+            index: 0,
+            end_height: sealed_end,
+            segments: 1,
+            excluded: true,
+        }],
         segment: None,
         records: vec![],
         checked_through: Some(sealed_end),
@@ -4142,4 +4165,122 @@ fn a_final_witness_built_ahead_of_the_scanned_tip_is_admitted() {
     );
     assert_eq!(tip(&st).height, scanned);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// The wallet refuses a lookup step whose coverage or continuation does not follow from
+/// what it read, and keeps its progress: one ending the request after page 0 of 2, one
+/// whose cursor jumps from shard 0 to shard 2 past shard 1, and one claiming coverage
+/// through the inventory's end while still reading shard 1. The one valid step from the
+/// same position is taken.
+#[test]
+fn malformed_lookup_steps_cannot_advance_coverage() {
+    for shape in ["early end", "jump", "over-claim"] {
+        let mut st = scanned_wallet();
+        let account = st.test_account().unwrap().id();
+        pay_candidate(&mut st, key8());
+        pay_candidate(&mut st, key8());
+        let height = tip(&st).height;
+        recover(st.wallet_mut().db_mut(), account, key8(), height - 1);
+        let publication = publication_at(&st, height);
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .begin_one_time_recovery(account, publication, false)
+                .unwrap()
+        );
+        let work = work_of(&st, key8());
+        let fvk = get_key(st.wallet().db(), account, key8()).unwrap().unwrap();
+        let records = oracle(&st, work.work.receiver, fvk.full_viewing_key());
+        assert_eq!(records.len(), 2);
+        let end = publication.end.height;
+        let shard = |index: u32, end_height, excluded| StepShard {
+            index,
+            end_height,
+            segments: 1,
+            excluded,
+        };
+        let cursor = |shard, last| {
+            Some(LookupCursor {
+                inventory: publication.id,
+                shard,
+                segment: 0,
+                last,
+            })
+        };
+        let first = Some(records[0].clone());
+        let (malformed, valid) = match shape {
+            "early end" => (
+                whole(publication, vec![records[0].clone()]),
+                LookupPage {
+                    checked_through: None,
+                    next: cursor(0, first),
+                    ..whole(publication, vec![records[0].clone()])
+                },
+            ),
+            "jump" => {
+                let read = LookupPage {
+                    inventory_shards: 3,
+                    shards: vec![shard(0, end - 2, false)],
+                    records: vec![],
+                    checked_through: Some(end - 2),
+                    next: cursor(2, None),
+                    ..whole(publication, vec![])
+                };
+                let valid = LookupPage {
+                    next: cursor(1, None),
+                    ..read.clone()
+                };
+                (read, valid)
+            }
+            _ => {
+                let reading = LookupPage {
+                    inventory_shards: 3,
+                    shards: vec![shard(0, end - 2, true), shard(1, end - 1, false)],
+                    segment: Some(SegmentRef {
+                        shard: 1,
+                        ..segment_ref(publication)
+                    }),
+                    records: vec![records[0].clone()],
+                    checked_through: Some(end),
+                    next: cursor(1, first),
+                    ..whole(publication, vec![])
+                };
+                let valid = LookupPage {
+                    checked_through: Some(end - 2),
+                    ..reading.clone()
+                };
+                (reading, valid)
+            }
+        };
+        let id = key_ref(&st.wallet().db().conn, account, key8()).unwrap();
+        let progress = |st: &State| -> (Option<u32>, Option<Vec<u8>>, Option<u32>, bool) {
+            row(
+                st.wallet().conn(),
+                "SELECT checked_height, inventory, done_height, read_complete
+                 FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+                [id],
+            )
+        };
+        let before = progress(&st);
+        assert!(
+            matches!(
+                st.wallet_mut().db_mut().record_one_time_lookup(
+                    account,
+                    &work,
+                    &malformed,
+                    clock_now()
+                ),
+                Err(SqliteClientError::InvalidOneTimeIvkInput(_))
+            ),
+            "{shape}"
+        );
+        assert_eq!(progress(&st), before, "{shape}");
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .record_one_time_lookup(account, &work, &valid, clock_now())
+                .unwrap(),
+            "{shape}"
+        );
+    }
 }

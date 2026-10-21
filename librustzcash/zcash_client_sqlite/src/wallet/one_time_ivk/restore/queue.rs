@@ -1296,24 +1296,9 @@ pub(crate) fn record_lookup<P: Parameters>(
                 .segment
                 .is_some_and(|s| (s.shard, s.segment) == (c.shard, c.segment))
     });
-    if !page.records.is_empty() && page.segment.is_none()
-        || page.next.as_ref().is_some_and(|next| {
-            next.inventory != publication.id
-                || (next.last.is_some()
-                    && (next.last.as_ref() != page.records.last()
-                        || page
-                            .segment
-                            .is_none_or(|s| (s.shard, s.segment) != (next.shard, next.segment))))
-        })
-        || page
-            .checked_through
-            .is_some_and(|h| h < work.from.saturating_sub(1) || h > publication.end.height)
-        // A final step must prove coverage through the inventory's end, unless the saved
-        // frontier already reaches it; otherwise it would mark unread history checked.
-        || (page.next.is_none()
-            && page.checked_through != Some(publication.end.height)
-            && work.from <= publication.end.height)
-    {
+    // The step's coverage and continuation must follow from its position and what it read
+    // (see `LookupPage::valid_step`), so it can never mark unread history checked.
+    if !page.valid_step(work) {
         return Err(invalid("inconsistent receiver lookup step"));
     }
     let mut previous = resumed.and_then(|c| c.last.as_ref());

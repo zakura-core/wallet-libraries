@@ -269,7 +269,15 @@ pub struct InventoryClient<T> {
     filters: bool,
     segments: Mutex<Lru<(u32, u32), Segment>>,
     filter_cache: Mutex<Lru<u32, ShardFilter>>,
+    /// Each segment's coordinates by its payment session, built once per capture.
+    sessions: HashMap<Hash, (u32, u32)>,
+    /// Filter answers by shard and receiver, so a filter is traversed once per batch.
+    screened: Mutex<HashMap<(u32, ReceiverBytes), bool>>,
+    traversals: std::sync::atomic::AtomicU64,
 }
+
+/// Most remembered filter answers; the memo starts over past it.
+const SCREENED_ANSWERS: usize = 1 << 20;
 
 /// Default bound on the encoded shard filters one client keeps in memory.
 pub const FILTER_CACHE_BYTES: usize = 64 * 1024 * 1024;
@@ -331,7 +339,19 @@ impl<T: Transport> InventoryClient<T> {
     /// [`Inventory::accept`]. With `filters`, sealed shards' filters may stand in for PIR
     /// when they exclude a receiver; without, every required segment is read blind.
     pub fn new(origin: &str, http: T, inventory: Inventory, filters: bool) -> Self {
+        let mut sessions = HashMap::new();
+        for shard in inventory.shards() {
+            for (segment, publication) in shard.segments.iter().enumerate() {
+                // Capture validated every session, so each has an identity.
+                if let Ok(id) = publication.payments.id() {
+                    sessions.entry(id).or_insert((shard.index, segment as u32));
+                }
+            }
+        }
         Self {
+            sessions,
+            screened: Mutex::new(HashMap::new()),
+            traversals: Default::default(),
             origin: origin.trim_end_matches('/').to_owned(),
             http,
             inventory,
@@ -407,10 +427,9 @@ impl<T: Transport> InventoryClient<T> {
             .await
             .ok()
             .filter(|bytes| bytes.len() == reference.bytes as usize)
-            .and_then(|bytes| ShardFilter::decode(&bytes).ok())
+            .and_then(|bytes| ShardFilter::decode_named(&bytes, &reference.digest).ok())
             .filter(|filter| {
-                filter.digest() == reference.digest
-                    && filter.receivers() == u64::from(reference.receivers)
+                filter.receivers() == u64::from(reference.receivers)
                     && filter
                         .check(
                             &self.inventory.head().genesis,
@@ -428,6 +447,45 @@ impl<T: Transport> InventoryClient<T> {
                 .insert(shard, filter.clone(), filter.bytes().len());
         }
         fetched
+    }
+
+    /// Whether shard `shard`'s validated filter may hold each of `receivers`, in order, or
+    /// `None` when the shard has no usable filter. One traversal of the filter answers every
+    /// receiver not screened against it before, and each answer is remembered, so a caller
+    /// that screens its receivers together reads each filter once per round.
+    pub async fn screen(&self, shard: u32, receivers: &[ReceiverBytes]) -> Option<Vec<bool>> {
+        let pending: Vec<ReceiverBytes> = {
+            let screened = self.screened.lock().unwrap();
+            let mut pending: Vec<_> = receivers
+                .iter()
+                .filter(|r| !screened.contains_key(&(shard, **r)))
+                .copied()
+                .collect();
+            pending.sort_unstable();
+            pending.dedup();
+            pending
+        };
+        if !pending.is_empty() {
+            let filter = self.filter(shard).await?;
+            self.traversals
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let found = filter.matches(&pending);
+            let mut screened = self.screened.lock().unwrap();
+            if screened.len() + pending.len() > SCREENED_ANSWERS {
+                screened.clear();
+            }
+            screened.extend(pending.iter().map(|r| (shard, *r)).zip(found));
+        }
+        let screened = self.screened.lock().unwrap();
+        receivers
+            .iter()
+            .map(|r| screened.get(&(shard, *r)).copied())
+            .collect()
+    }
+
+    /// How many filter traversals [`Self::screen`] has made.
+    pub fn filter_traversals(&self) -> u64 {
+        self.traversals.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Reads page `page` of `receiver`'s history in one segment over PIR: one query, whose
@@ -451,15 +509,10 @@ impl<T: Transport> InventoryClient<T> {
         segment.client.decode(query, &body)
     }
 
-    /// The segment whose payment session is `payments`, if this inventory holds it.
+    /// The segment whose payment session is `payments`, if this inventory holds it: the
+    /// first in chain order, found in the index built at construction.
     pub fn find_segment(&self, payments: &Hash) -> Option<(u32, u32)> {
-        self.inventory.shards().iter().find_map(|shard| {
-            shard
-                .segments
-                .iter()
-                .position(|segment| segment.payments.id().ok().as_ref() == Some(payments))
-                .map(|segment| (shard.index, segment as u32))
-        })
+        self.sessions.get(payments).copied()
     }
 
     /// Reads the companion witness payload for `ordinal` in one segment over PIR. The
