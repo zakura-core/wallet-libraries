@@ -6,11 +6,12 @@ use zakura_one_time_ivk::swap::{
 };
 use zcash_protocol::TxId;
 
-/// Starts a quote on the currently lowest eligible slot.
-fn quote(st: &mut State, now: i64, deposit: &str, start: bool) -> (KeyId, String) {
+/// Reserves the currently lowest eligible slot at `now`, with the chain's time at `now`,
+/// first completing the window's histories if issuance waits for them.
+fn reserve_receive(st: &mut State, now: i64) -> OneTimeKey {
     let account = st.test_account().unwrap().id();
     chain_agrees(st.wallet().db(), now);
-    let key = match st
+    match st
         .wallet_mut()
         .db_mut()
         .prepare_receive_reservation(account, now)
@@ -25,7 +26,13 @@ fn quote(st: &mut State, now: i64, deposit: &str, start: bool) -> (KeyId, String
                 .unwrap()
         }
         issued => issued.unwrap(),
-    };
+    }
+}
+
+/// Starts a quote on the currently lowest eligible slot.
+fn quote(st: &mut State, now: i64, deposit: &str, start: bool) -> (KeyId, String) {
+    let account = st.test_account().unwrap().id();
+    let key = reserve_receive(st, now);
     let db = st.wallet_mut().db_mut();
     let request = db
         .begin_receive_operation(account, key.key_id().index(), now + 60, now)
@@ -994,4 +1001,820 @@ fn seeded_reservation_sequences_never_hold_without_work() {
         );
         assert_eq!(held, 0, "seed {seed}: settling releases every hold");
     }
+}
+
+/// Whether receive index `index` is reserved and not released.
+fn held(st: &State, index: u64) -> bool {
+    value(
+        st.wallet().conn(),
+        "SELECT reserved_at IS NOT NULL AND released_at IS NULL FROM ironwood_one_time_keys
+         WHERE purpose = 1 AND key_index = ?1",
+        [index.to_be_bytes()],
+    )
+}
+
+/// Receive index `index`'s `reserved_at` and `reservation_floor`.
+fn reservation(st: &State, index: u64) -> (Option<i64>, Option<i64>) {
+    row(
+        st.wallet().conn(),
+        "SELECT reserved_at, reservation_floor FROM ironwood_one_time_keys
+         WHERE purpose = 1 AND key_index = ?1",
+        [index.to_be_bytes()],
+    )
+}
+
+/// The number of stored provider operations.
+fn operations(st: &State) -> u32 {
+    value(
+        st.wallet().conn(),
+        "SELECT COUNT(*) FROM ironwood_one_time_operations",
+        [],
+    )
+}
+
+/// Records the provider's `status` for `deposit` and `memo` at `at`, returning whether an
+/// operation matched.
+fn report(
+    st: &mut State,
+    (deposit, memo): (&str, Option<&str>),
+    status: zakura_one_time_ivk::swap::OperationStatus,
+    funded: bool,
+    at: i64,
+) -> bool {
+    let account = st.test_account().unwrap().id();
+    st.wallet_mut()
+        .db_mut()
+        .record_operation_status(
+            account,
+            deposit,
+            memo,
+            Observation {
+                status,
+                funded,
+                receipts: vec![],
+            },
+            at,
+        )
+        .unwrap()
+}
+
+/// A draft is reusable, after a restart too, until the deadline of its latest request: the
+/// requested one when the provider rejected the quote or never answered, else the accepted
+/// one, which can only lower it. Until then the same address and reservation resume and
+/// take another request. From then `begin` refuses it as stale without storing anything,
+/// and the next reservation reissues the unpaid address under a new floor.
+#[test]
+fn a_draft_is_reusable_until_its_latest_request_expires() {
+    for outcome in ["rejected", "unanswered", "accepted"] {
+        let mut st = scanned_wallet();
+        let now = clock_now();
+        let account = st.test_account().unwrap().id();
+        assert_eq!(reserve_receive(&mut st, now).key_id().index(), 0);
+        let db = st.wallet_mut().db_mut();
+        let request = db
+            .begin_receive_operation(account, 0, now + 120, now)
+            .unwrap()
+            .unwrap();
+        let expiry = match outcome {
+            "rejected" => {
+                db.finish_receive_operation(account, &request, &OperationOutcome::Rejected)
+                    .unwrap();
+                now + 120
+            }
+            "unanswered" => now + 120,
+            _ => {
+                db.finish_receive_operation(account, &request, &accepted("draft", None, now + 60))
+                    .unwrap();
+                now + 60
+            }
+        };
+        let (reserved_at, floor) = reservation(&st, 0);
+        // Reopening reseeds the fixture's request generator, so it gets another seed.
+        let path = st.wallet().data_file_path().to_owned();
+        *st.wallet_mut().db_mut() = WalletDb::for_path(
+            path,
+            *st.network(),
+            crate::testing::db::test_clock(),
+            zcash_client_backend::data_api::testing::TestRng::seed_from_u64(1),
+        )
+        .unwrap();
+
+        chain_agrees(st.wallet().db(), expiry - 1);
+        let db = st.wallet_mut().db_mut();
+        let resumed = db
+            .prepare_receive_reservation(account, expiry - 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.key_id().index(), 0, "{outcome}");
+        assert_eq!(reservation(&st, 0), (reserved_at, floor), "{outcome}");
+        let db = st.wallet_mut().db_mut();
+        db.begin_receive_operation(account, 0, expiry, expiry - 1)
+            .unwrap()
+            .unwrap();
+
+        chain_agrees(st.wallet().db(), expiry);
+        let before = operations(&st);
+        let db = st.wallet_mut().db_mut();
+        assert_eq!(
+            db.begin_receive_operation(account, 0, expiry + 600, expiry)
+                .unwrap(),
+            Err(ReservationPolicy::Stale),
+            "{outcome}"
+        );
+        assert_eq!(operations(&st), before);
+        let db = st.wallet_mut().db_mut();
+        let reissued = db
+            .prepare_receive_reservation(account, expiry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reissued.key_id().index(), 0, "{outcome}");
+        assert_eq!(
+            reservation(&st, 0),
+            (Some(expiry), Some(i64::from(before))),
+            "{outcome}"
+        );
+        let db = st.wallet_mut().db_mut();
+        db.begin_receive_operation(account, 0, expiry + 600, expiry)
+            .unwrap()
+            .unwrap();
+    }
+}
+
+/// A device clock days ahead of the chain cannot reclaim a started reservation while its
+/// deadline has not passed by block time, since the provider may still take a deposit, and
+/// its quote still starts. Once the chain catches up, a fresh unfunded status reclaims it.
+#[test]
+fn a_fast_clock_cannot_reclaim_a_started_reservation_before_the_deadline_by_block_time() {
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let account = st.test_account().unwrap().id();
+    let (_, request) = quote(&mut st, now, "fast", true);
+    let fast = now + 5 * 86_400;
+    let awaiting = zakura_one_time_ivk::swap::OperationStatus::AwaitingDeposit;
+    assert!(report(&mut st, ("fast", None), awaiting, false, fast - 10));
+    assert!(held(&st, 0));
+    st.wallet_mut()
+        .db_mut()
+        .start_receive_operation(account, &request, fast)
+        .unwrap()
+        .unwrap();
+    chain_agrees(st.wallet().db(), fast);
+    assert!(report(&mut st, ("fast", None), awaiting, false, fast));
+    assert!(!held(&st, 0));
+}
+
+/// A request finishes one way only: rejecting it again is harmless, but a rejected quote
+/// can be neither accepted nor started.
+#[test]
+fn a_rejected_request_keeps_its_outcome() {
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let account = st.test_account().unwrap().id();
+    reserve_receive(&mut st, now);
+    let db = st.wallet_mut().db_mut();
+    let request = db
+        .begin_receive_operation(account, 0, now + 60, now)
+        .unwrap()
+        .unwrap();
+    for _ in 0..2 {
+        db.finish_receive_operation(account, &request, &OperationOutcome::Rejected)
+            .unwrap();
+    }
+    assert!(matches!(
+        db.finish_receive_operation(account, &request, &accepted("late", None, now + 60)),
+        Err(SqliteClientError::InvalidOneTimeIvkInput(_))
+    ));
+    assert_eq!(
+        db.start_receive_operation(account, &request, now).unwrap(),
+        Err(ReservationPolicy::Stale)
+    );
+}
+
+/// A reservation without an operation floor, as one made before the floor existed, counts
+/// every request on its key, even one begun before `reserved_at` after the clock was set
+/// back. While that request is live the draft resumes. Once it has expired, `begin` refuses
+/// the reservation as stale without storing another request.
+#[test]
+fn a_reservation_without_a_floor_counts_every_request() {
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let account = st.test_account().unwrap().id();
+    reserve_receive(&mut st, now);
+    let db = st.wallet_mut().db_mut();
+    db.begin_receive_operation(account, 0, now + 120, now)
+        .unwrap()
+        .unwrap();
+    exec(
+        st.wallet().conn(),
+        "UPDATE ironwood_one_time_keys SET reservation_floor = NULL, reserved_at = ?1
+         WHERE purpose = 1 AND key_index = X'0000000000000000'",
+        [now + 10],
+    );
+    let db = st.wallet_mut().db_mut();
+    let resumed = db
+        .prepare_receive_reservation(account, now + 60)
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.key_id().index(), 0);
+    db.begin_receive_operation(account, 0, now + 120, now + 60)
+        .unwrap()
+        .unwrap();
+
+    chain_agrees(st.wallet().db(), now + 120);
+    let before = operations(&st);
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_receive_operation(account, 0, now + 600, now + 120)
+            .unwrap(),
+        Err(ReservationPolicy::Stale)
+    );
+    assert_eq!(operations(&st), before);
+}
+
+/// A started reservation is reclaimed only on a fresh conclusive status. A funded swap's
+/// is a final status without a refund, not an inconclusive one. An unfunded swap's status
+/// must have arrived within the last two minutes, and a stale one arriving late never
+/// replaces a newer one. Deposit evidence an older status carried sticks, so a later fresh
+/// unfunded status cannot reclaim the address.
+#[test]
+fn a_started_reservation_needs_a_fresh_conclusive_status() {
+    let awaiting = zakura_one_time_ivk::swap::OperationStatus::AwaitingDeposit;
+    let account_of = |st: &State| st.test_account().unwrap().id();
+
+    // A funded swap ends inconclusively, then without a refund.
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    quote(&mut st, now, "funded", true);
+    chain_agrees(st.wallet().db(), now + 120);
+    let unknown = Terminal(ReceiptExpectation::Unknown);
+    assert!(report(&mut st, ("funded", None), unknown, true, now + 120));
+    assert!(held(&st, 0), "an inconclusive end may still owe a refund");
+    let none = Terminal(ReceiptExpectation::None);
+    assert!(report(&mut st, ("funded", None), none, true, now + 121));
+    assert!(!held(&st, 0));
+
+    // An unfunded swap's status goes stale, then a late older one cannot refresh it.
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let account = account_of(&st);
+    quote(&mut st, now, "unfunded", true);
+    assert!(report(
+        &mut st,
+        ("unfunded", None),
+        awaiting,
+        false,
+        now + 59
+    ));
+    chain_agrees(st.wallet().db(), now + 300);
+    let _ = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, now + 300)
+        .unwrap();
+    assert!(held(&st, 0), "a stale status reclaims nothing");
+    assert!(report(
+        &mut st,
+        ("unfunded", None),
+        Active,
+        false,
+        now + 301
+    ));
+    assert!(report(
+        &mut st,
+        ("unfunded", None),
+        awaiting,
+        false,
+        now + 300
+    ));
+    assert!(
+        held(&st, 0),
+        "an older status arriving late replaces nothing"
+    );
+    assert!(report(
+        &mut st,
+        ("unfunded", None),
+        awaiting,
+        false,
+        now + 302
+    ));
+    assert!(!held(&st, 0));
+
+    // A late older status that saw the deposit keeps the address.
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    quote(&mut st, now, "seen", true);
+    assert!(report(&mut st, ("seen", None), awaiting, false, now + 2));
+    assert!(report(&mut st, ("seen", None), Active, true, now + 1));
+    chain_agrees(st.wallet().db(), now + 300);
+    assert!(report(&mut st, ("seen", None), awaiting, false, now + 300));
+    assert!(held(&st, 0), "the deposit evidence sticks");
+}
+
+/// Beginning a request needs a future deadline, and each request gets a fresh identity.
+#[test]
+fn begin_needs_a_future_deadline_and_returns_a_fresh_request() {
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let account = st.test_account().unwrap().id();
+    reserve_receive(&mut st, now);
+    let db = st.wallet_mut().db_mut();
+    assert!(matches!(
+        db.begin_receive_operation(account, 0, now, now),
+        Err(SqliteClientError::InvalidOneTimeIvkInput(_))
+    ));
+    assert_eq!(operations(&st), 0);
+    let db = st.wallet_mut().db_mut();
+    let first = db
+        .begin_receive_operation(account, 0, now + 60, now)
+        .unwrap()
+        .unwrap();
+    let second = db
+        .begin_receive_operation(account, 0, now + 60, now)
+        .unwrap()
+        .unwrap();
+    assert_ne!(first, second);
+    for request in [&first, &second] {
+        assert_eq!(request.len(), 32);
+        assert!(request.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+}
+
+/// Deposit instructions bind one operation in the account. Repeating an acceptance can
+/// lower its deadline but not change its address or memo, and another request, on the same
+/// reservation or another, cannot take the same instructions, though another memo makes
+/// them distinct. A status then matches the one operation, and an unknown request is an
+/// error.
+#[test]
+fn deposit_instructions_bind_one_operation_and_cannot_change() {
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let account = st.test_account().unwrap().id();
+    reserve_receive(&mut st, now);
+    let db = st.wallet_mut().db_mut();
+    let first = db
+        .begin_receive_operation(account, 0, now + 60, now)
+        .unwrap()
+        .unwrap();
+    let sibling = db
+        .begin_receive_operation(account, 0, now + 60, now)
+        .unwrap()
+        .unwrap();
+    let shared = || accepted("shared", Some("m1"), now + 60);
+    for _ in 0..2 {
+        db.finish_receive_operation(account, &first, &shared())
+            .unwrap();
+    }
+    let invalid = |r: Result<(), SqliteClientError>| {
+        matches!(r, Err(SqliteClientError::InvalidOneTimeIvkInput(_)))
+    };
+    assert!(invalid(db.finish_receive_operation(
+        account,
+        &sibling,
+        &shared()
+    )));
+    assert!(invalid(db.finish_receive_operation(
+        account,
+        &first,
+        &accepted("shared", Some("m2"), now + 60)
+    )));
+    assert!(invalid(db.finish_receive_operation(
+        account,
+        &first,
+        &accepted("shared", None, now + 60)
+    )));
+    db.start_receive_operation(account, &first, now)
+        .unwrap()
+        .unwrap();
+
+    let other = reserve_receive(&mut st, now).key_id().index();
+    assert_eq!(other, 1);
+    let db = st.wallet_mut().db_mut();
+    let elsewhere = db
+        .begin_receive_operation(account, other, now + 60, now)
+        .unwrap()
+        .unwrap();
+    assert!(invalid(db.finish_receive_operation(
+        account,
+        &elsewhere,
+        &shared()
+    )));
+    db.finish_receive_operation(account, &elsewhere, &accepted("shared", None, now + 60))
+        .unwrap();
+
+    db.finish_receive_operation(account, &first, &accepted("shared", Some("m1"), now + 30))
+        .unwrap();
+    assert_eq!(
+        db.start_receive_operation(account, &first, now)
+            .unwrap()
+            .unwrap(),
+        ReceiveDeposit {
+            address: "shared".into(),
+            memo: Some("m1".into()),
+            deadline: now + 30,
+        }
+    );
+    assert!(report(
+        &mut st,
+        ("shared", Some("m1")),
+        Active,
+        false,
+        now + 5
+    ));
+    let observed: Vec<(String, i64)> = rows(
+        st.wallet().conn(),
+        "SELECT request, observed_at FROM ironwood_one_time_operations
+         WHERE reference = 'shared' ORDER BY id",
+        [],
+    );
+    assert_eq!(observed, [(first.clone(), now + 5), (elsewhere, now)]);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .start_receive_operation(account, "unknown", now)
+            .is_err()
+    );
+}
+
+/// A request keeps the caller's clock as its time, even behind block times ahead of it, and
+/// an accepted deadline is checked against the earlier of the two, so one still ahead of the
+/// request is kept though the latest block time has passed it.
+#[test]
+fn finish_checks_the_deadline_against_the_real_request_time() {
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let account = st.test_account().unwrap().id();
+    reserve_receive(&mut st, now);
+    chain_agrees(st.wallet().db(), now + 3600);
+    let db = st.wallet_mut().db_mut();
+    let request = db
+        .begin_receive_operation(account, 0, now + 3600, now)
+        .unwrap()
+        .unwrap();
+    let begun: i64 = value(
+        st.wallet().conn(),
+        "SELECT begun_at FROM ironwood_one_time_operations WHERE request = ?1",
+        [&request],
+    );
+    assert_eq!(begun, now);
+    st.wallet_mut()
+        .db_mut()
+        .finish_receive_operation(account, &request, &accepted("a", None, now + 1800))
+        .unwrap();
+    let deadline: i64 = value(
+        st.wallet().conn(),
+        "SELECT deadline FROM ironwood_one_time_operations WHERE request = ?1",
+        [&request],
+    );
+    assert_eq!(deadline, now + 1800);
+}
+
+/// An accepted deadline that has passed by the earlier of the request time and the latest
+/// block time is refused without changing the operation, but one only behind a fast device
+/// clock is kept, since the provider sets it by its own clock.
+#[test]
+fn finish_refuses_an_accepted_deadline_that_has_passed() {
+    let mut st = scanned_wallet();
+    let chain = clock_now();
+    let fast = chain + 86_400;
+    let account = st.test_account().unwrap().id();
+    reserve_receive(&mut st, chain);
+    let db = st.wallet_mut().db_mut();
+    let request = db
+        .begin_receive_operation(account, 0, fast + 60, fast)
+        .unwrap()
+        .unwrap();
+    let stored = |st: &State| -> (Option<String>, i64) {
+        row(
+            st.wallet().conn(),
+            "SELECT reference, deadline FROM ironwood_one_time_operations WHERE request = ?1",
+            [&request],
+        )
+    };
+    let before = stored(&st);
+    for passed in [chain - 30 * 86_400, chain] {
+        assert!(matches!(
+            st.wallet_mut().db_mut().finish_receive_operation(
+                account,
+                &request,
+                &accepted("a", None, passed)
+            ),
+            Err(SqliteClientError::InvalidOneTimeIvkInput(_))
+        ));
+        assert_eq!(stored(&st), before);
+    }
+    let db = st.wallet_mut().db_mut();
+    db.finish_receive_operation(account, &request, &accepted("a", None, chain + 3600))
+        .unwrap();
+    assert_eq!(
+        db.start_receive_operation(account, &request, fast)
+            .unwrap()
+            .unwrap()
+            .deadline,
+        chain + 3600
+    );
+}
+
+/// Starting refuses an accepted quote whose deadline has passed by the earlier of the
+/// caller's clock and the latest block time, on a first start or a restart, without
+/// marking it started. A device clock days slow still starts a live quote.
+#[test]
+fn start_refuses_a_quote_past_its_deadline() {
+    let started = |st: &State, request: &str| -> bool {
+        value(
+            st.wallet().conn(),
+            "SELECT started FROM ironwood_one_time_operations WHERE request = ?1",
+            [request],
+        )
+    };
+    // A late first start.
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let account = st.test_account().unwrap().id();
+    let (_, request) = quote(&mut st, now, "late", false);
+    chain_agrees(st.wallet().db(), now + 120);
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .start_receive_operation(account, &request, now + 120)
+            .unwrap(),
+        Err(ReservationPolicy::Stale)
+    );
+    assert!(!started(&st, &request));
+
+    // A device clock two days slow.
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let slow = now - 2 * 86_400;
+    let account = st.test_account().unwrap().id();
+    reserve_receive(&mut st, now);
+    let db = st.wallet_mut().db_mut();
+    let request = db
+        .begin_receive_operation(account, 0, now + 3600, slow)
+        .unwrap()
+        .unwrap();
+    db.finish_receive_operation(account, &request, &accepted("slow", None, now + 3600))
+        .unwrap();
+    db.start_receive_operation(account, &request, slow + 10)
+        .unwrap()
+        .unwrap();
+
+    // A late restart.
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let account = st.test_account().unwrap().id();
+    let (_, request) = quote(&mut st, now, "restart", true);
+    chain_agrees(st.wallet().db(), now + 120);
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .start_receive_operation(account, &request, now + 120)
+            .unwrap(),
+        Err(ReservationPolicy::Stale)
+    );
+}
+
+/// A reservation with two accepted quote requests starts only one, so one receiver never
+/// has two quotes a user could fund. Restarting the first returns its instructions again,
+/// and the started reservation takes no new request.
+#[test]
+fn one_reservation_starts_only_one_accepted_quote() {
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let account = st.test_account().unwrap().id();
+    reserve_receive(&mut st, now);
+    let db = st.wallet_mut().db_mut();
+    let first = db
+        .begin_receive_operation(account, 0, now + 60, now)
+        .unwrap()
+        .unwrap();
+    let second = db
+        .begin_receive_operation(account, 0, now + 60, now)
+        .unwrap()
+        .unwrap();
+    db.finish_receive_operation(account, &first, &accepted("first", None, now + 60))
+        .unwrap();
+    db.finish_receive_operation(account, &second, &accepted("second", None, now + 60))
+        .unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            db.start_receive_operation(account, &first, now)
+                .unwrap()
+                .unwrap()
+                .address,
+            "first"
+        );
+    }
+    assert_eq!(
+        db.start_receive_operation(account, &second, now).unwrap(),
+        Err(ReservationPolicy::Stale)
+    );
+    let started: u32 = value(
+        st.wallet().conn(),
+        "SELECT COUNT(*) FROM ironwood_one_time_operations WHERE started = 1",
+        [],
+    );
+    assert_eq!(started, 1);
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_receive_operation(account, 0, now + 60, now)
+            .unwrap(),
+        Err(ReservationPolicy::Stale)
+    );
+}
+
+/// A paid reservation holding an unstarted quote edit and the started quote that was paid
+/// is released only once every quote has settled: the edit's deadline has passed and the
+/// paid quote's status is fresh. Both operations remain, and the paid address is not
+/// issued again.
+#[test]
+fn paid_reservation_closes_once_every_quote_settles() {
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let account = st.test_account().unwrap().id();
+    reserve_receive(&mut st, now);
+    let db = st.wallet_mut().db_mut();
+    let edit = db
+        .begin_receive_operation(account, 0, now + 60, now)
+        .unwrap()
+        .unwrap();
+    let paid = db
+        .begin_receive_operation(account, 0, now + 60, now)
+        .unwrap()
+        .unwrap();
+    db.finish_receive_operation(account, &edit, &accepted("edit", None, now + 60))
+        .unwrap();
+    db.finish_receive_operation(account, &paid, &accepted("paid", None, now + 60))
+        .unwrap();
+    db.start_receive_operation(account, &paid, now)
+        .unwrap()
+        .unwrap();
+    let payment =
+        store::restore::tests::discovery::pay_candidate(&mut st, KeyId::new(Purpose::Receive, 0));
+    let owed = Terminal(ReceiptExpectation::Positive(None));
+    let account_paid = |st: &mut State, at: i64| {
+        st.wallet_mut()
+            .db_mut()
+            .record_operation_status(
+                account,
+                "paid",
+                None,
+                Observation {
+                    status: owed,
+                    funded: true,
+                    receipts: vec![payment.txid],
+                },
+                at,
+            )
+            .unwrap()
+    };
+    assert!(account_paid(&mut st, now));
+    catch_up(&mut st);
+    let used: bool = value(
+        st.wallet().conn(),
+        "SELECT used FROM ironwood_one_time_keys WHERE purpose = 1 AND key_index = X'0000000000000000'",
+        [],
+    );
+    assert!(used);
+    let awaiting = zakura_one_time_ivk::swap::OperationStatus::AwaitingDeposit;
+    chain_agrees(st.wallet().db(), now + 59);
+    assert!(report(&mut st, ("edit", None), awaiting, false, now + 1));
+    assert!(held(&st, 0));
+    chain_agrees(st.wallet().db(), now + 300);
+    assert!(report(&mut st, ("edit", None), awaiting, false, now + 300));
+    assert!(held(&st, 0), "the paid quote's status is stale");
+    assert!(account_paid(&mut st, now + 300));
+    assert!(!held(&st, 0));
+    assert_eq!(operations(&st), 2);
+    let next = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, now + 300)
+        .unwrap();
+    assert!(next.is_err() || next.unwrap().key_id().index() != 0);
+}
+
+/// An operation is found by its deposit address and memo: a status for another memo on the
+/// same address matches nothing and changes nothing, and a payout status records its
+/// expected amount but keeps the deadline.
+#[test]
+fn provider_statuses_update_the_operation_or_leave_it_alone() {
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    quote(&mut st, now, "payout", true);
+    let stored = |st: &State| -> (i64, u8, Option<i64>, i64) {
+        row(
+            st.wallet().conn(),
+            "SELECT observed_at, expectation, expected_value, deadline
+             FROM ironwood_one_time_operations WHERE reference = 'payout'",
+            [],
+        )
+    };
+    let before = stored(&st);
+    assert!(!report(
+        &mut st,
+        ("payout", Some("memo")),
+        Active,
+        false,
+        now + 1
+    ));
+    assert_eq!(stored(&st), before);
+    assert!(report(&mut st, ("payout", None), Active, false, now + 2));
+    let owed = Terminal(ReceiptExpectation::Positive(Some(
+        Zatoshis::const_from_u64(5_000),
+    )));
+    assert!(report(&mut st, ("payout", None), owed, false, now + 3));
+    assert_eq!(stored(&st), (now + 3, 2, Some(5_000), before.3));
+}
+
+/// A fresh unfunded status reclaims an abandoned started reservation at once, keeping its
+/// operation, so the next reservation reissues the address and the old quote cannot start
+/// again. A paid one is released instead and its address is not issued again.
+#[test]
+fn statuses_reclaim_abandoned_reservations_and_release_paid_ones() {
+    let awaiting = zakura_one_time_ivk::swap::OperationStatus::AwaitingDeposit;
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let account = st.test_account().unwrap().id();
+    let (_, old) = quote(&mut st, now, "abandoned", true);
+    chain_agrees(st.wallet().db(), now + 120);
+    assert!(report(
+        &mut st,
+        ("abandoned", None),
+        awaiting,
+        false,
+        now + 120
+    ));
+    assert!(!held(&st, 0));
+    assert_eq!(operations(&st), 1);
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(
+        db.prepare_receive_reservation(account, now + 120)
+            .unwrap()
+            .unwrap()
+            .key_id()
+            .index(),
+        0
+    );
+    assert_eq!(
+        db.start_receive_operation(account, &old, now + 120)
+            .unwrap(),
+        Err(ReservationPolicy::Stale)
+    );
+
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let account = st.test_account().unwrap().id();
+    let (key, _) = quote(&mut st, now, "paid", true);
+    let payment = store::restore::tests::discovery::pay_candidate(&mut st, key);
+    catch_up(&mut st);
+    chain_agrees(st.wallet().db(), now + 120);
+    promise_payout(&mut st, "paid", &[payment.txid], now + 120);
+    assert!(!held(&st, 0));
+    let next = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, now + 120)
+        .unwrap();
+    assert!(next.is_err() || next.unwrap().key_id().index() != 0);
+}
+
+/// A payment the directory reported for a reserved address but that waits for admission
+/// may be another device's, so beginning or starting a quote on it waits with
+/// `ReceiveHistory`, and issuance passes it by.
+#[test]
+fn quoting_waits_for_a_queued_payment_to_its_address() {
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let account = st.test_account().unwrap().id();
+    let key = reserve_receive(&mut st, now).key_id();
+    let db = st.wallet_mut().db_mut();
+    let request = db
+        .begin_receive_operation(account, 0, now + 3600, now)
+        .unwrap()
+        .unwrap();
+    db.finish_receive_operation(account, &request, &accepted("queued", None, now + 3600))
+        .unwrap();
+    exec(
+        st.wallet().conn(),
+        "INSERT INTO ironwood_one_time_payment_recovery
+             (one_time_key_id, txid, action_index, height, block_hash, tx_index, position,
+              encrypted_note)
+         SELECT id, zeroblob(32), 0, 1, zeroblob(32), 1, 0, zeroblob(148)
+         FROM ironwood_one_time_keys WHERE purpose = 1 AND key_index = ?1",
+        [key.index().to_be_bytes()],
+    );
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(
+        db.begin_receive_operation(account, 0, now + 3600, now)
+            .unwrap(),
+        Err(ReservationPolicy::ReceiveHistory)
+    );
+    assert_eq!(
+        db.start_receive_operation(account, &request, now).unwrap(),
+        Err(ReservationPolicy::ReceiveHistory)
+    );
+    let next = db.prepare_receive_reservation(account, now).unwrap();
+    assert!(next.is_err() || next.unwrap().key_id().index() != 0);
 }

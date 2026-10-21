@@ -1,6 +1,6 @@
 use receiver_directory::{
     blocks::{Batch, BlockFilter, BlockId, Head, MAX_BATCH_BYTES, MAX_BLOCKS, MAX_RECEIVERS},
-    ReceiverBytes,
+    Error, ReceiverBytes,
 };
 use sha2::{Digest, Sha256};
 
@@ -199,4 +199,116 @@ fn capacity_is_bounded_before_filter_allocation() {
         std::iter::repeat_n(&members[0], MAX_RECEIVERS as usize + 1)
     )
     .is_ok());
+}
+
+/// One block's batch at height 10 whose GCS payload is `payload`, encoded by hand.
+fn with_payload(payload: &[u8]) -> Vec<u8> {
+    let block = BlockId {
+        height: 10,
+        hash: [10; 32],
+    };
+    let filter = BlockFilter::build(&GENESIS, block, [9; 32], &receivers(0)).unwrap();
+    let mut bytes = Batch::new(GENESIS, 0, vec![filter])
+        .unwrap()
+        .encode()
+        .unwrap();
+    // Header: magic/genesis/revision/count; block: height/hash/parent/payload length.
+    bytes.truncate(120);
+    bytes.extend((payload.len() as u32).to_le_bytes());
+    bytes.extend(payload);
+    bytes
+}
+
+/// The decoder accepts only canonical sets: every value below the set's range, a minimal
+/// count, zero padding bits and no bytes after the last value. Each one-value payload
+/// codes quotient 1 or 2 in unary, then a zero 20-bit remainder.
+#[test]
+fn only_canonical_gcs_payloads_decode() {
+    // Quotient 1: value 2^20, below the range 1 * M.
+    let canonical = [1, 0b1000_0000, 0, 0];
+    assert!(Batch::decode(&with_payload(&canonical)).is_ok());
+    // Quotient 2: value 2^21, at or past the range.
+    assert!(matches!(
+        Batch::decode(&with_payload(&[1, 0b1100_0000, 0, 0])),
+        Err(Error::Malformed)
+    ));
+    // The same count as a three-byte CompactSize.
+    assert!(matches!(
+        Batch::decode(&with_payload(&[0xfd, 1, 0, 0b1000_0000, 0, 0])),
+        Err(Error::Malformed)
+    ));
+    // A set bit in the two padding bits.
+    assert!(matches!(
+        Batch::decode(&with_payload(&[1, 0b1000_0000, 0, 1])),
+        Err(Error::Malformed)
+    ));
+    // A byte after the last value, inside the declared payload.
+    assert!(matches!(
+        Batch::decode(&with_payload(&[1, 0b1000_0000, 0, 0, 0])),
+        Err(Error::Malformed)
+    ));
+    // A real set's last byte with a padding bit set.
+    let (_, batch, _) = sample();
+    let mut bytes = batch.encode().unwrap();
+    let len = u32::from_le_bytes(bytes[120..124].try_into().unwrap()) as usize;
+    bytes[124 + len - 1] |= 1;
+    assert!(Batch::decode(&bytes).is_err());
+}
+
+/// Batches are bounded in bytes before decoding and when built, and a block's declared
+/// receiver count is bounded before its set is decoded.
+#[test]
+fn batches_and_block_sets_are_bounded() {
+    let (_, batch, _) = sample();
+    let mut padded = batch.encode().unwrap();
+    padded.resize(MAX_BATCH_BYTES + 1, 0);
+    assert!(matches!(Batch::decode(&padded), Err(Error::Capacity)));
+
+    let mut count = vec![0xfe];
+    count.extend((MAX_RECEIVERS + 1).to_le_bytes());
+    assert!(matches!(
+        Batch::decode(&with_payload(&count)),
+        Err(Error::Capacity)
+    ));
+
+    // Full blocks of distinct receivers exceed the byte bound long before the block bound.
+    let members = receivers(MAX_RECEIVERS);
+    let mut filters = Vec::new();
+    let mut parent = [0; 32];
+    for height in 1..=24u32 {
+        let block = BlockId {
+            height,
+            hash: Sha256::digest(height.to_le_bytes()).into(),
+        };
+        filters.push(BlockFilter::build(&GENESIS, block, parent, &members).unwrap());
+        parent = block.hash;
+    }
+    assert!(matches!(
+        Batch::new(GENESIS, 0, filters.clone()),
+        Err(Error::Capacity)
+    ));
+    filters.truncate(4);
+    assert!(Batch::new(GENESIS, 0, filters).is_ok());
+}
+
+/// A non-member matches a block's set with probability about 1 in 1,569,792, so 2,000
+/// non-members almost never match a populated block.
+#[test]
+fn non_members_rarely_match() {
+    let (_, batch, members) = sample();
+    let others: Vec<ReceiverBytes> = (0..2_000u32)
+        .map(|i| {
+            let mut receiver = [0xff; 43];
+            receiver[..4].copy_from_slice(&i.to_le_bytes());
+            receiver
+        })
+        .filter(|r| !members.contains(r))
+        .collect();
+    let matched = batch
+        .matches(0, &others)
+        .unwrap()
+        .into_iter()
+        .filter(|m| *m)
+        .count();
+    assert!(matched <= 1, "{matched} false matches");
 }

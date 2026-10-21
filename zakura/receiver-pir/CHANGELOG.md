@@ -27,7 +27,7 @@
 - `DirectoryClient`, `AcceptedCoverage` and `/v1/receiver/init`: one session for all
   history. Its rolling-hint reads moved to `Inventories`.
 - `DirectoryClient::witnesses` and `transport::MAX_WITNESS_BYTES`: the common witness file.
-- Remove aggregate filter downloads and evaluator storage. Rolling block hints are independent of full-history PIR sessions.
+- Remove aggregate filter downloads and evaluator storage (`fetch_filters` and `server::Server::filters`). Rolling block hints are independent of full-history PIR sessions.
 - Remove `server::Server::rows` and `server::Server::new_reusing_rows`, which only tests used. A prepared server no longer keeps a second copy of its encoded rows.
 
 ## [0.0.1-rc2] - 2026-10-20
