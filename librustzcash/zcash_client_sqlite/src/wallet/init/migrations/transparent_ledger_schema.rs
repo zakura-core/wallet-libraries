@@ -253,6 +253,7 @@ mod tests {
             "ironwood_one_time_payment_recovery",
             "ironwood_one_time_spend_retention",
             "ironwood_one_time_sweeps",
+            "ironwood_one_time_unchecked_raw",
             "ironwood_spend_journal",
             "ironwood_spend_journal_nullifiers",
             "transparent_detail_work",
