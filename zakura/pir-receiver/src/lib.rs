@@ -9,7 +9,7 @@
 #[cfg(feature = "wallet")]
 mod discovery;
 #[cfg(feature = "wallet")]
-pub use discovery::{FILTER_STEP_LIMIT, lookup, publication, witness};
+pub use discovery::{FILTER_STEP_LIMIT, lookup, publication, screen, witness};
 
 pub use receiver_pir::{Error as DirectoryError, transport::Transport};
 /// The directory format and client underneath, for callers that need them directly.

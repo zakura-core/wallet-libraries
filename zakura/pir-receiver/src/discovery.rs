@@ -99,8 +99,10 @@ pub async fn lookup<T: Transport>(
             && last.is_none()
             && client.uses_filters()
             && descriptor.filter.is_some()
-            && let Some(filter) = client.filter(shard).await
-            && !filter.matches(&[receiver])[0]
+            && client
+                .screen(shard, &[receiver])
+                .await
+                .is_some_and(|found| !found[0])
         {
             result.shards.push(StepShard {
                 excluded: true,
@@ -137,6 +139,46 @@ pub async fn lookup<T: Transport>(
                 .and_then(|_| cursor(shard + 1, 0, None))
         };
         return checked_step(result, work);
+    }
+}
+
+/// Screens every receiver in `works` against the filters of the sealed shards their next
+/// steps may cover, traversing each filter once for all of them (see
+/// `InventoryClient::screen`), so the steps that follow read remembered answers. Optional:
+/// a step screens what it needs itself.
+pub async fn screen<T: Transport>(client: &InventoryClient<T>, works: &[LookupWork]) {
+    if !client.uses_filters() {
+        return;
+    }
+    let inventory = client.inventory();
+    let id = inventory.head().inventory;
+    let shards = inventory.shards();
+    let mut wanted: std::collections::BTreeMap<u32, Vec<[u8; 43]>> = Default::default();
+    for work in works {
+        let first = match &work.cursor {
+            Some(c) if c.inventory == id => {
+                if c.segment != 0 || c.last.is_some() {
+                    c.shard + 1
+                } else {
+                    c.shard
+                }
+            }
+            _ => shards.partition_point(|s| s.end_height < u32::from(work.from)) as u32,
+        };
+        for shard in shards
+            .iter()
+            .skip(first as usize)
+            .take(FILTER_STEP_LIMIT)
+            .filter(|s| s.filter.is_some())
+        {
+            wanted
+                .entry(shard.index)
+                .or_default()
+                .push(work.work.receiver);
+        }
+    }
+    for (shard, receivers) in wanted {
+        let _ = client.screen(shard, &receivers).await;
     }
 }
 

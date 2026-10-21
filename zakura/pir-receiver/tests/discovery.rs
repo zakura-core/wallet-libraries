@@ -1389,3 +1389,31 @@ async fn a_publication_ahead_of_the_wallet_waits() {
     assert_eq!(after, before);
     assert!(after.filter_frontier.is_none() && after.witnesses.is_empty());
 }
+
+/// Screening a round's due lookups together traverses each sealed shard's filter once
+/// for every receiver, and the lookups that follow read the remembered answers instead of
+/// traversing it again.
+#[tokio::test]
+async fn screening_a_round_traverses_each_filter_once() {
+    let mut r = restored(&[0]);
+    let paid = BlockHeight::from(r.records[0].payment.height);
+    let plans = [Plan::sealed(paid), Plan::recent(r.through.height)];
+    let directory = Directory::new(publish_with(&r.st, &r.records, &plans, &|_| 0));
+    let client = connect(&directory, r.through).await;
+    begin(&mut r, &client, true);
+    let works =
+        r.st.wallet()
+            .db()
+            .one_time_recovery(r.account, NOW)
+            .unwrap()
+            .lookups;
+    assert!(works.len() > 1);
+    zakura_pir_receiver::screen(&client, &works).await;
+    assert_eq!(client.filter_traversals(), 1);
+    for work in &works {
+        lookup(&client, work).await.unwrap();
+    }
+    assert_eq!(client.filter_traversals(), 1);
+    drain(&mut r.st, r.account, &client).await;
+    assert_eq!(one_time_value(&r.st), VALUE);
+}
