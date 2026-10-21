@@ -13,6 +13,9 @@ and this library adheres to Rust's notion of
 - Remove provider seen gates, broad one-time-key decryption, scan hints, replay state and their old APIs. Ordinary sync never waits for receiver discovery. Retain targeted payment authentication, chain proofs, spend-journal checks and existing note ownership. Rewinds and earlier birthdays requeue affected history even while discovery is disabled.
 - A provider's promised receipt settles only through a recovered note in a transaction the provider reported for that operation, recorded from `Observation::receipts`. Without one, the address stays in direct catch-up.
 - Rebaseline the unlaunched one-time-key schema. The cutover drops abandoned discovery progress while preserving accounts, note ownership and unrelated wallet data. Recovery starts disabled.
+- `WalletDb::get_wallet_summary` computes scan and recovery progress without looking up
+  each scanned block in the scan queue, which made it slow on wallets with millions of
+  scanned blocks. The reported progress is unchanged.
 
 ### Removed
 

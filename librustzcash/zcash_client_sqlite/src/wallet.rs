@@ -2283,7 +2283,9 @@ fn subtree_scan_progress<P: consensus::Parameters>(
     // recorded by a previous scan but whose enclosing range was subsequently re-queued
     // (e.g., by `rewind_to_chain_state`) would be counted as scanned, over-reporting
     // progress against a tree-size denominator that no longer reflects the wallet's
-    // actual scanned state.
+    // actual scanned state. The output counts apply it through
+    // `scanned_output_count`; the tree-size lookups below, which read one height or the
+    // heights up to the birthday, apply it per row.
     let scanned_priority = priority_code(&ScanPriority::Scanned);
     let unscanned_filter = "AND NOT EXISTS (
             SELECT 1 FROM scan_queue
@@ -2292,18 +2294,6 @@ fn subtree_scan_progress<P: consensus::Parameters>(
               AND priority > :scanned_priority
         )";
 
-    let mut stmt_scanned_count_until = conn.prepare_cached(&format!(
-        "SELECT SUM({output_count_col})
-        FROM blocks
-        WHERE :start_height <= height AND height < :end_height
-        {unscanned_filter}",
-    ))?;
-    let mut stmt_scanned_count_from = conn.prepare_cached(&format!(
-        "SELECT SUM({output_count_col})
-        FROM blocks
-        WHERE :start_height <= height
-        {unscanned_filter}",
-    ))?;
     let mut stmt_start_tree_size = conn.prepare_cached(&format!(
         "SELECT MAX({table_prefix}_commitment_tree_size - {output_count_col})
         FROM blocks
@@ -2465,13 +2455,11 @@ fn subtree_scan_progress<P: consensus::Parameters>(
     // Count the total outputs scanned so far on the birthday side of the recover-until height.
     let recovered_count = recover_until_height
         .map(|end_height| {
-            stmt_scanned_count_until.query_row(
-                named_params! {
-                    ":start_height": u32::from(min_birthday_height),
-                    ":end_height": u32::from(end_height),
-                    ":scanned_priority": scanned_priority,
-                },
-                |row| row.get::<_, Option<u64>>(0),
+            scanned_output_count(
+                conn,
+                output_count_col,
+                min_birthday_height,
+                Some(end_height),
             )
         })
         .transpose()?;
@@ -2480,7 +2468,7 @@ fn subtree_scan_progress<P: consensus::Parameters>(
         .zip(recover_until_size)
         .map(|(recovered, end_size)| {
             birthday_size.zip(end_size).map(|(start_size, end_size)| {
-                Ratio::new(recovered.unwrap_or(0), end_size.saturating_sub(start_size))
+                Ratio::new(recovered, end_size.saturating_sub(start_size))
             })
         })
         // If none of the wallet's accounts have a recover-until height, then there
@@ -2491,26 +2479,93 @@ fn subtree_scan_progress<P: consensus::Parameters>(
     let scan = {
         // Count the total outputs scanned so far on the chain tip side of the
         // recover-until height.
-        let scanned_count = stmt_scanned_count_from.query_row(
-            named_params![
-                ":start_height": u32::from(recover_until_height.unwrap_or(min_birthday_height)),
-                ":scanned_priority": scanned_priority,
-            ],
-            |row| row.get::<_, Option<u64>>(0),
+        let scanned_count = scanned_output_count(
+            conn,
+            output_count_col,
+            recover_until_height.unwrap_or(min_birthday_height),
+            None,
         )?;
 
         recover_until_size
             .unwrap_or(birthday_size)
             .zip(tip_tree_size)
             .map(|(start_size, tip_tree_size)| {
-                Ratio::new(
-                    scanned_count.unwrap_or(0),
-                    tip_tree_size.saturating_sub(start_size),
-                )
+                Ratio::new(scanned_count, tip_tree_size.saturating_sub(start_size))
             })
     };
 
     Ok(scan.map(|scan| Progress::new(scan, recover)))
+}
+
+/// Sums `output_count_col` over the blocks from `start_height`, and below `end_height` if
+/// given, that lie in no `scan_queue` range with a priority above
+/// [`ScanPriority::Scanned`].
+///
+/// This is the sum over every block of the range, less the sum over its blocks in such
+/// ranges. The ranges are clipped to the range and merged where they overlap or touch, so
+/// that no block is subtracted twice whether or not the queue keeps its ranges disjoint.
+/// Each sum reads one span of `height`, the primary key, so no block is looked up in the
+/// scan queue. Where no block has a count, the result is zero rather than `SUM`'s `NULL`,
+/// which the callers read as zero.
+fn scanned_output_count(
+    conn: &rusqlite::Connection,
+    output_count_col: &str,
+    start_height: BlockHeight,
+    end_height: Option<BlockHeight>,
+) -> Result<u64, SqliteClientError> {
+    let start = i64::from(u32::from(start_height));
+    // Above every block height.
+    let end = end_height.map_or(i64::from(u32::MAX) + 1, |h| i64::from(u32::from(h)));
+
+    let mut stmt_sum = conn.prepare_cached(&format!(
+        "SELECT SUM({output_count_col})
+        FROM blocks
+        WHERE :start <= height AND height < :end",
+    ))?;
+    let mut sum = |range: Range<i64>| {
+        stmt_sum
+            .query_row(
+                named_params! {":start": range.start, ":end": range.end},
+                |row| row.get::<_, Option<u64>>(0),
+            )
+            .map(Option::unwrap_or_default)
+    };
+    let total = sum(start..end)?;
+
+    let mut stmt_pending = conn.prepare_cached(
+        "SELECT MAX(block_range_start, :start), MIN(block_range_end, :end)
+        FROM scan_queue
+        WHERE priority > :scanned_priority
+          AND block_range_start < :end
+          AND :start < block_range_end
+        ORDER BY 1",
+    )?;
+    let mut rows = stmt_pending.query(named_params! {
+        ":start": start,
+        ":end": end,
+        ":scanned_priority": priority_code(&ScanPriority::Scanned),
+    })?;
+    let mut pending = 0;
+    let mut merged: Option<Range<i64>> = None;
+    while let Some(row) = rows.next()? {
+        let range = row.get::<_, i64>(0)?..row.get::<_, i64>(1)?;
+        merged = match merged {
+            Some(current) if range.start <= current.end => {
+                Some(current.start..current.end.max(range.end))
+            }
+            Some(current) => {
+                pending += sum(current)?;
+                Some(range)
+            }
+            None => Some(range),
+        };
+    }
+    if let Some(current) = merged {
+        pending += sum(current)?;
+    }
+
+    // The pending blocks are a subset of the blocks summed in `total`.
+    Ok(total.saturating_sub(pending))
 }
 
 impl ProgressEstimator for SubtreeProgressEstimator {
@@ -7533,6 +7588,212 @@ mod tests {
             n = scan.numerator(),
             d = scan.denominator(),
         );
+    }
+
+    /// The scanned output count as `subtree_scan_progress` computed it before
+    /// `scanned_output_count`, looking each block up in the scan queue. Its callers read a
+    /// `NULL` sum as zero.
+    fn scanned_output_count_by_lookup(
+        conn: &Connection,
+        start_height: u32,
+        end_height: Option<u32>,
+    ) -> u64 {
+        let unscanned_filter = "AND NOT EXISTS (
+                SELECT 1 FROM scan_queue
+                WHERE block_range_start <= blocks.height
+                  AND blocks.height < block_range_end
+                  AND priority > :scanned_priority
+            )";
+        let scanned_priority = super::priority_code(&super::ScanPriority::Scanned);
+        match end_height {
+            Some(end_height) => conn.query_row(
+                &format!(
+                    "SELECT SUM(sapling_output_count)
+                    FROM blocks
+                    WHERE :start_height <= height AND height < :end_height
+                    {unscanned_filter}",
+                ),
+                named_params! {
+                    ":start_height": start_height,
+                    ":end_height": end_height,
+                    ":scanned_priority": scanned_priority,
+                },
+                |row| row.get::<_, Option<u64>>(0),
+            ),
+            None => conn.query_row(
+                &format!(
+                    "SELECT SUM(sapling_output_count)
+                    FROM blocks
+                    WHERE :start_height <= height
+                    {unscanned_filter}",
+                ),
+                named_params! {
+                    ":start_height": start_height,
+                    ":scanned_priority": scanned_priority,
+                },
+                |row| row.get::<_, Option<u64>>(0),
+            ),
+        }
+        .unwrap()
+        .unwrap_or(0)
+    }
+
+    /// A database with only the `blocks` and `scan_queue` tables, holding `blocks` as
+    /// `(height, sapling_output_count)` and `queue` as `(start, end, priority)`.
+    fn scan_count_db(
+        blocks: &[(u32, Option<u64>)],
+        queue: &[(u32, u32, super::ScanPriority)],
+    ) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "{};\n{};",
+            super::db::TABLE_BLOCKS,
+            super::db::TABLE_SCAN_QUEUE
+        ))
+        .unwrap();
+        for (height, count) in blocks {
+            conn.execute(
+                "INSERT INTO blocks (height, hash, time, sapling_tree, sapling_output_count)
+                VALUES (:height, x'00', 0, x'00', :count)",
+                named_params! {":height": height, ":count": count},
+            )
+            .unwrap();
+        }
+        for (start, end, priority) in queue {
+            conn.execute(
+                "INSERT INTO scan_queue (block_range_start, block_range_end, priority)
+                VALUES (:start, :end, :priority)",
+                named_params! {
+                    ":start": start,
+                    ":end": end,
+                    ":priority": super::priority_code(priority),
+                },
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    fn assert_scanned_counts_agree(conn: &Connection, ranges: &[(u32, Option<u32>)]) {
+        for &(start, end) in ranges {
+            let count = super::scanned_output_count(
+                conn,
+                "sapling_output_count",
+                BlockHeight::from(start),
+                end.map(BlockHeight::from),
+            )
+            .unwrap();
+            assert_eq!(
+                count,
+                scanned_output_count_by_lookup(conn, start, end),
+                "start {start}, end {end:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn scanned_output_count_matches_per_block_lookup() {
+        use super::ScanPriority::{
+            ChainTip, FoundNote, Historic, Ignored, OpenAdjacent, Scanned, Verify,
+        };
+
+        // Heights 10 to 29 without 15 and 22, where 12 and 25 have no count.
+        let blocks = (10..30)
+            .filter(|h| ![15, 22].contains(h))
+            .map(|h| (h, (![12, 25].contains(&h)).then_some(u64::from(h % 4 + 1))))
+            .collect::<Vec<_>>();
+        let ranges = [
+            (10, Some(30)),
+            (12, Some(20)),
+            (13, Some(14)),
+            (0, None),
+            (18, None),
+            (30, None),
+            (20, Some(20)),
+            (25, Some(15)),
+        ];
+        let layouts: &[&[(u32, u32, super::ScanPriority)]] = &[
+            // Nothing above `Scanned`.
+            &[],
+            &[(0, 40, Scanned)],
+            &[(0, 13, Ignored), (13, 40, Scanned)],
+            // A pending range inside the queried ranges.
+            &[(13, 17, Historic)],
+            // Pending ranges over the lower edge, the upper edge and everything.
+            &[(5, 14, ChainTip)],
+            &[(18, 40, FoundNote)],
+            &[(0, 100, Verify)],
+            // Adjacent pending ranges, alone and between scanned ones.
+            &[(13, 16, Historic), (16, 19, OpenAdjacent)],
+            &[
+                (10, 13, Scanned),
+                (13, 16, Historic),
+                (16, 19, ChainTip),
+                (19, 30, Scanned),
+            ],
+            // Overlapping pending ranges, which the schema allows.
+            &[(13, 18, Historic), (15, 21, Verify)],
+            &[(11, 25, Historic), (14, 16, ChainTip), (20, 27, FoundNote)],
+            // Pending ranges beside the blocks.
+            &[(0, 10, Historic), (30, 50, ChainTip)],
+        ];
+        for layout in layouts {
+            assert_scanned_counts_agree(&scan_count_db(&blocks, layout), &ranges);
+        }
+    }
+
+    #[test]
+    fn scanned_output_count_matches_per_block_lookup_for_random_queues() {
+        use super::ScanPriority::{
+            ChainTip, FoundNote, Historic, Ignored, LatestPoolActivation, OpenAdjacent, Scanned,
+            Verify,
+        };
+        use rand_core::Rng as _;
+
+        let priorities = [
+            Ignored,
+            Scanned,
+            Historic,
+            LatestPoolActivation,
+            OpenAdjacent,
+            FoundNote,
+            ChainTip,
+            Verify,
+        ];
+        let below = |rng: &mut TestRng, n: u32| rng.next_u32() % n;
+        let mut rng = TestRng::seed_from_u64(0);
+        for _ in 0..300 {
+            let mut blocks = vec![];
+            for height in 0..60 {
+                if below(&mut rng, 4) != 0 {
+                    let count = (below(&mut rng, 5) != 0).then(|| u64::from(below(&mut rng, 10)));
+                    blocks.push((height, count));
+                }
+            }
+
+            // Starts and ends are each distinct, as the schema requires, but the ranges
+            // may overlap.
+            let mut starts = HashSet::new();
+            let mut ends = HashSet::new();
+            let mut queue = vec![];
+            for _ in 0..below(&mut rng, 8) {
+                let start = below(&mut rng, 70);
+                let end = start + 1 + below(&mut rng, 25);
+                let priority = priorities[below(&mut rng, priorities.len() as u32) as usize];
+                if starts.insert(start) && ends.insert(end) {
+                    queue.push((start, end, priority));
+                }
+            }
+
+            let mut ranges = vec![];
+            for _ in 0..8 {
+                let start = below(&mut rng, 70);
+                let end = (below(&mut rng, 3) != 0).then(|| below(&mut rng, 80));
+                ranges.push((start, end));
+            }
+
+            assert_scanned_counts_agree(&scan_count_db(&blocks, &queue), &ranges);
+        }
     }
 
     /// `rewind_to_chain_state` must return `RewindBeyondBirthdays` when the rewind would
