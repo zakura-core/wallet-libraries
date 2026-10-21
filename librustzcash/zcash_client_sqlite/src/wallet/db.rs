@@ -2016,6 +2016,15 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_OPERATION_RECEIPTS: &str = "CREATE TABL
                 PRIMARY KEY (operation_id, txid)
             )";
 
+/// An owned private receipt whose transaction label was refused (see
+/// `restore::queue::check_raw_receipts`): its authenticated note, by nullifier, stays owed a
+/// repair under its true label even while discovery is disabled.
+pub(super) const TABLE_IRONWOOD_ONE_TIME_OWED_RECEIPTS: &str = "CREATE TABLE ironwood_one_time_owed_receipts (
+                one_time_key_id INTEGER NOT NULL REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
+                nf BLOB NOT NULL CHECK (length(nf) = 32),
+                PRIMARY KEY (one_time_key_id, nf)
+             )";
+
 /// One provider operation on a one-time key: an incoming quote request, identified by
 /// `request` and accepted once `reference` holds its deposit address or marked `rejected`,
 /// or a refund quote, identified by its deposit address. `expectation` is the normalized

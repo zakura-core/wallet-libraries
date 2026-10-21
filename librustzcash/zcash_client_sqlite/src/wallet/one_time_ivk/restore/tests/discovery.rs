@@ -2516,48 +2516,69 @@ fn manual_only_receive_keys_stay_out_of_automatic_monitoring() {
 /// A faulty directory returns the right note and path under another transaction's ID. The
 /// payment is admitted under that label, but storing that transaction's raw bytes finds
 /// no such action in it: the note is dropped rather than credited to it, its key's history
-/// is read again, and the true record is then admitted under its own transaction.
+/// is read again, and the true record is then admitted under its own transaction. The note
+/// stays owed, so this holds even when discovery was disabled before the raw transaction
+/// arrived.
 #[test]
 fn a_raw_transaction_without_the_claimed_action_drops_the_admitted_note() {
     use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
-    let mut st = scanned_wallet();
-    let network = *st.network();
-    let account = st.test_account().unwrap().id();
-    let other = external_payment(
-        foreign_receiver(),
-        &zcash_protocol::memo::MemoBytes::empty(),
-    );
-    let (mined, _) = st.generate_next_block_from_tx(1, &other);
-    st.scan_cached_blocks(mined, 1);
-    let candidate = pay_candidate(&mut st, key8());
-    let mut forged = candidate.clone();
-    forged.txid = other.txid();
-    let publication = queue_late(&mut st, key8(), &forged);
-    send_witness(&mut st, key8(), &forged);
-    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    for enabled in [true, false] {
+        let mut st = scanned_wallet();
+        let network = *st.network();
+        let account = st.test_account().unwrap().id();
+        let other = external_payment(
+            foreign_receiver(),
+            &zcash_protocol::memo::MemoBytes::empty(),
+        );
+        let (mined, _) = st.generate_next_block_from_tx(1, &other);
+        st.scan_cached_blocks(mined, 1);
+        let candidate = pay_candidate(&mut st, key8());
+        let mut forged = candidate.clone();
+        forged.txid = other.txid();
+        let publication = queue_late(&mut st, key8(), &forged);
+        send_witness(&mut st, key8(), &forged);
+        assert_eq!(one_time_notes(&st), [(100_000, false)]);
+        if !enabled {
+            st.wallet_mut()
+                .db_mut()
+                .set_one_time_recovery_enabled(account, false)
+                .unwrap();
+        }
 
-    decrypt_and_store_transaction(&network, st.wallet_mut(), &other, Some(mined)).unwrap();
-    assert!(
-        one_time_notes(&st).is_empty(),
-        "nothing is credited to the other transaction"
-    );
-    let id = key_ref(&st.wallet().db().conn, account, key8()).unwrap();
-    let reopened: bool = value(
-        st.wallet().conn(),
-        "SELECT target_height IS NOT NULL AND read_complete = 0 FROM ironwood_one_time_lookups
-         WHERE one_time_key_id = ?1",
-        [id],
-    );
-    assert!(reopened, "the key's history is read again");
+        decrypt_and_store_transaction(&network, st.wallet_mut(), &other, Some(mined)).unwrap();
+        assert!(
+            one_time_notes(&st).is_empty(),
+            "nothing is credited to the other transaction"
+        );
+        let id = key_ref(&st.wallet().db().conn, account, key8()).unwrap();
+        let reopened: bool = value(
+            st.wallet().conn(),
+            "SELECT target_height IS NOT NULL AND read_complete = 0 FROM ironwood_one_time_lookups
+             WHERE one_time_key_id = ?1",
+            [id],
+        );
+        assert!(reopened, "the key's history is read again");
 
-    drain(&mut st, account, publication);
-    let txids: Vec<Vec<u8>> = column(
-        st.wallet().conn(),
-        "SELECT t.txid FROM ironwood_received_notes n JOIN transactions t
-         ON t.id_tx = n.transaction_id WHERE n.one_time_key_id IS NOT NULL",
-        [],
-    );
-    assert_eq!(txids, [candidate.txid.as_ref().to_vec()]);
+        drain(&mut st, account, publication);
+        assert_eq!(status(st.wallet().db(), account).enabled, enabled);
+        let txids: Vec<Vec<u8>> = column(
+            st.wallet().conn(),
+            "SELECT t.txid FROM ironwood_received_notes n JOIN transactions t
+             ON t.id_tx = n.transaction_id WHERE n.one_time_key_id IS NOT NULL",
+            [],
+        );
+        assert_eq!(
+            txids,
+            [candidate.txid.as_ref().to_vec()],
+            "enabled {enabled}"
+        );
+        let owed: u32 = value(
+            st.wallet().conn(),
+            "SELECT COUNT(*) FROM ironwood_one_time_owed_receipts",
+            [],
+        );
+        assert_eq!(owed, 0, "the repair settles what was owed");
+    }
 }
 
 /// A final lookup step that does not prove coverage through the inventory's end, by an
@@ -2774,13 +2795,21 @@ fn a_reorg_repairs_each_private_receipt_of_one_transaction() {
                 .unwrap();
         }
         st.truncate_to_height(floor);
-        // Another payment first moves the transaction's outputs to later positions.
-        pay(
-            &mut st,
-            &FullViewingKey::from(&orchard::keys::SpendingKey::from_bytes([3; 32]).unwrap()),
-            10_000,
+        // Another payment first moves the transaction's outputs to later positions. It is
+        // mined and scanned directly, since `pay` would enable recovery again.
+        let other = IronwoodFvk(FullViewingKey::from(
+            &orchard::keys::SpendingKey::from_bytes([3; 32]).unwrap(),
+        ));
+        let (shifted, _, _) = st.generate_next_block(
+            &other,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(10_000),
         );
+        payment_indexes(&st, shifted, 1);
+        st.scan_cached_blocks(shifted, 1);
+        assert_eq!(status(st.wallet().db(), account).enabled, enabled);
         let (height, moved) = mine(&mut st);
+        assert_eq!(status(st.wallet().db(), account).enabled, enabled);
         assert_ne!(moved, positions);
         let mut expected: Vec<_> = moved
             .iter()
