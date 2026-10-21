@@ -2242,3 +2242,54 @@ fn a_reorg_repairs_each_private_receipt_of_one_transaction() {
         assert_eq!(one_time_notes(&st).len(), 2);
     }
 }
+
+/// Direct catch-up skips a used key whose history is complete, so a second payment the
+/// directory left out of its history is not read. A correction that adds that payment
+/// reads every monitored key once, used ones included, and recovers it automatically.
+#[test]
+fn a_correction_recovers_a_payment_it_adds_to_a_used_receiver() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key0 = KeyId::new(Purpose::Receive, 0);
+    pay_candidate(&mut st, key0);
+    let first = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, first, true)
+            .unwrap()
+    );
+    drain(&mut st, account, first);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+
+    // The directory omits the second payment, and catch-up does not read the used key.
+    pay_candidate(&mut st, key0);
+    let omitted = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, omitted, true)
+            .unwrap()
+    );
+    assert!(
+        status(st.wallet().db(), account)
+            .lookups
+            .iter()
+            .all(|w| w.work.key != key0)
+    );
+    drain(&mut st, account, omitted);
+    assert_eq!(one_time_notes(&st).len(), 1);
+
+    let corrected = RecoveryPublication {
+        history_revision: 1,
+        ..omitted
+    };
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, corrected, true)
+            .unwrap()
+    );
+    drain(&mut st, account, corrected);
+    assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
+}
