@@ -2028,6 +2028,14 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_DISPUTED_RECEIPTS: &str =
                 note_id INTEGER PRIMARY KEY REFERENCES ironwood_received_notes(id) ON DELETE CASCADE
              )";
 
+/// A private receipt's transaction whose raw bytes a build without Orchard stored without
+/// checking them (see `ironwood_hooks::defer_receipt_check`). An Orchard build checks them and
+/// clears the private enhancement work they supersede.
+pub(super) const TABLE_IRONWOOD_ONE_TIME_UNCHECKED_RAW: &str =
+    "CREATE TABLE ironwood_one_time_unchecked_raw (
+                transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE
+             )";
+
 /// One provider operation on a one-time key: an incoming quote request, identified by
 /// `request` and accepted once `reference` holds its deposit address or marked `rejected`,
 /// or a refund quote, identified by its deposit address. `expectation` is the normalized

@@ -108,6 +108,30 @@ pub(crate) fn truncate_after_unmine(conn: &rusqlite::Transaction) -> Result<(), 
     Ok(())
 }
 
+/// A build without Orchard cannot check a private one-time receipt against its transaction's
+/// raw bytes (see `one_time_ivk::restore::queue::check_raw_receipts`). Storing those bytes
+/// marks the check for an Orchard build, which also clears the private enhancement work they
+/// supersede, so that work stays until then. Returns whether `tx_ref` holds such a receipt.
+#[cfg(not(feature = "orchard"))]
+pub(crate) fn defer_receipt_check(
+    conn: &Connection,
+    tx_ref: TxRef,
+) -> Result<bool, SqliteClientError> {
+    let receipt: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes
+         WHERE transaction_id = ?1 AND one_time_key_id IS NOT NULL)",
+        [tx_ref.0],
+        |r| r.get(0),
+    )?;
+    if receipt {
+        conn.execute(
+            "INSERT OR IGNORE INTO ironwood_one_time_unchecked_raw (transaction_id) VALUES (?1)",
+            [tx_ref.0],
+        )?;
+    }
+    Ok(receipt)
+}
+
 /// Full transaction storage supersedes private queues without erasing recovered data.
 pub(crate) fn clear_ironwood_enhancement_work(
     conn: &Connection,
