@@ -162,7 +162,7 @@ impl Device {
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
                  JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
-                 WHERE k.account_id = ?1 AND l.reasons != 0 AND l.target_height IS NOT NULL
+                 WHERE k.account_id = ?1 AND l.reasons & 3 != 0 AND l.target_height IS NOT NULL
                    AND l.read_complete = 1 AND l.done_height >= l.target_height
                    AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
                        WHERE p.one_time_key_id = k.id)),
@@ -173,7 +173,7 @@ impl Device {
                  JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
                  JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id
                  WHERE k.account_id = ?1 AND p.payments IS NULL
-                   AND l.reasons != 0 AND (l.read_complete = 1 OR l.target_height IS NULL))",
+                   AND l.reasons & 3 != 0 AND (l.read_complete = 1 OR l.target_height IS NULL))",
                 [owner],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -195,7 +195,7 @@ impl Device {
                     EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
                         JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
                         WHERE k.account_id = r.account_id
-                          AND l.target_height IS NOT NULL AND l.read_complete = 0 AND l.reasons != 0)
+                          AND l.target_height IS NOT NULL AND l.read_complete = 0 AND l.reasons & 3 != 0)
                  FROM ironwood_one_time_recovery r JOIN accounts a ON a.id = r.account_id
                  WHERE a.uuid = ?1",
                 [self.account.expose_uuid()],
