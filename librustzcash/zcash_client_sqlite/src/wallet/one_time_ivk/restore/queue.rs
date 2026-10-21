@@ -39,9 +39,16 @@ pub(crate) fn activation<P: Parameters>(params: &P) -> u32 {
         .map_or(0, u32::from)
 }
 
-/// SQL over key alias `k`: an already-owned receipt needs its chain placement repaired.
+/// SQL over receipt alias `n` and its transaction `t`: the receipt's own chain placement is
+/// not restored. Placement is per receipt: a rewind clears each private receipt's position
+/// (see `one_time_rewind::truncate`), and repairing one receipt marks its whole transaction
+/// mined while a sibling receipt still waits for its own position and witness.
+const UNPLACED: &str = "(t.mined_height IS NULL OR n.commitment_tree_position IS NULL)";
+
+/// SQL over key alias `k`: an already-owned receipt is [`UNPLACED`] and needs repair.
 const REPAIR_KEY: &str = "EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
-    ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = k.id AND t.mined_height IS NULL)";
+    ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = k.id
+    AND (t.mined_height IS NULL OR n.commitment_tree_position IS NULL))";
 
 /// SQL over key alias `k`: a local operation promises a receipt not yet attributed to it.
 /// Only a mined note in a transaction the provider reported for that operation counts.
@@ -339,6 +346,10 @@ fn enrolled_end(conn: &Connection, owner: i64) -> Result<u64, SqliteClientError>
 /// one an earlier manual check already derived and completed, gets a historical target
 /// through the processed filter frontier from `from`. This shares the transaction with
 /// filter progress.
+///
+/// Growing the automatic set advances the generation, as every change to the filter
+/// receiver set must: a filter request captured before it never matched the new keys, so
+/// its callback must not move the frontier past their blocks.
 fn enroll(conn: &Connection, owner: i64, end: u64, from: u32) -> Result<(), SqliteClientError> {
     let enrolled = enrolled_end(conn, owner)?;
     if end <= enrolled {
@@ -358,7 +369,8 @@ fn enroll(conn: &Connection, owner: i64, end: u64, from: u32) -> Result<(), Sqli
         register_history(conn, owner, id, from)?;
     }
     conn.execute(
-        "UPDATE ironwood_one_time_recovery SET receive_end = ?2 WHERE account_id = ?1",
+        "UPDATE ironwood_one_time_recovery SET receive_end = ?2, generation = generation + 1
+        WHERE account_id = ?1",
         params![owner, end.to_be_bytes()],
     )?;
     Ok(())
@@ -1018,14 +1030,14 @@ pub(crate) fn status<P: Parameters>(
                 from, through: BlockHeight::from(r.get::<_, u32>(3)?), cursor,
             })
         })?.collect::<Result<_, _>>()?;
-    status.witnesses = conn.prepare("SELECT k.purpose, k.key_index, p.position, substr(p.encrypted_note, 33, 32),
+    status.witnesses = conn.prepare(&format!("SELECT k.purpose, k.key_index, p.position, substr(p.encrypted_note, 33, 32),
             p.payments, p.witnesses, p.ordinal
         FROM ironwood_one_time_payment_recovery p JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
         WHERE k.account_id = ?1 AND p.witness IS NULL AND p.payments IS NOT NULL
         AND (?2 OR EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t ON t.id_tx = n.transaction_id
-            WHERE n.one_time_key_id = k.id AND t.txid = p.txid AND n.action_index = p.action_index AND t.mined_height IS NULL))
+            WHERE n.one_time_key_id = k.id AND t.txid = p.txid AND n.action_index = p.action_index AND {UNPLACED}))
         AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id AND l.reasons != 0)
-        ORDER BY p.height, p.position LIMIT 64")?
+        ORDER BY p.height, p.position LIMIT 64"))?
         .query_and_then(params![owner.0, enabled], |r| Ok::<_, SqliteClientError>(WitnessRequest {
             key: stored_key_id(r)?, position: r.get(2)?, cmx: r.get(3)?, payments: r.get(4)?,
             witnesses: r.get(5)?, ordinal: r.get(6)?
@@ -1295,13 +1307,13 @@ fn requested(
     }
     let found: Option<(Vec<u8>, u32, u32)> = conn
         .query_row(
-            "SELECT p.txid, p.action_index, p.height
+            &format!("SELECT p.txid, p.action_index, p.height
         FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = ?1 AND p.position = ?2
             AND substr(p.encrypted_note, 33, 32) = ?3 AND p.payments = ?4 AND p.ordinal = ?5
             AND p.witnesses = ?7 AND p.witness IS NULL AND (?6 OR EXISTS(SELECT 1 FROM transactions t
                 JOIN ironwood_received_notes n ON n.transaction_id = t.id_tx
                 WHERE t.txid = p.txid AND n.one_time_key_id = p.one_time_key_id
-                    AND n.action_index = p.action_index AND t.mined_height IS NULL))",
+                    AND n.action_index = p.action_index AND {UNPLACED}))"),
             params![
                 key,
                 request.position,

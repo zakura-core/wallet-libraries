@@ -54,6 +54,15 @@ pub(crate) fn truncate(
         "UPDATE ironwood_one_time_keys SET prebirthday_height = NULL WHERE prebirthday_height > ?1",
         [floor],
     )?;
+    // A private receipt's position came from the directory, not a rescan that would replace
+    // it, so each one loses its placement until its own repair restores it (see
+    // `restore::queue::UNPLACED`).
+    conn.execute(
+        "UPDATE ironwood_received_notes SET commitment_tree_position = NULL
+        WHERE one_time_key_id IS NOT NULL AND transaction_id IN
+            (SELECT id_tx FROM transactions WHERE mined_height > ?1)",
+        [floor],
+    )?;
     conn.execute(
         "DELETE FROM ironwood_one_time_payment_recovery WHERE height > ?1",
         [floor],
