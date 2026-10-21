@@ -2997,6 +2997,7 @@ fn answer_with(
                 page,
                 total,
                 payment: payment.clone(),
+                ordinal: page,
             })
             .collect(),
         complete: true,
@@ -3035,8 +3036,8 @@ fn a_late_payment_already_admitted_under_another_action_is_dequeued() {
         st.wallet().conn(),
         "INSERT INTO ironwood_one_time_payment_recovery
              (one_time_key_id, txid, action_index, height, block_hash, tx_index, position,
-              encrypted_note)
-         SELECT k.id, ?1, ?2, ?3, ?4, ?5, ?6, ?7 FROM ironwood_one_time_keys k
+              encrypted_note, payments, witnesses, ordinal)
+         SELECT k.id, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?9, ?10, 0 FROM ironwood_one_time_keys k
          WHERE k.purpose = 1 AND k.key_index = ?8",
         rusqlite::params![
             candidate.txid.as_ref(),
@@ -3046,7 +3047,9 @@ fn a_late_payment_already_admitted_under_another_action_is_dequeued() {
             candidate.tx_index,
             candidate.position,
             candidate.encrypted_note.to_bytes().to_vec(),
-            key8().index().to_be_bytes()
+            key8().index().to_be_bytes(),
+            [1u8; 32],
+            [7u8; 32]
         ],
     );
     exec(
