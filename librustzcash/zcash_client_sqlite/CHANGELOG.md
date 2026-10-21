@@ -16,6 +16,9 @@ and this library adheres to Rust's notion of
 - `WalletDb::require_one_time_upgrade` records that a step returned `Unsupported`. Recovery then exposes no work and keeps every pending lookup, candidate and obligation, instead of backing off forever, until `begin_one_time_recovery` accepts a publication this client captured.
 - A provider's promised receipt settles only through a recovered note in a transaction the provider reported for that operation, recorded from `Observation::receipts`. Without one, the address stays in direct catch-up.
 - Rebaseline the unlaunched one-time-key schema. The cutover drops abandoned discovery progress while preserving accounts, note ownership and unrelated wallet data. Recovery starts disabled.
+- `WalletDb::get_wallet_summary` computes scan and recovery progress without looking up
+  each scanned block in the scan queue, which made it slow on wallets with millions of
+  scanned blocks. The reported progress is unchanged.
 
 ### Removed
 
