@@ -7,6 +7,13 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9] - 2026-10-20
+
+### Changed
+
+- Use the stable Common `4.0.0` dependency family, with compatible requirements
+  for downstream consumers.
+
 ## [0.1.0-rc8] - 2026-10-20
 
 ### Changed

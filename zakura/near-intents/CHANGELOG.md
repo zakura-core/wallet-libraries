@@ -6,6 +6,14 @@
 
 - `NearStatus::origin_tx_hashes` and `NearStatus::destination_tx_hashes` carry the status response's `swapDetails` transaction hashes. `near_observation` reads an incoming key's receipts from the destination chain and a refund key's from the origin chain.
 
+## [0.0.1-rc3] - 2026-10-20
+
+### Changed
+
+- Use the stable Common `4.0.0` dependency family, with compatible requirements
+  for downstream consumers.
+- Use one-time IVK `0.0.1-rc3`.
+
 ## [0.0.1-rc2] - 2026-10-20
 
 ### Changed

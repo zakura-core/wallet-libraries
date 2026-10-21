@@ -9,7 +9,7 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
-- Replace one-time-key discovery passes and scan watches with a durable PIR recovery queue. Seed recovery stops after four complete empty receive histories, receive issuance recycles unpaid holes in a four-index window that extends once a payment is mined, and refunds use authenticated funding evidence. Manual history checks support cancellation, restart and an explicit receive bound.
+- Replace one-time-key discovery passes and scan watches with a durable PIR recovery queue. Seed recovery stops after four complete empty receive histories, receive issuance recycles unpaid holes in a four-index window that extends once a payment is mined and hands out an index only after its own history lookup completes (`ReservationPolicy::ReceiveHistory` until then), and refunds use authenticated funding evidence. Manual history checks support cancellation, restart and an explicit receive bound.
 - Remove provider seen gates, broad one-time-key decryption, scan hints, replay state and their old APIs. Ordinary sync never waits for receiver discovery. Retain targeted payment authentication, chain proofs, spend-journal checks and existing note ownership. Rewinds and earlier birthdays requeue affected history even while discovery is disabled.
 - `WalletDb::record_one_time_witness` takes a companion witness answer instead of a full path, and `WalletDb::refresh_one_time_witness` re-reads a payment whose session can no longer serve its witness. A provisional witness is checked against the wallet's own tree at exactly its construction block; a final one (its Ironwood shard full) at the scanned tip. The accepted root is read before any returned node is used, and an unusable or missing witness leaves the payment pending and reads it again, never completing an empty address.
 - A provider's promised receipt settles only through a recovered note in a transaction the provider reported for that operation, recorded from `Observation::receipts`. Without one, the address stays in direct catch-up.
@@ -19,6 +19,14 @@ and this library adheres to Rust's notion of
 
 - `WalletDb::get_one_time_key_for_receiver`, which only tests used, and its receiver index.
 - The unused `now` argument of `WalletDb::set_one_time_recovery_enabled`, `WalletDb::begin_one_time_recovery`, `WalletDb::check_one_time_history` and `WalletDb::reserve_refund_key`, and the write-only `registered_at` key column.
+
+## [0.1.0-rc9.3] - 2026-10-20
+
+### Changed
+
+- Use the stable Common `4.0.0` dependency family, with compatible requirements
+  for downstream consumers.
+- Use backend `0.1.0-rc9.3` and one-time IVK `0.0.1-rc3`.
 
 ## [0.1.0-rc9.2] - 2026-10-20
 

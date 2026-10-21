@@ -1,6 +1,6 @@
 [package]
 name = "zakura-receiver-directory"
-version = "0.0.1-rc1"
+version = "0.0.1-rc2"
 # Kept at 2021 from wallet-pir so the moved code compiles unchanged.
 edition = "2021"
 description = "Receiver directory publications: record placement, filters, manifests and structural parsing"
@@ -17,7 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # The wire codec alone: this crate parses structure and checks no cryptography.
-zakura-receiver-crypto = { version = "=0.0.1-rc1", path = "../receiver-crypto", default-features = false }
+zakura-receiver-crypto = { version = "=0.0.1-rc2", path = "../receiver-crypto", default-features = false }
 # Codec only: no Bitcoin transaction types or elliptic-curve implementation.
 zakura-filters = { version = "=0.0.1-rc0", path = "../filters" }
 bitcoin_hashes = { version = "=0.14.101", default-features = false, features = ["std"] }
