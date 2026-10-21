@@ -4,6 +4,8 @@ use rusqlite::params;
 use zcash_protocol::consensus::BlockHeight;
 
 /// Invalidates callbacks and fork-dependent progress before ordinary notes are unmined.
+/// History settled above the floor is invalidated (reason bit 4, see
+/// `restore::queue::INVALIDATED`), so a receiver reserved on it waits for the re-check.
 /// Completed unaffected addresses stay closed to automatic direct catch-up. Enrolled receive
 /// indexes keep their place there even if the window shrinks (see `queue::automatic_end`),
 /// so the next catch-up rechecks their invalidated history.
@@ -13,11 +15,11 @@ pub(crate) fn truncate(
 ) -> Result<(), SqliteClientError> {
     let floor = u32::from(height);
     conn.execute("INSERT INTO ironwood_one_time_lookups(one_time_key_id, target_height, reasons)
-        SELECT k.id, COALESCE((SELECT MAX(height) FROM blocks), ?1), 1 FROM ironwood_one_time_keys k
+        SELECT k.id, COALESCE((SELECT MAX(height) FROM blocks), ?1), 5 FROM ironwood_one_time_keys k
         WHERE k.prebirthday_height > ?1 OR EXISTS(SELECT 1 FROM ironwood_received_notes n
             JOIN transactions t ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = k.id AND t.mined_height > ?1)
         ON CONFLICT(one_time_key_id) DO UPDATE SET
-            target_height = MAX(COALESCE(target_height, 0), excluded.target_height), reasons = reasons | 1",
+            target_height = MAX(COALESCE(target_height, 0), excluded.target_height), reasons = reasons | 5",
         [floor])?;
     conn.execute("UPDATE ironwood_one_time_recovery SET generation = generation + 1,
         filter_height = CASE WHEN filter_height > ?1 THEN ?2 ELSE filter_height END,
@@ -29,7 +31,8 @@ pub(crate) fn truncate(
         params![floor, conn.query_row("SELECT MAX(height) FROM blocks WHERE height <= ?1", [floor], |r| r.get::<_, Option<u32>>(0))?])?;
     conn.execute(
         "UPDATE ironwood_one_time_lookups SET last_record = NULL, done_height = NULL,
-        read_complete = 0, attempts = 0, next_attempt_at = 0
+        read_complete = 0, attempts = 0, next_attempt_at = 0,
+        reasons = CASE WHEN done_height > ?1 THEN reasons | 4 ELSE reasons END
         WHERE done_height > ?1 OR target_height > ?1",
         [floor],
     )?;
@@ -87,10 +90,10 @@ pub(crate) fn reopen_discovery(
         [owner],
     )?;
     conn.execute("INSERT INTO ironwood_one_time_lookups(one_time_key_id, target_height, reasons)
-        SELECT id, COALESCE((SELECT MAX(height) FROM blocks), 0), 1 FROM ironwood_one_time_keys
+        SELECT id, COALESCE((SELECT MAX(height) FROM blocks), 0), 5 FROM ironwood_one_time_keys
         WHERE account_id = ?1 AND (purpose = 1 OR funding_height IS NOT NULL)
         ON CONFLICT(one_time_key_id) DO UPDATE SET target_height = MAX(COALESCE(target_height, 0), excluded.target_height),
-            reasons = reasons | 1, last_record = NULL, done_height = NULL, read_complete = 0,
+            reasons = reasons | 5, last_record = NULL, done_height = NULL, read_complete = 0,
             attempts = 0, next_attempt_at = 0", [owner])?;
     conn.execute(
         "DELETE FROM ironwood_one_time_payment_recovery WHERE one_time_key_id IN

@@ -28,17 +28,18 @@ use crate::wallet::one_time_ivk::{
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 const AUTOMATIC: u8 = 1;
-/// Lookup reason bit marking a positive filter hint: the key may have been paid since its
-/// history was read, so its receiver is not reused until the lookup settles (see
-/// [`RECEIVE_PENDING`]). It is set only together with [`AUTOMATIC`].
-const HINT: u8 = 4;
+/// Lookup reason bit marking history an event invalidated: a positive filter hint, a
+/// correction, a rewind below the settled height, a disputed receipt label, a rejected
+/// payment claim or a lowered birthday. The key may have been paid in what was read before,
+/// so its receiver is not reused until the lookup settles (see [`RECEIVE_PENDING`]), which
+/// clears the bit. Reading new blocks never sets it.
+pub(crate) const INVALIDATED: u8 = 4;
 
-/// SQL over key alias `k`: a recorded positive hint or a payment candidate on the key is
-/// unresolved, so the key may already be paid. Ordinary catch-up targets do not count, so
-/// this never waits for coverage to reach the chain tip.
+/// SQL over key alias `k`: history an event invalidated (see [`INVALIDATED`]) or a payment
+/// candidate on the key is unresolved, so the key may already be paid. Ordinary catch-up
+/// does not count, so this never waits for coverage to reach the chain tip.
 pub(in crate::wallet::one_time_ivk) const RECEIVE_PENDING: &str = "(EXISTS(SELECT 1
-        FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id
-        AND l.reasons & 4 != 0 AND l.target_height IS NOT NULL)
+        FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id AND l.reasons & 4 != 0)
     OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = k.id))";
 const MANUAL: u8 = 2;
 /// Local cursor entries one progress step may advance, keeping each transaction short. A
@@ -443,9 +444,10 @@ pub(crate) fn begin<P: Parameters>(
             manual_next = CASE WHEN manual_end IS NOT NULL THEN X'0000000000000000' ELSE manual_next END
             WHERE account_id = ?1",
             params![owner.0, publication.history_revision.to_be_bytes()])?;
-        conn.execute("UPDATE ironwood_one_time_lookups SET last_record = NULL, done_height = NULL, read_complete = 0
+        conn.execute("UPDATE ironwood_one_time_lookups SET last_record = NULL, done_height = NULL, read_complete = 0,
+            reasons = CASE WHEN done_height IS NOT NULL THEN reasons | ?2 ELSE reasons END
             WHERE one_time_key_id IN
-            (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)", [owner.0])?;
+            (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)", params![owner.0, INVALIDATED])?;
         conn.execute(
             "DELETE FROM ironwood_one_time_payment_recovery WHERE one_time_key_id IN
             (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
@@ -460,7 +462,7 @@ pub(crate) fn begin<P: Parameters>(
             .query_map([owner.0], |r| r.get::<_, i64>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         for key in keys {
-            enqueue(conn, key, height, AUTOMATIC)?;
+            enqueue(conn, key, height, AUTOMATIC | INVALIDATED)?;
         }
     }
     if !enabled {
@@ -587,7 +589,7 @@ pub(crate) fn record_filters<P: Parameters>(
         if !eligible {
             return Err(invalid("filter hit for a key outside automatic monitoring"));
         }
-        enqueue(conn, id, u32::from(end.height), AUTOMATIC | HINT)?;
+        enqueue(conn, id, u32::from(end.height), AUTOMATIC | INVALIDATED)?;
     }
     conn.execute("UPDATE ironwood_one_time_recovery SET filter_height = ?2, filter_hash = ?3 WHERE account_id = ?1",
         params![owner.0, u32::from(end.height), end.hash.0])?;
@@ -743,7 +745,7 @@ pub(crate) fn cancel_manual<P: Parameters>(
     conn.execute(
         "UPDATE ironwood_one_time_lookups SET reasons = reasons & ?2
         WHERE one_time_key_id IN (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
-        params![owner.0, AUTOMATIC | HINT],
+        params![owner.0, AUTOMATIC | INVALIDATED],
     )?;
     Ok(())
 }
@@ -1320,9 +1322,9 @@ pub(crate) fn check_raw_receipts(
         )?;
         conn.execute(
             "UPDATE ironwood_one_time_lookups SET last_record = NULL, done_height = NULL,
-                read_complete = 0, attempts = 0, next_attempt_at = 0
+                read_complete = 0, attempts = 0, next_attempt_at = 0, reasons = reasons | ?2
              WHERE one_time_key_id = ?1",
-            [key],
+            params![key, INVALIDATED],
         )?;
         register_history(conn, owner, key)?;
         disputed = true;
@@ -1428,8 +1430,8 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
                 )?;
                 conn.execute(
                     "UPDATE ironwood_one_time_lookups SET last_record = NULL, read_complete = 0,
-                    next_attempt_at = ?2 WHERE one_time_key_id = ?1",
-                    params![id, now.saturating_add(60)],
+                    next_attempt_at = ?2, reasons = reasons | ?3 WHERE one_time_key_id = ?1",
+                    params![id, now.saturating_add(60), INVALIDATED],
                 )?;
             }
         }
