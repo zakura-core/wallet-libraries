@@ -3429,3 +3429,62 @@ fn a_refund_key_retires_only_once_every_operation_settles() {
     observe(&mut st, 1, "c", owed, vec![second.txid], now + 60);
     assert!(!watched(&st, 1));
 }
+
+/// A witness whose advertised construction size the wallet's own tree contradicts is
+/// refused before any of its siblings is used. A service that binds the wallet's next,
+/// commitment-free block but claims 65,536 leaves would otherwise pass a payment at its
+/// last leaf off as final, and the empty sibling after it, which matches the accepted root,
+/// would be stored as a complete leaf that the next real commitment conflicts with. A
+/// provisional witness claiming one leaf too many is refused the same way. In both cases
+/// the payment stays pending, the scan continues over the next commitment, and the honest
+/// witness admits the payment.
+#[test]
+fn a_witness_with_a_wrong_construction_size_is_refused() {
+    for inflated in [true, false] {
+        let mut st = scanned_wallet();
+        let account = st.test_account().unwrap().id();
+        let candidate = pay_candidate(&mut st, key8());
+        st.generate_and_scan_empty_blocks(1);
+        queue_late(&mut st, key8(), &candidate);
+        let request = request_for(&st, key8(), &candidate);
+        let honest = publication_at(&st, tip(&st).height).end;
+        assert_eq!(honest.tree_size, u64::from(candidate.position) + 1);
+        let claimed = PublicationEnd {
+            tree_size: if inflated {
+                1 << 16
+            } else {
+                honest.tree_size + 1
+            },
+            ..honest
+        };
+        let forged = answer(&request, &witness_at(&st, candidate.position), claimed);
+        let token = status(st.wallet().db(), account).token;
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .record_one_time_witness(account, token, request, &forged, clock_now())
+                .unwrap()
+        );
+        assert!(one_time_notes(&st).is_empty(), "inflated {inflated}");
+        let pending: u32 = value(
+            st.wallet().conn(),
+            "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery",
+            [],
+        );
+        assert_eq!(pending, 1, "inflated {inflated}");
+        // The next real commitment lands where the forged path claimed an empty leaf.
+        foreign_blocks(&mut st, 1);
+        exec(
+            st.wallet().conn(),
+            "UPDATE ironwood_one_time_lookups SET next_attempt_at = 0",
+            [],
+        );
+        let publication = publication_at(&st, tip(&st).height);
+        drain(&mut st, account, publication);
+        assert_eq!(
+            one_time_notes(&st),
+            [(100_000, false)],
+            "inflated {inflated}"
+        );
+    }
+}

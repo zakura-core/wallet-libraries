@@ -164,34 +164,44 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     let Ok(supplied) = decode_witness_payload(witness.payload, position, witness.tree_size) else {
         return Ok(Admission::StaleWitness);
     };
-    let final_path = witness_is_final(position, witness.tree_size);
     let context = witness.context;
     if context.height > through.height {
         return Ok(Admission::Waiting);
     }
+    // The service's construction size is untrusted. Where the wallet holds the
+    // construction block, the payload must describe that block's own tree.
+    let local: Option<([u8; 32], u64)> = conn
+        .query_row(
+            "SELECT hash, ironwood_commitment_tree_size FROM blocks WHERE height = ?1",
+            [u32::from(context.height)],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if local.is_some_and(|(hash, size)| hash != context.hash.0 || size != witness.tree_size) {
+        return Ok(Admission::StaleWitness);
+    }
+    // A path built after its shard filled is final and usable at any later anchor, but the
+    // wallet's own tree must show the shard full: the advertised size alone proves nothing.
+    let tip_size: Option<u64> = conn
+        .query_row(
+            "SELECT ironwood_commitment_tree_size FROM blocks WHERE height = ?1",
+            [u32::from(through.height)],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let final_path = witness_is_final(position, witness.tree_size)
+        && tip_size.is_some_and(|size| witness_is_final(position, size));
     let anchor = if final_path {
-        // A final path depends on blocks through its construction block only; a fork
-        // there replaces it, but its age does not.
-        if wallet::get_block_hash(conn, context.height)?.is_some_and(|h| h != context.hash) {
-            return Ok(Admission::StaleWitness);
-        }
         through
     } else {
+        // A provisional path is usable only at its own construction block, which the
+        // wallet must hold with the same tree.
         if through.height - context.height > crate::PRUNING_DEPTH {
             return Ok(Admission::StaleWitness);
         }
-        let Some((hash, size)): Option<([u8; 32], u64)> = conn
-            .query_row(
-                "SELECT hash, ironwood_commitment_tree_size FROM blocks WHERE height = ?1",
-                [u32::from(context.height)],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-        else {
+        if local.is_none() {
             return Ok(Admission::Waiting);
-        };
-        if hash != context.hash.0 || size != witness.tree_size {
-            return Ok(Admission::StaleWitness);
         }
         context
     };
@@ -222,9 +232,16 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         Err(e) if tree_data(&e) => return Ok(missing),
         Err(e) => return Err(e.into()),
     };
-    // Supplied siblings come from the payload. The tree supplies the rest at the anchor:
-    // empty subtrees, the one straddling the anchor's frontier, and levels above the shard.
-    let anchor_size = Position::from(checkpoint_position(conn, checkpoint)?);
+    // Supplied siblings come from the payload, but only those complete at the anchor's
+    // locally verified size (see `insert_witness`). The tree supplies the rest at the
+    // anchor: empty subtrees, the one straddling its frontier, and levels above the shard.
+    let anchor_size = checkpoint_position(conn, checkpoint)?;
+    let supplied: Vec<Option<[u8; 32]>> = supplied
+        .iter()
+        .enumerate()
+        .map(|(level, node)| node.filter(|_| complete_at(position, anchor_size, level as u8)))
+        .collect();
+    let anchor_size = Position::from(anchor_size);
     let mut auth_path = Vec::with_capacity(32);
     for level in 0..32u8 {
         let address = Address::from_parts(level.into(), (position >> level) ^ 1);
@@ -405,7 +422,8 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
 /// The marked leaf goes in before its siblings, since it keeps its pair from pruning. A
 /// sibling inserted first can strip a reference that held the pair unpruned, and the
 /// leaf's insertion under the pruned node would then drop that sibling. Only supplied
-/// siblings are kept: they are complete at the anchor, so no future append changes them.
+/// siblings are kept, and the caller passes only those complete at the anchor's locally
+/// verified size, so no future append changes them.
 fn insert_witness<'a>(
     tree: &mut crate::IronwoodCommitmentTree<&'a rusqlite::Transaction<'a>>,
     position: u64,
@@ -433,6 +451,12 @@ fn insert_witness<'a>(
     Ok(tree
         .witness_at_checkpoint_id(Position::from(position), &checkpoint)?
         .is_some_and(|stored| recovered.verify_position(position, &stored.into(), root.into())))
+}
+
+/// Whether `position`'s sibling at `level` is a complete subtree of the wallet's tree of
+/// `size` leaves, so no later append changes it.
+fn complete_at(position: u64, size: u64, level: u8) -> bool {
+    (((position >> level) ^ 1) + 1) << level <= size
 }
 
 /// The tree size at checkpoint `checkpoint`: one past its last leaf, or zero.
