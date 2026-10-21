@@ -248,6 +248,7 @@ mod tests {
             "ironwood_nullifier_scan_blocks",
             "ironwood_one_time_lookups",
             "ironwood_one_time_operation_receipts",
+            "ironwood_one_time_owed_receipts",
             "ironwood_one_time_recovery",
             "ironwood_one_time_payment_recovery",
             "ironwood_one_time_spend_retention",
