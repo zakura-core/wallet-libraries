@@ -27,6 +27,7 @@ members = [
     "zakura/receiver-crypto",
     "zakura/receiver-directory",
     "zakura/receiver-pir",
+    "zakura/transaction-wire",
 ]
 
 resolver = "2"

@@ -46,6 +46,7 @@ python3 scripts/dev.py verify
 | `transaction-status-lightwalletd` | Status policy plus the explicit lightwalletd adapter, including payload validation and cancellation |
 | `receiver-wire` | Library-owned receiver codec with default features disabled |
 | `receiver-pir-server` | Receiver PIR client with the `server` evaluator, which the golden client/evaluator vectors need |
+| `transaction-wire` | Unpublished borrowed transaction wire reader, with the typed decoders as dev-only differential oracles |
 | `one-time-ivk-scenarios` | One-time IVK scenario suite (see its README); `ONE_TIME_IVK_SLOW=1` adds the scenarios that wait months of chain time. CI runs it nightly, not on PRs |
 
 `default` builds the backend and SQLite crates without Orchard or transparent
