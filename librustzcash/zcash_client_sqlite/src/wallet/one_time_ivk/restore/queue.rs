@@ -333,7 +333,8 @@ fn accepts<P: Parameters>(
     )?)
 }
 
-/// Captures a usable frontier. Direct catch-up selects unfinished addresses, never every old paid key.
+/// Captures a usable frontier. Direct catch-up selects unfinished addresses, never every old
+/// paid key, except that a newer correction generation reads every monitored key once.
 pub(crate) fn begin<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -358,6 +359,7 @@ pub(crate) fn begin<P: Parameters>(
     {
         return Ok(false);
     }
+    let height = u32::from(publication.end.height);
     if publication.history_revision > current.history_revision {
         conn.execute("UPDATE ironwood_one_time_recovery SET history_revision = ?2, generation = generation + 1,
             filter_height = NULL, filter_hash = NULL,
@@ -375,8 +377,18 @@ pub(crate) fn begin<P: Parameters>(
             (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
             [owner.0],
         )?;
+        // A correction can add a payment the old history left out, even to a used key that
+        // direct catch-up would skip, so every monitored key is read again once.
+        let keys = conn
+            .prepare(&format!(
+                "SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {MONITORED}"
+            ))?
+            .query_map([owner.0], |r| r.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for key in keys {
+            enqueue(conn, key, height, AUTOMATIC)?;
+        }
     }
-    let height = u32::from(publication.end.height);
     if !enabled {
         let keys = conn
             .prepare(&format!(
