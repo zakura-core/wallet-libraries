@@ -1500,3 +1500,57 @@ fn a_path_insertion_conflict_requests_a_newer_path() {
     deliver(&mut st);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
+
+/// A manual check derives receive keys beyond the automatic end. They stay out of the
+/// filter receiver set, and a filter hit for one is refused, so one manual search never
+/// widens automatic monitoring.
+#[test]
+fn manual_only_receive_keys_stay_out_of_automatic_monitoring() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, publication, Some(10))
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    let manual_only = KeyId::new(Purpose::Receive, 8);
+    assert!(
+        get_key(st.wallet().db(), account, manual_only)
+            .unwrap()
+            .is_some()
+    );
+    let (token, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
+    let receive: Vec<u64> = receivers
+        .iter()
+        .filter(|w| w.key.purpose() == Purpose::Receive)
+        .map(|w| w.key.index())
+        .collect();
+    assert_eq!(receive, [0, 1, 2, 3]);
+
+    st.generate_and_scan_empty_blocks(1);
+    let block = tip(&st);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_filters(account, token, 0, &[block], &[manual_only])
+            .is_err()
+    );
+    let automatic: u32 = value(
+        st.wallet().conn(),
+        "SELECT COUNT(*) FROM ironwood_one_time_lookups l
+         JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
+         WHERE k.purpose = 1 AND k.key_index = ?1 AND l.reasons & 1 != 0",
+        [8u64.to_be_bytes()],
+    );
+    assert_eq!(automatic, 0);
+}

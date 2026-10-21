@@ -382,6 +382,13 @@ pub(super) fn direct_keys(conn: &Connection, owner: i64) -> Result<Vec<i64>, Sql
     Ok(keys)
 }
 
+/// SQL over key alias `k` and owner `?1`: the key is monitored automatically, a receive
+/// index below the enrolled automatic end or a funded key. Receive keys a manual check
+/// derived beyond that end are checked only by that search.
+const MONITORED: &str = "(k.purpose = 1 AND k.key_index < (SELECT receive_end
+        FROM ironwood_one_time_recovery WHERE account_id = ?1)
+    OR k.funding_height IS NOT NULL)";
+
 /// Returns all known eligible receivers with the generation that makes the set current.
 pub(crate) fn receivers<P: Parameters>(
     conn: &Connection,
@@ -391,11 +398,20 @@ pub(crate) fn receivers<P: Parameters>(
     let (owner, _) = account_key(conn, params, account)?;
     let (enabled, token) = token(conn, owner.0)?;
     let work = if enabled {
-        conn.prepare("SELECT purpose, key_index, receiver FROM ironwood_one_time_keys
-        WHERE account_id = ?1 AND (purpose = 1 OR funding_height IS NOT NULL) ORDER BY purpose, key_index")?
-        .query_and_then([owner.0], |r| Ok::<_, SqliteClientError>(DiscoveryWork {
-            key: stored_key_id(r)?, receiver: r.get::<_, Vec<u8>>(2)?.try_into().map_err(|_| corrupt("invalid receiver"))?
-        }))?.collect::<Result<_, _>>()?
+        conn.prepare(&format!(
+            "SELECT k.purpose, k.key_index, k.receiver FROM ironwood_one_time_keys k
+        WHERE k.account_id = ?1 AND {MONITORED} ORDER BY k.purpose, k.key_index"
+        ))?
+        .query_and_then([owner.0], |r| {
+            Ok::<_, SqliteClientError>(DiscoveryWork {
+                key: stored_key_id(r)?,
+                receiver: r
+                    .get::<_, Vec<u8>>(2)?
+                    .try_into()
+                    .map_err(|_| corrupt("invalid receiver"))?,
+            })
+        })?
+        .collect::<Result<_, _>>()?
     } else {
         vec![]
     };
@@ -439,13 +455,12 @@ pub(crate) fn record_filters<P: Parameters>(
     for key in hits {
         let id = key_ref(conn, account, *key)?;
         let eligible: bool = conn.query_row(
-            "SELECT purpose = 1 OR funding_height IS NOT NULL
-            FROM ironwood_one_time_keys WHERE id = ?1",
-            [id],
+            &format!("SELECT {MONITORED} FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND k.id = ?2"),
+            params![owner.0, id],
             |r| r.get(0),
         )?;
         if !eligible {
-            return Err(invalid("filter hit for an unfunded refund key"));
+            return Err(invalid("filter hit for a key outside automatic monitoring"));
         }
         enqueue(conn, id, u32::from(end.height), AUTOMATIC)?;
     }
