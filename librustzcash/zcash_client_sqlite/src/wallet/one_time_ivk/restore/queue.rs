@@ -1132,6 +1132,11 @@ pub(crate) fn record_lookup<P: Parameters>(
         || page
             .checked_through
             .is_some_and(|h| h < work.from.saturating_sub(1) || h > publication.end.height)
+        // A final step must prove coverage through the inventory's end, unless the saved
+        // frontier already reaches it; otherwise it would mark unread history checked.
+        || (page.next.is_none()
+            && page.checked_through != Some(publication.end.height)
+            && work.from <= publication.end.height)
     {
         return Err(invalid("inconsistent receiver lookup step"));
     }
