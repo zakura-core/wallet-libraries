@@ -477,14 +477,16 @@ fn progress<P: Parameters>(
 ) -> Result<(), SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
     // A complete replacement history can retire orphaned payment evidence. Operation
-    // ownership remains independent, so a live quote still prevents address recycling.
-    conn.execute("UPDATE ironwood_one_time_keys SET used = 0
+    // ownership remains independent, so a live quote still prevents address recycling, and
+    // a promised receipt the chain no longer holds keeps the address out of reuse.
+    conn.execute(&format!("UPDATE ironwood_one_time_keys SET used = 0
         WHERE account_id = ?1 AND prebirthday_height IS NULL AND used = 1
+        AND id NOT IN (SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {UNSETTLED})
         AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
             ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = ironwood_one_time_keys.id AND t.mined_height IS NOT NULL)
         AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = ironwood_one_time_keys.id
             AND l.read_complete = 1 AND l.done_height >= l.target_height)
-        AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = ironwood_one_time_keys.id)", [owner.0])?;
+        AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = ironwood_one_time_keys.id)"), [owner.0])?;
     conn.execute("UPDATE ironwood_one_time_lookups SET target_height = NULL, reasons = 0
         WHERE read_complete = 1 AND done_height >= target_height AND one_time_key_id IN
             (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)
