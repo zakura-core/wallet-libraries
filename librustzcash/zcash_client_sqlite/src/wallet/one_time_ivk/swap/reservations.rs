@@ -4,7 +4,7 @@ use zakura_one_time_ivk::swap::Observation;
 use zcash_protocol::consensus::Parameters;
 
 use super::{RESERVED, ReservationPolicy, lifecycle::record};
-use crate::wallet::one_time_ivk::restore::queue::{RECEIVE_PENDING, fencing_monitoring};
+use crate::wallet::one_time_ivk::restore::queue::RECEIVE_PENDING;
 use crate::wallet::one_time_ivk::{
     KeyId, OneTimeKey, Purpose, account_key, decode_index, index_after, invalid, key_by_id,
     register,
@@ -350,14 +350,9 @@ pub(in crate::wallet::one_time_ivk) fn record_status<P: Parameters>(
             r.get::<_, i64>(0)
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    // A conclusive status can retire a refund key from automatic monitoring.
-    let (owner, _) = account_key(conn, params, account)?;
-    fencing_monitoring(conn, &[owner.0], || {
-        for id in &operations {
-            record(conn, *id, &observation, now)?;
-        }
-        Ok(())
-    })?;
+    for id in &operations {
+        record(conn, *id, &observation, now)?;
+    }
     reap(conn, params, account, now)?;
     Ok(!operations.is_empty())
 }

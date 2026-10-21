@@ -821,15 +821,63 @@ fn a_rewound_reservation_is_released_by_its_queued_recheck() {
     assert_eq!(prepare(&mut st), Ok(0));
 }
 
+/// Every key that entered automatic monitoring since `before` was read, with the filter
+/// frontier then at `frontier`, has history settled through that frontier or a runnable
+/// lookup reaching it, since filters never watched it there. Returns the monitored keys
+/// and frontier for the next check.
+fn assert_entered_with_history(
+    st: &State,
+    before: &[KeyId],
+    frontier: Option<BlockHeight>,
+) -> (Vec<KeyId>, Option<BlockHeight>) {
+    let account = st.test_account().unwrap().id();
+    let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
+    let after: Vec<KeyId> = receivers.iter().map(|w| w.key).collect();
+    for key in after.iter().filter(|k| !before.contains(k)) {
+        let Some(frontier) = frontier else { break };
+        let covered: bool = value(
+            st.wallet().conn(),
+            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys k
+                 JOIN accounts a ON a.id = k.account_id
+                 LEFT JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id
+                 WHERE a.uuid = ?1 AND k.purpose = ?2 AND k.key_index = ?3
+                   AND (l.done_height >= ?4
+                     OR (l.target_height >= ?4 AND l.reasons & 3 != 0 AND l.read_complete = 0)
+                     OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
+                         WHERE p.one_time_key_id = k.id)))",
+            rusqlite::params![
+                account.0,
+                u8::from(key.purpose() == Purpose::Receive),
+                key.index().to_be_bytes(),
+                u32::from(frontier)
+            ],
+        );
+        assert!(
+            covered,
+            "{key:?} entered monitoring with no history through the filter frontier"
+        );
+    }
+    let frontier = st
+        .wallet()
+        .db()
+        .one_time_recovery(account, clock_now())
+        .unwrap()
+        .filter_frontier
+        .map(|f| f.height);
+    (after, frontier)
+}
+
 /// Seeded sequences of payments, reservations, positive hints, empty filter batches,
-/// rewinds, corrections, catch-up and toggles. Every status read checks the no-stall
-/// invariant, including that a held reservation always has runnable work (see
-/// `restore::tests::discovery::assert_no_stall`), and settling at the end releases every
-/// hold.
+/// rewinds, corrections, catch-up, toggles, and refund keys being paid and retired or
+/// returned to monitoring by statuses. Every status read checks the no-stall invariant,
+/// including that a held reservation always has runnable work (see
+/// `restore::tests::discovery::assert_no_stall`). After each step, every key that entered
+/// monitoring has its history queued (see [`assert_entered_with_history`]), and settling
+/// at the end releases every hold.
 #[test]
 fn seeded_reservation_sequences_never_hold_without_work() {
     use store::restore::tests::discovery::status;
-    for seed in 0..4u64 {
+    for seed in 0..16u64 {
         let mut rng = seed;
         let mut below = |bound: u64| {
             rng = rng
@@ -842,6 +890,8 @@ fn seeded_reservation_sequences_never_hold_without_work() {
         let account = st.test_account().unwrap().id();
         let now = clock_now();
         check_window(&mut st);
+        let (mut monitored, mut frontier) = assert_entered_with_history(&st, &[], None);
+        let mut observed = now;
         for _ in 0..20 {
             let has_frontier = st
                 .wallet()
@@ -850,7 +900,7 @@ fn seeded_reservation_sequences_never_hold_without_work() {
                 .unwrap()
                 .filter_frontier
                 .is_some();
-            match below(8) {
+            match below(10) {
                 0 => {
                     let index = below(4);
                     store::restore::tests::discovery::pay_candidate(
@@ -895,9 +945,47 @@ fn seeded_reservation_sequences_never_hold_without_work() {
                     status(db, account);
                     db.set_one_time_recovery_enabled(account, true).unwrap();
                 }
+                7 => {
+                    store::restore::tests::discovery::pay_candidate(
+                        &mut st,
+                        KeyId::new(Purpose::Refund, below(2)),
+                    );
+                }
+                8 => {
+                    // A funded refund key's swap is active, ends with no refund, or
+                    // reports one, retiring the key or returning it to monitoring.
+                    let index = below(2);
+                    let key = KeyId::new(Purpose::Refund, index);
+                    let height = tip(&st).height;
+                    recover(st.wallet_mut().db_mut(), account, key, height);
+                    let status = match below(3) {
+                        0 => Active,
+                        1 => Terminal(ReceiptExpectation::None),
+                        _ => Terminal(ReceiptExpectation::Positive(Some(
+                            Zatoshis::const_from_u64(100_000),
+                        ))),
+                    };
+                    observed += 60;
+                    let observation = zakura_one_time_ivk::swap::Observation {
+                        status,
+                        funded: true,
+                        receipts: vec![],
+                    };
+                    let operation = (format!("refund-{index}"), now + 3_600);
+                    observe_with(
+                        st.wallet_mut().db_mut(),
+                        account,
+                        key,
+                        (&operation.0, operation.1),
+                        observation,
+                        observed,
+                    )
+                    .unwrap();
+                }
                 _ => settle(&mut st),
             }
             status(st.wallet().db(), account);
+            (monitored, frontier) = assert_entered_with_history(&st, &monitored, frontier);
         }
         settle(&mut st);
         settle(&mut st);
