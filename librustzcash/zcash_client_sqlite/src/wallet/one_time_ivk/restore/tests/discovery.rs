@@ -207,7 +207,7 @@ pub(in crate::wallet::one_time_ivk) fn assert_no_stall(db: &Db, account: Account
         "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
              JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
              JOIN accounts a ON a.id = k.account_id
-             WHERE a.uuid = ?1 AND l.target_height IS NOT NULL AND l.read_complete = 0 AND l.reasons != 0)",
+             WHERE a.uuid = ?1 AND l.target_height IS NOT NULL AND l.read_complete = 0 AND l.reasons & 3 != 0)",
         [account.0],
     );
     let manual = state.manual.is_some_and(|m| m.active);
@@ -714,7 +714,7 @@ fn manual_history_does_not_expand_automatic_catch_up() {
     );
     let queued: Vec<Vec<u8>> = column(st.wallet().conn(),
         "SELECT k.key_index FROM ironwood_one_time_keys k JOIN ironwood_one_time_lookups l
-         ON l.one_time_key_id = k.id WHERE l.target_height IS NOT NULL AND l.reasons != 0 ORDER BY k.key_index", []);
+         ON l.one_time_key_id = k.id WHERE l.target_height IS NOT NULL AND l.reasons & 3 != 0 ORDER BY k.key_index", []);
     let queued: Vec<_> = queued
         .into_iter()
         .map(|b| u64::from_be_bytes(b.try_into().unwrap()))
@@ -2516,4 +2516,221 @@ fn a_correction_recovers_a_payment_it_adds_to_a_used_receiver() {
     );
     drain(&mut st, account, corrected);
     assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
+}
+
+/// A correction invalidates a completed manual-only index 4, and a resumed manual search
+/// queues it again. Cancelling that search must stop it: the invalidation only holds
+/// reservations and never makes a lookup runnable on its own. The hold still applies to the
+/// reserved automatic index 0 until its corrected history settles.
+#[test]
+fn a_cancelled_search_stops_an_invalidated_manual_only_lookup() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let now = clock_now();
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, publication, Some(10))
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    let reserved = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, now)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reserved.key_id().index(), 0);
+
+    let corrected = RecoveryPublication {
+        history_revision: 1,
+        ..publication
+    };
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, corrected, true)
+            .unwrap()
+    );
+    assert!(
+        matches!(
+            st.wallet_mut()
+                .db_mut()
+                .prepare_receive_reservation(account, now)
+                .unwrap(),
+            Err(crate::wallet::one_time_ivk::swap::ReservationPolicy::ReceiveHistory)
+        ),
+        "the corrected reservation waits"
+    );
+    drain(&mut st, account, corrected);
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .prepare_receive_reservation(account, now)
+            .unwrap()
+            .unwrap()
+            .key_id()
+            .index(),
+        0
+    );
+
+    let key4 = KeyId::new(Purpose::Receive, 4);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, corrected, Some(10))
+            .unwrap()
+    );
+    assert!(
+        status(st.wallet().db(), account)
+            .lookups
+            .iter()
+            .any(|w| w.work.key == key4)
+    );
+    st.wallet_mut()
+        .db_mut()
+        .cancel_one_time_history(account)
+        .unwrap();
+    let paused = status(st.wallet().db(), account);
+    assert!(paused.lookups.is_empty(), "no requests while paused");
+    assert!(paused.witnesses.is_empty());
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, corrected, None)
+            .unwrap()
+    );
+    assert!(
+        status(st.wallet().db(), account)
+            .lookups
+            .iter()
+            .any(|w| w.work.key == key4)
+    );
+    drain(&mut st, account, corrected);
+    assert!(!status(st.wallet().db(), account).manual.unwrap().active);
+}
+
+/// A funded refund key leaves automatic monitoring, both the filter receiver set and direct
+/// catch-up, once every local operation on it is conclusive: R0's swap succeeded, so no
+/// refund is coming, and R3's expected refund was received and settled. R1's swap ended
+/// inconclusively and R2 has no local operation, as after recovering it from a funding memo,
+/// so both stay watched. Retiring a key advances the generation, fencing held filter requests.
+#[test]
+fn conclusive_refund_keys_leave_automatic_monitoring() {
+    use zakura_one_time_ivk::swap::{
+        Observation,
+        OperationStatus::{Active, Terminal},
+        ReceiptExpectation,
+    };
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let now = clock_now();
+    let tip_height = tip(&st).height;
+    let refund = |i| KeyId::new(Purpose::Refund, i);
+    for i in 0..4 {
+        recover(st.wallet_mut().db_mut(), account, refund(i), tip_height);
+    }
+    let active = Observation {
+        status: Active,
+        funded: true,
+        receipts: vec![],
+    };
+    for i in [0, 1, 3] {
+        observe_with(
+            st.wallet_mut().db_mut(),
+            account,
+            refund(i),
+            (&format!("deposit-{i}"), now + 3_600),
+            active.clone(),
+            now,
+        )
+        .unwrap();
+    }
+    let watched = |st: &State| -> (Vec<u64>, Vec<u64>) {
+        let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
+        let filters = receivers
+            .iter()
+            .filter(|w| w.key.purpose() == Purpose::Refund)
+            .map(|w| w.key.index())
+            .collect();
+        let owner: i64 = value(
+            st.wallet().conn(),
+            "SELECT id FROM accounts WHERE uuid = ?1",
+            [account.0],
+        );
+        let ids =
+            crate::wallet::one_time_ivk::restore::queue::direct_keys(st.wallet().conn(), owner)
+                .unwrap();
+        let mut direct: Vec<u64> = ids
+            .into_iter()
+            .filter_map(|id: i64| {
+                let (purpose, index): (u8, Vec<u8>) = row(
+                    st.wallet().conn(),
+                    "SELECT purpose, key_index FROM ironwood_one_time_keys WHERE id = ?1",
+                    [id],
+                );
+                (purpose == 0).then(|| u64::from_be_bytes(index.try_into().unwrap()))
+            })
+            .collect();
+        direct.sort();
+        (filters, direct)
+    };
+    assert_eq!(watched(&st), (vec![0, 1, 2, 3], vec![0, 1, 2, 3]));
+
+    let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    let observe = |st: &mut State, i: u64, status, receipts| {
+        st.wallet_mut()
+            .db_mut()
+            .record_operation_status(
+                account,
+                &format!("deposit-{i}"),
+                None,
+                Observation {
+                    status,
+                    funded: true,
+                    receipts,
+                },
+                now + 60,
+            )
+            .unwrap();
+    };
+    observe(&mut st, 0, Terminal(ReceiptExpectation::None), vec![]);
+    observe(&mut st, 1, Terminal(ReceiptExpectation::Unknown), vec![]);
+    assert_eq!(watched(&st), (vec![1, 2, 3], vec![1, 2, 3]));
+    let (current, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert_ne!(current, held, "retiring R0 fences held filter requests");
+
+    // R3's refund arrives, the provider names it, and recovery settles it.
+    let paid = pay_candidate(&mut st, refund(3));
+    observe(
+        &mut st,
+        3,
+        Terminal(ReceiptExpectation::Positive(Some(
+            Zatoshis::const_from_u64(100_000),
+        ))),
+        vec![paid.txid],
+    );
+    assert_eq!(
+        watched(&st),
+        (vec![1, 2, 3], vec![1, 2, 3]),
+        "not yet received"
+    );
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    assert_eq!(watched(&st), (vec![1, 2], vec![1, 2]));
 }
