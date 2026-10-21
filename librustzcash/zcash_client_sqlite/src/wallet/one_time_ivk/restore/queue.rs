@@ -172,6 +172,10 @@ fn enrolled_end(conn: &Connection, owner: i64) -> Result<u64, SqliteClientError>
 /// mined window or the seed walk reached them. Every newly enrolled index, including
 /// one an earlier manual check already derived and completed, gets a historical target
 /// through the processed filter frontier. This shares the transaction with filter progress.
+///
+/// Growing the automatic set advances the generation, as every change to the filter
+/// receiver set must: a filter request captured before it never matched the new keys, so
+/// its callback must not move the frontier past their blocks.
 fn enroll(conn: &Connection, owner: i64, end: u64) -> Result<(), SqliteClientError> {
     let enrolled = enrolled_end(conn, owner)?;
     if end <= enrolled {
@@ -191,7 +195,8 @@ fn enroll(conn: &Connection, owner: i64, end: u64) -> Result<(), SqliteClientErr
         register_history(conn, owner, id)?;
     }
     conn.execute(
-        "UPDATE ironwood_one_time_recovery SET receive_end = ?2 WHERE account_id = ?1",
+        "UPDATE ironwood_one_time_recovery SET receive_end = ?2, generation = generation + 1
+        WHERE account_id = ?1",
         params![owner, end.to_be_bytes()],
     )?;
     Ok(())

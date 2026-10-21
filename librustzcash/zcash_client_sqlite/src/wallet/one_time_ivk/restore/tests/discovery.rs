@@ -1605,3 +1605,96 @@ fn a_raw_transaction_without_the_claimed_action_drops_the_admitted_note() {
     );
     assert_eq!(txids, [candidate.txid.as_ref().to_vec()]);
 }
+
+/// The blocks the cache holds above `height`, as filter progress names them.
+fn blocks_above(st: &State, height: BlockHeight) -> Vec<ChainPoint> {
+    let blocks: Vec<Vec<u8>> = column(
+        &st.cache().0,
+        "SELECT data FROM compactblocks WHERE height > ?1 ORDER BY height",
+        [u32::from(height)],
+    );
+    blocks
+        .into_iter()
+        .map(|bytes| {
+            let b = CompactBlock::decode(bytes.as_slice()).unwrap();
+            ChainPoint {
+                height: BlockHeight::from(b.height as u32),
+                hash: b.hash(),
+            }
+        })
+        .collect()
+}
+
+/// A manual check already derived I4. A filter request captures the automatic receivers
+/// I0 to I3, then I0's delayed payment proof enrolls I4, and ordinary sync stores a block
+/// paying I4. The held callback never matched I4, so it cannot commit past that block; a
+/// fresh capture does, and I4's payment is found.
+#[test]
+fn enrollment_invalidates_a_held_filter_request() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, publication, Some(5))
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    let (key0, key4) = (
+        KeyId::new(Purpose::Receive, 0),
+        KeyId::new(Purpose::Receive, 4),
+    );
+    assert!(get_key(st.wallet().db(), account, key4).unwrap().is_some());
+
+    // I0's payment is matched by filters, so its lookup is queued.
+    let frontier = status(st.wallet().db(), account)
+        .filter_frontier
+        .unwrap()
+        .height;
+    pay_candidate(&mut st, key0);
+    let (token, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    let first = blocks_above(&st, frontier);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_filters(account, token, 0, &first, &[key0])
+            .unwrap()
+    );
+    // A filter request for the next blocks captures I0 to I3.
+    let (held, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert!(receivers.iter().all(|w| w.key != key4));
+    // I0's proof arrives and enrolls I4.
+    let current = publication_at(&st, tip(&st).height);
+    drain(&mut st, account, current);
+    let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert!(receivers.iter().any(|w| w.key == key4));
+    // Ordinary sync stores I4's first payment, then the held callback returns.
+    let synced = tip(&st).height;
+    pay_candidate(&mut st, key4);
+    let next = blocks_above(&st, synced);
+    assert!(
+        !st.wallet_mut()
+            .db_mut()
+            .record_one_time_filters(account, held, 0, &next, &[])
+            .unwrap(),
+        "a receiver set from before enrollment is stale"
+    );
+    let (token, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_filters(account, token, 0, &next, &[key4])
+            .unwrap()
+    );
+    let current = publication_at(&st, tip(&st).height);
+    drain(&mut st, account, current);
+    assert_eq!(mined_receipt_indexes(&st), [0, 4]);
+}
