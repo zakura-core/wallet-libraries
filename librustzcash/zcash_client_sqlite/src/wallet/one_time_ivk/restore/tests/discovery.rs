@@ -217,6 +217,10 @@ fn oracle(st: &State, receiver: [u8; 43], fvk: &FullViewingKey) -> Vec<Directory
 /// would clear, a completed read keeps no segment cursor, and a candidate whose witness
 /// binding was dropped has an unread lookup to rebind it after rewound coverage, unless the
 /// user paused that lookup.
+///
+/// A reserved receiver held by invalidated history (see `queue::RECEIVE_PENDING`) must also
+/// have a runnable lookup that can lift the hold, or a payment candidate in progress, unless
+/// the user paused discovery, which refuses reservations anyway.
 pub(in crate::wallet::one_time_ivk) fn assert_no_stall(db: &Db, account: AccountUuid) {
     let owner: i64 = value(
         &db.conn,
@@ -245,6 +249,26 @@ pub(in crate::wallet::one_time_ivk) fn assert_no_stall(db: &Db, account: Account
     assert!(!cursor, "a completed read keeps a segment cursor");
     assert!(!unbound, "an unbound candidate has no read to rebind it");
     let state = db.one_time_recovery(account, i64::MAX).unwrap();
+    if state.enabled {
+        let held: bool = value(
+            &db.conn,
+            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys k JOIN accounts a ON a.id = k.account_id
+             WHERE a.uuid = ?1 AND k.purpose = 1 AND k.used = 0
+               AND k.reserved_at IS NOT NULL AND k.released_at IS NULL
+               AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
+                   WHERE l.one_time_key_id = k.id AND l.reasons & 4 != 0)
+               AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
+                   WHERE l.one_time_key_id = k.id AND l.target_height IS NOT NULL
+                     AND l.reasons & 3 != 0 AND l.read_complete = 0)
+               AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
+                   WHERE p.one_time_key_id = k.id))",
+            [account.0],
+        );
+        assert!(
+            !held,
+            "a reserved receiver is held with no work to release it"
+        );
+    }
     if !state.enabled || !state.lookups.is_empty() || !state.witnesses.is_empty() {
         return;
     }

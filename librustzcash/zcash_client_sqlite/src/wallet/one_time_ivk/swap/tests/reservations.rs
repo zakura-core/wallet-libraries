@@ -608,6 +608,11 @@ fn an_orphaned_promised_payout_keeps_its_address_out_of_reuse() {
 
 /// Records a positive filter hint for receive index `index` over a new block.
 fn hint(st: &mut State, index: u64) {
+    filter(st, &[KeyId::new(Purpose::Receive, index)]);
+}
+
+/// Commits filter progress over a new block with `hits`, from the current frontier.
+fn filter(st: &mut State, hits: &[KeyId]) {
     let account = st.test_account().unwrap().id();
     let frontier = st
         .wallet()
@@ -623,17 +628,10 @@ fn hint(st: &mut State, index: u64) {
     assert!(
         st.wallet_mut()
             .db_mut()
-            .record_one_time_filters(
-                account,
-                token,
-                0,
-                &blocks,
-                &[KeyId::new(Purpose::Receive, index)]
-            )
+            .record_one_time_filters(account, token, token.history_revision, &blocks, hits)
             .unwrap()
     );
 }
-
 /// Runs recovery at the tip under the account's current correction generation until every
 /// due lookup and witness is answered, so invalidated histories settle again.
 fn settle(st: &mut State) {
@@ -762,5 +760,150 @@ fn an_invalidating_event_after_reservation_holds_its_receiver() {
             settle(&mut st);
             assert_eq!(attempt(&mut st), Ok(()), "{event} {step}");
         }
+    }
+}
+
+/// After seed recovery completes, index 0 is reserved and a rewind drops the block its
+/// history was checked through. Rolling filters then see no hit, so only the recheck the
+/// rewind queued can release the hold: it is runnable at once, and once it settles the
+/// reservation resumes. With discovery off, reservations are refused outright, and the
+/// queued recheck runs when discovery is enabled again.
+#[test]
+fn a_rewound_reservation_is_released_by_its_queued_recheck() {
+    let mut st = scanned_wallet();
+    st.generate_and_scan_empty_blocks(5);
+    let account = st.test_account().unwrap().id();
+    let now = clock_now();
+    check_window(&mut st);
+    assert!(
+        st.wallet()
+            .db()
+            .one_time_recovery(account, now)
+            .unwrap()
+            .restore_complete
+    );
+    let prepare = |st: &mut State| {
+        st.wallet_mut()
+            .db_mut()
+            .prepare_receive_reservation(account, now)
+            .unwrap()
+            .map(|key| key.key_id().index())
+    };
+    assert_eq!(prepare(&mut st), Ok(0));
+
+    let floor = tip(&st).height - 1;
+    st.truncate_to_height(floor);
+    st.generate_and_scan_empty_blocks(2);
+    filter(&mut st, &[]);
+    assert_eq!(prepare(&mut st), Err(ReservationPolicy::ReceiveHistory));
+    let queued = store::restore::tests::discovery::status(st.wallet().db(), account);
+    assert!(
+        queued
+            .lookups
+            .iter()
+            .any(|w| w.work.key == KeyId::new(Purpose::Receive, 0)),
+        "the rewind queued a runnable recheck"
+    );
+
+    let db = st.wallet_mut().db_mut();
+    db.set_one_time_recovery_enabled(account, false).unwrap();
+    assert_eq!(prepare(&mut st), Err(ReservationPolicy::Disabled));
+    st.wallet_mut()
+        .db_mut()
+        .set_one_time_recovery_enabled(account, true)
+        .unwrap();
+    settle(&mut st);
+    assert_eq!(prepare(&mut st), Ok(0));
+}
+
+/// Seeded sequences of payments, reservations, positive hints, empty filter batches,
+/// rewinds, corrections, catch-up and toggles. Every status read checks the no-stall
+/// invariant, including that a held reservation always has runnable work (see
+/// `restore::tests::discovery::assert_no_stall`), and settling at the end releases every
+/// hold.
+#[test]
+fn seeded_reservation_sequences_never_hold_without_work() {
+    use store::restore::tests::discovery::status;
+    for seed in 0..4u64 {
+        let mut rng = seed;
+        let mut below = |bound: u64| {
+            rng = rng
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (rng >> 33) % bound
+        };
+        let mut st = scanned_wallet();
+        st.generate_and_scan_empty_blocks(5);
+        let account = st.test_account().unwrap().id();
+        let now = clock_now();
+        check_window(&mut st);
+        for _ in 0..20 {
+            let has_frontier = st
+                .wallet()
+                .db()
+                .one_time_recovery(account, now)
+                .unwrap()
+                .filter_frontier
+                .is_some();
+            match below(8) {
+                0 => {
+                    let index = below(4);
+                    store::restore::tests::discovery::pay_candidate(
+                        &mut st,
+                        KeyId::new(Purpose::Receive, index),
+                    );
+                }
+                1 => {
+                    let _ = st
+                        .wallet_mut()
+                        .db_mut()
+                        .prepare_receive_reservation(account, now)
+                        .unwrap();
+                }
+                2 if has_frontier => hint(&mut st, below(4)),
+                3 if has_frontier => filter(&mut st, &[]),
+                4 => {
+                    let floor = tip(&st).height - 1 - below(2) as u32;
+                    st.truncate_to_height(floor);
+                    st.generate_and_scan_empty_blocks(2);
+                }
+                5 => {
+                    let revision = status(st.wallet().db(), account).token.history_revision;
+                    let corrected =
+                        zcash_client_backend::data_api::one_time_ivk::restore::RecoveryPublication {
+                            history_revision: revision + 1,
+                            ..store::restore::tests::discovery::publication_at(
+                                &st,
+                                tip(&st).height,
+                            )
+                        };
+                    assert!(
+                        st.wallet_mut()
+                            .db_mut()
+                            .begin_one_time_recovery(account, corrected, true)
+                            .unwrap()
+                    );
+                }
+                6 => {
+                    let db = st.wallet_mut().db_mut();
+                    db.set_one_time_recovery_enabled(account, false).unwrap();
+                    status(db, account);
+                    db.set_one_time_recovery_enabled(account, true).unwrap();
+                }
+                _ => settle(&mut st),
+            }
+            status(st.wallet().db(), account);
+        }
+        settle(&mut st);
+        settle(&mut st);
+        let held: u32 = value(
+            st.wallet().conn(),
+            "SELECT COUNT(*) FROM ironwood_one_time_keys k WHERE k.purpose = 1 AND k.used = 0
+               AND k.reserved_at IS NOT NULL AND k.released_at IS NULL
+               AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
+                   WHERE l.one_time_key_id = k.id AND l.reasons & 4 != 0)",
+            [],
+        );
+        assert_eq!(held, 0, "seed {seed}: settling releases every hold");
     }
 }
