@@ -146,7 +146,10 @@ notes AS (
                THEN 1
              ELSE 0
            END AS does_not_match_shielding
-    FROM v_received_outputs ro"#,
+    -- A private receipt whose transaction label raw bytes disproved is not received in it.
+    FROM (SELECT * FROM v_received_outputs
+          WHERE NOT (pool = 4 AND id_within_pool_table IN
+              (SELECT note_id FROM ironwood_one_time_disputed_receipts))) ro"#,
             $received_filter,
             r#"
     UNION

@@ -143,7 +143,9 @@ pub(super) fn has_unretrieved_memo(
 ) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
         "SELECT EXISTS (
-             SELECT 1 FROM v_received_outputs
+             SELECT 1 FROM (SELECT * FROM v_received_outputs
+          WHERE NOT (pool = 4 AND id_within_pool_table IN
+              (SELECT note_id FROM ironwood_one_time_disputed_receipts))) ro
              WHERE account_id = :account_id AND transaction_id = :transaction_id
              AND pool != 0 AND memo IS NULL
          ) OR EXISTS (
