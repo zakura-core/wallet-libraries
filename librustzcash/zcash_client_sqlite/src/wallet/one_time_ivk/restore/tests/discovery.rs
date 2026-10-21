@@ -2542,15 +2542,70 @@ fn with_other_commitment(
     zcash_primitives::transaction::Transaction::read(&bytes[..], tx.consensus_branch_id()).unwrap()
 }
 
+/// A wallet holding a genuine payment to I8 that a faulty directory labeled with another
+/// transaction's ID, admitted under that label, with that wrong transaction and the true
+/// payment.
+struct Mislabeled {
+    st: State,
+    candidate: PendingPayment,
+    forged: PendingPayment,
+    wrong: zcash_primitives::transaction::Transaction,
+}
+
+/// Admits a genuine payment to I8 under the wrong label `mislabel` describes.
+fn mislabeled(mislabel: Mislabel) -> Mislabeled {
+    let mut st = scanned_wallet();
+    let receiver = derive(&st, key8()).address_at(0u32, Scope::External);
+    let paying = external_payment(receiver, &zcash_protocol::memo::MemoBytes::empty());
+    let (height, _) = st.generate_next_block_from_tx(1, &paying);
+    st.scan_cached_blocks(height, 1);
+    let candidate = candidate_at(&st, height, &derive(&st, key8()));
+    let wrong = match mislabel {
+        Mislabel::OtherTransaction => {
+            let other = external_payment(
+                foreign_receiver(),
+                &zcash_protocol::memo::MemoBytes::empty(),
+            );
+            let (mined, _) = st.generate_next_block_from_tx(1, &other);
+            st.scan_cached_blocks(mined, 1);
+            other
+        }
+        Mislabel::CommitmentOnly => with_other_commitment(&paying, candidate.action_index),
+    };
+    let mut forged = candidate.clone();
+    forged.txid = wrong.txid();
+    queue_late(&mut st, key8(), &forged);
+    send_witness(&mut st, key8(), &forged);
+    Mislabeled {
+        st,
+        candidate,
+        forged,
+        wrong,
+    }
+}
+
+/// The one-time receipts: note row, transaction ID, and whether its label is disputed.
+fn receipts(st: &State) -> Vec<(i64, Vec<u8>, bool)> {
+    rows(
+        st.wallet().conn(),
+        "SELECT n.id, t.txid, EXISTS(SELECT 1 FROM ironwood_one_time_disputed_receipts d
+             WHERE d.note_id = n.id)
+         FROM ironwood_received_notes n JOIN transactions t ON t.id_tx = n.transaction_id
+         WHERE n.one_time_key_id IS NOT NULL ORDER BY n.id",
+        [],
+    )
+}
+
 /// A faulty directory returns a genuine payment's note and path under another
 /// transaction's ID, either an unrelated one or one whose claimed action differs only in its
 /// note commitment. The payment is admitted under that label, but the claimed action in the
-/// fetched raw transaction does not hold it: the note is dropped rather than credited, and
-/// stays owed. The raw transaction is kept, so the same mislabeled record repeated later is
-/// refused at admission. The true record is then admitted under its own transaction. This
-/// holds with discovery enabled, and disabled before the raw transaction arrived.
+/// fetched raw transaction does not hold it: the receipt keeps its note row and only its label
+/// becomes disputed, and its key's history is read again. The raw transaction is kept, so the
+/// same mislabeled record repeated later is refused at admission. The true record then moves
+/// the same row to its own transaction. This holds with discovery enabled, and disabled before
+/// the raw transaction arrived.
 #[test]
-fn a_raw_transaction_without_the_claimed_action_drops_the_admitted_note() {
+fn a_raw_transaction_without_the_claimed_action_disputes_the_label() {
     use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
     for (mislabel, enabled) in [
         (Mislabel::OtherTransaction, true),
@@ -2558,39 +2613,18 @@ fn a_raw_transaction_without_the_claimed_action_drops_the_admitted_note() {
         (Mislabel::CommitmentOnly, true),
         (Mislabel::CommitmentOnly, false),
     ] {
-        let mut st = scanned_wallet();
+        let Mislabeled {
+            mut st,
+            candidate,
+            forged,
+            wrong,
+        } = mislabeled(mislabel);
         let network = *st.network();
         let account = st.test_account().unwrap().id();
-        let receiver = derive(&st, key8()).address_at(0u32, Scope::External);
-        let paying = external_payment(receiver, &zcash_protocol::memo::MemoBytes::empty());
-        let (height, _) = st.generate_next_block_from_tx(1, &paying);
-        st.scan_cached_blocks(height, 1);
-        let candidate = candidate_at(&st, height, &derive(&st, key8()));
-        let wrong = match mislabel {
-            Mislabel::OtherTransaction => {
-                let other = external_payment(
-                    foreign_receiver(),
-                    &zcash_protocol::memo::MemoBytes::empty(),
-                );
-                let (mined, _) = st.generate_next_block_from_tx(1, &other);
-                st.scan_cached_blocks(mined, 1);
-                other
-            }
-            Mislabel::CommitmentOnly => with_other_commitment(&paying, candidate.action_index),
+        let [(note, ref label, false)] = receipts(&st)[..] else {
+            panic!("one receipt under the wrong label");
         };
-        let mut forged = candidate.clone();
-        forged.txid = wrong.txid();
-        let wrong_label = |st: &State| -> bool {
-            value(
-                st.wallet().conn(),
-                "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
-                 ON t.id_tx = n.transaction_id WHERE n.one_time_key_id IS NOT NULL AND t.txid = ?1)",
-                [forged.txid.as_ref()],
-            )
-        };
-        queue_late(&mut st, key8(), &forged);
-        send_witness(&mut st, key8(), &forged);
-        assert!(wrong_label(&st));
+        assert_eq!(*label, forged.txid.as_ref().to_vec());
         if !enabled {
             st.wallet_mut()
                 .db_mut()
@@ -2599,10 +2633,9 @@ fn a_raw_transaction_without_the_claimed_action_drops_the_admitted_note() {
         }
 
         decrypt_and_store_transaction(&network, st.wallet_mut(), &wrong, None).unwrap();
-        assert!(
-            one_time_notes(&st).is_empty(),
-            "{mislabel:?} {enabled}: dropped"
-        );
+        let disputed = vec![(note, forged.txid.as_ref().to_vec(), true)];
+        assert_eq!(receipts(&st), disputed, "{mislabel:?} {enabled}");
+        assert_eq!(one_time_notes(&st), [(50_000, false)]);
         let id = key_ref(&st.wallet().db().conn, account, key8()).unwrap();
         let reopened: bool = value(
             st.wallet().conn(),
@@ -2615,8 +2648,11 @@ fn a_raw_transaction_without_the_claimed_action_drops_the_admitted_note() {
         // The directory repeats the same mislabeled record: the kept raw bytes refuse it.
         let publication = queue_late(&mut st, key8(), &forged);
         send_witness(&mut st, key8(), &forged);
-        assert!(!wrong_label(&st), "{mislabel:?} {enabled}: refused again");
-        assert!(one_time_notes(&st).is_empty());
+        assert_eq!(
+            receipts(&st),
+            disputed,
+            "{mislabel:?} {enabled}: refused again"
+        );
 
         // After the rejection's backoff, the true record is read.
         exec(
@@ -2626,23 +2662,87 @@ fn a_raw_transaction_without_the_claimed_action_drops_the_admitted_note() {
         );
         drain(&mut st, account, publication);
         assert_eq!(status(st.wallet().db(), account).enabled, enabled);
-        let txids: Vec<Vec<u8>> = column(
-            st.wallet().conn(),
-            "SELECT t.txid FROM ironwood_received_notes n JOIN transactions t
-             ON t.id_tx = n.transaction_id WHERE n.one_time_key_id IS NOT NULL",
-            [],
-        );
         assert_eq!(
-            txids,
-            [candidate.txid.as_ref().to_vec()],
+            receipts(&st),
+            [(note, candidate.txid.as_ref().to_vec(), false)],
             "{mislabel:?} {enabled}"
         );
-        let owed: u32 = value(
-            st.wallet().conn(),
-            "SELECT COUNT(*) FROM ironwood_one_time_owed_receipts",
-            [],
+        assert_eq!(one_time_notes(&st), [(50_000, false)]);
+    }
+}
+
+/// A receipt admitted under a wrong label funds an unmined send before raw bytes disprove the
+/// label. Disputing it keeps the note row and its spend, so the note stays unavailable and the
+/// balance unchanged, and the true record moves that same row to its own transaction with
+/// the spend intact, with discovery enabled and disabled.
+#[test]
+fn a_disputed_label_keeps_the_receipts_pending_spend() {
+    use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
+    for enabled in [true, false] {
+        let Mislabeled {
+            mut st,
+            candidate,
+            forged,
+            wrong,
+        } = mislabeled(Mislabel::OtherTransaction);
+        let network = *st.network();
+        let account = st.test_account().cloned().unwrap();
+        let [(note, _, false)] = receipts(&st)[..] else {
+            panic!("one receipt under the wrong label");
+        };
+        let to = payment(&unified(foreign_receiver()), 30_000, None);
+        let (_, send) = transfer(
+            &mut st,
+            (account.id(), account.usk()),
+            vec![to],
+            (None, zcash_protocol::ShieldedPool::Orchard),
         );
-        assert_eq!(owed, 0, "the repair settles what was owed");
+        let send = send.unwrap();
+        let spends = |st: &State| -> Vec<Vec<u8>> {
+            column(
+                st.wallet().conn(),
+                "SELECT t.txid FROM ironwood_received_note_spends s
+                 JOIN transactions t ON t.id_tx = s.transaction_id
+                 WHERE s.ironwood_received_note_id = ?1",
+                [note],
+            )
+        };
+        assert_eq!(spends(&st), [send.as_ref().to_vec()]);
+        assert_eq!(one_time_notes(&st), [(50_000, true)]);
+        if !enabled {
+            st.wallet_mut()
+                .db_mut()
+                .set_one_time_recovery_enabled(account.id(), false)
+                .unwrap();
+        }
+
+        decrypt_and_store_transaction(&network, st.wallet_mut(), &wrong, None).unwrap();
+        assert_eq!(receipts(&st), [(note, forged.txid.as_ref().to_vec(), true)]);
+        assert_eq!(
+            spends(&st),
+            [send.as_ref().to_vec()],
+            "the pending spend survives"
+        );
+        assert_eq!(one_time_notes(&st), [(50_000, true)], "still unavailable");
+
+        let publication = publication_at(&st, tip(&st).height);
+        if enabled {
+            assert!(
+                st.wallet_mut()
+                    .db_mut()
+                    .begin_one_time_recovery(account.id(), publication, true)
+                    .unwrap()
+            );
+        }
+        drain(&mut st, account.id(), publication);
+        assert_eq!(status(st.wallet().db(), account.id()).enabled, enabled);
+        assert_eq!(
+            receipts(&st),
+            [(note, candidate.txid.as_ref().to_vec(), false)],
+            "enabled {enabled}"
+        );
+        assert_eq!(spends(&st), [send.as_ref().to_vec()]);
+        assert_eq!(one_time_notes(&st), [(50_000, true)]);
     }
 }
 

@@ -547,46 +547,61 @@ fn a_new_account_issues_once_the_index_history_completes() {
     assert_eq!(key.key_id().index(), 0);
 }
 
-/// A quote's promised payout arrived and settled it, so its reservation was released while
-/// the payment kept the address used and index 1 was drafted. A reorg then orphans that payout and the replacement
-/// history is empty. The provider's receipt is still outstanding, so the address must not
-/// be issued again.
+/// A quote's payout arrived and its provider reported the operation ended, either with a
+/// promised receipt or inconclusively after funding. Its reservation was released while the
+/// payment kept the address used and index 1 was drafted. A reorg then orphans that payout and
+/// the replacement history is empty. The receipt the operation may still owe is outstanding,
+/// so the address must not be issued again.
 #[test]
 fn an_orphaned_promised_payout_keeps_its_address_out_of_reuse() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let now = clock_now();
-    let (key, _) = quote(&mut st, now, "quote", true);
-    assert_eq!(key.index(), 0);
-    let floor = tip(&st).height;
-    let paid = store::restore::tests::discovery::pay_candidate(&mut st, key);
-    promise_payout(&mut st, "quote", &[paid.txid], now + 120);
-    catch_up(&mut st);
-    assert_eq!(
-        store::restore::tests::discovery::one_time_notes(&st),
-        [(100_000, false)]
-    );
-    // Past the quote's deadline the settled reservation is released, and the payment alone
-    // keeps index 0 from being issued.
-    mined_at(&st, tip(&st).height, now + 600);
-    chain_agrees(st.wallet().db(), now + 180);
-    let next = st
-        .wallet_mut()
-        .db_mut()
-        .prepare_receive_reservation(account, now + 180)
-        .unwrap()
-        .unwrap();
-    assert_eq!(next.key_id().index(), 1);
+    for positive in [true, false] {
+        let mut st = scanned_wallet();
+        let account = st.test_account().unwrap().id();
+        let now = clock_now();
+        let (key, _) = quote(&mut st, now, "quote", true);
+        assert_eq!(key.index(), 0);
+        let floor = tip(&st).height;
+        let paid = store::restore::tests::discovery::pay_candidate(&mut st, key);
+        if positive {
+            promise_payout(&mut st, "quote", &[paid.txid], now + 120);
+        } else {
+            let observation = Observation {
+                status: Terminal(ReceiptExpectation::Unknown),
+                funded: true,
+                receipts: vec![],
+            };
+            st.wallet_mut()
+                .db_mut()
+                .record_operation_status(account, "quote", None, observation, now + 120)
+                .unwrap();
+        }
+        catch_up(&mut st);
+        assert_eq!(
+            store::restore::tests::discovery::one_time_notes(&st),
+            [(100_000, false)]
+        );
+        // Past the quote's deadline the reservation is released, and the payment alone
+        // keeps index 0 from being issued.
+        mined_at(&st, tip(&st).height, now + 600);
+        chain_agrees(st.wallet().db(), now + 180);
+        let next = st
+            .wallet_mut()
+            .db_mut()
+            .prepare_receive_reservation(account, now + 180)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.key_id().index(), 1);
 
-    st.truncate_to_height(floor);
-    st.generate_and_scan_empty_blocks(3);
-    check_window(&mut st);
-    chain_agrees(st.wallet().db(), now + 180);
-    let next = st
-        .wallet_mut()
-        .db_mut()
-        .prepare_receive_reservation(account, now + 180)
-        .unwrap()
-        .unwrap();
-    assert_ne!(next.key_id().index(), 0);
+        st.truncate_to_height(floor);
+        st.generate_and_scan_empty_blocks(3);
+        check_window(&mut st);
+        chain_agrees(st.wallet().db(), now + 180);
+        let next = st
+            .wallet_mut()
+            .db_mut()
+            .prepare_receive_reservation(account, now + 180)
+            .unwrap()
+            .unwrap();
+        assert_ne!(next.key_id().index(), 0, "positive {positive}");
+    }
 }
