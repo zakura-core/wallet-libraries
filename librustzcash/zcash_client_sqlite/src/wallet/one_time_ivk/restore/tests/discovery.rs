@@ -257,7 +257,11 @@ pub(in crate::wallet::one_time_ivk) fn late_fixture() -> (State, PendingPayment,
 
 /// Starts recovery at the tip and answers `key`'s lookup with `candidate`, which then
 /// waits for its inclusion path.
-fn queue_late(st: &mut State, key: KeyId, candidate: &PendingPayment) -> RecoveryPublication {
+pub(in crate::wallet::one_time_ivk) fn queue_late(
+    st: &mut State,
+    key: KeyId,
+    candidate: &PendingPayment,
+) -> RecoveryPublication {
     let account = st.test_account().unwrap().id();
     recover(st.wallet_mut().db_mut(), account, key, candidate.height);
     let publication = publication_at(st, tip(st).height);
@@ -1553,4 +1557,51 @@ fn manual_only_receive_keys_stay_out_of_automatic_monitoring() {
         [8u64.to_be_bytes()],
     );
     assert_eq!(automatic, 0);
+}
+
+/// A faulty directory returns the right note and path under another transaction's ID. The
+/// payment is admitted under that label, but storing that transaction's raw bytes finds
+/// no such action in it: the note is dropped rather than credited to it, its key's history
+/// is read again, and the true record is then admitted under its own transaction.
+#[test]
+fn a_raw_transaction_without_the_claimed_action_drops_the_admitted_note() {
+    use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
+    let mut st = scanned_wallet();
+    let network = *st.network();
+    let account = st.test_account().unwrap().id();
+    let other = external_payment(
+        foreign_receiver(),
+        &zcash_protocol::memo::MemoBytes::empty(),
+    );
+    let (mined, _) = st.generate_next_block_from_tx(1, &other);
+    st.scan_cached_blocks(mined, 1);
+    let candidate = pay_candidate(&mut st, key8());
+    let mut forged = candidate.clone();
+    forged.txid = other.txid();
+    let publication = queue_late(&mut st, key8(), &forged);
+    send_witness(&mut st, key8(), &forged);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &other, Some(mined)).unwrap();
+    assert!(
+        one_time_notes(&st).is_empty(),
+        "nothing is credited to the other transaction"
+    );
+    let id = key_ref(&st.wallet().db().conn, account, key8()).unwrap();
+    let reopened: bool = value(
+        st.wallet().conn(),
+        "SELECT target_height IS NOT NULL AND read_complete = 0 FROM ironwood_one_time_lookups
+         WHERE one_time_key_id = ?1",
+        [id],
+    );
+    assert!(reopened, "the key's history is read again");
+
+    drain(&mut st, account, publication);
+    let txids: Vec<Vec<u8>> = column(
+        st.wallet().conn(),
+        "SELECT t.txid FROM ironwood_received_notes n JOIN transactions t
+         ON t.id_tx = n.transaction_id WHERE n.one_time_key_id IS NOT NULL",
+        [],
+    );
+    assert_eq!(txids, [candidate.txid.as_ref().to_vec()]);
 }

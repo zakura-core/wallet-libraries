@@ -1019,6 +1019,84 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
     Ok(())
 }
 
+/// Checks every one-time note admitted from the directory under `tx`'s ID against the raw
+/// transaction: its claimed action must carry the note's rho, ephemeral key and ciphertext
+/// prefix. The directory authenticates the note and its position but not its transaction
+/// label, so a mismatch is handled like a rejected admission: the note is dropped, crediting
+/// nothing to `tx`, and its key's history is read again. Returns whether an admitted note
+/// still belongs to `tx`.
+pub(crate) fn check_raw_receipts(
+    conn: &Connection,
+    tx: &zcash_primitives::transaction::Transaction,
+) -> Result<bool, SqliteClientError> {
+    #[allow(clippy::type_complexity)]
+    let notes: Vec<(i64, u32, Vec<u8>, Vec<u8>, Vec<u8>, i64, i64)> = conn
+        .prepare(
+            "SELECT n.id, n.action_index, n.rho, n.ephemeral_key, n.compact_ciphertext,
+                 n.one_time_key_id, k.account_id
+             FROM ironwood_received_notes n
+             JOIN transactions t ON t.id_tx = n.transaction_id
+             JOIN ironwood_one_time_keys k ON k.id = n.one_time_key_id
+             WHERE t.txid = ?1 AND n.compact_ciphertext IS NOT NULL",
+        )?
+        .query_map([tx.txid().as_ref()], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut kept = false;
+    let mut dropped = false;
+    for (note, action, rho, epk, prefix, key, owner) in notes {
+        let carried = tx
+            .ironwood_bundle()
+            .and_then(|b| b.actions().get(usize::try_from(action).ok()?))
+            .is_some_and(|a| {
+                a.nullifier().to_bytes()[..] == rho[..]
+                    && a.encrypted_note().epk_bytes[..] == epk[..]
+                    && a.encrypted_note().enc_ciphertext[..52] == prefix[..]
+            });
+        if carried {
+            kept = true;
+            continue;
+        }
+        conn.execute("DELETE FROM ironwood_received_notes WHERE id = ?1", [note])?;
+        conn.execute(
+            "UPDATE ironwood_one_time_lookups SET last_record = NULL, done_height = NULL,
+                read_complete = 0, attempts = 0, next_attempt_at = 0
+             WHERE one_time_key_id = ?1",
+            [key],
+        )?;
+        register_history(conn, owner, key)?;
+        dropped = true;
+    }
+    if dropped && !kept {
+        // The transaction no longer holds a private receipt, so its private enhancement
+        // work goes too.
+        let tx_ref: Option<i64> = conn
+            .query_row(
+                "SELECT id_tx FROM transactions WHERE txid = ?1",
+                [tx.txid().as_ref()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(tx_ref) = tx_ref {
+            wallet::enhance_pir::clear_work(conn, crate::TxRef(tx_ref))?;
+            conn.execute(
+                "DELETE FROM ironwood_enhance_routing WHERE transaction_id = ?1",
+                [tx_ref],
+            )?;
+        }
+    }
+    Ok(kept)
+}
+
 /// Admits active candidates once their inclusion proof and ordinary spend coverage are usable.
 pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
