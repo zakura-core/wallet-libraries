@@ -9,7 +9,7 @@ use crate::{snapshot, Error, Hash};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub use zakura_receiver_crypto::wire::PAYLOAD_BYTES;
+pub use zakura_receiver_crypto::wire::{is_final, PAYLOAD_BYTES};
 
 /// The witness table format a manifest commits to.
 pub const PROFILE: &str = "ironwood-zero-ovk-witness-v1";

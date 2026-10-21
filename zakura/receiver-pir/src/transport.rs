@@ -3,7 +3,7 @@
 //! Routes never name a receiver: inventory heads and chunks, shard filters (addressed by
 //! digest) and PIR setup are public, and payment and witness rows are selected inside PIR.
 use crate::{
-    inventory::{Capture, Head, Inventory, MAX_CAPTURE_BYTES, MAX_CHUNK_BYTES},
+    inventory::{Capture, DescriptorCache, Head, Inventory, MAX_CAPTURE_BYTES, MAX_CHUNK_BYTES},
     public_bytes, response_bytes, Client, Error, Publication, WitnessClient, MAX_MANIFEST_BYTES,
 };
 use receiver_directory::{
@@ -32,6 +32,16 @@ impl<T: Transport> Transport for &T {
     async fn post(&self, url: &str, body: Vec<u8>, limit: usize) -> Result<Vec<u8>, Error> {
         T::post(self, url, body, limit).await
     }
+}
+
+/// Durable storage the host provides for verified shard descriptors, so a capture can skip
+/// chunks that cannot have changed. It holds one opaque value. A lost, stale or corrupted
+/// value only costs a full capture, never a wrong inventory.
+pub trait DescriptorStore {
+    /// The value last saved, if any.
+    fn load(&self) -> Option<Vec<u8>>;
+    /// Replaces the saved value. A failed save may be dropped.
+    fn save(&self, value: &[u8]);
 }
 
 /// One segment's payment and companion witness PIR sessions.
@@ -121,10 +131,71 @@ impl Inventories {
         head: Head,
         budget: usize,
     ) -> Result<Inventory, Error> {
+        Self::fetch(origin, http, head, budget, None).await
+    }
+
+    /// [`Self::capture`], reusing settled shard descriptors from `store` for whole chunks
+    /// and downloading only the rest: new shards, sealed shards whose witnesses are still
+    /// provisional, and the recent tier. The result is proved complete against the head
+    /// exactly as a full capture is. If it fails, the capture is repeated without the cache.
+    /// Either way the verified inventory's settled descriptors replace the saved value.
+    pub async fn capture_cached<T: Transport, S: DescriptorStore>(
+        origin: &str,
+        http: &T,
+        head: Head,
+        store: &S,
+    ) -> Result<Inventory, Error> {
+        Self::capture_cached_within(origin, http, head, store, MAX_CAPTURE_BYTES).await
+    }
+
+    /// [`Self::capture_cached`], retaining at most `budget` serialized bytes, cached chunks
+    /// included.
+    pub async fn capture_cached_within<T: Transport, S: DescriptorStore>(
+        origin: &str,
+        http: &T,
+        head: Head,
+        store: &S,
+        budget: usize,
+    ) -> Result<Inventory, Error> {
+        let saved = store.load();
+        let cache = saved
+            .as_deref()
+            .and_then(|bytes| DescriptorCache::decode(bytes, &head));
+        let inventory = match &cache {
+            Some(cache) => match Self::fetch(origin, http, head.clone(), budget, Some(cache)).await
+            {
+                Ok(inventory) => inventory,
+                // Neither comes from a cached descriptor, so a full capture would repeat it.
+                Err(e @ (Error::Transport(_) | Error::Unsupported)) => return Err(e),
+                Err(_) => Self::fetch(origin, http, head, budget, None).await?,
+            },
+            None => Self::fetch(origin, http, head, budget, None).await?,
+        };
+        if let Ok(bytes) = DescriptorCache::of(&inventory).encode() {
+            if saved.as_deref() != Some(&bytes[..]) {
+                store.save(&bytes);
+            }
+        }
+        Ok(inventory)
+    }
+
+    /// Captures `head`'s inventory chunk by chunk, taking each chunk `cache` holds whole
+    /// from it and downloading the others.
+    async fn fetch<T: Transport>(
+        origin: &str,
+        http: &T,
+        head: Head,
+        budget: usize,
+        cache: Option<&DescriptorCache>,
+    ) -> Result<Inventory, Error> {
         let origin = origin.trim_end_matches('/');
         let inventory = hex::encode(head.inventory);
-        let mut capture = Capture::new(head, budget)?;
+        let mut capture = Capture::new(head.clone(), budget)?;
         while let Some(index) = capture.next_chunk() {
+            if let Some(shards) = cache.and_then(|cache| cache.chunk(&head, index)) {
+                capture.push_cached(shards)?;
+                continue;
+            }
             let bytes = http
                 .get(
                     &format!("{origin}/v1/receiver/inventory/{inventory}/{index}"),

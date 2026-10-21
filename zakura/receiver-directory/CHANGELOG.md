@@ -17,7 +17,8 @@
   from block hints and streaming, bounded-memory decoding and matching.
 
 - Add `witness`: companion witness tables of 512-byte lower paths addressed by ordinal,
-  with a manifest bound to its payment table and construction tree.
+  with a manifest bound to its payment table and construction tree. `witness::is_final`
+  tells whether a position's payload can still change on its chain.
 
 - Bind the required history correction generation into PIR publication identity so unfinished work can fence older answers after a same-chain correction.
 
