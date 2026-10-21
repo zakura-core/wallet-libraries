@@ -1772,13 +1772,21 @@ fn a_reorg_repairs_each_private_receipt_of_one_transaction() {
                 .unwrap();
         }
         st.truncate_to_height(floor);
-        // Another payment first moves the transaction's outputs to later positions.
-        pay(
-            &mut st,
-            &FullViewingKey::from(&orchard::keys::SpendingKey::from_bytes([3; 32]).unwrap()),
-            10_000,
+        // Another payment first moves the transaction's outputs to later positions. It is
+        // mined and scanned directly, since `pay` would enable recovery again.
+        let other = IronwoodFvk(FullViewingKey::from(
+            &orchard::keys::SpendingKey::from_bytes([3; 32]).unwrap(),
+        ));
+        let (shifted, _, _) = st.generate_next_block(
+            &other,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(10_000),
         );
+        payment_indexes(&st, shifted, 1);
+        st.scan_cached_blocks(shifted, 1);
+        assert_eq!(status(st.wallet().db(), account).enabled, enabled);
         let (height, moved) = mine(&mut st);
+        assert_eq!(status(st.wallet().db(), account).enabled, enabled);
         assert_ne!(moved, positions);
         let mut expected: Vec<_> = moved
             .iter()
