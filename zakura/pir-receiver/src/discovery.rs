@@ -90,6 +90,7 @@ pub async fn lookup<T: Transport>(
         };
         let visited = StepShard {
             index: shard,
+            start_height: BlockHeight::from(descriptor.start_height),
             end_height: BlockHeight::from(descriptor.end_height),
             segments: u32::try_from(descriptor.segments.len())
                 .map_err(|_| DirectoryError::Malformed)?,
