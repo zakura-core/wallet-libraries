@@ -155,6 +155,9 @@ pub struct ManualProgress {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryStatus {
     pub enabled: bool,
+    /// The receiver service needs a newer client. No work is exposed until a capture this
+    /// client supports begins recovery again; every pending request is kept.
+    pub upgrade_required: bool,
     pub token: RecoveryToken,
     pub filter_frontier: Option<ChainPoint>,
     /// Direct catch-up deliberately skipped completed old addresses through this height.

@@ -35,6 +35,8 @@ impl RusqliteMigration for Migration {
         tx.execute_batch(
             "ALTER TABLE ironwood_one_time_recovery ADD COLUMN receive_end BLOB NOT NULL
                 DEFAULT X'0000000000000000' CHECK (length(receive_end) = 8);
+             ALTER TABLE ironwood_one_time_recovery ADD COLUMN upgrade_required INTEGER NOT NULL
+                DEFAULT 0 CHECK (upgrade_required IN (0, 1));
              DROP INDEX IF EXISTS idx_ironwood_one_time_keys_account_receiver;
              ALTER TABLE ironwood_one_time_keys DROP COLUMN registered_at;
              CREATE TABLE ironwood_one_time_operation_receipts (

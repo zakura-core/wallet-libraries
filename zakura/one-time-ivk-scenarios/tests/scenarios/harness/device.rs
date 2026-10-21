@@ -182,7 +182,11 @@ impl Device {
         assert!(!cursor, "a completed read keeps a segment cursor");
         assert!(!unbound, "an unbound candidate has no read to rebind it");
         let state = self.db.one_time_recovery(self.account, i64::MAX).unwrap();
-        if !state.enabled || !state.lookups.is_empty() || !state.witnesses.is_empty() {
+        if !state.enabled
+            || state.upgrade_required
+            || !state.lookups.is_empty()
+            || !state.witnesses.is_empty()
+        {
             return;
         }
         let (unstarted, syncing, hidden): (bool, bool, bool) = self

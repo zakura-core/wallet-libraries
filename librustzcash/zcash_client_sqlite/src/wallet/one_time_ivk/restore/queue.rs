@@ -490,6 +490,11 @@ pub(crate) fn begin<P: Parameters>(
     {
         return Ok(false);
     }
+    // This client captured the publication, so the service speaks a format it supports.
+    conn.execute(
+        "UPDATE ironwood_one_time_recovery SET upgrade_required = 0 WHERE account_id = ?1",
+        [owner.0],
+    )?;
     if publication.history_revision > current.history_revision {
         conn.execute("UPDATE ironwood_one_time_recovery SET history_revision = ?2, generation = generation + 1,
             filter_height = NULL, filter_hash = NULL,
@@ -990,13 +995,14 @@ pub(crate) fn status<P: Parameters>(
     ensure_account(conn, owner.0)?;
     let (enabled, token) = token(conn, owner.0)?;
     let mut status = conn.query_row("SELECT filter_height, filter_hash, skipped_height,
-        restore_next, restore_gap, restore_done, manual_active, manual_purpose, manual_next, manual_end
+        restore_next, restore_gap, restore_done, manual_active, manual_purpose, manual_next, manual_end,
+        upgrade_required
         FROM ironwood_one_time_recovery WHERE account_id = ?1", [owner.0], |r| {
         let height: Option<u32> = r.get(0)?;
         let next: [u8; 8] = r.get(3)?;
         let manual_next: [u8; 8] = r.get(8)?;
         let manual_end: Option<[u8; 8]> = r.get(9)?;
-        Ok(RecoveryStatus { enabled, token,
+        Ok(RecoveryStatus { enabled, upgrade_required: r.get(10)?, token,
             filter_frontier: height.map(|height| Ok::<_, rusqlite::Error>(ChainPoint {
                 height: height.into(), hash: BlockHash(r.get(1)?) })).transpose()?,
             skipped_through: r.get::<_, Option<u32>>(2)?.map(Into::into),
@@ -1018,6 +1024,11 @@ pub(crate) fn status<P: Parameters>(
                 from, through: BlockHeight::from(r.get::<_, u32>(3)?), cursor,
             })
         })?.collect::<Result<_, _>>()?;
+    if status.upgrade_required {
+        // Nothing this client could ask would be answered in a format it reads.
+        status.lookups.clear();
+        return Ok(status);
+    }
     status.witnesses = conn.prepare("SELECT k.purpose, k.key_index, p.position, substr(p.encrypted_note, 33, 32),
             p.payments, p.witnesses, p.ordinal
         FROM ironwood_one_time_payment_recovery p JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
@@ -1230,6 +1241,23 @@ pub(crate) fn record_lookup<P: Parameters>(
     admit(conn, params, sessions, account, now)?;
     progress(conn, params, account)?;
     Ok(true)
+}
+
+/// Records that the receiver service answered in a protocol this client does not support,
+/// so recovery waits for an app update instead of retrying. No lookup, candidate, cursor or
+/// obligation changes; [`begin`] with a publication this client captured clears it.
+pub(crate) fn require_upgrade<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    account: AccountUuid,
+) -> Result<(), SqliteClientError> {
+    let (owner, _) = account_key(conn, params, account)?;
+    ensure_account(conn, owner.0)?;
+    conn.execute(
+        "UPDATE ironwood_one_time_recovery SET upgrade_required = 1 WHERE account_id = ?1",
+        [owner.0],
+    )?;
+    Ok(())
 }
 
 /// Backs off a failed request without counting it as an empty or completed history.

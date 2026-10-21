@@ -106,6 +106,19 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
         })
     }
 
+    /// Records that the receiver service needs a newer client, after any step returned
+    /// `Unsupported` for its inventory, session or record format. Show the user that the
+    /// app needs an update; do not defer the work. `one_time_recovery` then exposes no
+    /// lookups or witness requests, while every pending lookup, candidate and obligation is
+    /// kept. A later `begin_one_time_recovery` with a publication this client captured
+    /// resumes the work.
+    pub fn require_one_time_upgrade(
+        &mut self,
+        account: AccountUuid,
+    ) -> Result<(), SqliteClientError> {
+        self.transactionally(|db| queue::require_upgrade(db.conn.0, db.params, account))
+    }
+
     /// Delays a failed request without recording an empty result.
     pub fn defer_one_time_lookup(
         &mut self,
