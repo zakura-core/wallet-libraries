@@ -619,6 +619,7 @@ pub(crate) fn begin<P: Parameters>(
                 AUTOMATIC | INVALIDATED,
             )?;
         }
+        crate::wallet::one_time_rewind::queue_invalidated(conn, Some(height))?;
     }
     if !enabled {
         let keys = conn
@@ -977,6 +978,8 @@ pub(crate) fn cancel_manual<P: Parameters>(
         WHERE one_time_key_id IN (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
         params![owner.0, AUTOMATIC | INVALIDATED],
     )?;
+    // A monitored key re-checked only by the search still owes its held reservation a read.
+    crate::wallet::one_time_rewind::queue_invalidated(conn, None)?;
     Ok(())
 }
 
@@ -1697,6 +1700,7 @@ fn dispute_raw_receipts(
         rewind_lookup(conn, key, height, 0)?;
         invalidate(conn, key)?;
         register_history(conn, owner, key, height)?;
+        crate::wallet::one_time_rewind::queue_invalidated(conn, None)?;
         disputed = true;
     }
     if disputed && !kept {
@@ -1823,6 +1827,7 @@ fn admit_waiting<P: Parameters>(
                     now.saturating_add(60),
                 )?;
                 invalidate(conn, id)?;
+                crate::wallet::one_time_rewind::queue_invalidated(conn, None)?;
             }
         }
     }
