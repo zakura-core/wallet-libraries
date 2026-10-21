@@ -3653,7 +3653,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             .ok_or(SqliteClientError::ChainHeightUnknown)?;
         #[cfg(feature = "orchard")]
         {
-            // PIR already authenticated ownership. Full retrieval need not rediscover its key.
+            // PIR already authenticated ownership. Full retrieval need not rediscover its key,
+            // but must hold the action the directory claimed for it.
             let known_receipt: bool = self.conn.0.query_row(
                 "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n
                  JOIN transactions t ON t.id_tx = n.transaction_id
@@ -3661,7 +3662,9 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
                 [d_tx.tx().txid().as_ref()],
                 |r| r.get(0),
             )?;
-            if known_receipt {
+            if known_receipt
+                && wallet::one_time_ivk::restore::queue::check_raw_receipts(self.conn.0, d_tx.tx())?
+            {
                 self.put_tx_data(
                     d_tx.tx(),
                     None,

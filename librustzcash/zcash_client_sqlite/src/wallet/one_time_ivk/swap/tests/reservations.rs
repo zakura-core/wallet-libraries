@@ -10,11 +10,23 @@ use zcash_protocol::TxId;
 fn quote(st: &mut State, now: i64, deposit: &str, start: bool) -> (KeyId, String) {
     let account = st.test_account().unwrap().id();
     chain_agrees(st.wallet().db(), now);
-    let db = st.wallet_mut().db_mut();
-    let key = db
+    let key = match st
+        .wallet_mut()
+        .db_mut()
         .prepare_receive_reservation(account, now)
         .unwrap()
-        .unwrap();
+    {
+        Err(ReservationPolicy::ReceiveHistory) => {
+            check_window(st);
+            st.wallet_mut()
+                .db_mut()
+                .prepare_receive_reservation(account, now)
+                .unwrap()
+                .unwrap()
+        }
+        issued => issued.unwrap(),
+    };
+    let db = st.wallet_mut().db_mut();
     let request = db
         .begin_receive_operation(account, key.key_id().index(), now + 60, now)
         .unwrap()
@@ -27,6 +39,20 @@ fn quote(st: &mut State, now: i64, deposit: &str, start: bool) -> (KeyId, String
             .unwrap();
     }
     (key.key_id(), request)
+}
+
+/// Runs recovery at the tip until every due lookup and witness is answered, so the window's
+/// histories are complete.
+fn check_window(st: &mut State) {
+    let account = st.test_account().unwrap().id();
+    let publication = store::restore::tests::discovery::publication_at(st, tip(st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    store::restore::tests::discovery::drain(st, account, publication);
 }
 
 /// Quotes and provider responses cannot create a fifth receive slot.
@@ -366,6 +392,8 @@ fn another_devices_later_payment_does_not_settle_a_reused_address() {
 fn a_block_timestamp_ahead_of_the_device_clock_does_not_settle_a_quote() {
     let mut st = scanned_wallet();
     let now = clock_now();
+    // The payment lands after index 0's history was read, so issuance cannot know it.
+    check_window(&mut st);
     let earlier =
         store::restore::tests::discovery::pay_candidate(&mut st, KeyId::new(Purpose::Receive, 0));
     let (key, _) = quote(&mut st, now, "quote", true);
@@ -443,4 +471,122 @@ fn a_mined_payout_opens_the_next_indexes_until_a_reorg_drops_it() {
     {
         assert!(key.key_id().index() < 4);
     }
+}
+
+/// A restored seed already paid index 0. Enabling recovery must not hand that address to a
+/// provider before its history is read: issuance waits, then skips the paid index.
+#[test]
+fn a_restored_seeds_paid_index_is_not_issued_before_its_history() {
+    let mut st = restored_wallet();
+    let account = st.test_account().unwrap().id();
+    let now = clock_now();
+    store::restore::tests::discovery::pay_candidate(&mut st, KeyId::new(Purpose::Receive, 0));
+    st.wallet_mut()
+        .db_mut()
+        .set_one_time_recovery_enabled(account, true)
+        .unwrap();
+    assert!(matches!(
+        st.wallet_mut()
+            .db_mut()
+            .prepare_receive_reservation(account, now)
+            .unwrap(),
+        Err(ReservationPolicy::ReceiveHistory)
+    ));
+    check_window(&mut st);
+    let key = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, now)
+        .unwrap()
+        .unwrap();
+    assert_eq!(key.key_id().index(), 1);
+}
+
+/// A new account issues index 0 as soon as that index's own history lookup completes, while
+/// the rest of the window is still unread.
+#[test]
+fn a_new_account_issues_once_the_index_history_completes() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let now = clock_now();
+    assert!(matches!(
+        st.wallet_mut()
+            .db_mut()
+            .prepare_receive_reservation(account, now)
+            .unwrap(),
+        Err(ReservationPolicy::ReceiveHistory)
+    ));
+    let publication = store::restore::tests::discovery::publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    let state = st.wallet().db().one_time_recovery(account, now).unwrap();
+    let first = state
+        .lookups
+        .iter()
+        .find(|w| w.work.key == KeyId::new(Purpose::Receive, 0))
+        .expect("index 0 is queued")
+        .clone();
+    assert!(state.lookups.len() > 1, "the rest of the window is unread");
+    let empty = store::restore::tests::discovery::whole(publication, vec![]);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, &first, &empty, now)
+            .unwrap()
+    );
+    let key = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, now)
+        .unwrap()
+        .unwrap();
+    assert_eq!(key.key_id().index(), 0);
+}
+
+/// A quote's promised payout arrived and settled it, so its reservation was released while
+/// the payment kept the address used and index 1 was drafted. A reorg then orphans that payout and the replacement
+/// history is empty. The provider's receipt is still outstanding, so the address must not
+/// be issued again.
+#[test]
+fn an_orphaned_promised_payout_keeps_its_address_out_of_reuse() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let now = clock_now();
+    let (key, _) = quote(&mut st, now, "quote", true);
+    assert_eq!(key.index(), 0);
+    let floor = tip(&st).height;
+    let paid = store::restore::tests::discovery::pay_candidate(&mut st, key);
+    promise_payout(&mut st, "quote", &[paid.txid], now + 120);
+    catch_up(&mut st);
+    assert_eq!(
+        store::restore::tests::discovery::one_time_notes(&st),
+        [(100_000, false)]
+    );
+    // Past the quote's deadline the settled reservation is released, and the payment alone
+    // keeps index 0 from being issued.
+    mined_at(&st, tip(&st).height, now + 600);
+    chain_agrees(st.wallet().db(), now + 180);
+    let next = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, now + 180)
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.key_id().index(), 1);
+
+    st.truncate_to_height(floor);
+    st.generate_and_scan_empty_blocks(3);
+    check_window(&mut st);
+    chain_agrees(st.wallet().db(), now + 180);
+    let next = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, now + 180)
+        .unwrap()
+        .unwrap();
+    assert_ne!(next.key_id().index(), 0);
 }

@@ -563,6 +563,13 @@ pub(super) fn direct_keys(conn: &Connection, owner: i64) -> Result<Vec<i64>, Sql
     Ok(keys)
 }
 
+/// SQL over key alias `k` and owner `?1`: the key is monitored automatically, a receive
+/// index below the enrolled automatic end or a funded key. Receive keys a manual check
+/// derived beyond that end are checked only by that search.
+const MONITORED: &str = "(k.purpose = 1 AND k.key_index < (SELECT receive_end
+        FROM ironwood_one_time_recovery WHERE account_id = ?1)
+    OR k.funding_height IS NOT NULL)";
+
 /// Returns all known eligible receivers with the generation that makes the set current.
 pub(crate) fn receivers<P: Parameters>(
     conn: &Connection,
@@ -572,11 +579,20 @@ pub(crate) fn receivers<P: Parameters>(
     let (owner, _) = account_key(conn, params, account)?;
     let (enabled, token) = token(conn, owner.0)?;
     let work = if enabled {
-        conn.prepare("SELECT purpose, key_index, receiver FROM ironwood_one_time_keys
-        WHERE account_id = ?1 AND (purpose = 1 OR funding_height IS NOT NULL) ORDER BY purpose, key_index")?
-        .query_and_then([owner.0], |r| Ok::<_, SqliteClientError>(DiscoveryWork {
-            key: stored_key_id(r)?, receiver: r.get::<_, Vec<u8>>(2)?.try_into().map_err(|_| corrupt("invalid receiver"))?
-        }))?.collect::<Result<_, _>>()?
+        conn.prepare(&format!(
+            "SELECT k.purpose, k.key_index, k.receiver FROM ironwood_one_time_keys k
+        WHERE k.account_id = ?1 AND {MONITORED} ORDER BY k.purpose, k.key_index"
+        ))?
+        .query_and_then([owner.0], |r| {
+            Ok::<_, SqliteClientError>(DiscoveryWork {
+                key: stored_key_id(r)?,
+                receiver: r
+                    .get::<_, Vec<u8>>(2)?
+                    .try_into()
+                    .map_err(|_| corrupt("invalid receiver"))?,
+            })
+        })?
+        .collect::<Result<_, _>>()?
     } else {
         vec![]
     };
@@ -620,13 +636,12 @@ pub(crate) fn record_filters<P: Parameters>(
     for key in hits {
         let id = key_ref(conn, account, *key)?;
         let eligible: bool = conn.query_row(
-            "SELECT purpose = 1 OR funding_height IS NOT NULL
-            FROM ironwood_one_time_keys WHERE id = ?1",
-            [id],
+            &format!("SELECT {MONITORED} FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND k.id = ?2"),
+            params![owner.0, id],
             |r| r.get(0),
         )?;
         if !eligible {
-            return Err(invalid("filter hit for an unfunded refund key"));
+            return Err(invalid("filter hit for a key outside automatic monitoring"));
         }
         enqueue(conn, id, previous + 1, u32::from(end.height), AUTOMATIC)?;
     }
@@ -643,14 +658,16 @@ fn progress<P: Parameters>(
 ) -> Result<(), SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
     // A complete replacement history can retire orphaned payment evidence. Operation
-    // ownership remains independent, so a live quote still prevents address recycling.
-    conn.execute("UPDATE ironwood_one_time_keys SET used = 0
+    // ownership remains independent, so a live quote still prevents address recycling, and
+    // a promised receipt the chain no longer holds keeps the address out of reuse.
+    conn.execute(&format!("UPDATE ironwood_one_time_keys SET used = 0
         WHERE account_id = ?1 AND prebirthday_height IS NULL AND used = 1
+        AND id NOT IN (SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {UNSETTLED})
         AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
             ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = ironwood_one_time_keys.id AND t.mined_height IS NOT NULL)
         AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = ironwood_one_time_keys.id
             AND l.read_complete = 1 AND l.done_height >= l.target_height)
-        AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = ironwood_one_time_keys.id)", [owner.0])?;
+        AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = ironwood_one_time_keys.id)"), [owner.0])?;
     conn.execute("UPDATE ironwood_one_time_lookups SET target_height = NULL, reasons = 0
         WHERE read_complete = 1 AND done_height >= target_height AND one_time_key_id IN
             (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)
@@ -1403,6 +1420,83 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
         progress(conn, params, account)?;
     }
     Ok(())
+}
+
+/// Checks every one-time note admitted from the directory under `tx`'s ID against the raw
+/// transaction: its claimed action must carry the note's rho, ephemeral key and ciphertext
+/// prefix. The directory authenticates the note and its position but not its transaction
+/// label, so a mismatch is handled like a rejected admission: the note is dropped, crediting
+/// nothing to `tx`, and its key's history is read again. Returns whether an admitted note
+/// still belongs to `tx`.
+pub(crate) fn check_raw_receipts(
+    conn: &Connection,
+    tx: &zcash_primitives::transaction::Transaction,
+) -> Result<bool, SqliteClientError> {
+    #[allow(clippy::type_complexity)]
+    let notes: Vec<(i64, u32, Vec<u8>, Vec<u8>, Vec<u8>, i64, i64, u32)> = conn
+        .prepare(
+            "SELECT n.id, n.action_index, n.rho, n.ephemeral_key, n.compact_ciphertext,
+                 n.one_time_key_id, k.account_id,
+                 COALESCE(t.mined_height, (SELECT MAX(height) FROM blocks), 0)
+             FROM ironwood_received_notes n
+             JOIN transactions t ON t.id_tx = n.transaction_id
+             JOIN ironwood_one_time_keys k ON k.id = n.one_time_key_id
+             WHERE t.txid = ?1 AND n.compact_ciphertext IS NOT NULL",
+        )?
+        .query_map([tx.txid().as_ref()], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut kept = false;
+    let mut dropped = false;
+    for (note, action, rho, epk, prefix, key, owner, height) in notes {
+        let carried = tx
+            .ironwood_bundle()
+            .and_then(|b| b.actions().get(usize::try_from(action).ok()?))
+            .is_some_and(|a| {
+                a.nullifier().to_bytes()[..] == rho[..]
+                    && a.encrypted_note().epk_bytes[..] == epk[..]
+                    && a.encrypted_note().enc_ciphertext[..52] == prefix[..]
+            });
+        if carried {
+            kept = true;
+            continue;
+        }
+        conn.execute("DELETE FROM ironwood_received_notes WHERE id = ?1", [note])?;
+        // Its pages were already read past it, so that coverage is undone from its height,
+        // and its settled history is queued again through the current frontier.
+        rewind_lookup(conn, key, height, 0)?;
+        register_history(conn, owner, key, height)?;
+        dropped = true;
+    }
+    if dropped && !kept {
+        // The transaction no longer holds a private receipt, so its private enhancement
+        // work goes too.
+        let tx_ref: Option<i64> = conn
+            .query_row(
+                "SELECT id_tx FROM transactions WHERE txid = ?1",
+                [tx.txid().as_ref()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(tx_ref) = tx_ref {
+            wallet::enhance_pir::clear_work(conn, crate::TxRef(tx_ref))?;
+            conn.execute(
+                "DELETE FROM ironwood_enhance_routing WHERE transaction_id = ?1",
+                [tx_ref],
+            )?;
+        }
+    }
+    Ok(kept)
 }
 
 /// Admits active candidates once their inclusion proof and ordinary spend coverage are usable.

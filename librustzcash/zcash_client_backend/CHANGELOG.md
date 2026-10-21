@@ -13,6 +13,14 @@ and this library adheres to Rust's notion of
 - `one_time_ivk::restore::RecoveryPublication` identifies a captured shard inventory. `LookupWork` carries the first unchecked height and a `LookupCursor` (inventory, shard, segment, last page), and `LookupPage` reports the segment read, the height checked through and the next cursor.
 - `one_time_ivk::restore::WitnessRequest` names the payment session, its companion witness session and the witness ordinal a candidate was read under, and `WitnessAnswer` carries one companion witness payload with its revision and construction tree. The common witness file is gone.
 
+## [0.1.0-rc9.3] - 2026-10-20
+
+### Changed
+
+- Use the stable Common `4.0.0` dependency family, with compatible requirements
+  for downstream consumers.
+- Use PIR protocol `0.0.1-rc2`, one-time IVK `0.0.1-rc3` and PCZT `0.1.0-rc9`.
+
 ## [0.1.0-rc9.2] - 2026-10-20
 
 ### Fixed

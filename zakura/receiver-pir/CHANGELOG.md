@@ -30,6 +30,14 @@
 - Remove aggregate filter downloads and evaluator storage. Rolling block hints are independent of full-history PIR sessions.
 - Remove `server::Server::rows` and `server::Server::new_reusing_rows`, which only tests used. A prepared server no longer keeps a second copy of its encoded rows.
 
+## [0.0.1-rc2] - 2026-10-20
+
+### Changed
+
+- Use the stable Common `4.0.0` dependency family, with compatible requirements
+  for downstream consumers.
+- Use receiver directory, PIR client and server crates `0.0.1-rc2`.
+
 ## [0.0.1-rc1] - 2026-10-20
 
 ### Changed

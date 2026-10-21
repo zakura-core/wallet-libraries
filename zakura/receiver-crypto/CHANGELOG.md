@@ -20,6 +20,13 @@
 - The common `IWPROOF1` witness file: `witness::{WitnessSnapshot, WitnessCache,
   Publication, MAX_WITNESS_BYTES}`.
 
+## [0.0.1-rc2] - 2026-10-20
+
+### Changed
+
+- Use the stable Common `4.0.0` dependency family, with compatible requirements
+  for downstream consumers.
+
 ## [0.0.1-rc1] - 2026-10-20
 
 ### Changed
