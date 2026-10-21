@@ -2513,31 +2513,80 @@ fn manual_only_receive_keys_stay_out_of_automatic_monitoring() {
     assert_eq!(automatic, 0);
 }
 
-/// A faulty directory returns the right note and path under another transaction's ID. The
-/// payment is admitted under that label, but storing that transaction's raw bytes finds
-/// no such action in it: the note is dropped rather than credited to it, its key's history
-/// is read again, and the true record is then admitted under its own transaction. The note
-/// stays owed, so this holds even when discovery was disabled before the raw transaction
-/// arrived.
+/// How a faulty directory mislabels a genuine payment.
+#[derive(Clone, Copy, Debug)]
+enum Mislabel {
+    /// Under an unrelated transaction's ID.
+    OtherTransaction,
+    /// Under a transaction whose claimed action differs only in its note commitment.
+    CommitmentOnly,
+}
+
+/// The payment's transaction with the note commitment of action `action` changed, so it
+/// keeps the action's nullifier, ephemeral key and ciphertext but has another ID.
+fn with_other_commitment(
+    tx: &zcash_primitives::transaction::Transaction,
+    action: u32,
+) -> zcash_primitives::transaction::Transaction {
+    let cmx = tx.ironwood_bundle().unwrap().actions()[action as usize]
+        .cmx()
+        .to_bytes();
+    let mut bytes = vec![];
+    tx.write(&mut bytes).unwrap();
+    let at = bytes.windows(32).position(|w| w == cmx).unwrap();
+    bytes[at] ^= 1;
+    zcash_primitives::transaction::Transaction::read(&bytes[..], tx.consensus_branch_id()).unwrap()
+}
+
+/// A faulty directory returns a genuine payment's note and path under another
+/// transaction's ID, either an unrelated one or one whose claimed action differs only in its
+/// note commitment. The payment is admitted under that label, but the claimed action in the
+/// fetched raw transaction does not hold it: the note is dropped rather than credited, and
+/// stays owed. The raw transaction is kept, so the same mislabeled record repeated later is
+/// refused at admission. The true record is then admitted under its own transaction. This
+/// holds with discovery enabled, and disabled before the raw transaction arrived.
 #[test]
 fn a_raw_transaction_without_the_claimed_action_drops_the_admitted_note() {
     use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
-    for enabled in [true, false] {
+    for (mislabel, enabled) in [
+        (Mislabel::OtherTransaction, true),
+        (Mislabel::OtherTransaction, false),
+        (Mislabel::CommitmentOnly, true),
+        (Mislabel::CommitmentOnly, false),
+    ] {
         let mut st = scanned_wallet();
         let network = *st.network();
         let account = st.test_account().unwrap().id();
-        let other = external_payment(
-            foreign_receiver(),
-            &zcash_protocol::memo::MemoBytes::empty(),
-        );
-        let (mined, _) = st.generate_next_block_from_tx(1, &other);
-        st.scan_cached_blocks(mined, 1);
-        let candidate = pay_candidate(&mut st, key8());
+        let receiver = derive(&st, key8()).address_at(0u32, Scope::External);
+        let paying = external_payment(receiver, &zcash_protocol::memo::MemoBytes::empty());
+        let (height, _) = st.generate_next_block_from_tx(1, &paying);
+        st.scan_cached_blocks(height, 1);
+        let candidate = candidate_at(&st, height, &derive(&st, key8()));
+        let wrong = match mislabel {
+            Mislabel::OtherTransaction => {
+                let other = external_payment(
+                    foreign_receiver(),
+                    &zcash_protocol::memo::MemoBytes::empty(),
+                );
+                let (mined, _) = st.generate_next_block_from_tx(1, &other);
+                st.scan_cached_blocks(mined, 1);
+                other
+            }
+            Mislabel::CommitmentOnly => with_other_commitment(&paying, candidate.action_index),
+        };
         let mut forged = candidate.clone();
-        forged.txid = other.txid();
-        let publication = queue_late(&mut st, key8(), &forged);
+        forged.txid = wrong.txid();
+        let wrong_label = |st: &State| -> bool {
+            value(
+                st.wallet().conn(),
+                "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
+                 ON t.id_tx = n.transaction_id WHERE n.one_time_key_id IS NOT NULL AND t.txid = ?1)",
+                [forged.txid.as_ref()],
+            )
+        };
+        queue_late(&mut st, key8(), &forged);
         send_witness(&mut st, key8(), &forged);
-        assert_eq!(one_time_notes(&st), [(100_000, false)]);
+        assert!(wrong_label(&st));
         if !enabled {
             st.wallet_mut()
                 .db_mut()
@@ -2545,10 +2594,10 @@ fn a_raw_transaction_without_the_claimed_action_drops_the_admitted_note() {
                 .unwrap();
         }
 
-        decrypt_and_store_transaction(&network, st.wallet_mut(), &other, Some(mined)).unwrap();
+        decrypt_and_store_transaction(&network, st.wallet_mut(), &wrong, None).unwrap();
         assert!(
             one_time_notes(&st).is_empty(),
-            "nothing is credited to the other transaction"
+            "{mislabel:?} {enabled}: dropped"
         );
         let id = key_ref(&st.wallet().db().conn, account, key8()).unwrap();
         let reopened: bool = value(
@@ -2559,6 +2608,18 @@ fn a_raw_transaction_without_the_claimed_action_drops_the_admitted_note() {
         );
         assert!(reopened, "the key's history is read again");
 
+        // The directory repeats the same mislabeled record: the kept raw bytes refuse it.
+        let publication = queue_late(&mut st, key8(), &forged);
+        send_witness(&mut st, key8(), &forged);
+        assert!(!wrong_label(&st), "{mislabel:?} {enabled}: refused again");
+        assert!(one_time_notes(&st).is_empty());
+
+        // After the rejection's backoff, the true record is read.
+        exec(
+            st.wallet().conn(),
+            "UPDATE ironwood_one_time_lookups SET next_attempt_at = 0",
+            [],
+        );
         drain(&mut st, account, publication);
         assert_eq!(status(st.wallet().db(), account).enabled, enabled);
         let txids: Vec<Vec<u8>> = column(
@@ -2570,7 +2631,7 @@ fn a_raw_transaction_without_the_claimed_action_drops_the_admitted_note() {
         assert_eq!(
             txids,
             [candidate.txid.as_ref().to_vec()],
-            "enabled {enabled}"
+            "{mislabel:?} {enabled}"
         );
         let owed: u32 = value(
             st.wallet().conn(),
