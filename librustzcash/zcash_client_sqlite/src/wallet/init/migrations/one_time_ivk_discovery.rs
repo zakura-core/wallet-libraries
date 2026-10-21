@@ -164,9 +164,109 @@ impl RusqliteMigration for Migration {
 
 #[cfg(test)]
 mod tests {
+    use secrecy::Secret;
+    use tempfile::NamedTempFile;
+    use zcash_keys::keys::UnifiedSpendingKey;
+    use zcash_protocol::consensus::Network;
+
+    use super::{DEPENDENCIES, MIGRATION_ID};
+    use crate::{
+        WalletDb,
+        testing::db::{test_clock, test_rng},
+        wallet::init::WalletMigrator,
+    };
+
     /// The rebaselined schema applies to a fresh wallet with intact account dependencies.
     #[test]
     fn migrate() {
-        super::super::tests::test_migrate(&[super::MIGRATION_ID]);
+        super::super::tests::test_migrate(&[MIGRATION_ID]);
+    }
+
+    /// One-time keys and operations a published release stored keep their rows, and their
+    /// reservations get no floor, so every request on a key belongs to its reservation
+    /// (see `one_time_ivk::swap::reservations`). Here one reservation's request was begun
+    /// before `reserved_at`, after the clock was set back.
+    #[test]
+    fn existing_reservations_get_no_floor() {
+        let network = Network::TestNetwork;
+        let data_file = NamedTempFile::new().unwrap();
+        let mut db_data =
+            WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
+        let migrator = || {
+            WalletMigrator::new()
+                .with_seed(Secret::new([0xab; 32].to_vec()))
+                .ignore_seed_relevance()
+        };
+        migrator()
+            .init_or_migrate_to(&mut db_data, DEPENDENCIES)
+            .unwrap();
+        // The published key table, before discovery added its columns.
+        db_data
+            .conn
+            .execute_batch(
+                "ALTER TABLE ironwood_one_time_keys DROP COLUMN reservation_floor;
+                 ALTER TABLE ironwood_one_time_keys DROP COLUMN funding_height;
+                 ALTER TABLE ironwood_one_time_keys DROP COLUMN prebirthday_height;
+                 ALTER TABLE ironwood_one_time_keys ADD COLUMN scan_from INTEGER;
+                 ALTER TABLE ironwood_one_time_keys ADD COLUMN advances_allocation INTEGER;
+                 ALTER TABLE ironwood_one_time_keys ADD COLUMN active_from INTEGER;",
+            )
+            .unwrap();
+        let operations = "SELECT o.id, o.one_time_key_id, o.request, o.deadline, o.begun_at
+             FROM ironwood_one_time_operations o ORDER BY o.id";
+        let read = |conn: &rusqlite::Connection| -> Vec<(i64, i64, String, i64, i64)> {
+            conn.prepare(operations)
+                .unwrap()
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let ufvk = UnifiedSpendingKey::from_seed(&network, &[0xab; 32], zip32::AccountId::ZERO)
+            .unwrap()
+            .to_unified_full_viewing_key();
+        db_data
+            .conn
+            .execute(
+                "INSERT INTO accounts (id, uuid, account_kind, ufvk, uivk, birthday_height)
+                 VALUES (1, zeroblob(16), 1, ?1, ?2, 1)",
+                [
+                    ufvk.encode(&network),
+                    ufvk.to_unified_incoming_viewing_key().encode(&network),
+                ],
+            )
+            .unwrap();
+        db_data
+            .conn
+            .execute_batch(
+                "INSERT INTO ironwood_one_time_keys
+                     (id, account_id, purpose, key_index, receiver, scan_from,
+                      advances_allocation, registered_at, reserved_at, active_from)
+                 VALUES (1, 1, 1, X'0000000000000000', zeroblob(43), 0, 1, 100, 200, 0),
+                     (2, 1, 1, X'0000000000000001', zeroblob(43), 0, 1, 100, 100, 0);
+                 INSERT INTO ironwood_one_time_operations
+                     (one_time_key_id, request, deadline, begun_at, observed_at)
+                 VALUES (1, 'live', 400, 150, 150), (2, 'expired', 160, 100, 100);",
+            )
+            .unwrap();
+        let before = read(&db_data.conn);
+
+        migrator()
+            .init_or_migrate_to(&mut db_data, &[MIGRATION_ID])
+            .unwrap();
+        assert_eq!(read(&db_data.conn), before);
+        let floors: Vec<(i64, Option<i64>, i64)> = db_data
+            .conn
+            .prepare(
+                "SELECT id, reservation_floor, reserved_at FROM ironwood_one_time_keys ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(floors, [(1, None, 200), (2, None, 100)]);
     }
 }
