@@ -404,7 +404,8 @@ pub(crate) fn begin<P: Parameters>(
         // direct catch-up would skip, so every monitored key is read again once.
         let keys = conn
             .prepare(&format!(
-                "SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {MONITORED}"
+                "SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {}",
+                *MONITORED
             ))?
             .query_map([owner.0], |r| r.get::<_, i64>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -450,18 +451,77 @@ pub(super) fn direct_keys(conn: &Connection, owner: i64) -> Result<Vec<i64>, Sql
     let end = automatic_end(conn, owner)?;
     let keys: Vec<i64> = conn.prepare(&format!("SELECT k.id FROM ironwood_one_time_keys k
             WHERE k.account_id = ?1 AND ((k.purpose = 1 AND (k.key_index < ?2 OR k.reserved_at IS NOT NULL))
-                OR (k.purpose = 0 AND k.funding_height IS NOT NULL))
-            AND (k.used = 0 OR {REPAIR_KEY} OR {UNSETTLED})"))?
+                OR (k.purpose = 0 AND k.funding_height IS NOT NULL AND NOT {retired}))
+            AND (k.used = 0 OR {REPAIR_KEY} OR {UNSETTLED})", retired = *REFUND_RETIRED))?
             .query_map(params![owner, end.to_be_bytes()], |r| r.get(0))?.collect::<Result<_, _>>()?;
     Ok(keys)
 }
 
+/// SQL over key alias `k`: a refund key whose every local operation is conclusive, the
+/// provider having reported that no refund is coming or the expected refund being received
+/// and settled, with no dispute, repair work or payment candidate left. Refund keys are
+/// never reused, so it only leaves automatic monitoring; a manual history check still covers
+/// it. A key with no local operation, such as one recovered from a funding memo, stays.
+static REFUND_RETIRED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "(k.purpose = 0
+    AND EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id = k.id)
+    AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id = k.id
+        AND NOT ((o.expectation = 1 AND o.observed_at > 0) OR o.expectation = 2))
+    AND NOT {UNSETTLED} AND NOT {REPAIR_KEY}
+    AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
+        WHERE p.one_time_key_id = k.id))"
+    )
+});
+
 /// SQL over key alias `k` and owner `?1`: the key is monitored automatically, a receive
-/// index below the enrolled automatic end or a funded key. Receive keys a manual check
-/// derived beyond that end are checked only by that search.
-const MONITORED: &str = "(k.purpose = 1 AND k.key_index < (SELECT receive_end
+/// index below the enrolled automatic end or a funded refund key not yet retired (see
+/// [`REFUND_RETIRED`]). Receive keys a manual check derived beyond that end are checked
+/// only by that search.
+static MONITORED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "(k.purpose = 1 AND k.key_index < (SELECT receive_end
         FROM ironwood_one_time_recovery WHERE account_id = ?1)
-    OR k.funding_height IS NOT NULL)";
+    OR (k.funding_height IS NOT NULL AND NOT {}))",
+        *REFUND_RETIRED
+    )
+});
+
+/// The account's automatically monitored keys, ordered (see [`MONITORED`]).
+fn monitored_keys(conn: &Connection, owner: i64) -> Result<Vec<i64>, SqliteClientError> {
+    Ok(conn
+        .prepare(&format!(
+            "SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {}
+             ORDER BY k.id",
+            *MONITORED
+        ))?
+        .query_map([owner], |r| r.get(0))?
+        .collect::<Result<_, _>>()?)
+}
+
+/// Runs `change` and advances the generation of each account whose monitored keys it
+/// changed, so a filter request captured with the old receiver set cannot commit.
+pub(in crate::wallet::one_time_ivk) fn fencing_monitoring<T>(
+    conn: &Connection,
+    owners: &[i64],
+    change: impl FnOnce() -> Result<T, SqliteClientError>,
+) -> Result<T, SqliteClientError> {
+    let before = owners
+        .iter()
+        .map(|owner| monitored_keys(conn, *owner))
+        .collect::<Result<Vec<_>, _>>()?;
+    let result = change()?;
+    for (owner, before) in owners.iter().zip(before) {
+        if monitored_keys(conn, *owner)? != before {
+            conn.execute(
+                "UPDATE ironwood_one_time_recovery SET generation = generation + 1
+                 WHERE account_id = ?1",
+                [owner],
+            )?;
+        }
+    }
+    Ok(result)
+}
 
 /// Returns all known eligible receivers with the generation that makes the set current.
 pub(crate) fn receivers<P: Parameters>(
@@ -474,7 +534,8 @@ pub(crate) fn receivers<P: Parameters>(
     let work = if enabled {
         conn.prepare(&format!(
             "SELECT k.purpose, k.key_index, k.receiver FROM ironwood_one_time_keys k
-        WHERE k.account_id = ?1 AND {MONITORED} ORDER BY k.purpose, k.key_index"
+        WHERE k.account_id = ?1 AND {} ORDER BY k.purpose, k.key_index",
+            *MONITORED
         ))?
         .query_and_then([owner.0], |r| {
             Ok::<_, SqliteClientError>(DiscoveryWork {
@@ -529,7 +590,10 @@ pub(crate) fn record_filters<P: Parameters>(
     for key in hits {
         let id = key_ref(conn, account, *key)?;
         let eligible: bool = conn.query_row(
-            &format!("SELECT {MONITORED} FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND k.id = ?2"),
+            &format!(
+                "SELECT {} FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND k.id = ?2",
+                *MONITORED
+            ),
             params![owner.0, id],
             |r| r.get(0),
         )?;
@@ -1112,6 +1176,24 @@ pub(crate) fn check_raw_receipts(
     conn: &Connection,
     tx: &zcash_primitives::transaction::Transaction,
 ) -> Result<(), SqliteClientError> {
+    // A disputed refund receipt returns its key to automatic monitoring.
+    let owners: Vec<i64> = conn
+        .prepare(
+            "SELECT DISTINCT k.account_id FROM ironwood_received_notes n
+             JOIN transactions t ON t.id_tx = n.transaction_id
+             JOIN ironwood_one_time_keys k ON k.id = n.one_time_key_id
+             WHERE t.txid = ?1",
+        )?
+        .query_map([tx.txid().as_ref()], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    fencing_monitoring(conn, &owners, || dispute_raw_receipts(conn, tx))
+}
+
+/// [`check_raw_receipts`] without the monitoring fence.
+fn dispute_raw_receipts(
+    conn: &Connection,
+    tx: &zcash_primitives::transaction::Transaction,
+) -> Result<(), SqliteClientError> {
     let notes: Vec<(i64, i64, i64)> = conn
         .prepare(
             "SELECT n.id, n.one_time_key_id, k.account_id
@@ -1179,6 +1261,22 @@ pub(crate) fn check_raw_receipts(
 
 /// Admits active candidates once their inclusion proof and ordinary spend coverage are usable.
 pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    sessions: &Sessions<'_>,
+    account: AccountUuid,
+    now: i64,
+) -> Result<(), SqliteClientError> {
+    // Settling a refund, or a relabel ending a dispute, can retire a refund key from
+    // automatic monitoring.
+    let (owner, _) = account_key(conn, params, account)?;
+    fencing_monitoring(conn, &[owner.0], || {
+        admit_waiting(conn, params, sessions, account, now)
+    })
+}
+
+/// [`admit`] without the monitoring fence.
+fn admit_waiting<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     sessions: &Sessions<'_>,

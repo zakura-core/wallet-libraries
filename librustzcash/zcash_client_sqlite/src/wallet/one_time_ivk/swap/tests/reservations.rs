@@ -228,9 +228,10 @@ fn disabled_feature_refuses_issuance() {
     ));
 }
 
-/// A success without a reported refund cannot complete an empty funded refund address.
+/// A swap the provider reports as finished with no refund retires its funded refund key:
+/// a newer frontier no longer queues its history, though no refund ever reached it.
 #[test]
-fn success_without_refund_keeps_an_unpaid_funded_key_unfinished() {
+fn success_without_refund_retires_an_unpaid_funded_key() {
     let mut st = scanned_wallet();
     let now = clock_now();
     let account = st.test_account().unwrap().id();
@@ -269,7 +270,6 @@ fn success_without_refund_keeps_an_unpaid_funded_key_unfinished() {
             .begin_one_time_recovery(account, newer, true)
             .unwrap()
     );
-    // The four-request batch can put lookahead keys ahead of this refund.
     let pending: bool = st
         .wallet()
         .conn()
@@ -285,7 +285,7 @@ fn success_without_refund_keeps_an_unpaid_funded_key_unfinished() {
             |r| r.get(0),
         )
         .unwrap();
-    assert!(pending);
+    assert!(!pending);
 }
 
 /// Stamps block `height` with time `at`, as its miner would.
