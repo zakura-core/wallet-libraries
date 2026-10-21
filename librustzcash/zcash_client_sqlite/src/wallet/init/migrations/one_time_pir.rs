@@ -318,6 +318,9 @@ impl RusqliteMigration for Migration {
              CREATE TABLE ironwood_one_time_disputed_receipts (
                 note_id INTEGER PRIMARY KEY REFERENCES ironwood_received_notes(id) ON DELETE CASCADE
              );
+             CREATE TABLE ironwood_one_time_unchecked_raw (
+                transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE
+             );
              DROP VIEW v_transactions;
              DROP VIEW v_tx_outputs;",
         )?;

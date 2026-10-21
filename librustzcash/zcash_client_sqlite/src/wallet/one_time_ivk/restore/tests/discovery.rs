@@ -2779,6 +2779,43 @@ fn a_raw_transaction_without_the_claimed_action_disputes_the_label() {
     }
 }
 
+/// A build without Orchard stored the raw transaction a receipt's wrong label names, leaving
+/// the check pending (see `ironwood_hooks::defer_receipt_check`). The next blocks an Orchard
+/// build stores check those bytes, which disputes the label, and settle the pending check.
+#[test]
+fn an_orchard_build_checks_raw_bytes_a_build_without_it_stored() {
+    let Mislabeled {
+        mut st,
+        forged,
+        wrong,
+        ..
+    } = mislabeled(Mislabel::OtherTransaction);
+    let [(note, _, false)] = receipts(&st)[..] else {
+        panic!("one receipt under the wrong label");
+    };
+    let mut raw = vec![];
+    wrong.write(&mut raw).unwrap();
+    exec(
+        st.wallet().conn(),
+        "UPDATE transactions SET raw = ?2 WHERE txid = ?1",
+        rusqlite::params![forged.txid.as_ref(), raw],
+    );
+    exec(
+        st.wallet().conn(),
+        "INSERT INTO ironwood_one_time_unchecked_raw (transaction_id)
+         SELECT id_tx FROM transactions WHERE txid = ?1",
+        [forged.txid.as_ref()],
+    );
+    st.generate_and_scan_empty_blocks(1);
+    assert_eq!(receipts(&st), [(note, forged.txid.as_ref().to_vec(), true)]);
+    let pending: u32 = value(
+        st.wallet().conn(),
+        "SELECT COUNT(*) FROM ironwood_one_time_unchecked_raw",
+        [],
+    );
+    assert_eq!(pending, 0);
+}
+
 /// A receipt admitted under a wrong label funds an unmined send before raw bytes disprove the
 /// label. Disputing it keeps the note row and its spend, so the note stays unavailable and the
 /// balance unchanged, while history, transaction outputs and transaction details stop

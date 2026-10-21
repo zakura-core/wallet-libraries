@@ -935,3 +935,55 @@ fn private_status_polling_keeps_unresolved_work_after_ten_heights() {
         );
     }
 }
+
+/// A build without Orchard cannot check a private one-time receipt against its transaction's
+/// raw bytes. Storing them marks the check for an Orchard build and keeps the receipt's
+/// private enhancement work, which that build clears once it checks them.
+#[cfg(not(feature = "orchard"))]
+#[test]
+fn storing_a_private_receipts_transaction_without_orchard_leaves_its_check_pending() {
+    let (st, height) = fixture();
+    let transaction = TransactionData::<Authorized>::from_parts(
+        TxVersion::V5,
+        BranchId::Nu5,
+        0,
+        height,
+        None,
+        None,
+        None,
+        None,
+    )
+    .freeze()
+    .unwrap();
+    let txid = transaction.txid();
+    let conn = st.wallet().conn();
+    conn.execute(
+        "INSERT INTO transactions (txid, expiry_height, min_observed_height) VALUES (?1, 0, ?2)",
+        params![txid.as_ref(), u32::from(height)],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "INSERT INTO ironwood_one_time_keys (account_id, purpose, key_index, receiver)
+         SELECT id, 1, zeroblob(8), zeroblob(43) FROM accounts;
+         INSERT INTO ironwood_received_notes (transaction_id, action_index, account_id,
+             diversifier, value, rho, rseed, is_change, note_version, one_time_key_id)
+         SELECT t.id_tx, 0, k.account_id, zeroblob(11), 50000, zeroblob(32), zeroblob(32), 0, 3,
+             k.id FROM transactions t, ironwood_one_time_keys k;
+         INSERT INTO ironwood_enhance_metadata_queue (transaction_id) SELECT id_tx FROM transactions;",
+    )
+    .unwrap();
+    crate::wallet::put_tx_data(conn, &transaction, None, None, None, height).unwrap();
+    let (stored, work, pending): (bool, u32, u32) = conn
+        .query_row(
+            "SELECT raw IS NOT NULL,
+                 (SELECT COUNT(*) FROM ironwood_enhance_metadata_queue),
+                 (SELECT COUNT(*) FROM ironwood_one_time_unchecked_raw u
+                  WHERE u.transaction_id = t.id_tx)
+             FROM transactions t WHERE txid = ?1",
+            [txid.as_ref()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert!(stored);
+    assert_eq!((work, pending), (1, 1));
+}

@@ -1616,6 +1616,7 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
     sessions: &Sessions<'_>,
     now: i64,
 ) -> Result<(), SqliteClientError> {
+    check_deferred_receipts(conn, params)?;
     let accounts: Vec<AccountUuid> = conn
         .prepare(
             "SELECT a.uuid FROM accounts a
@@ -1630,6 +1631,33 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
         }
         admit(conn, params, sessions, account, now)?;
         progress(conn, params, account)?;
+    }
+    Ok(())
+}
+
+/// Checks the raw bytes a build without Orchard stored for a private receipt's transaction
+/// (see `ironwood_hooks::defer_receipt_check`), as fetching them here would, then clears the
+/// private enhancement work they supersede.
+fn check_deferred_receipts<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+) -> Result<(), SqliteClientError> {
+    let deferred: Vec<(i64, TxId)> = conn
+        .prepare(
+            "SELECT u.transaction_id, t.txid FROM ironwood_one_time_unchecked_raw u
+             JOIN transactions t ON t.id_tx = u.transaction_id",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, TxId::from_bytes(r.get(1)?))))?
+        .collect::<Result<_, _>>()?;
+    for (id, txid) in deferred {
+        if let Some((_, tx)) = crate::wallet::get_transaction(conn, params, txid)? {
+            check_raw_receipts(conn, &tx)?;
+            crate::wallet::ironwood_hooks::clear_ironwood_enhancement_work(conn, crate::TxRef(id))?;
+        }
+        conn.execute(
+            "DELETE FROM ironwood_one_time_unchecked_raw WHERE transaction_id = ?1",
+            [id],
+        )?;
     }
     Ok(())
 }
