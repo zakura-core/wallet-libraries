@@ -26,8 +26,8 @@ const FORBIDDEN: &[&str] = &[
     "rpc",
 ];
 
-/// The only Common crates allowed in the graph.
-const ALLOWED_COMMON: &[&str] = &["zakura-transaction-wire", "zakura-protocol"];
+/// The only Zakura packages allowed in the graph: this crate and Common's protocol types.
+const ALLOWED_ZAKURA: &[&str] = &["zakura-transaction-wire", "zakura-protocol"];
 
 #[test]
 fn normal_dependencies_exclude_shielded_wallet_and_node_crates() {
@@ -69,8 +69,8 @@ fn normal_dependencies_exclude_shielded_wallet_and_node_crates() {
             "forbidden normal dependency {name}"
         );
         assert!(
-            !name.starts_with("zakura-") || ALLOWED_COMMON.contains(name),
-            "unexpected Common dependency {name}"
+            !name.starts_with("zakura-") || ALLOWED_ZAKURA.contains(name),
+            "unexpected Zakura dependency {name}"
         );
     }
     eprintln!("{} packages: {names:?}", names.len());
