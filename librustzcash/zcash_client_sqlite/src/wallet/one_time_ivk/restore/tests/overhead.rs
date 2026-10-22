@@ -1,10 +1,13 @@
-//! Per-batch cost of one-time recovery bookkeeping for accounts that hold no one-time keys
-//! beyond their completed seed walk. `scripts/bench-one-time-batch-overhead.py` runs it.
+//! Per-batch one-time recovery bookkeeping: its cost for accounts that hold no one-time keys
+//! beyond their completed seed walk, which `scripts/bench-one-time-batch-overhead.py`
+//! measures, and the work it must still do on time.
 use std::time::Instant;
 
 use zcash_client_backend::data_api::{AccountBirthday, chain::ChainState};
 
-use super::discovery::{drain, publication_at};
+use super::discovery::{
+    drain, one_time_notes, pay_candidate, publication_at, queue_late, send_witness,
+};
 use super::*;
 
 /// Timed repetitions of each measurement.
@@ -91,4 +94,38 @@ fn one_time_batch_overhead() {
             }
         }
     }
+}
+
+/// A batch with no witnessed candidate skips admission's monitoring fence, but the batch that
+/// makes a waiting payment admissible still admits it, and widens the receive window past
+/// the paid index in that same batch.
+#[test]
+fn quiet_batches_do_not_delay_admission_or_the_window() {
+    let mut st = scanned_wallet();
+    let receive_end = |st: &State| -> Vec<u8> {
+        value(
+            st.wallet().conn(),
+            "SELECT receive_end FROM ironwood_one_time_recovery",
+            [],
+        )
+    };
+    st.generate_and_scan_empty_blocks(2);
+    let key = KeyId::new(Purpose::Receive, 3);
+    let candidate = pay_candidate(&mut st, key);
+    queue_late(&mut st, key, &candidate);
+    // Admission waits on spend coverage of the paying block until a rescan covers it.
+    let tip = u32::from(candidate.height);
+    for sql in [
+        "UPDATE ironwood_journal_coverage SET end_height = ?1 WHERE end_height > ?1",
+        "DELETE FROM ironwood_spend_journal_nullifiers WHERE block_height = ?1",
+        "DELETE FROM ironwood_spend_journal WHERE block_height = ?1",
+    ] {
+        exec(st.wallet().conn(), sql, [tip]);
+    }
+    send_witness(&mut st, key, &candidate);
+    assert!(one_time_notes(&st).is_empty(), "admission waits");
+    assert_eq!(receive_end(&st), 4u64.to_be_bytes());
+    st.scan_cached_blocks(candidate.height, 1);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    assert_eq!(receive_end(&st), 8u64.to_be_bytes());
 }

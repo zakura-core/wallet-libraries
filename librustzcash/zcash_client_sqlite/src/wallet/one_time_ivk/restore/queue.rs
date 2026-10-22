@@ -1807,24 +1807,12 @@ fn dispute_raw_receipts(
     Ok(())
 }
 
+/// A witnessed candidate waiting for admission: its key's registry ID and identity, its
+/// transaction and action, and its witness payload, height, block hash and tree size.
+type Waiting = (i64, KeyId, TxId, u32, Vec<u8>, u32, [u8; 32], u64);
+
 /// Admits active candidates once their inclusion proof and ordinary spend coverage are usable.
 pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
-    conn: &rusqlite::Transaction<'_>,
-    params: &P,
-    sessions: &Sessions<'_>,
-    account: AccountUuid,
-    now: i64,
-) -> Result<(), SqliteClientError> {
-    // Settling a refund, or a relabel ending a dispute, can retire a refund key from
-    // automatic monitoring.
-    let owner = wallet::get_account_ref(conn, account)?;
-    fencing_monitoring(conn, &[owner.0], || {
-        admit_waiting(conn, params, sessions, account, now)
-    })
-}
-
-/// [`admit`] without the monitoring fence.
-fn admit_waiting<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     sessions: &Sessions<'_>,
@@ -1835,8 +1823,7 @@ fn admit_waiting<P: Parameters>(
         return Ok(());
     };
     let owner = wallet::get_account_ref(conn, account)?;
-    #[allow(clippy::type_complexity)]
-    let waiting: Vec<(i64, KeyId, TxId, u32, Vec<u8>, u32, [u8; 32], u64)> = conn
+    let waiting: Vec<Waiting> = conn
         .prepare(
             "SELECT k.purpose, k.key_index, k.id, p.txid, p.action_index, p.witness,
                  p.witness_height, p.witness_hash, p.witness_size
@@ -1860,11 +1847,35 @@ fn admit_waiting<P: Parameters>(
             ))
         })?
         .collect::<Result<_, _>>()?;
+    // With nothing waiting nothing changes, so a quiet batch skips the fence's two reads.
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    // Settling a refund, or a relabel ending a dispute, can retire a refund key from
+    // automatic monitoring.
+    fencing_monitoring(conn, &[owner.0], || {
+        admit_waiting(conn, params, sessions, account, owner.0, through, waiting, now)
+    })
+}
+
+/// Admits or settles each of `waiting`, `owner`'s candidates read by [`admit`], against
+/// the scanned tip `through`, without the monitoring fence.
+#[allow(clippy::too_many_arguments)]
+fn admit_waiting<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    sessions: &Sessions<'_>,
+    account: AccountUuid,
+    owner: i64,
+    through: ChainPoint,
+    waiting: Vec<Waiting>,
+    now: i64,
+) -> Result<(), SqliteClientError> {
     for (id, key, txid, action, witness, height, hash, tree_size) in waiting {
         let Some(candidate) = pending_payment(conn, txid, action)? else {
             continue;
         };
-        if !token(conn, owner.0)?.0 && !repairable(conn, params, account, key, id, &candidate)? {
+        if !token(conn, owner)?.0 && !repairable(conn, params, account, key, id, &candidate)? {
             continue;
         }
         let admission = apply_payment(
@@ -1886,7 +1897,7 @@ fn admit_waiting<P: Parameters>(
         )?;
         match admission {
             Admission::Admitted | Admission::Waiting => {}
-            Admission::Uncovered => rescan_uncovered(conn, owner.0, candidate.height, through)?,
+            Admission::Uncovered => rescan_uncovered(conn, owner, candidate.height, through)?,
             Admission::StaleWitness => refresh_witness(
                 conn,
                 id,
