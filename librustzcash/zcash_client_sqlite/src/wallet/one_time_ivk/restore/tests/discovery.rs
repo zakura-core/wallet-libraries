@@ -4416,9 +4416,7 @@ fn drain_sharded(
 /// transaction with the dispute cleared.
 #[test]
 fn a_dispute_after_its_label_moved_rereads_the_whole_history() {
-    use zcash_client_backend::data_api::{
-        TransactionStatus, wallet::decrypt_and_store_transaction,
-    };
+    use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
     let Mislabeled {
         mut st,
         candidate,
