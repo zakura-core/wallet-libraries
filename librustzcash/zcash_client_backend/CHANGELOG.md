@@ -17,7 +17,7 @@ and this library adheres to Rust's notion of
 
 ### Removed
 
-- `data_api::one_time_ivk::{OneTimeIvkRead, OneTimeIvkWrite}`, `data_api::one_time_ivk::restore::{OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite, DirectoryPayment, DiscoveryStatus, EnumerationCursor, FilterCheck}`, `data_api::chain::scan_cached_blocks_with_one_time_ivks`, `data_api::wallet::decrypt_and_store_transaction_with_one_time_ivks`, and the `TestState` helpers that scanned with one-time keys.
+- `data_api::one_time_ivk::{OneTimeIvkRead, OneTimeIvkWrite}`, `data_api::one_time_ivk::restore::{OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite, DirectoryPayment, DiscoveryStatus, EnumerationCursor, FilterCheck}`, `data_api::chain::scan_cached_blocks_with_one_time_ivks`, `data_api::wallet::decrypt_and_store_transaction_with_one_time_ivks`, `decrypt::decrypt_transaction_with_one_time_ivks`, `data_api::DecryptedTransaction::one_time_ivks_applied`, `decrypt::DecryptedOutput::one_time_key_id`, `scanning::ScanningKeyOps::one_time_key_id`, the `scanning::one_time_ivk` module, and the `TestState` helpers that scanned with one-time keys.
 
 ## [0.1.0-rc9.3] - 2026-10-20
 

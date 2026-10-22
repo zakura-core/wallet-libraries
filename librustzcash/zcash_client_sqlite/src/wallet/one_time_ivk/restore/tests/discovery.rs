@@ -4757,3 +4757,31 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
     );
     assert_eq!(rows(&st), 1);
 }
+
+/// Pausing an account that is not enabled, or reporting an upgrade it already waits for, only
+/// reads: both succeed on a read-only connection, before and after the account has a row.
+#[test]
+fn pausing_a_disabled_account_needs_no_write() {
+    let mut st = restored_wallet();
+    let account = st.test_account().unwrap().id();
+    let read_only = |st: &mut State, on: bool| {
+        st.wallet()
+            .conn()
+            .pragma_update(None, "query_only", on)
+            .unwrap()
+    };
+    read_only(&mut st, true);
+    let db = st.wallet_mut().db_mut();
+    db.set_one_time_recovery_enabled(account, false).unwrap();
+    db.require_one_time_upgrade(account).unwrap();
+    read_only(&mut st, false);
+    let db = st.wallet_mut().db_mut();
+    db.set_one_time_recovery_enabled(account, true).unwrap();
+    db.set_one_time_recovery_enabled(account, false).unwrap();
+    db.require_one_time_upgrade(account).unwrap();
+    read_only(&mut st, true);
+    let db = st.wallet_mut().db_mut();
+    db.set_one_time_recovery_enabled(account, false).unwrap();
+    db.require_one_time_upgrade(account).unwrap();
+    read_only(&mut st, false);
+}

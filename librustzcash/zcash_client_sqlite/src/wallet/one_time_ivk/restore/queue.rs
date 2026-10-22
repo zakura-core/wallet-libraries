@@ -478,7 +478,8 @@ pub(crate) fn funded(
 
 /// Pauses work and invalidates in-flight responses without deleting notes or pending requests.
 /// Pausing never creates state: an account without an Orchard key or a progress row is
-/// already disabled, so it is left untouched.
+/// already disabled, so it is left untouched. Pausing an account that is not enabled only
+/// reads, so it works on a read-only connection and never waits on another writer.
 pub(crate) fn set_enabled<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -487,11 +488,14 @@ pub(crate) fn set_enabled<P: Parameters>(
 ) -> Result<(), SqliteClientError> {
     if !enabled {
         if let Some(owner) = one_time_account(conn, params, account)? {
-            conn.execute(
-                "UPDATE ironwood_one_time_recovery SET enabled = 0, generation = generation + 1
-                WHERE account_id = ?1 AND enabled != 0",
-                [owner.0],
-            )?;
+            // SQLite takes the write lock for an UPDATE even when no row matches.
+            if recovery_flag(conn, owner.0, "enabled")? == Some(true) {
+                conn.execute(
+                    "UPDATE ironwood_one_time_recovery SET enabled = 0, generation = generation + 1
+                    WHERE account_id = ?1",
+                    [owner.0],
+                )?;
+            }
         }
         return Ok(());
     }
@@ -1473,15 +1477,34 @@ pub(crate) fn require_upgrade<P: Parameters>(
     params: &P,
     account: AccountUuid,
 ) -> Result<(), SqliteClientError> {
-    // An account without progress has no work to hold back.
+    // An account without progress has no work to hold back, and one already waiting needs
+    // no write (see `set_enabled`).
     let Some(owner) = one_time_account(conn, params, account)? else {
         return Ok(());
     };
-    conn.execute(
-        "UPDATE ironwood_one_time_recovery SET upgrade_required = 1 WHERE account_id = ?1",
-        [owner.0],
-    )?;
+    if recovery_flag(conn, owner.0, "upgrade_required")? == Some(false) {
+        conn.execute(
+            "UPDATE ironwood_one_time_recovery SET upgrade_required = 1 WHERE account_id = ?1",
+            [owner.0],
+        )?;
+    }
     Ok(())
+}
+
+/// Reads `column`, one of the recovery row's flags, for `owner`, or `None` when the account
+/// has no progress row.
+fn recovery_flag(
+    conn: &Connection,
+    owner: i64,
+    column: &'static str,
+) -> Result<Option<bool>, SqliteClientError> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {column} FROM ironwood_one_time_recovery WHERE account_id = ?1"),
+            [owner],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 /// Backs off a failed request without counting it as an empty or completed history.
