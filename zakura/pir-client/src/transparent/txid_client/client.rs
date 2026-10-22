@@ -3,6 +3,7 @@
 use crate::transparent::native::TableClientExt as _;
 
 use crate::transparent::native::{NativeScheme, TableProfile};
+use crate::transparent::routes::origin_path;
 use crate::transparent::txid_client::{
     Placement, ProtocolKind, Provenance, Route, Tier, TxidError, TxidLookup, TxidReply,
     TxidRequest, TxidTransport,
@@ -333,7 +334,7 @@ impl TxidDisplayClient {
     /// [`ProtocolKind::Map`]. On any error the previously cached map is
     /// kept. Once a map is accepted, a cached init naming a schema or codec
     /// this client does not support is dropped, so the next lookup asks
-    /// again. Sends exactly one `GET /v2/txid/map` unless `cancel` returns
+    /// again. Sends exactly one `GET /transparent/v1/txid/map` unless `cancel` returns
     /// true first; statuses map to errors as in [`Self::lookup`], with no
     /// retry.
     pub fn refresh_map(
@@ -691,7 +692,11 @@ impl TxidDisplayClient {
                 let reply = send(
                     transport,
                     cancel,
-                    TxidRequest::new(Route::MapChunk, map.chunk_path(index), Vec::new()),
+                    TxidRequest::new(
+                        Route::MapChunk,
+                        origin_path(&map.chunk_operation(index)),
+                        Vec::new(),
+                    ),
                 )?;
                 if hex::encode(Sha256::digest(&reply.body)) != *digest {
                     return Err(TxidError::Protocol(ProtocolKind::Map));
@@ -726,10 +731,10 @@ impl TxidDisplayClient {
             }
             return Ok(manifest.clone());
         }
-        let path = format!(
-            "/v2/txid/shards/{}/revisions/{}/manifest",
+        let path = origin_path(&format!(
+            "/txid/shards/{}/revisions/{}/manifest",
             entry.shard_id, entry.manifest_digest
-        );
+        ));
         let reply = send(
             transport,
             cancel,
@@ -819,12 +824,12 @@ impl TxidDisplayClient {
         if let Some(setup) = self.setups.get(&key) {
             return Ok(setup.clone());
         }
-        let path = format!(
-            "/v2/txid/{}/shards/{}/revisions/{digest}/setup/{}/{segment}",
+        let path = origin_path(&format!(
+            "/txid/{}/shards/{}/revisions/{digest}/setup/{}/{segment}",
             entry.tier(),
             entry.shard_id,
             table.label()
-        );
+        ));
         let reply = send(
             transport,
             cancel,
@@ -910,13 +915,13 @@ impl TxidDisplayClient {
         let entry = &located.entry;
         let binding = display::query_binding(&entry.manifest_digest, target.table);
         let stride = 16 + target.profile.scheme.response_bytes;
-        let path = format!(
-            "/v2/txid/{}/shards/{}/revisions/{}/query/{}",
+        let path = origin_path(&format!(
+            "/txid/{}/shards/{}/revisions/{}/query/{}",
             entry.tier(),
             entry.shard_id,
             entry.manifest_digest,
             target.table.label()
-        );
+        ));
         let (secret, upload) = target
             .profile
             .prepare(row as usize)
@@ -1066,7 +1071,7 @@ mod tests {
         assert_eq!(transport.sent.len(), 1);
         assert_eq!(transport.sent[0].route, Route::Init);
         assert_eq!(transport.sent[0].method, Method::Get);
-        assert_eq!(transport.sent[0].path(), "/v2/txid/init");
+        assert_eq!(transport.sent[0].path(), "/transparent/v1/txid/init");
         assert!(transport.sent[0].body.is_empty());
     }
 
@@ -1682,8 +1687,11 @@ mod tests {
     fn templates_carry_no_identifiers() {
         for route in Route::ALL {
             let template = route.template();
-            assert!(template.starts_with("/v2/txid/"));
-            assert!(!template["/v1".len()..].contains(|c: char| c.is_ascii_digit()));
+            let operation = template.strip_prefix("/transparent/v1/txid/").unwrap();
+            assert!(
+                !operation.contains(|c: char| c.is_ascii_digit()),
+                "{template}"
+            );
             assert_eq!(route.method() == Method::Post, route == Route::Query);
         }
         let request = TxidRequest::new(Route::Query, "/x".into(), vec![1]);

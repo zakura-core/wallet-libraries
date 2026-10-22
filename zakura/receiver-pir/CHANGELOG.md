@@ -4,6 +4,10 @@
 
 ### Changed
 
+- Every receiver request goes to the canonical `{base}/receiver/v1/<operation>`, built
+  once through `zakura_pir_protocol::endpoint`, keeping any base path such as
+  `https://host/edge`. Clients no longer request `/v1/receiver/...`. A base that is not
+  a supported HTTP(S) endpoint fails with the new `Error::Endpoint` before any request.
 - Publications are inventories of sealed Receiver shards and a recent tier. A shard's
   segments are `Publication`s: a payment session and its companion `WitnessManifest`.
   `/v1/receiver/inventory` serves the `inventory::Head` and

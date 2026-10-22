@@ -1,5 +1,5 @@
 //! Wallet client for the tiered txid display publication
-//! (`/v2/txid/`, see `transparent/docs/txid-display.md`).
+//! (`/transparent/v1/txid/`, see `transparent/docs/txid-display.md`).
 //!
 //! The client is synchronous and has no HTTP stack: the wallet supplies a
 //! [`TxidTransport`] that sends one [`TxidRequest`] and returns the raw
@@ -23,7 +23,7 @@
 //!
 //! The map is split (see `zakura_pir_protocol::transparent::shard::display::split`): a small
 //! recent map, refetched after every 409, and immutable index chunks of 32
-//! archives, cached by digest. The full `/v2/txid/shards` listing is not read.
+//! archives, cached by digest. The full `/transparent/v1/txid/shards` listing is not read.
 //!
 //! The client follows a fresh publication (a re-cut or re-layout, with new
 //! shard ids and digests) through the same map: a 409 or a placement from a
@@ -45,6 +45,8 @@ pub use zakura_pir_protocol::transparent::shard::txid::{
 };
 
 use std::time::Duration;
+
+use crate::transparent::routes::static_origin_path;
 
 /// HTTP method of a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -89,14 +91,18 @@ impl Route {
     /// txid, so it can be logged.
     pub fn template(self) -> &'static str {
         match self {
-            Route::Init => "/v2/txid/init",
-            Route::Map => "/v2/txid/map",
-            Route::MapChunk => "/v2/txid/map/{shard}/{digest}",
-            Route::Manifest => "/v2/txid/shards/{shard}/revisions/{digest}/manifest",
-            Route::Setup => {
-                "/v2/txid/{tier}/shards/{shard}/revisions/{digest}/setup/{table}/{segment}"
+            Route::Init => static_origin_path!("/txid/init"),
+            Route::Map => static_origin_path!("/txid/map"),
+            Route::MapChunk => static_origin_path!("/txid/map/{shard}/{digest}"),
+            Route::Manifest => {
+                static_origin_path!("/txid/shards/{shard}/revisions/{digest}/manifest")
             }
-            Route::Query => "/v2/txid/{tier}/shards/{shard}/revisions/{digest}/query/{table}",
+            Route::Setup => static_origin_path!(
+                "/txid/{tier}/shards/{shard}/revisions/{digest}/setup/{table}/{segment}"
+            ),
+            Route::Query => {
+                static_origin_path!("/txid/{tier}/shards/{shard}/revisions/{digest}/query/{table}")
+            }
         }
     }
 
@@ -110,8 +116,9 @@ impl Route {
 
 /// One request the client asks the transport to send.
 ///
-/// The path is origin-relative (it starts with `/v2/txid/`); the transport
-/// prefixes its base URL. A `POST` body is `application/octet-stream` and its
+/// The path is origin-relative (it starts with the Transparent namespace,
+/// `/transparent/v1/txid/`); the transport prefixes its base URL, keeping the
+/// base's path. A `POST` body is `application/octet-stream` and its
 /// length must be declared (`Content-Length`). Neither path nor body carries
 /// the txid; the path carries shard id, revision digest, tier and table,
 /// which the map already makes public, and an index chunk's path its base

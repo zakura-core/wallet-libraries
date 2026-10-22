@@ -677,11 +677,18 @@ impl ShardRequest<'_> {
         }
     }
 
-    /// The service route this request addresses.
+    /// The origin-relative service route this request addresses, below the
+    /// Transparent namespace (`/transparent/v1/shards/...`).
     pub fn route(&self) -> String {
+        crate::transparent::routes::origin_path(&self.operation())
+    }
+
+    /// The Transparent product operation this request addresses, without the
+    /// namespace prefix (`/shards/...`).
+    pub(crate) fn operation(&self) -> String {
         match *self {
             ShardRequest::Manifest { shard_id, revision } => {
-                format!("/v2/shards/{shard_id}/revisions/{revision}/manifest")
+                format!("/shards/{shard_id}/revisions/{revision}/manifest")
             }
             ShardRequest::Setup {
                 shard_id,
@@ -689,7 +696,7 @@ impl ShardRequest<'_> {
                 table,
                 segment,
             } => format!(
-                "/v2/shards/{shard_id}/revisions/{revision}/setup/{}/{segment}",
+                "/shards/{shard_id}/revisions/{revision}/setup/{}/{segment}",
                 table.name()
             ),
             ShardRequest::Query {
@@ -698,7 +705,7 @@ impl ShardRequest<'_> {
                 table,
                 ..
             } => format!(
-                "/v2/shards/{shard_id}/revisions/{revision}/query/{}",
+                "/shards/{shard_id}/revisions/{revision}/query/{}",
                 table.name()
             ),
         }

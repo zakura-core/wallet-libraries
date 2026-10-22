@@ -322,7 +322,7 @@ impl DisplayMapEntry {
     }
 }
 
-/// `GET /v2/txid/shards`: the shards currently served, oldest first. Clients
+/// `GET /transparent/v1/txid/shards`: the shards currently served, oldest first. Clients
 /// read the [split map](super::split) instead; this full listing is kept for
 /// clients built before it.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

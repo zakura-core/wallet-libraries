@@ -158,7 +158,7 @@ impl Transport for Server {
     async fn get(&self, url: &str, _: usize) -> Result<Vec<u8>, Error> {
         self.requests.set(self.requests.get() + 1);
         let path = url
-            .strip_prefix("https://receiver/v1/receiver/inventory/")
+            .strip_prefix("https://receiver/receiver/v1/inventory/")
             .unwrap();
         let (inventory, index) = path.split_once('/').unwrap();
         let index: usize = index.parse().unwrap();

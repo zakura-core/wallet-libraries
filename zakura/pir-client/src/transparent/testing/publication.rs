@@ -251,7 +251,10 @@ impl FixturePublication {
     fn answer(&self, method: &str, path: &str, body: &[u8]) -> Reply {
         let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
         match (method, parts.as_slice()) {
-            ("GET", ["v2", "shards"] | ["v2", "filters", "shards"]) => Reply::ok(
+            (
+                "GET",
+                ["transparent", "v1", "shards"] | ["transparent", "v1", "filters", "shards"],
+            ) => Reply::ok(
                 "application/json",
                 vec![
                     ("x-shard-map-sha256", self.map_digest.clone()),
@@ -259,14 +262,25 @@ impl FixturePublication {
                 ],
                 self.map_json.clone(),
             ),
-            ("GET", ["v2", "filters", "shards", shard_id, "filter"]) => {
+            ("GET", ["transparent", "v1", "filters", "shards", shard_id, "filter"]) => {
                 match shard_id.parse::<u64>() {
                     Ok(shard_id) => self.filter(shard_id),
                     Err(_) => Reply::bad("invalid shard id"),
                 }
             }
-            ("GET", ["v2", "shards", "init"]) => self.init(),
-            (_, ["v2", "shards", shard_id, "revisions", digest, rest @ ..]) => {
+            ("GET", ["transparent", "v1", "shards", "init"]) => self.init(),
+            (
+                _,
+                [
+                    "transparent",
+                    "v1",
+                    "shards",
+                    shard_id,
+                    "revisions",
+                    digest,
+                    rest @ ..,
+                ],
+            ) => {
                 let Ok(shard_id) = shard_id.parse::<u64>() else {
                     return Reply::bad("invalid shard id");
                 };

@@ -72,13 +72,14 @@ const ORIGIN: &str = "https://fixture.test";
 
 /// Every route the service serves a wallet, with its method: queries are the
 /// only uploads. Page tables are named per page shard, `pages-<j>`.
-const ROUTES: &str = r"^(GET /v2/(filters/shards(/[0-9]+/filter)?|shards/init|shards/[0-9]+/revisions/[0-9a-f]{64}/(manifest|setup/(directory|pages-(0|[1-9][0-9]?))/[0-9]+))|POST /v2/shards/[0-9]+/revisions/[0-9a-f]{64}/query/(directory|pages-(0|[1-9][0-9]?)))$";
+const ROUTES: &str = r"^(GET /transparent/v1/(filters/shards(/[0-9]+/filter)?|shards/init|shards/[0-9]+/revisions/[0-9a-f]{64}/(manifest|setup/(directory|pages-(0|[1-9][0-9]?))/[0-9]+))|POST /transparent/v1/shards/[0-9]+/revisions/[0-9a-f]{64}/query/(directory|pages-(0|[1-9][0-9]?)))$";
 
 /// The shard a request's path names: its filter, manifest, tables or queries.
-const SHARD: &str = r"^/v2/(filters/)?shards/([0-9]+)/";
+const SHARD: &str = r"^/transparent/v1/(filters/)?shards/([0-9]+)/";
 
 /// A pages query's revision and page shard.
-const PAGES_QUERY: &str = r"^/v2/shards/[0-9]+/revisions/([0-9a-f]{64})/query/pages-([0-9]+)$";
+const PAGES_QUERY: &str =
+    r"^/transparent/v1/shards/[0-9]+/revisions/([0-9a-f]{64})/query/pages-([0-9]+)$";
 
 /// What a pass over a map that rewrites sealed history the companion's store
 /// holds, without declaring a re-cut, returns: wallet-pir refuses it before
@@ -1173,7 +1174,9 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     // Both attempts fetched the map.
     let maps = f.server.requests()[seen..]
         .iter()
-        .filter(|request| request.method == "GET" && request.path == "/v2/filters/shards")
+        .filter(|request| {
+            request.method == "GET" && request.path == "/transparent/v1/filters/shards"
+        })
         .count();
     assert_eq!(maps, 2);
     // The old rows are kept, with their export marks cleared; the retry's are
@@ -1638,7 +1641,7 @@ fn candidate_receives(f: &Fixture) -> BTreeSet<[u8; 32]> {
 /// Directory queries the service received for shard `shard_id` from `from` on.
 fn directory_queries(f: &Fixture, shard_id: u64, from: usize) -> usize {
     let route = Regex::new(&format!(
-        "^/v2/shards/{shard_id}/revisions/[0-9a-f]{{64}}/query/directory$"
+        "^/transparent/v1/shards/{shard_id}/revisions/[0-9a-f]{{64}}/query/directory$"
     ))
     .unwrap();
     f.server.requests()[from..]
@@ -1814,7 +1817,9 @@ fn a_stopping_pass_is_not_retried_and_an_unreachable_service_is_an_outage() {
     ));
     let maps = f.server.requests()[seen..]
         .iter()
-        .filter(|request| request.method == "GET" && request.path == "/v2/filters/shards")
+        .filter(|request| {
+            request.method == "GET" && request.path == "/transparent/v1/filters/shards"
+        })
         .count();
     assert_eq!(maps, 1);
     let companion = f.companion.as_mut().unwrap();
@@ -2727,7 +2732,7 @@ fn private_details_end_to_end() {
     assert_eq!(public_fetches.get(), 0);
     assert!(!transport.sent.is_empty());
     for (path, body) in &transport.sent {
-        assert!(path.starts_with("/v2/txid/"), "{path}");
+        assert!(path.starts_with("/transparent/v1/txid/"), "{path}");
         for txid in [r1, r2] {
             let mut display = txid.0;
             display.reverse();
