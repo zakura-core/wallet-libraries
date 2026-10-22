@@ -40,7 +40,11 @@ fn an_explicit_server_choice_routes_every_product_under_its_base_path() {
         ),
     ] {
         assert_eq!(
-            server.base.endpoint().product_url(product, operation).unwrap(),
+            server
+                .base
+                .endpoint()
+                .product_url(product, operation)
+                .unwrap(),
             expected_url
         );
     }
