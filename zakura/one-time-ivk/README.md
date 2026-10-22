@@ -73,9 +73,11 @@ index has no valid key, and derivation returns an error.
 | 15 | 497 | Reserved: written as zero, ignored on decode |
 
 The memo does not store the deposit address. A restored refund key needs none: it
-is queried through receiver PIR until a payment is authenticated. An empty funded
-key remains unfinished even if the provider reports success without a refund.
-Further payments after completion are found by retained block filters or an explicit
+is queried through receiver PIR until a payment is authenticated. A funded key
+leaves automatic monitoring only once every local operation on it is conclusive:
+the provider reported that no refund is coming, or the expected refund was received
+and settled. A key restored from its memo alone has no local operation, so it stays
+monitored. Further payments after completion are found by retained block filters or an explicit
 history check. Incoming indices are recovered through four-index lookahead. `RefundMemo::decode` returns `None`
 for any memo that is not a v1 record, and a wallet ignores such a memo even when it
 starts with `swap::REFUND_MEMO_MAGIC`.
