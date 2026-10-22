@@ -1,8 +1,10 @@
 //! Ordered walk over dynamic config mirrors.
 //!
-//! Mirrors are copies of the same dynamic document at different URLs. Walking
-//! them widens availability, not trust: every candidate goes through the same
-//! resolution and attestation, so a mirror can be stale but cannot forge.
+//! Mirrors are copies of the same dynamic document at different URLs. Every
+//! candidate goes through the same resolution and attestation policy. A signed
+//! profile authenticates the fields its verifier checks; an HTTPS-only profile
+//! trusts each authorized mirror to supply the complete document. Walking
+//! mirrors does not establish freshness or replay protection.
 
 use std::fmt;
 
