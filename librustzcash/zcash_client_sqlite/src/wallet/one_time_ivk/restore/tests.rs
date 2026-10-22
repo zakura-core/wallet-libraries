@@ -4,3 +4,4 @@ use super::*;
 use crate::wallet::one_time_ivk::tests::*;
 
 pub(in crate::wallet::one_time_ivk) mod discovery;
+mod overhead;
