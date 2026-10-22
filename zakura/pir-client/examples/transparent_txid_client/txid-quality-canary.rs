@@ -29,8 +29,8 @@ use zakura_pir_protocol::endpoint::Endpoint;
 #[derive(Parser)]
 struct Args {
     /// Public server base; the client appends the `/transparent/v1/txid/`
-    /// paths below its path.
-    #[arg(long, default_value = "https://transparent-pir.valargroup.dev")]
+    /// paths below its path. Required: there is no default server.
+    #[arg(long)]
     url: String,
     /// The pinned `{"txid", "height", "entry_sha256"}` document.
     #[arg(long)]
