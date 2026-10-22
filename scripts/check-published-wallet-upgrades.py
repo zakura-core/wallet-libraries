@@ -104,7 +104,8 @@ def consumer(root, version):
     (dest / "src").mkdir(parents=True)
     (dest / "src/main.rs").write_text((ROOT / "scripts/probes/published_wallet_upgrades.rs").read_text())
     # `ledger` marks explicit transparent ledger modes, and `current` this tree.
-    manifest = f'[package]\nname = "legacy-writers-probe-{version.replace('.', '-')}"\nversion = "0.0.0"\nedition = "2024"\n[workspace]\n[features]\nledger = []\ncurrent = ["ledger"]\none-time-rc9 = []\n[dependencies]\nhex = "0.4"\nsecrecy = "0.8"\n'
+    probe = version.replace(".", "-")
+    manifest = f'[package]\nname = "legacy-writers-probe-{probe}"\nversion = "0.0.0"\nedition = "2024"\n[workspace]\n[features]\nledger = []\ncurrent = ["ledger"]\none-time-rc9 = []\n[dependencies]\nhex = "0.4"\nsecrecy = "0.8"\n'
     tree = {"current": ROOT, "pre-migrations": root / f"source-{PRE_MIGRATIONS}"}.get(version)
     for alias, package, directory in [
         ("zcash_client_sqlite", "zakura-client-sqlite", "zcash_client_sqlite"),
