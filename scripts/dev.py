@@ -190,7 +190,8 @@ def execute(args) -> int:
                     argv.append("--no-deps")
                 if args.filter:
                     argv.append(args.filter)
-                    harness = ["--", "--list"] + (["--exact"] if args.exact else [])
+                    flags = (["--exact"] if args.exact else []) + (["--ignored"] if args.ignored else [])
+                    harness = ["--", "--list"] + flags
                     listing = run(argv + harness, env, output=True, pass_fds=(lease.lock.fileno(),))
                     print(listing.stdout, end="")
                     if listing.returncode:
@@ -199,8 +200,9 @@ def execute(args) -> int:
                         print(f"no tests selected by {args.filter!r}", file=sys.stderr)
                         code = 2
                     else:
-                        if args.exact:
-                            argv += ["--", "--exact"]
+                        if flags:
+                            # Ignored tests here are timing experiments that report by printing.
+                            argv += ["--"] + flags + (["--nocapture"] if args.ignored else [])
                         code = run(argv, env, pass_fds=(lease.lock.fileno(),)).returncode
                 else:
                     code = run(argv, env, pass_fds=(lease.lock.fileno(),)).returncode
@@ -223,6 +225,7 @@ def main(argv=None) -> int:
     parser.add_argument("-p", "--package", action="append")
     parser.add_argument("--profile", help="Cargo profile; final validation uses test")
     parser.add_argument("--exact", action="store_true")
+    parser.add_argument("--ignored", action="store_true", help="run only ignored tests, showing their output")
     parser.add_argument("--only", choices=VERIFY, help="one repository verification script")
     # Options may follow the command or the test filter, as documented.
     args = parser.parse_intermixed_args(argv)
@@ -232,6 +235,8 @@ def main(argv=None) -> int:
         parser.error("test filters require the test command")
     if args.exact and not args.filter:
         parser.error("--exact requires a test-name filter")
+    if args.ignored and not args.filter:
+        parser.error("--ignored requires a test-name filter")
     if args.only and args.command != "verify":
         parser.error("--only requires verify")
     if args.package and args.command in {"doctor", "verify"}:

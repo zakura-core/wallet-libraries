@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Measure one-time recovery's per-batch scan overhead in release mode.
 
-Runs the ignored `one_time_batch_overhead` timing test several times and prints, per account
-count and step, the median of the per-run medians with recovery never enabled and enabled,
-and their ratio. `hook` is `after_blocks_stored` alone; `scanN` scans N empty blocks.
+Runs the ignored `one_time_batch_overhead` timing test several times through `dev.py`, which
+leases its build directory, and prints, per account count and step, the median of the per-run
+medians with recovery never enabled and enabled, and their ratio. `hook` is
+`after_blocks_stored` alone, and `scanN` scans N empty blocks.
 """
 import argparse
-import os
 import re
 import statistics
 import subprocess
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -18,20 +19,18 @@ LINE = re.compile(r"BENCH accounts=(\d+) enabled=(\w+) step=(\w+) ms=([\d.]+)")
 
 
 def main() -> int:
-    """Builds once, runs the timing test `--runs` times and prints the summary table."""
+    """Runs the timing test `--runs` times and prints the summary table."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target-dir", required=True, type=Path, help="absolute Cargo target directory")
     parser.add_argument("--runs", type=int, default=5)
     args = parser.parse_args()
     argv = [
-        "cargo", "test", "--locked", "--release", "-p", "zakura-client-sqlite",
-        "--features", "orchard,test-dependencies", "--lib", "one_time_batch_overhead",
-        "--", "--ignored", "--nocapture", "--test-threads=1",
+        sys.executable, str(ROOT / "scripts" / "dev.py"), "test", "--config", "orchard",
+        "-p", "zakura-client-sqlite", "--profile", "release", "--ignored", "--exact",
+        "wallet::one_time_ivk::restore::tests::overhead::one_time_batch_overhead",
     ]
-    env = dict(os.environ, CARGO_TARGET_DIR=str(args.target_dir.resolve()))
     samples = defaultdict(list)
     for run in range(args.runs):
-        output = subprocess.run(argv, cwd=ROOT, env=env, text=True, capture_output=True, check=False)
+        output = subprocess.run(argv, cwd=ROOT, text=True, capture_output=True, check=False)
         if output.returncode != 0:
             print(output.stdout + output.stderr)
             return output.returncode

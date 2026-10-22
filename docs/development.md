@@ -64,6 +64,8 @@ and the local push self-check share `.github/preflight.json`.
 The Python configuration table is authoritative. `-p` replaces the package
 selection; features still come from the selected configuration. Test-name
 filters use libtest substring matching; add `--exact` for exact matching.
+`--ignored` runs only the ignored tests a filter selects, with their output,
+for timing experiments such as `scripts/bench-one-time-batch-overhead.py`.
 An empty selection fails before execution. Unfiltered commands include
 doctests. `verify` runs repository checks and all configurations; use it for
 final evidence rather than repeatedly during small edits.
