@@ -19,6 +19,7 @@ and this library adheres to Rust's notion of
 - One-time IVK issuance no longer reads a provider seen set. `WalletDb::prepare_receive_reservation`, `WalletDb::begin_receive_operation` and `WalletDb::reserve_refund_key` drop their `seen` argument, and keys no longer stop being watched `COMPLETION_LIMIT_SECS` after their last deadline. `ReservationPolicy` gains `Disabled`, `FundingHistory` and `ReceiveHistory`.
 - A build without `orchard` that stores a transaction holding a private one-time receipt keeps that receipt's private enhancement work and leaves its raw-transaction check to an Orchard build, which runs it when it next stores blocks.
 - Storing scanned blocks looks for those deferred raw-transaction checks from their queue, so a wallet with no one-time state no longer walks its whole transaction table on every scan batch.
+- `WalletDb::one_time_recovery`, `WalletDb::one_time_receivers` and `WalletDb::one_time_direct_query_count` are pure reads, and `WalletDb::set_one_time_recovery_enabled(.., false)` changes nothing for an account that never enabled recovery. They report recovery disabled, with no work, for such an account and for one without an Orchard full viewing key, instead of writing a progress row or failing. Enabling recovery and issuing keys still refuse an account without an Orchard key.
 - `WalletDb::get_wallet_summary` computes scan and recovery progress without looking up
   each scanned block in the scan queue, which made it slow on wallets with millions of
   scanned blocks. The reported progress is unchanged.

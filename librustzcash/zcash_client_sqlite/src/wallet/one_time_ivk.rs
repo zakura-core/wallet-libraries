@@ -149,6 +149,22 @@ fn account_key<P: Parameters>(
     Ok((account.id, fvk.clone()))
 }
 
+/// `account`'s database reference, or `None` when it has no Orchard full viewing key, so
+/// one-time IVKs never apply to it. Reads and pausing treat such an account as disabled;
+/// calls that issue keys use [`account_key`], which refuses it.
+fn one_time_account<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    account: AccountUuid,
+) -> Result<Option<super::AccountRef>, SqliteClientError> {
+    let account =
+        super::get_account(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
+    Ok(account
+        .ufvk()
+        .and_then(|key| key.orchard())
+        .map(|_| account.id))
+}
+
 /// The registry ID of `account`'s key `key`.
 fn key_ref(conn: &Connection, account: AccountUuid, key: KeyId) -> Result<i64, SqliteClientError> {
     conn.query_row(

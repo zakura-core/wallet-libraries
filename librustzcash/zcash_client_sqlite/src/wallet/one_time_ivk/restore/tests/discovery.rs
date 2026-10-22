@@ -4572,3 +4572,89 @@ fn the_deferred_receipt_check_starts_from_its_queue() {
     assert!(plan[0].starts_with("SCAN u"), "{plan:?}");
     assert!(plan[1].starts_with("SEARCH t"), "{plan:?}");
 }
+
+/// An account that never enabled one-time recovery reads as disabled without gaining a
+/// progress row: its status, receivers and direct query count, and pausing it, leave no
+/// row, so scanning does none of the per-account recovery work. View-only accounts with no
+/// Orchard key, one imported from a Sapling-only key and one from an incoming viewing key,
+/// read and pause as disabled too, and only enabling them is refused.
+#[test]
+fn a_never_enabled_account_reads_as_disabled_without_state() {
+    use zcash_client_backend::data_api::{
+        Account as _, AccountBirthday, AccountPurpose, AccountSource, chain::ChainState,
+    };
+    use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
+    let mut st = restored_wallet();
+    let network = *st.network();
+    let rows = |st: &State| -> u32 {
+        value(
+            st.wallet().conn(),
+            "SELECT COUNT(*) FROM ironwood_one_time_recovery",
+            [],
+        )
+    };
+    let anchor = tip(&st);
+    let birthday = AccountBirthday::from_parts(ChainState::empty(anchor.height, anchor.hash), None);
+    let mut accounts = vec![(st.test_account().unwrap().id(), true)];
+    for incoming_only in [false, true] {
+        let ufvk = UnifiedSpendingKey::from_seed(
+            &network,
+            &[if incoming_only { 8 } else { 7 }; 32],
+            zip32::AccountId::ZERO,
+        )
+        .unwrap()
+        .to_unified_full_viewing_key();
+        let key = if incoming_only {
+            crate::wallet::ViewingKey::Incoming(Box::new(ufvk.to_unified_incoming_viewing_key()))
+        } else {
+            crate::wallet::ViewingKey::Full(Box::new(
+                UnifiedFullViewingKey::new(
+                    #[cfg(feature = "transparent-inputs")]
+                    None,
+                    ufvk.sapling().cloned(),
+                    None,
+                )
+                .unwrap(),
+            ))
+        };
+        let account = st
+            .wallet_mut()
+            .db_mut()
+            .transactionally(|db| {
+                crate::wallet::add_account(
+                    db.conn.0,
+                    db.params,
+                    "viewing",
+                    &AccountSource::Imported {
+                        purpose: AccountPurpose::ViewOnly,
+                        key_source: None,
+                    },
+                    key,
+                    &birthday,
+                    #[cfg(feature = "transparent-inputs")]
+                    &crate::GapLimits::default(),
+                )
+            })
+            .unwrap();
+        accounts.push((account.id(), false));
+    }
+    for (account, orchard) in accounts {
+        let db = st.wallet_mut().db_mut();
+        // Receivers come first: with no progress row they must still read as disabled.
+        let (_, receivers) = db.one_time_receivers(account).unwrap();
+        assert!(receivers.is_empty());
+        assert_eq!(db.one_time_direct_query_count(account).unwrap(), 0);
+        db.set_one_time_recovery_enabled(account, false).unwrap();
+        let state = db.one_time_recovery(account, clock_now()).unwrap();
+        assert!(!state.enabled && state.lookups.is_empty() && state.witnesses.is_empty());
+        if !orchard {
+            assert!(matches!(
+                db.set_one_time_recovery_enabled(account, true),
+                Err(SqliteClientError::BadAccountData(_))
+            ));
+        }
+        assert_eq!(rows(&st), 0, "orchard {orchard}");
+    }
+    st.generate_and_scan_empty_blocks(2);
+    assert_eq!(rows(&st), 0);
+}
