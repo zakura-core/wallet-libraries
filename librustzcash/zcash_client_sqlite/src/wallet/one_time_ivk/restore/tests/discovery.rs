@@ -4573,11 +4573,13 @@ fn the_deferred_receipt_check_starts_from_its_queue() {
     assert!(plan[1].starts_with("SEARCH t"), "{plan:?}");
 }
 
-/// An account that never enabled one-time recovery reads as disabled without gaining a
-/// progress row: its status, receivers and direct query count, and pausing it, leave no
-/// row, so scanning does none of the per-account recovery work. View-only accounts with no
-/// Orchard key, one imported from a Sapling-only key and one from an incoming viewing key,
-/// read and pause as disabled too, and only enabling them is refused.
+/// An account that never enabled one-time recovery gains no progress row from any public
+/// one-time call: reads, pausing, recovery steps, history checks, upgrade reports and every
+/// swap call report disabled, refuse or do nothing, so scanning does none of the
+/// per-account recovery work. View-only accounts with no Orchard key, one imported from a
+/// Sapling-only key and one from an incoming viewing key, read and pause as disabled too,
+/// and the calls that would issue keys refuse them. Enabling, pausing and enabling again
+/// still behave as before.
 #[test]
 fn a_never_enabled_account_reads_as_disabled_without_state() {
     use zcash_client_backend::data_api::{
@@ -4638,6 +4640,35 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
             .unwrap();
         accounts.push((account.id(), false));
     }
+    let publication = publication_at(&st, anchor.height);
+    let work = LookupWork {
+        token: zcash_client_backend::data_api::one_time_ivk::restore::RecoveryToken {
+            generation: 0,
+            history_revision: 0,
+        },
+        work: zcash_client_backend::data_api::one_time_ivk::restore::DiscoveryWork {
+            key: key8(),
+            receiver: [0; 43],
+        },
+        from: publication.start_height,
+        through: publication.end.height,
+        cursor: None,
+    };
+    let page = whole(publication, vec![]);
+    let request = WitnessRequest {
+        key: key8(),
+        position: 0,
+        cmx: [0; 32],
+        payments: [1; 32],
+        witnesses: [7; 32],
+        ordinal: 0,
+    };
+    let answer = WitnessAnswer {
+        payments: [1; 32],
+        revision: [7; 32],
+        context: publication.end,
+        payload: [0; 512],
+    };
     for (account, orchard) in accounts {
         let db = st.wallet_mut().db_mut();
         // Receivers come first: with no progress row they must still read as disabled.
@@ -4647,6 +4678,51 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
         db.set_one_time_recovery_enabled(account, false).unwrap();
         let state = db.one_time_recovery(account, clock_now()).unwrap();
         assert!(!state.enabled && state.lookups.is_empty() && state.witnesses.is_empty());
+        assert!(
+            !db.begin_one_time_recovery(account, publication, true)
+                .unwrap()
+        );
+        assert!(
+            !db.check_one_time_history(account, publication, Some(4))
+                .unwrap()
+        );
+        let _ = db.cancel_one_time_history(account);
+        db.require_one_time_upgrade(account).unwrap();
+        let token = db.one_time_recovery(account, clock_now()).unwrap().token;
+        let _ = db.record_one_time_filters(account, token, 0, &[], &[]);
+        let _ = db.defer_one_time_lookup(account, &work, clock_now());
+        let _ = db.record_one_time_lookup(account, &work, &page, clock_now());
+        let _ = db.record_one_time_witness(account, token, request, &answer, clock_now());
+        let _ = db.refresh_one_time_witness(account, token, request);
+        let issued = [
+            db.prepare_receive_reservation(account, clock_now())
+                .map(|r| r.map(drop)),
+            db.reserve_refund_key(account, anchor.height)
+                .map(|r| r.map(drop)),
+            db.begin_receive_operation(account, 0, clock_now() + 60, clock_now())
+                .map(|r| r.map(drop)),
+            db.start_receive_operation(account, "request", clock_now())
+                .map(|r| r.map(drop)),
+        ];
+        for result in issued {
+            if orchard {
+                assert!(matches!(result, Ok(Err(ReservationPolicy::Disabled))));
+            } else {
+                assert!(matches!(result, Err(SqliteClientError::BadAccountData(_))));
+            }
+        }
+        assert!(
+            db.record_refund_operation(account, 0, "deposit", clock_now() + 60, clock_now())
+                .is_err()
+        );
+        let _ = db.finish_receive_operation(account, "request", &OperationOutcome::Rejected);
+        let observation = Observation {
+            status: OperationStatus::Active,
+            funded: false,
+            receipts: vec![],
+        };
+        let _ = db.record_operation_status(account, "deposit", None, observation, clock_now());
+        let _ = db.refund_funding_memo(account, 0, "deposit");
         if !orchard {
             assert!(matches!(
                 db.set_one_time_recovery_enabled(account, true),
@@ -4657,4 +4733,27 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
     }
     st.generate_and_scan_empty_blocks(2);
     assert_eq!(rows(&st), 0);
+
+    // Only enabling creates progress, and pausing and enabling again keep their behavior.
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet_mut().db_mut();
+    db.set_one_time_recovery_enabled(account, true).unwrap();
+    assert!(db.one_time_recovery(account, clock_now()).unwrap().enabled);
+    db.set_one_time_recovery_enabled(account, false).unwrap();
+    assert!(!db.one_time_recovery(account, clock_now()).unwrap().enabled);
+    assert_eq!(
+        db.prepare_receive_reservation(account, clock_now())
+            .unwrap()
+            .map(drop),
+        Err(ReservationPolicy::Disabled)
+    );
+    db.set_one_time_recovery_enabled(account, true).unwrap();
+    assert!(db.one_time_recovery(account, clock_now()).unwrap().enabled);
+    assert_ne!(
+        db.prepare_receive_reservation(account, clock_now())
+            .unwrap()
+            .map(drop),
+        Err(ReservationPolicy::Disabled)
+    );
+    assert_eq!(rows(&st), 1);
 }

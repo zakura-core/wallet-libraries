@@ -242,7 +242,10 @@ fn can_lookup(
             )?))
 }
 
-/// Ensures account progress exists without enabling network work.
+/// Ensures account progress exists without enabling network work. Only enabling recovery
+/// and the flows it starts (registering keys, widening the receive window) create it, and
+/// [`begin`] for an account that already holds receipts needing repair, so an account that
+/// never used the feature has no row and costs no per-batch work.
 pub(crate) fn ensure_account(conn: &Connection, owner: i64) -> Result<(), SqliteClientError> {
     conn.execute(
         "INSERT OR IGNORE INTO ironwood_one_time_recovery(account_id) VALUES (?1)",
@@ -553,8 +556,10 @@ pub(crate) fn begin<P: Parameters>(
     publication: RecoveryPublication,
     direct: bool,
 ) -> Result<bool, SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
-    ensure_account(conn, owner.0)?;
+    // An account without an Orchard key holds no one-time keys, so it has nothing to do.
+    let Some(owner) = one_time_account(conn, params, account)? else {
+        return Ok(false);
+    };
     let (enabled, current) = token(conn, owner.0)?;
     let repair: bool = conn.query_row(
         &format!(
@@ -570,6 +575,9 @@ pub(crate) fn begin<P: Parameters>(
     {
         return Ok(false);
     }
+    // Repairing receipts an earlier release or an earlier enable left needs progress even
+    // while disabled. An account with no one-time state never gets here.
+    ensure_account(conn, owner.0)?;
     // This client captured the publication, so the service speaks a format it supports.
     conn.execute(
         "UPDATE ironwood_one_time_recovery SET upgrade_required = 0 WHERE account_id = ?1",
@@ -946,8 +954,10 @@ pub(crate) fn manual<P: Parameters>(
     publication: RecoveryPublication,
     receive_end: Option<u64>,
 ) -> Result<bool, SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
-    ensure_account(conn, owner.0)?;
+    // Like any disabled account, one without an Orchard key or progress searches nothing.
+    let Some(owner) = one_time_account(conn, params, account)? else {
+        return Ok(false);
+    };
     if !token(conn, owner.0)?.0 || !begin(conn, params, account, publication, false)? {
         return Ok(false);
     }
@@ -1463,8 +1473,10 @@ pub(crate) fn require_upgrade<P: Parameters>(
     params: &P,
     account: AccountUuid,
 ) -> Result<(), SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
-    ensure_account(conn, owner.0)?;
+    // An account without progress has no work to hold back.
+    let Some(owner) = one_time_account(conn, params, account)? else {
+        return Ok(());
+    };
     conn.execute(
         "UPDATE ironwood_one_time_recovery SET upgrade_required = 1 WHERE account_id = ?1",
         [owner.0],

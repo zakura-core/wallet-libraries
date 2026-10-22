@@ -189,6 +189,7 @@ fn register<P: Parameters>(
     key_id: KeyId,
 ) -> Result<(i64, OneTimeKey), SqliteClientError> {
     let (owner, parent) = account_key(conn, params, account)?;
+    // Only flows that enabling recovery started register keys (see `ensure_account`).
     restore::queue::ensure_account(conn, owner.0)?;
     let fvk = key_id.derive(&parent)?;
     let receiver = fvk.address_at(0u32, Scope::External).to_raw_address_bytes();
