@@ -10,6 +10,7 @@ and this library adheres to Rust's notion of
 ### Changed
 
 - Replace the one-time-key restore traits and broad block/transaction scanning APIs with bounded PIR queue records and cancellation tokens. Ordinary sync uses account keys. Private payment recovery retains targeted note authentication, identity and spending support.
+- `sync::SyncWallet` is now `WalletWrite` in every build, implemented for every `WalletWrite` store. With `orchard` it no longer requires one-time IVK storage, which ordinary sync no longer uses.
 - `one_time_ivk::restore::RecoveryPublication` identifies a captured shard inventory. `LookupWork` carries the first unchecked height and a `LookupCursor` (inventory, shard, segment, last page), and `LookupPage` reports the segment read, the height checked through and the next cursor.
 - `one_time_ivk::restore::RecoveryStatus::upgrade_required` reports that the receiver service needs a newer client; no work is exposed until recovery begins again with a supported publication.
 - `one_time_ivk::restore::WitnessRequest` names the payment session, its companion witness session and the witness ordinal a candidate was read under, and `WitnessAnswer` carries one companion witness payload with its revision and construction tree. The common witness file is gone.
