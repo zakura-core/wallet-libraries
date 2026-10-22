@@ -1,7 +1,9 @@
 //! The facts a history entry is derived from: the transaction row, the account's recorded
 //! amounts and sends, and qualified recovered metadata.
 
-use rusqlite::{OptionalExtension as _, named_params};
+use std::{collections::HashMap, rc::Rc};
+
+use rusqlite::{OptionalExtension as _, named_params, types::Value};
 use zcash_client_backend::data_api::transparent_ledger::{
     MetadataProvenance, TransactionMetadata, TransactionMetadataEvidence, WholeTransactionFee,
 };
@@ -179,40 +181,54 @@ pub(super) struct KnownPoolAmount {
     pub(super) spent: Zatoshis,
 }
 
-/// The account's recorded received and spent amounts per pool in the transaction. Empty when the
-/// account has no recorded output or spend in it.
-pub(super) fn known_amounts(
+/// Recorded received and spent amounts, grouped by transaction and pool.
+/// Reads the grouped output views once for the batch, including transactions
+/// whose only involvement is a spend of an older received output.
+pub(super) fn known_amounts_batch(
     conn: &rusqlite::Connection,
     account_id: i64,
-    transaction_id: i64,
-) -> Result<Vec<KnownPoolAmount>, SqliteClientError> {
+    transaction_ids: &[i64],
+) -> Result<HashMap<i64, Vec<KnownPoolAmount>>, SqliteClientError> {
+    if transaction_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ids = Rc::new(
+        transaction_ids
+            .iter()
+            .copied()
+            .map(Value::Integer)
+            .collect::<Vec<_>>(),
+    );
     let mut stmt = conn.prepare_cached(
-        "SELECT pool, SUM(received), SUM(spent) FROM (
-             SELECT ro.pool, ro.value AS received, 0 AS spent
+        "SELECT transaction_id, pool, SUM(received), SUM(spent) FROM (
+             SELECT ro.transaction_id, ro.pool, ro.value AS received, 0 AS spent
              FROM (SELECT * FROM v_received_outputs
           WHERE NOT (pool = 4 AND id_within_pool_table IN
               (SELECT note_id FROM ironwood_one_time_disputed_receipts))) ro
-             WHERE ro.account_id = :account_id AND ro.transaction_id = :transaction_id
+             WHERE ro.account_id = :account_id AND ro.transaction_id IN rarray(:transaction_ids)
              UNION ALL
-             SELECT ro.pool, 0, ro.value
+             SELECT ros.transaction_id, ro.pool, 0, ro.value
              FROM v_received_outputs ro
              JOIN v_received_output_spends ros
                   ON ros.pool = ro.pool AND ros.received_output_id = ro.id_within_pool_table
-             WHERE ro.account_id = :account_id AND ros.transaction_id = :transaction_id
+             WHERE ro.account_id = :account_id AND ros.transaction_id IN rarray(:transaction_ids)
          )
-         GROUP BY pool",
+         GROUP BY transaction_id, pool",
     )?;
     let mut rows = stmt.query(named_params![
         ":account_id": account_id,
-        ":transaction_id": transaction_id,
+        ":transaction_ids": ids,
     ])?;
-    let mut amounts = vec![];
+    let mut amounts: HashMap<i64, Vec<KnownPoolAmount>> = HashMap::new();
     while let Some(row) = rows.next()? {
-        amounts.push(KnownPoolAmount {
-            pool: parse_pool_code(row.get(0)?)?,
-            received: zatoshis(row.get(1)?)?,
-            spent: zatoshis(row.get(2)?)?,
-        });
+        amounts
+            .entry(row.get(0)?)
+            .or_default()
+            .push(KnownPoolAmount {
+                pool: parse_pool_code(row.get(1)?)?,
+                received: zatoshis(row.get(2)?)?,
+                spent: zatoshis(row.get(3)?)?,
+            });
     }
     Ok(amounts)
 }

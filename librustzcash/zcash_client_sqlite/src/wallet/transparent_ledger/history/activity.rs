@@ -6,7 +6,9 @@
 //! what they establish belongs in its own change. Shieldings, pool migrations and transactions
 //! no rule covers stay the wallet's, which classifies shieldings and migrations first.
 
-use rusqlite::named_params;
+use std::{collections::HashMap, rc::Rc};
+
+use rusqlite::{named_params, types::Value};
 use zcash_client_backend::data_api::transparent_ledger::{
     AccountActivity, ActivityOutputs, FeeState, OutputRef,
 };
@@ -80,8 +82,33 @@ pub(super) fn read_outputs(
     account_id: i64,
     transaction_id: i64,
 ) -> Result<Vec<ActivityOutput>, SqliteClientError> {
+    Ok(
+        read_outputs_batch(conn, account, account_id, &[transaction_id])?
+            .remove(&transaction_id)
+            .unwrap_or_default(),
+    )
+}
+
+/// Reads a batch in one pass over the output view. That view groups received and sent
+/// records, so reading it separately for each transaction repeatedly scans the wallet.
+pub(super) fn read_outputs_batch(
+    conn: &rusqlite::Connection,
+    account: AccountUuid,
+    account_id: i64,
+    transaction_ids: &[i64],
+) -> Result<HashMap<i64, Vec<ActivityOutput>>, SqliteClientError> {
+    if transaction_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ids = Rc::new(
+        transaction_ids
+            .iter()
+            .copied()
+            .map(Value::Integer)
+            .collect::<Vec<_>>(),
+    );
     let mut stmt = conn.prepare_cached(
-        "SELECT txo.output_pool, txo.output_index, txo.value,
+        "SELECT txo.transaction_id, txo.output_pool, txo.output_index, txo.value,
                 txo.from_account_uuid = :uuid, txo.from_account_uuid IS NULL,
                 txo.to_account_uuid IS NOT NULL AND txo.to_account_uuid = :uuid,
                 (SELECT a.key_scope FROM accounts acc
@@ -102,32 +129,40 @@ pub(super) fn read_outputs(
                         AND orn.action_index = txo.output_index
                         AND orn.note_version = :ironwood_version)
          FROM v_tx_outputs txo
-         WHERE txo.transaction_id = :transaction_id
+         WHERE txo.transaction_id IN rarray(:transaction_ids)
          AND (txo.from_account_uuid = :uuid OR txo.to_account_uuid = :uuid)
-         ORDER BY txo.output_pool, txo.output_index",
+         ORDER BY txo.transaction_id, txo.output_pool, txo.output_index",
     )?;
     let rows = stmt.query_map(
         named_params![
             ":uuid": account.0,
             ":account_id": account_id,
-            ":transaction_id": transaction_id,
+            ":transaction_ids": ids,
             ":ironwood_version": IRONWOOD_NOTE_VERSION,
         ],
         |row| {
-            Ok(ActivityOutput {
-                pool: row.get(0)?,
-                index: row.get(1)?,
-                value: row.get::<_, i64>(2)?.unsigned_abs(),
-                from_own: row.get::<_, Option<bool>>(3)?.unwrap_or(false),
-                from_unknown: row.get(4)?,
-                to_own: row.get(5)?,
-                to_key_scope: row.get(6)?,
-                sent_to_address: row.get(7)?,
-                ironwood_note: row.get(8)?,
-            })
+            Ok((
+                row.get::<_, i64>(0)?,
+                ActivityOutput {
+                    pool: row.get(1)?,
+                    index: row.get(2)?,
+                    value: row.get::<_, i64>(3)?.unsigned_abs(),
+                    from_own: row.get::<_, Option<bool>>(4)?.unwrap_or(false),
+                    from_unknown: row.get(5)?,
+                    to_own: row.get(6)?,
+                    to_key_scope: row.get(7)?,
+                    sent_to_address: row.get(8)?,
+                    ironwood_note: row.get(9)?,
+                },
+            ))
         },
     )?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    let mut outputs: HashMap<i64, Vec<ActivityOutput>> = HashMap::new();
+    for row in rows {
+        let (transaction_id, output) = row?;
+        outputs.entry(transaction_id).or_default().push(output);
+    }
+    Ok(outputs)
 }
 
 /// Whether some wallet account spent a version-2 Orchard note in the transaction.

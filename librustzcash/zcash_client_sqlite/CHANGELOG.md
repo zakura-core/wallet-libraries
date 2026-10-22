@@ -9,6 +9,8 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- Read transaction history outputs and received/spent amounts in batches to avoid repeatedly scanning the entire wallet for each transaction.
+
 - Replace one-time-key discovery passes and scan watches with a durable PIR recovery queue. Seed recovery stops after four complete empty receive histories, receive issuance recycles unpaid holes in a four-index window that extends once a payment is mined and hands out an index only after its own history lookup completes (`ReservationPolicy::ReceiveHistory` until then), and refunds use authenticated funding evidence. Manual history checks support cancellation, restart and an explicit receive bound.
 - Remove provider seen gates, broad one-time-key decryption, scan hints, replay state and their old APIs. Ordinary sync never waits for receiver discovery. Retain targeted payment authentication, chain proofs, spend-journal checks and existing note ownership. Rewinds and earlier birthdays requeue affected history even while discovery is disabled.
 - Receiver lookups follow sealed shard inventories. A request keeps its required history start and the height checked through, so a replacement inventory resumes after whole checked shards and rereads any shard straddling that point, while a cursor is only resumed under the inventory it came from. Seed receive discovery covers history from activation, and four empties count only with that coverage. Corrections clear progress between shards and send active requests back to activation, reorgs clamp progress to the fork, enabling discovery drops repair-only progress, and a payment rejected after its pages were read sends its key back to that payment's shard.

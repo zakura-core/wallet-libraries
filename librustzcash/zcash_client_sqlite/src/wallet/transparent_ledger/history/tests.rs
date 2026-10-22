@@ -82,8 +82,8 @@ mod ironwood {
             TransactionEnhancementWork,
         },
         testing::{
-            AddressType, IronwoodFvk, TestBuilder, TestState, orchard::OrchardPoolTester,
-            pool::ShieldedPoolTester,
+            AddressType, FakeCompactOutput, IronwoodFvk, TestBuilder, TestState,
+            orchard::OrchardPoolTester, pool::ShieldedPoolTester,
         },
         transparent_ledger::TransparentLedgerRead,
     };
@@ -91,6 +91,205 @@ mod ironwood {
     use zcash_protocol::{local_consensus::LocalNetwork, memo::MemoBytes};
 
     type State = TestState<BlockCache, TestDb, LocalNetwork>;
+
+    #[test]
+    fn batched_history_preserves_requested_order_duplicates_and_missing_transactions() {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let account = st.test_account().unwrap().id();
+        let fvk = OrchardPoolTester::test_account_fvk(&st);
+        let mut txids = vec![];
+        for value in [20_000, 30_000] {
+            let (height, _, _) = st.generate_next_block(
+                &fvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(value),
+            );
+            st.scan_cached_blocks(height, 1);
+            let bytes = st
+                .wallet()
+                .conn()
+                .query_row(
+                    "SELECT txid FROM transactions WHERE mined_height = ?",
+                    [u32::from(height)],
+                    |row| row.get::<_, [u8; 32]>(0),
+                )
+                .unwrap();
+            txids.push(TxId::from_bytes(bytes));
+        }
+        let db = st.wallet().db();
+        let first = db
+            .transaction_history_details(account, &txids[..1])
+            .unwrap()
+            .remove(0);
+        let second = db
+            .transaction_history_details(account, &txids[1..])
+            .unwrap()
+            .remove(0);
+        assert_eq!(first.account_movement.received, 20_000);
+        assert_eq!(second.account_movement.received, 30_000);
+        let entries = db
+            .transaction_history_details(
+                account,
+                &[txids[1], TxId::from_bytes([0xff; 32]), txids[0], txids[1]],
+            )
+            .unwrap();
+        assert_eq!(entries, vec![second.clone(), first, second]);
+        assert!(
+            db.transaction_history_details(account, &[])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn batched_history_keeps_spends_and_receipts_scoped_to_each_account() {
+        use secrecy::SecretVec;
+        use zcash_client_backend::data_api::WalletWrite;
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let first = st.test_account().unwrap().id();
+        let birthday = st.test_account().unwrap().birthday().clone();
+        let first_fvk = OrchardPoolTester::test_account_fvk(&st);
+        let (second, usk) = st
+            .wallet_mut()
+            .create_account("second", &SecretVec::new(vec![7; 32]), &birthday, None)
+            .unwrap();
+        let second_fvk = OrchardPoolTester::sk_to_fvk(usk.orchard());
+        let (start, _, nf) = st.generate_next_block(
+            &first_fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(20_000),
+        );
+        st.generate_next_block(
+            &second_fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(30_000),
+        );
+        st.generate_next_block_spending(
+            &first_fvk,
+            (nf, Zatoshis::const_from_u64(20_000)),
+            OrchardPoolTester::fvk_default_address(&second_fvk),
+            Zatoshis::const_from_u64(5_000),
+        );
+        st.scan_cached_blocks(start, 3);
+        let txids = st
+            .wallet()
+            .conn()
+            .prepare("SELECT txid FROM transactions ORDER BY mined_height")
+            .unwrap()
+            .query_map([], |r| Ok(TxId::from_bytes(r.get(0)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(txids.len(), 3);
+        let db = st.wallet().db();
+        let a = db.transaction_history_details(first, &txids).unwrap();
+        let b = db.transaction_history_details(second, &txids).unwrap();
+        assert_eq!(
+            a.iter().map(|e| e.txid).collect::<Vec<_>>(),
+            [txids[0], txids[2]]
+        );
+        assert_eq!(
+            b.iter().map(|e| e.txid).collect::<Vec<_>>(),
+            [txids[1], txids[2]]
+        );
+        assert_eq!(
+            (a[1].account_movement.received, a[1].account_movement.spent),
+            (15_000, 20_000)
+        );
+        assert_eq!(
+            (b[1].account_movement.received, b[1].account_movement.spent),
+            (5_000, 0)
+        );
+        for (account, expected) in [(first, a), (second, b)] {
+            let singles = txids
+                .iter()
+                .flat_map(|txid| db.transaction_history_details(account, &[*txid]).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(expected, singles);
+        }
+    }
+
+    /// Set HISTORY_BENCH_TRANSACTIONS=5000 and RUST_TEST_NOCAPTURE=1 for the
+    /// 20,000-output benchmark. The default keeps the same comparison cheap in CI.
+    #[test]
+    fn history_batch_benchmark() {
+        use std::time::Instant;
+
+        let count = std::env::var("HISTORY_BENCH_TRANSACTIONS")
+            .map(|v| v.parse::<usize>().expect("positive transaction count"))
+            .unwrap_or(16);
+        assert!(count > 0);
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let account = st.test_account().unwrap().id();
+        let fvk = OrchardPoolTester::test_account_fvk(&st);
+        let outputs = (0..4)
+            .map(|_| {
+                FakeCompactOutput::new(
+                    &fvk,
+                    AddressType::DefaultExternal,
+                    Zatoshis::const_from_u64(20_000),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut start = None;
+        for _ in 0..count {
+            let (height, _, _) = st.generate_next_block_multi(&outputs);
+            start.get_or_insert(height);
+        }
+        st.scan_cached_blocks(start.unwrap(), count);
+        let txids = st
+            .wallet()
+            .conn()
+            .prepare("SELECT txid FROM transactions ORDER BY mined_height")
+            .unwrap()
+            .query_map([], |r| Ok(TxId::from_bytes(r.get(0)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(txids.len(), count);
+        let db = st.wallet().db();
+        let started = Instant::now();
+        let all = db.transaction_history_details(account, &txids).unwrap();
+        let full = started.elapsed();
+        assert_eq!(all.len(), count);
+        assert!(
+            all.iter()
+                .all(|entry| entry.account_movement.received == 80_000)
+        );
+        let started = Instant::now();
+        let chunks = txids
+            .chunks(256)
+            .flat_map(|chunk| db.transaction_history_details(account, chunk).unwrap())
+            .collect::<Vec<_>>();
+        let chunked = started.elapsed();
+        assert_eq!(all, chunks);
+        // Single-entry reads exercise the receipt caller as well as providing an
+        // independent batching control. Limit this comparison for large runs.
+        for (txid, expected) in txids.iter().zip(&all).take(16) {
+            assert_eq!(
+                db.transaction_history_details(account, &[*txid]).unwrap(),
+                std::slice::from_ref(expected)
+            );
+        }
+        eprintln!(
+            "history benchmark: SQLite {}, transactions={count}, outputs={}, full={full:?}, batches256={chunked:?}",
+            rusqlite::version(),
+            count * 4
+        );
+    }
 
     struct Fixture {
         st: State,
