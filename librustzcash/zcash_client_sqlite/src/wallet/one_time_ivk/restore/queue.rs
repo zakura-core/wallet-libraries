@@ -1617,6 +1617,13 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
     Ok(())
 }
 
+/// The deferred raw receipt checks and their transaction IDs. Every scan batch runs this,
+/// so the queue, almost always empty, drives the join: SQLite would otherwise walk the
+/// whole transaction index probing it once per row.
+pub(in crate::wallet::one_time_ivk) const DEFERRED_RECEIPTS: &str =
+    "SELECT u.transaction_id, t.txid FROM ironwood_one_time_unchecked_raw u
+     CROSS JOIN transactions t ON t.id_tx = u.transaction_id";
+
 /// Checks the raw bytes a build without Orchard stored for a private receipt's transaction
 /// (see `ironwood_hooks::defer_receipt_check`), as fetching them here would, then clears the
 /// private enhancement work they supersede.
@@ -1625,10 +1632,7 @@ fn check_deferred_receipts<P: Parameters>(
     params: &P,
 ) -> Result<(), SqliteClientError> {
     let deferred: Vec<(i64, TxId)> = conn
-        .prepare(
-            "SELECT u.transaction_id, t.txid FROM ironwood_one_time_unchecked_raw u
-             JOIN transactions t ON t.id_tx = u.transaction_id",
-        )?
+        .prepare(DEFERRED_RECEIPTS)?
         .query_map([], |r| Ok((r.get(0)?, TxId::from_bytes(r.get(1)?))))?
         .collect::<Result<_, _>>()?;
     for (id, txid) in deferred {

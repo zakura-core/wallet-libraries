@@ -4550,3 +4550,25 @@ fn a_step_that_skips_the_required_shards_is_refused() {
         assert_eq!(progress(&st), before, "replaced {replaced}");
     }
 }
+
+/// Every scan batch looks for deferred raw receipt checks. The query starts from that
+/// queue, which a wallet without one-time state never fills, so its cost does not grow with
+/// the wallet's transaction history.
+#[test]
+fn the_deferred_receipt_check_starts_from_its_queue() {
+    let st = scanned_wallet();
+    let plan: Vec<String> = st
+        .wallet()
+        .conn()
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            crate::wallet::one_time_ivk::restore::queue::DEFERRED_RECEIPTS
+        ))
+        .unwrap()
+        .query_map([], |r| r.get(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(plan[0].starts_with("SCAN u"), "{plan:?}");
+    assert!(plan[1].starts_with("SEARCH t"), "{plan:?}");
+}
