@@ -567,3 +567,37 @@ fn ordinals_rank_records_by_position() {
         assert!(matches!(s.validate(), Err(Error::Malformed)), "{from} {to}");
     }
 }
+
+/// A payment profile, or a record or payment version tag, that a newer client may read is
+/// `Unsupported`, so a host can ask for an upgrade, while corrupted data stays
+/// `Malformed`: a different coverage order, a zero version tag in a used slot, or a
+/// flipped padding byte. A lookup of a row holding an unknown record version refuses the
+/// whole row as `Unsupported`, never as an empty answer.
+#[test]
+fn an_unknown_format_needs_a_newer_client() {
+    let s = Snapshot::build(manifest(8), &[record(0, 1)]).unwrap();
+    let mut future = s.manifest.clone();
+    future.profile = "ironwood-receiver/v9".into();
+    assert!(matches!(future.validate(), Err(Error::Unsupported)));
+    let mut reversed = s.manifest.clone();
+    reversed.start_height = reversed.end_height + 1;
+    assert!(matches!(reversed.validate(), Err(Error::Malformed)));
+
+    let r = receiver();
+    let bytes = row(&s, &r, 0).to_vec();
+    let encoded = record(0, 1).encode().unwrap();
+    let slot = bytes
+        .windows(RECORD_BYTES)
+        .position(|w| w == encoded)
+        .unwrap();
+    for (offset, tag, unsupported) in [(0, 2, true), (52, 2, true), (0, 0, false), (52, 0, false)] {
+        let mut changed = bytes.clone();
+        changed[slot + offset] = tag;
+        let result = lookup_row(&s.manifest, &r, 0, &changed);
+        if unsupported {
+            assert!(matches!(result, Err(Error::Unsupported)), "{offset} {tag}");
+        } else {
+            assert!(matches!(result, Err(Error::Malformed)), "{offset} {tag}");
+        }
+    }
+}

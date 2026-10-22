@@ -16,7 +16,14 @@ pub(crate) fn encode(record: &RawRecord) -> Result<[u8; RECORD_BYTES], Error> {
 }
 
 /// Decodes one slot structurally. Only an entirely zero slot is empty; any other
-/// malformed slot is an error, so corruption can never advance a gap limit.
+/// malformed slot is an error, so corruption can never advance a gap limit. A slot in a
+/// record version a newer client reads is [`Error::Unsupported`].
 pub(crate) fn decode(bytes: &[u8]) -> Result<Option<RawRecord>, Error> {
-    RawRecord::decode(bytes).map_err(|_| Error::Malformed)
+    RawRecord::decode(bytes).map_err(|_| {
+        if RawRecord::unknown_version(bytes) {
+            Error::Unsupported
+        } else {
+            Error::Malformed
+        }
+    })
 }

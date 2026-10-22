@@ -34,7 +34,7 @@ const _: () = assert!(COLS == D);
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Directory(#[from] receiver_directory::Error),
+    Directory(receiver_directory::Error),
     #[error("unsupported receiver PIR protocol or geometry")]
     Unsupported,
     #[error("malformed receiver PIR message")]
@@ -47,6 +47,17 @@ pub enum Error {
     Transport(String),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+}
+
+/// A directory format a newer client supports is [`Error::Unsupported`], as an
+/// unsupported protocol is, so the host reaches one upgrade outcome either way.
+impl From<receiver_directory::Error> for Error {
+    fn from(error: receiver_directory::Error) -> Self {
+        match error {
+            receiver_directory::Error::Unsupported => Error::Unsupported,
+            other => Error::Directory(other),
+        }
+    }
 }
 
 /// Both the directory and its PIR setup belong to one immutable session.

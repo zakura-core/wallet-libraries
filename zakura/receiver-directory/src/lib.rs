@@ -25,6 +25,9 @@ pub enum Error {
     Capacity,
     #[error("missing continuation page")]
     MissingPage,
+    /// A payment or witness profile, or a record version, that a newer client supports.
+    #[error("receiver directory format needs a newer client")]
+    Unsupported,
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 }

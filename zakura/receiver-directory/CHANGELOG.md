@@ -6,6 +6,9 @@
 
 - Records are 289 bytes with a witness ordinal. Snapshots require ordinals to rank records
   by note position; `snapshot::assign_ordinals` sets them.
+- A payment or witness manifest profile, or a record or payment version tag, that a newer
+  client may read is the new `Error::Unsupported` rather than `Error::Malformed`, so a host
+  can ask for an upgrade. Corrupted data stays `Malformed`.
 
 ### Removed
 

@@ -10,6 +10,8 @@
 
 ### Added
 
+- `wire::RawRecord::unknown_version`, which tells a slot in a version a later encoding may
+  define from a corrupted one.
 - `wire::{PAYLOAD_BYTES, LOWER_LEVELS, supplied, is_final, decode_payload, encode_payload}`:
   the 512-byte companion witness payload, available without default features.
 - `witness::{ShardPaths, SHARD_LEAVES, payloads}`: lower paths built per Ironwood shard,

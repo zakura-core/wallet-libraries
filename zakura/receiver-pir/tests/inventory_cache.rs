@@ -355,3 +355,58 @@ fn an_altered_cached_protocol_recaptures_and_replaces_the_cache() {
         assert!(matches!(result, Err(Error::Unsupported)), "cached {cached}");
     }
 }
+
+/// A served inventory whose payment or witness profile a newer client may read surfaces
+/// `Unsupported`, the host's upgrade outcome, while corrupted descriptor fields are not
+/// `Unsupported`. A cached descriptor with an unknown profile is a bad cache: capture
+/// falls back to every chunk and replaces it.
+#[test]
+fn an_unknown_session_profile_needs_a_newer_client() {
+    let inventory = MAIN.inventory(32, settled);
+    let served = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let (server, store) = (Server::default(), Store::default());
+        let head = server.publish(&inventory);
+        let key = hex::encode(head.inventory);
+        let mut chunk: serde_json::Value =
+            serde_json::from_slice(&server.chunks.borrow()[&key][0]).unwrap();
+        edit(&mut chunk["shards"][0]["segments"][0]);
+        server.chunks.borrow_mut().get_mut(&key).unwrap()[0] = serde_json::to_vec(&chunk).unwrap();
+        ready(Inventories::capture_cached(
+            "https://receiver/",
+            &server,
+            head,
+            &store,
+        ))
+    };
+    let payments =
+        served(&|s| s["payments"]["directory"]["profile"] = "ironwood-receiver/v9".into());
+    assert!(matches!(payments, Err(Error::Unsupported)));
+    let witnesses = served(&|s| s["witnesses"]["table"]["profile"] = "ironwood-witness/v9".into());
+    assert!(matches!(witnesses, Err(Error::Unsupported)));
+    let corrupted = served(&|s| s["payments"]["directory"]["start_height"] = 999_999.into());
+    assert!(!matches!(corrupted, Ok(_) | Err(Error::Unsupported)));
+
+    let (server, store) = (Server::default(), Store::default());
+    assert_eq!(capture(&server, &store, &inventory), 3);
+    let verified = store.load().unwrap();
+    let mut saved: serde_json::Value = serde_json::from_slice(&verified).unwrap();
+    saved["shards"][3]["segments"][0]["payments"]["directory"]["profile"] =
+        "ironwood-receiver/v9".into();
+    store.save(&serde_json::to_vec(&saved).unwrap());
+    assert_eq!(capture(&server, &store, &inventory), 3);
+    assert_eq!(store.load().unwrap(), verified);
+}
+
+/// A directory format error a newer client handles is the client's `Unsupported`, the
+/// same outcome as an unsupported protocol; other directory errors stay directory errors.
+#[test]
+fn directory_format_errors_map_to_unsupported() {
+    assert!(matches!(
+        Error::from(receiver_directory::Error::Unsupported),
+        Error::Unsupported
+    ));
+    assert!(matches!(
+        Error::from(receiver_directory::Error::Malformed),
+        Error::Directory(receiver_directory::Error::Malformed)
+    ));
+}

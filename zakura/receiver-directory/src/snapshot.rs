@@ -51,10 +51,12 @@ pub struct Manifest {
 
 impl Manifest {
     /// Check the profile, coverage order and geometry bounds, at most [`MAX_ROWS`]
-    /// rows.
+    /// rows. Another profile is [`Error::Unsupported`]: a newer client may read it.
     pub fn validate(&self) -> Result<(), Error> {
-        if self.profile != PROFILE
-            || self.start_height > self.end_height
+        if self.profile != PROFILE {
+            return Err(Error::Unsupported);
+        }
+        if self.start_height > self.end_height
             || self.start_position > self.end_position
             || self.end_position > TREE_SIZE
             // Each record has its own note position in the covered span.

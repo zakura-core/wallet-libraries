@@ -72,6 +72,16 @@ impl RawRecord {
         Ok(out)
     }
 
+    /// Whether `bytes`, a nonempty slot, carries a record or payment version tag a later
+    /// encoding may define: nonzero and not 1. [`Self::decode`] refuses such a slot like
+    /// any other; a caller can tell it apart from corruption, which a zero tag in a
+    /// nonempty slot or any other defect is.
+    pub fn unknown_version(bytes: &[u8]) -> bool {
+        bytes.len() == RECORD_BYTES
+            && bytes.iter().any(|&byte| byte != 0)
+            && (bytes[0] > 1 || bytes[52] > 1)
+    }
+
     /// Parse structure only. An entirely zero slot is empty; malformed nonempty
     /// slots are errors. A returned record still requires cryptographic checks.
     pub fn decode(bytes: &[u8]) -> Result<Option<Self>, Error> {
