@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- The `receiver` product: the receiver wire codec, payment and companion witness table
+  formats, rolling block and sealed shard filters, PIR session manifests and shard
+  inventories, with the receiver PIR profile and message sizes under `native`. Every
+  format, constant and serialization is unchanged.
+- The `receiver-crypto` feature: `receiver::crypto`, with address, record and zero-OVK
+  recovery validation and checked note-tree hashing.
+
+### Removed
+
+- `zakura-receiver-directory` and `zakura-receiver-crypto` are removed; their formats and
+  validation live here. Witness path construction moved to `zakura-pir-publisher`.
+
 ## [0.0.1-rc2] - 2026-10-20
 
 ### Changed

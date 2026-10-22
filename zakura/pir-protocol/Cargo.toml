@@ -26,6 +26,24 @@ transparent = [
 ]
 recovery = ["transparent", "dep:zcash_protocol"]
 transparent-inputs = ["recovery", "dep:transparent", "transparent/transparent-inputs"]
+receiver = [
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:thiserror",
+    "dep:zakura-filters",
+    "dep:bitcoin_hashes",
+]
+# Address, record and recovery validation and checked note-tree hashing. The receiver
+# wire codec and formats are available without it.
+receiver-crypto = [
+    "receiver",
+    "dep:incrementalmerkletree",
+    "dep:orchard",
+    "dep:zcash_address",
+    "dep:zcash_note_encryption",
+    "dep:zcash_protocol",
+]
 http-endpoint = ["dep:http"]
 
 [dependencies]
@@ -37,6 +55,10 @@ serde_json = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 zcash_protocol = { workspace = true, optional = true }
 transparent = { workspace = true, optional = true }
+incrementalmerkletree = { workspace = true, optional = true }
+orchard = { workspace = true, optional = true }
+zcash_address = { workspace = true, features = ["std"], optional = true }
+zcash_note_encryption = { workspace = true, optional = true }
 base64 = { version = "0.22", optional = true }
 thiserror = { version = "2", optional = true }
 http = { version = "1", optional = true }
@@ -49,3 +71,26 @@ ipir-native-client = { version = "=0.1.0-rc.1", git = "https://github.com/valarg
 ipir-sp = { version = "=0.1.0-rc.7", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
 bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
 url = "2"
+hex = { workspace = true, features = ["std"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[[test]]
+name = "receiver_block_batches"
+path = "tests/receiver/block_batches.rs"
+required-features = ["receiver"]
+
+[[test]]
+name = "receiver_shard_filters"
+path = "tests/receiver/shard_filters.rs"
+required-features = ["receiver"]
+
+[[test]]
+name = "receiver_records"
+path = "tests/receiver/records.rs"
+required-features = ["receiver-crypto"]
+
+[[test]]
+name = "receiver_tree_hashing"
+path = "tests/receiver/tree_hashing.rs"
+required-features = ["receiver-crypto"]

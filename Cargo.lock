@@ -7983,6 +7983,7 @@ dependencies = [
  "bitcoin_hashes",
  "hex",
  "http",
+ "incrementalmerkletree 0.8.2",
  "ipir-native-client",
  "ipir-sp",
  "rand 0.8.8",
@@ -7993,7 +7994,10 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "url",
+ "zakura-address",
  "zakura-filters",
+ "zakura-note-encryption",
+ "zakura-orchard",
  "zakura-protocol",
  "zakura-transparent",
 ]
