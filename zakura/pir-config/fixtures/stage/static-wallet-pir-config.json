@@ -1,0 +1,12 @@
+{
+  "static_config_version": 1,
+  "network": "testnet",
+  "dynamic_config_urls": [
+    "https://valargroup.github.io/wallet-pir-config/stage/dynamic-wallet-pir-config.json",
+    "https://raw.githubusercontent.com/valargroup/wallet-pir-config/main/stage/dynamic-wallet-pir-config.json"
+  ],
+  "attestation": {
+    "method": "https-transport",
+    "trust": null
+  }
+}

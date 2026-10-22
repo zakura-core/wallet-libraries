@@ -105,6 +105,8 @@ def main():
         # Config resolution is shared with zcash_voting and must stay free of
         # wallet, PIR, server, async runtime and HTTP crates.
         ("service-config", "zakura/service-config", [], wallet_roles | server_roles | native_evaluators | endpoint_stack | {"zakura-pir-protocol", "tokio", "reqwest", "hyper"}, {"serde_json", "sha2"}),
+        # The wallet PIR config profile adds only the endpoint parser to it.
+        ("pir-config", "zakura/pir-config", [], wallet_roles | server_roles | native_evaluators | endpoint_stack | {"tokio", "reqwest", "hyper", "zakura-filters", "zcash_protocol"}, {"zakura-service-config", "zakura-pir-protocol", "http"}),
         ("test-support", "librustzcash/zcash_client_sqlite", ["test-dependencies"], {"wagyu-zcash-parameters"}, set()),
         ("proving", "librustzcash/zcash_client_sqlite", ["pczt-tests"], set(), {"wagyu-zcash-parameters"}),
     ]
