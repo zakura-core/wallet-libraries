@@ -4,23 +4,23 @@
 //! is tested against these clients in wallet-pir.
 
 use orchard::keys::{FullViewingKey, Scope};
-use receiver_directory::{
+use std::sync::Mutex;
+use zakura_pir_client::receiver::{
     RawRecord,
+    crypto::{Payment, Receiver, Record},
+    inventory::{FilterRef, Inventory, Shard},
+    lookup, publication as wallet_publication,
+    session::{Error as DirectoryError, MIN_ROWS, Publication},
     shards::{Coverage, ShardFilter},
-    snapshot::{Manifest, PROFILE, Snapshot, assign_ordinals},
+    snapshot::{Manifest, PROFILE, Snapshot},
+    transport::{Inventories, InventoryClient, Transport},
     witness,
 };
-use receiver_pir::{
-    MIN_ROWS, Publication,
-    inventory::{FilterRef, Inventory, Shard},
-    server::{Server, WitnessServer},
-    transport::{Inventories, InventoryClient},
+use zakura_pir_publisher::receiver::{
+    snapshot::{SnapshotPublisherExt, assign_ordinals},
+    witness::{TablePublisherExt, payloads},
 };
-use std::sync::Mutex;
-use zakura_pir_receiver::{
-    DirectoryError, Transport, lookup, publication as wallet_publication, witness,
-};
-use zakura_receiver_crypto::{Payment, Receiver, Record, witness::payloads};
+use zakura_pir_query_server::receiver::server::{Server, WitnessServer};
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _,
     chain::BlockSource as _,
@@ -424,12 +424,12 @@ impl Routes {
             } else if let Some(p) = self.payments.iter().find(|p| session == Some(&p.id()[..])) {
                 p.respond(body)
             } else {
-                Err(receiver_pir::Error::Revision)
+                Err(DirectoryError::Revision)
             };
             return match response {
                 Ok(response) => (200, response),
-                Err(receiver_pir::Error::Revision) => (410, Vec::new()),
-                Err(receiver_pir::Error::Malformed) => (400, Vec::new()),
+                Err(DirectoryError::Revision) => (410, Vec::new()),
+                Err(DirectoryError::Malformed) => (400, Vec::new()),
                 Err(_) => (500, Vec::new()),
             };
         }
@@ -662,7 +662,7 @@ async fn seed_recovery_pages_history_and_stops_at_four_empty_indexes() {
 /// A positive hint without a payment needs one empty PIR answer and cannot advance issuance.
 #[tokio::test]
 async fn a_positive_hint_without_payment_settles_with_one_empty_query() {
-    use receiver_directory::blocks::{Batch, BlockFilter, BlockId};
+    use zakura_pir_client::receiver::blocks::{Batch, BlockFilter, BlockId};
     let mut r = restored(&[]);
     let initial = serve(&r.st, &[], r.through);
     let client = connect(&initial, r.through).await;
@@ -1200,7 +1200,7 @@ async fn a_blind_restore_reopens_segments_beyond_the_session_budget() {
         Plan::recent(r.through.height),
     ];
     let directory = Directory::new(publish_with(&r.st, &r.records, &plans, &|_| 0));
-    let one_segment = 2 * receiver_pir::public_bytes(MIN_ROWS).unwrap();
+    let one_segment = 2 * zakura_pir_client::receiver::native::public_bytes(MIN_ROWS).unwrap();
     let client = connect_with(&directory, r.through, false)
         .await
         .with_segment_budget(one_segment);
@@ -1408,7 +1408,7 @@ async fn screening_a_round_traverses_each_filter_once() {
             .unwrap()
             .lookups;
     assert!(works.len() > 1);
-    zakura_pir_receiver::screen(&client, &works).await;
+    zakura_pir_client::receiver::screen(&client, &works).await;
     assert_eq!(client.filter_traversals(), 1);
     for work in &works {
         lookup(&client, work).await.unwrap();

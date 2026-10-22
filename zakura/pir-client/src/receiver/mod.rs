@@ -7,12 +7,20 @@
 //! trigger PIR rather than compact scanning. PIR hides the queried address, but query
 //! timing is visible. All returned payments require wallet authentication, inclusion
 //! and spend checks.
+//!
+//! With `receiver-wallet`, network futures hold no database handle. The caller commits
+//! results through the wallet's recovery queue, which fences stale callbacks and
+//! enforces the feature toggle.
 pub use zakura_pir_protocol::receiver::*;
 mod client;
 mod descriptor_cache;
+#[cfg(feature = "receiver-wallet")]
+mod discovery;
 pub mod transport;
 
 pub use client::{Client, Query, WitnessClient, WitnessQuery};
+#[cfg(feature = "receiver-wallet")]
+pub use discovery::{FILTER_STEP_LIMIT, lookup, publication, screen, witness};
 
 /// Zcash mainnet's genesis block hash, in internal byte order, which its directory
 /// publications commit to.

@@ -25,7 +25,7 @@ There is no alternate balance store in this crate.
 
 The SQLite backend implements this contract with its `orchard` feature: durable
 key registration, bounded issuance, a durable recovery queue and payment admission.
-`zakura-pir-receiver` supplies its network steps. Its rustdoc, starting at
+`zakura-pir-client`'s `receiver-wallet` feature supplies its network steps. Its rustdoc, starting at
 `zcash_client_sqlite::wallet::one_time_ivk`, documents the calls a wallet makes.
 
 Software PCZT signing of one-time-key notes works through the same builder.

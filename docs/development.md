@@ -21,7 +21,7 @@ python3 scripts/dev.py verify
 
 | Configuration | Packages and features |
 | --- | --- |
-| `default` | Workspace except the facade, Enhance PIR, the transparent PIR adapter, receiver PIR and the one-time IVK scenarios; default features |
+| `default` | Workspace except the facade, the PIR client and the one-time IVK scenarios; default features |
 | `sync` | Ordinary sync with Orchard and Ironwood enabled |
 | `zewif` | Wallet interchange import and atomic rollback, with the SQLite test fixtures |
 | `orchard` | Backend + SQLite; `orchard,test-dependencies` |
@@ -31,9 +31,9 @@ python3 scripts/dev.py verify
 | `pczt` | PCZT; `internal-tests`, including signing and end-to-end proof construction |
 | `proving` | Backend + SQLite; real Sapling proving fixtures, migration tests, standalone-key shielding and PCZT integration tests |
 | `sqlite` | SQLite; `test-dependencies`, without Orchard |
-| `pir-protocol` | Shared formats, native identities and byte compatibility |
-| `pir-client` | All three transport-free product clients |
-| `pir-server` | Publisher and query-server packages, all three products |
+| `pir-protocol` | Shared formats, native identities and byte compatibility, with Receiver validation |
+| `pir-client` | All four transport-free product clients, including the Receiver client/evaluator golden vectors |
+| `pir-server` | Publisher and query-server packages, all four products, with Receiver witness paths |
 | `enhance-wallet` | Enhance PIR; `wallet` |
 | `enhance` | Enhance PIR; default features |
 | `enhance-testing` | Enhance PIR; `testing` (the synthetic Ironwood output fixture service tests authenticate PIR-returned records with) |
@@ -43,11 +43,10 @@ python3 scripts/dev.py verify
 | `transparent-pir` | Transparent PIR adapter; `wallet` |
 | `transparent-pir-sqlite` | Transparent PIR adapter; `sqlite` (`wallet` plus the SQLite apply-and-acknowledge integration and the in-process end-to-end tests) |
 | `transparent-pir-testing` | Transparent PIR adapter; `sqlite`, `testing` and `reqwest` (the test support applications build their recovery and txid display tests on; the private recovery and discovery tests go through the HTTP transport) |
-| `pir-receiver` | Receiver PIR; `wallet` (which enables the backend's `orchard`; its tests use SQLite with `orchard`) |
+| `receiver-wallet` | PIR client; `receiver-wallet` (which enables the backend's `orchard`; its tests use SQLite with `orchard`) |
 | `transaction-status-core` | Status source selection and observations, without the bundled lightwalletd adapter |
 | `transaction-status-lightwalletd` | Status policy plus the explicit lightwalletd adapter, including payload validation and cancellation |
-| `receiver-wire` | Library-owned receiver codec with default features disabled |
-| `receiver-pir-server` | Receiver PIR client with the `server` evaluator, which the golden client/evaluator vectors need |
+| `receiver-protocol` | PIR protocol; `receiver` alone: the receiver codec and formats without Common |
 | `transaction-wire` | Unpublished borrowed transaction wire reader, with the typed decoders as dev-only differential oracles |
 | `one-time-ivk-scenarios` | PIR-only wallet scenarios with an independent chain oracle (see its README). CI runs it nightly, not on PRs |
 

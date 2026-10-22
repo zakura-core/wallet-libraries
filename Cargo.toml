@@ -21,12 +21,8 @@ members = [
     "zakura/filters",
     "wallet-lib",
     "zakura/one-time-ivk",
-    "zakura/pir-receiver",
     "zakura/near-intents",
     "zakura/one-time-ivk-scenarios",
-    "zakura/receiver-crypto",
-    "zakura/receiver-directory",
-    "zakura/receiver-pir",
     "zakura/transaction-wire",
 ]
 

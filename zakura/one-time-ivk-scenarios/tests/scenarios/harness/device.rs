@@ -4,14 +4,18 @@ use super::{
     directory::{Directory, ORIGIN},
 };
 use orchard::keys::FullViewingKey;
-use receiver_pir::transport::{Inventories, InventoryClient};
 use rusqlite::Connection;
 use sapling::prover::mock::{MockOutputProver, MockSpendProver};
 use secrecy::SecretVec;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 use zakura_one_time_ivk::{KeyId, Purpose};
-use zakura_pir_receiver::{DirectoryError, lookup, publication, witness};
+use zakura_pir_client::receiver::{
+    lookup, publication,
+    session::Error as DirectoryError,
+    transport::{Inventories, InventoryClient},
+    witness,
+};
 use zcash_client_backend::{
     data_api::{
         AccountBirthday, TransactionStatus, WalletCommitmentTrees, WalletRead as _,

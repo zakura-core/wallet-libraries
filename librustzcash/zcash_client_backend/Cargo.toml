@@ -25,7 +25,6 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-zakura-receiver-crypto = { version = "=0.0.1-rc2", path = "../../zakura/receiver-crypto", default-features = false, optional = true }
 zakura-pir-protocol = { path = "../../zakura/pir-protocol", version = "=0.0.1-rc2", features = ["enhance", "recovery"] }
 zakura-one-time-ivk = { version = "=0.0.1-rc3", path = "../../zakura/one-time-ivk", optional = true }
 zcash_address.workspace = true
@@ -207,7 +206,7 @@ spend-index = ["transparent-inputs"]
 ## `zcash_primitives`, which always requires it because every v5+ transaction
 ## carries an Orchard bundle type); this feature gates the wallet's
 ## Orchard note-handling code, not the crate linkage.
-orchard = ["dep:zakura-receiver-crypto", "dep:pasta_curves", "dep:zakura-one-time-ivk", "zcash_keys/orchard"]
+orchard = ["zakura-pir-protocol/receiver", "dep:pasta_curves", "dep:zakura-one-time-ivk", "zcash_keys/orchard"]
 
 ## Enables compatibility with legacy zcashd wallet data
 zcashd-compat = ["zcash_keys/zcashd-compat"]

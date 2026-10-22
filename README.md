@@ -60,9 +60,9 @@ own incoming viewing keys, and refund memo helpers, with an Ironwood proof test 
 mixed ordinary, refund, and incoming inputs. The
 [NEAR Intents adapter](zakura/near-intents/README.md) (`zakura-near-intents`)
 normalizes 1Click swap statuses into the observations one-time IVK stores record.
-The unpublished [receiver PIR](zakura/pir-receiver/README.md) crate provides the
-bounded network steps the wallet's recovery queue uses to find payments to those
-keys in a receiver directory.
+[Receiver PIR](docs/receiver-pir.md), the `receiver` product of the PIR packages,
+provides the bounded network steps the wallet's recovery queue uses to find payments
+to those keys in a receiver directory.
 
 ## How the rewiring works
 

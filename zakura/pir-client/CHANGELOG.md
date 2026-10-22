@@ -7,10 +7,14 @@
 - The `receiver` product: `receiver::{Client, WitnessClient}` and `receiver::transport`,
   which read payment rows, witness payloads, inventories and filters over a caller-owned
   transport.
+- The `receiver-wallet` feature: `receiver::{publication, lookup, witness, screen}`, the
+  bounded network steps the wallet recovery queue consumes.
 
 ### Removed
 
-- `zakura-receiver-pir` is removed; its client and transport live here.
+- `zakura-receiver-pir` and the unpublished `zakura-pir-receiver` are removed; their
+  client, transport and wallet steps live here. `zakura-pir-receiver`'s `DirectoryError`
+  is `receiver::session::Error`.
 
 ## [0.0.1-rc2] - 2026-10-20
 

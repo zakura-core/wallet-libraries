@@ -1,15 +1,26 @@
 //! Bounded network steps. Wallet queue mutations happen after these futures complete.
-use crate::{DirectoryError, Transport, checked};
-use receiver_pir::{
+use super::{
+    crypto::Receiver,
     inventory::Inventory,
-    transport::{InventoryClient, Segment},
+    session::Error as DirectoryError,
+    transport::{InventoryClient, Segment, Transport},
 };
-use zakura_receiver_crypto::Receiver;
 use zcash_client_backend::data_api::one_time_ivk::restore::{
     LookupCursor, LookupPage, LookupWork, PublicationEnd, RECOVERY_PAGE_LIMIT, RecoveryPublication,
     SegmentRef, StepShard, WitnessAnswer, WitnessRequest,
 };
 use zcash_protocol::consensus::BlockHeight;
+
+/// The directory error for data a receiver check refuses: the same error the
+/// directory's own decoding gave when it checked receivers, payments and witnesses.
+fn checked(error: super::crypto::Error) -> DirectoryError {
+    use super::crypto::Error;
+    DirectoryError::Directory(match error {
+        Error::Malformed => super::Error::Malformed,
+        Error::Coverage => super::Error::Coverage,
+        Error::Capacity => super::Error::Capacity,
+    })
+}
 
 /// Most shards one step may cover through negative filters before returning.
 pub const FILTER_STEP_LIMIT: usize = 256;
@@ -201,7 +212,7 @@ async fn read_segment<T: Transport>(
     client: &InventoryClient<T>,
     segment: &Segment,
     receiver: [u8; 43],
-    last: Option<receiver_directory::RawRecord>,
+    last: Option<super::RawRecord>,
     result: &mut LookupPage,
 ) -> Result<bool, DirectoryError> {
     let start = match &last {
@@ -218,7 +229,7 @@ async fn read_segment<T: Transport>(
             return Ok(true);
         };
         if let Some(previous) = result.records.last().or(last.as_ref()) {
-            receiver_directory::snapshot::check_next(previous, &record)?;
+            super::snapshot::check_next(previous, &record)?;
         }
         let finished = record.page.checked_add(1) == Some(record.total);
         result.records.push(record);

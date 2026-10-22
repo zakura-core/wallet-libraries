@@ -9,6 +9,7 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- The receiver record and witness payload codec re-exported by `one_time_ivk::restore` comes from `zakura-pir-protocol`'s `receiver::wire`, which replaces `zakura-receiver-crypto`. The `orchard` feature enables `zakura-pir-protocol/receiver`.
 - Replace the one-time-key restore traits and broad block/transaction scanning APIs with bounded PIR queue records and cancellation tokens. Ordinary sync uses account keys. Private payment recovery retains targeted note authentication, identity and spending support.
 - `sync::SyncWallet` is now `WalletWrite` in every build, implemented for every `WalletWrite` store. With `orchard` it no longer requires one-time IVK storage, which ordinary sync no longer uses.
 - `one_time_ivk::restore::RecoveryPublication` identifies a captured shard inventory. `LookupWork` carries the first unchecked height and a `LookupCursor` (inventory, shard, segment, last page), and `LookupPage` reports the segment read, the height checked through and the next cursor.

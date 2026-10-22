@@ -83,6 +83,13 @@ recovery = [
 wallet = ["dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol"]
 transparent-wallet = ["wallet", "recovery", "zcash_client_backend/transparent-inputs"]
 sqlite = ["transparent-wallet", "dep:zcash_client_sqlite"]
+# Typed network steps consumed by the wallet recovery queue.
+receiver-wallet = [
+    "receiver",
+    "wallet",
+    "zakura-pir-protocol/receiver-crypto",
+    "zcash_client_backend/orchard",
+]
 reqwest = ["dep:reqwest"]
 lightwalletd = [
     "status",
@@ -156,6 +163,8 @@ rand = "0.8"
 rand_chacha = { workspace = true }
 flate2 = "1"
 ipir-sp = { version = "=0.1.0-rc.7", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
+orchard = { workspace = true }
+zcash_primitives = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 zakura-pir-query-server = { path = "../pir-query-server", version = "=0.0.1-rc2", features = ["transparent", "enhance", "status", "receiver", "testing"] }
 zakura-pir-publisher = { path = "../pir-publisher", version = "=0.0.1-rc2", features = ["transparent", "enhance", "status", "receiver-crypto"] }
@@ -263,6 +272,11 @@ required-features = ["receiver"]
 name = "receiver_block_transport"
 path = "tests/receiver/block_transport.rs"
 required-features = ["receiver"]
+
+[[test]]
+name = "receiver_discovery"
+path = "tests/receiver/discovery.rs"
+required-features = ["receiver-wallet"]
 
 [[example]]
 name = "transparent_recover-activity"

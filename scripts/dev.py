@@ -16,7 +16,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = {
     # Wallet defaults exclude application adapters and the mutually exclusive facade.
-    "default": (["--workspace", "--exclude", "zakura-wallet-lib", "--exclude", "zakura-pir-client", "--exclude", "zakura-pir-receiver", "--exclude", "zakura-one-time-ivk-scenarios"], []),
+    "default": (["--workspace", "--exclude", "zakura-wallet-lib", "--exclude", "zakura-pir-client", "--exclude", "zakura-one-time-ivk-scenarios"], []),
     "zewif": (["-p", "zakura-client-sqlite"], ["zewif", "test-dependencies"]),
     "sync": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "test-dependencies", "zakura-client-backend/sync"]),
     "orchard": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "test-dependencies"]),
@@ -39,21 +39,20 @@ CONFIGS = {
     "transparent-recovery": (["-p", "zakura-pir-client"], ["transparent", "recovery"]),
     "transparent-pir-sqlite": (["-p", "zakura-pir-client"], ["transparent", "sqlite"]),
     "transparent-pir-testing": (["-p", "zakura-pir-client"], ["transparent", "sqlite", "testing", "engine-conformance", "reqwest"]),
-    "pir-receiver": (["-p", "zakura-pir-receiver"], ["wallet"]),
+    "receiver-wallet": (["-p", "zakura-pir-client"], ["receiver-wallet"]),
     # Public lightwalletd transport remains explicitly selected.
     "transaction-status-core": (["-p", "zakura-pir-client"], ["status"]),
     "transaction-status-lightwalletd": (["-p", "zakura-pir-client"], ["status", "lightwalletd"]),
-    "receiver-wire": (["-p", "zakura-receiver-crypto", "--no-default-features"], []),
-    "receiver-pir-server": (["-p", "zakura-receiver-pir"], ["server"]),
+    "receiver-protocol": (["-p", "zakura-pir-protocol"], ["receiver"]),
     "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
     # Unpublished borrowed transaction reader; its typed oracles are dev-only.
     "transaction-wire": (["-p", "zakura-transaction-wire"], []),
     # Role lanes cover formats and server-only helpers independently.
-    "pir-protocol": (["-p", "zakura-pir-protocol"], ["enhance", "status", "transparent-inputs", "native", "http-endpoint"]),
-    "pir-server": (["-p", "zakura-pir-server-core", "-p", "zakura-pir-publisher", "-p", "zakura-pir-query-server"], ["enhance", "status", "transparent"]),
-    "pir-client": (["-p", "zakura-pir-client"], ["enhance", "status", "transparent", "native"]),
+    "pir-protocol": (["-p", "zakura-pir-protocol"], ["enhance", "status", "transparent-inputs", "receiver-crypto", "native", "http-endpoint"]),
+    "pir-server": (["-p", "zakura-pir-server-core", "-p", "zakura-pir-publisher", "-p", "zakura-pir-query-server"], ["enhance", "status", "transparent", "receiver", "receiver-crypto"]),
+    "pir-client": (["-p", "zakura-pir-client"], ["enhance", "status", "transparent", "receiver", "native"]),
     # Final local feature-interaction coverage; independent CI lanes remain authoritative.
-    "pir-integration": (["-p", "zakura-pir-protocol", "-p", "zakura-pir-server-core", "-p", "zakura-pir-publisher", "-p", "zakura-pir-query-server", "-p", "zakura-pir-client"], ["enhance", "status", "transparent", "transparent-inputs", "native", "http-endpoint", "sqlite", "testing", "engine-conformance", "reqwest", "lightwalletd", "cli"]),
+    "pir-integration": (["-p", "zakura-pir-protocol", "-p", "zakura-pir-server-core", "-p", "zakura-pir-publisher", "-p", "zakura-pir-query-server", "-p", "zakura-pir-client"], ["enhance", "status", "transparent", "transparent-inputs", "receiver-wallet", "receiver-crypto", "native", "http-endpoint", "sqlite", "testing", "engine-conformance", "reqwest", "lightwalletd", "cli"]),
 }
 
 VERIFY = ("dependency-boundary", "zakura-graph", "wallet-lib-modes", "vendor-ancestry", "dependency-graph")

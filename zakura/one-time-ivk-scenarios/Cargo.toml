@@ -16,9 +16,6 @@ serde_json.workspace = true
 hex.workspace = true
 incrementalmerkletree.workspace = true
 orchard = { workspace = true, features = ["circuit"] }
-receiver-directory = { package = "zakura-receiver-directory", path = "../receiver-directory" }
-receiver-pir = { package = "zakura-receiver-pir", path = "../receiver-pir", features = ["server"] }
-zakura-receiver-crypto = { path = "../receiver-crypto" }
 rusqlite.workspace = true
 sapling = { workspace = true, features = ["test-dependencies"] }
 secrecy.workspace = true
@@ -26,7 +23,10 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
 transparent.workspace = true
 zakura-one-time-ivk = { path = "../one-time-ivk" }
-zakura-pir-receiver = { path = "../pir-receiver", features = ["wallet"] }
+zakura-pir-client = { path = "../pir-client", features = ["receiver-wallet"] }
+# Publication builders and the evaluator serve the in-process directory.
+zakura-pir-publisher = { path = "../pir-publisher", features = ["receiver-crypto"] }
+zakura-pir-query-server = { path = "../pir-query-server", features = ["receiver"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 zcash_client_sqlite = { path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "test-dependencies"] }
 zcash_keys = { workspace = true, features = ["orchard"] }

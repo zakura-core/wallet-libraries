@@ -35,15 +35,15 @@ def service_dependencies(manifest, workspace):
 
 class ReceiverBoundaryTests(unittest.TestCase):
     def test_receiver_library_has_no_service_owned_dependency(self):
-        manifest = tomllib.loads((ROOT / "zakura/receiver-crypto/Cargo.toml").read_text())
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["dependencies"]
-        self.assertEqual(service_dependencies(manifest, workspace), [])
+        for crate in ("pir-protocol", "pir-publisher", "pir-query-server", "pir-server-core"):
+            manifest = tomllib.loads((ROOT / "zakura" / crate / "Cargo.toml").read_text())
+            with self.subTest(crate=crate):
+                self.assertEqual(service_dependencies(manifest, workspace), [])
 
     def test_receiver_consumers_have_no_service_owned_dependency(self):
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["dependencies"]
-        for crate in (
-            "receiver-directory", "receiver-pir", "pir-receiver", "one-time-ivk-scenarios",
-        ):
+        for crate in ("pir-client", "one-time-ivk-scenarios"):
             manifest = tomllib.loads((ROOT / "zakura" / crate / "Cargo.toml").read_text())
             with self.subTest(crate=crate):
                 self.assertEqual(service_dependencies(manifest, workspace), [])
