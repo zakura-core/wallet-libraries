@@ -48,6 +48,8 @@ CONFIGS = {
     "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
     # Unpublished borrowed transaction reader; its typed oracles are dev-only.
     "transaction-wire": (["-p", "zakura-transaction-wire"], []),
+    # Transport-free service config resolution, consumed from git by zcash_voting.
+    "service-config": (["-p", "zakura-service-config"], []),
     # Role lanes cover formats and server-only helpers independently.
     "pir-protocol": (["-p", "zakura-pir-protocol"], ["enhance", "status", "transparent-inputs", "native", "http-endpoint"]),
     "pir-server": (["-p", "zakura-pir-server-core", "-p", "zakura-pir-publisher", "-p", "zakura-pir-query-server"], ["enhance", "status", "transparent"]),

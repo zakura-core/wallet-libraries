@@ -28,6 +28,7 @@ members = [
     "zakura/receiver-directory",
     "zakura/receiver-pir",
     "zakura/transaction-wire",
+    "zakura/service-config",
 ]
 
 resolver = "2"
