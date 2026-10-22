@@ -270,7 +270,8 @@ pub fn resolve_config_snapshot<V>(
 /// Pins `source_url` to the SHA-256 of `static_bytes`, producing the source
 /// string an application ships.
 ///
-/// The URL must be HTTPS and not already pinned. Other query items are kept.
+/// The URL must be HTTPS, without a fragment, and not already pinned. Other
+/// query items are kept.
 pub fn pin_static_config_source(
     source_url: &str,
     static_bytes: &[u8],
@@ -278,6 +279,9 @@ pub fn pin_static_config_source(
     let source_url = source_url.trim();
     if ConfigSource::parse(source_url)?.sha256.is_some() {
         return Err(WalletPirConfigError::SourceAlreadyPinned);
+    }
+    if source_url.contains('#') {
+        return Err(WalletPirConfigError::SourceUrlHasFragment);
     }
     let separator = if source_url.contains('?') { '&' } else { '?' };
     let pinned = format!(

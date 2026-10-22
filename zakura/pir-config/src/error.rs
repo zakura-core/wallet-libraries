@@ -20,6 +20,9 @@ pub enum WalletPirConfigError {
     /// has a pin.
     #[error("static config source is already pinned")]
     SourceAlreadyPinned,
+    /// A pin appended after a fragment would never reach the source parser.
+    #[error("static config source URL must not have a fragment")]
+    SourceUrlHasFragment,
     #[error("static_config_version {found} is not supported; expected 1")]
     UnsupportedStaticVersion { found: u32 },
     #[error("dynamic config_version {found} is not supported; expected 1")]

@@ -150,5 +150,13 @@ fn pins_sources_reproducibly() {
         pin_static_config_source(&pinned.raw, &static_bytes),
         Err(WalletPirConfigError::SourceAlreadyPinned)
     );
+    assert_eq!(
+        pin_static_config_source("https://config.example/static.json#v1", &static_bytes),
+        Err(WalletPirConfigError::SourceUrlHasFragment)
+    );
     assert!(pin_static_config_source("http://config.example/static.json", &static_bytes).is_err());
+    let with_query =
+        pin_static_config_source("https://config.example/s.json?ref=main", &static_bytes).unwrap();
+    assert_eq!(with_query.url, "https://config.example/s.json?ref=main");
+    assert!(with_query.sha256.is_some());
 }
