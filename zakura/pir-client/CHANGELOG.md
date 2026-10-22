@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- The `receiver` product: `receiver::{Client, WitnessClient}` and `receiver::transport`,
+  which read payment rows, witness payloads, inventories and filters over a caller-owned
+  transport.
+
+### Removed
+
+- `zakura-receiver-pir` is removed; its client and transport live here.
+
 ## [0.0.1-rc2] - 2026-10-20
 
 ### Changed

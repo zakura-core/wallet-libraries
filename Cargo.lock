@@ -7943,6 +7943,7 @@ dependencies = [
  "incrementalmerkletree 0.8.2",
  "inspiring",
  "ipir-native-client",
+ "ipir-sp",
  "rand 0.10.3",
  "rand 0.8.8",
  "rand_chacha 0.3.1",

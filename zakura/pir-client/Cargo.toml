@@ -2,7 +2,7 @@
 name = "zakura-pir-client"
 version = "0.0.1-rc2"
 edition = "2024"
-description = "Enhance, Status and Transparent PIR clients over caller-owned transports"
+description = "Enhance, Status, Transparent and Receiver PIR clients over caller-owned transports"
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -26,6 +26,17 @@ enhance = [
     "zakura-pir-protocol/http-endpoint",
     "dep:futures-util",
     "dep:base64",
+    "dep:hex",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:thiserror",
+]
+receiver = [
+    "zakura-pir-publisher?/receiver",
+    "zakura-pir-query-server?/receiver",
+    "native",
+    "zakura-pir-protocol/receiver",
     "dep:hex",
     "dep:serde",
     "dep:serde_json",
@@ -144,9 +155,10 @@ sha2 = { workspace = true }
 rand = "0.8"
 rand_chacha = { workspace = true }
 flate2 = "1"
+ipir-sp = { version = "=0.1.0-rc.7", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
 clap = { version = "4", features = ["derive"] }
-zakura-pir-query-server = { path = "../pir-query-server", version = "=0.0.1-rc2", features = ["transparent", "enhance", "status", "testing"] }
-zakura-pir-publisher = { path = "../pir-publisher", version = "=0.0.1-rc2", features = ["transparent", "enhance", "status"] }
+zakura-pir-query-server = { path = "../pir-query-server", version = "=0.0.1-rc2", features = ["transparent", "enhance", "status", "receiver", "testing"] }
+zakura-pir-publisher = { path = "../pir-publisher", version = "=0.0.1-rc2", features = ["transparent", "enhance", "status", "receiver-crypto"] }
 zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc2", features = ["transparent"] }
 
 [target."cfg(unix)".dependencies]
@@ -231,6 +243,26 @@ required-features = ["transparent", "testing"]
 name = "transparent_previous_companion"
 path = "tests/transparent/previous_companion.rs"
 required-features = ["recovery"]
+
+[[test]]
+name = "receiver_golden"
+path = "tests/receiver/golden.rs"
+required-features = ["receiver"]
+
+[[test]]
+name = "receiver_inventory"
+path = "tests/receiver/inventory.rs"
+required-features = ["receiver"]
+
+[[test]]
+name = "receiver_inventory_cache"
+path = "tests/receiver/inventory_cache.rs"
+required-features = ["receiver"]
+
+[[test]]
+name = "receiver_block_transport"
+path = "tests/receiver/block_transport.rs"
+required-features = ["receiver"]
 
 [[example]]
 name = "transparent_recover-activity"
