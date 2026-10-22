@@ -11,6 +11,14 @@ repository.workspace = true
 # Product and capability features are explicit; no product is enabled by default.
 default = []
 enhance = ["zakura-pir-protocol/enhance"]
+receiver = ["zakura-pir-protocol/receiver", "dep:sha2"]
+# Lower inclusion paths for companion witness tables, which hash with Orchard.
+receiver-crypto = [
+    "receiver",
+    "zakura-pir-protocol/receiver-crypto",
+    "dep:incrementalmerkletree",
+    "dep:orchard",
+]
 status = ["zakura-pir-protocol/status"]
 transparent = [
     "dep:base64",
@@ -36,6 +44,8 @@ sha2 = { version = "0.10", optional = true }
 thiserror = { version = "2", optional = true }
 zakura-filters = { path = "../filters", version = "=0.0.1-rc0", optional = true }
 bitcoin_hashes = { version = "=0.14.101", default-features = false, features = ["std"], optional = true }
+incrementalmerkletree = { workspace = true, optional = true }
+orchard = { workspace = true, optional = true }
 
 [dev-dependencies]
 zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc2", features = ["filter-matching"] }
@@ -44,6 +54,23 @@ sha2 = { workspace = true }
 rand = "0.8"
 rand_chacha = { workspace = true }
 bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
+incrementalmerkletree = { workspace = true, features = ["legacy-api"] }
+serde_json = { workspace = true }
+
+[[test]]
+name = "receiver_directory"
+path = "tests/receiver/directory.rs"
+required-features = ["receiver"]
+
+[[test]]
+name = "receiver_witness"
+path = "tests/receiver/witness.rs"
+required-features = ["receiver"]
+
+[[test]]
+name = "receiver_shard_paths"
+path = "tests/receiver/shard_paths.rs"
+required-features = ["receiver-crypto"]
 
 [[example]]
 name = "transparent_shard_layout_census"

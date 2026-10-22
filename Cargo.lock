@@ -8010,6 +8010,7 @@ dependencies = [
  "bitcoin",
  "bitcoin_hashes",
  "hex",
+ "incrementalmerkletree 0.8.2",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
  "serde",
@@ -8017,6 +8018,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "zakura-filters",
+ "zakura-orchard",
  "zakura-pir-protocol",
  "zakura-pir-server-core",
 ]

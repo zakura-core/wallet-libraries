@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- The `receiver` product: `receiver::snapshot::{SnapshotPublisherExt, assign_ordinals}`
+  for payment table placement and `receiver::witness::TablePublisherExt` for companion
+  witness tables. The `receiver-crypto` feature adds `receiver::witness::{ShardPaths,
+  payloads}`, the lower inclusion paths. Built publications are byte-identical.
+
+### Removed
+
+- Receiver publication construction formerly in `zakura-receiver-directory` and
+  `zakura-receiver-crypto`, which are removed.
+
 ## [0.0.1-rc2] - 2026-10-20
 
 ### Changed
