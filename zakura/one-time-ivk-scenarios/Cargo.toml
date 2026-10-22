@@ -25,7 +25,6 @@ secrecy.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
 transparent.workspace = true
-zakura-near-intents = { path = "../near-intents" }
 zakura-one-time-ivk = { path = "../one-time-ivk" }
 zakura-pir-receiver = { path = "../pir-receiver", features = ["wallet"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }

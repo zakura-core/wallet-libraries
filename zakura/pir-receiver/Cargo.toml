@@ -27,8 +27,6 @@ hex.workspace = true
 orchard.workspace = true
 # The evaluator answers the tests' encrypted queries in process.
 receiver-pir = { package = "zakura-receiver-pir", path = "../receiver-pir", features = ["server"] }
-rusqlite = { workspace = true, features = ["hooks"] }
-secrecy.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }

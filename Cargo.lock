@@ -7808,7 +7808,6 @@ dependencies = [
  "zakura-client-backend",
  "zakura-client-sqlite",
  "zakura-keys",
- "zakura-near-intents",
  "zakura-note-encryption",
  "zakura-one-time-ivk",
  "zakura-orchard",
@@ -8038,8 +8037,6 @@ name = "zakura-pir-receiver"
 version = "0.0.1-rc0"
 dependencies = [
  "hex",
- "rusqlite",
- "secrecy",
  "serde_json",
  "tokio",
  "zakura-client-backend",
