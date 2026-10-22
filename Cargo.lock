@@ -8029,6 +8029,7 @@ version = "0.0.1-rc2"
 dependencies = [
  "bitcoin",
  "hex",
+ "ipir-sp",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
  "rayon",
