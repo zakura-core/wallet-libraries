@@ -45,6 +45,10 @@ pub enum Error {
     Revision,
     #[error("receiver transport failed: {0}")]
     Transport(String),
+    /// The configured server base is not a supported HTTP(S) endpoint, or an
+    /// operation would leave the receiver route namespace below it.
+    #[error("invalid receiver PIR server endpoint: {0}")]
+    Endpoint(#[from] zakura_pir_protocol::endpoint::InvalidEndpoint),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 }

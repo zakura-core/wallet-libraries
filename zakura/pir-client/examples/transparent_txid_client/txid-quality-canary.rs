@@ -1,4 +1,4 @@
-//! One private txid display lookup over `/v2/txid`, checked against a pinned entry hash.
+//! One private txid display lookup over `/transparent/v1/txid`, checked against a pinned entry hash.
 //!
 //! The fixture is `{"txid": "<display hex>", "height": <mined height>,
 //! "entry_sha256": "<hex>"}`: one sample of a `txid-inventory fixture` document,
@@ -24,10 +24,12 @@ use zakura_pir_client::transparent::txid_client::{
     Method, TransportError, TxidDisplayClient, TxidError, TxidLookup, TxidReply, TxidRequest,
     TxidTransport,
 };
+use zakura_pir_protocol::endpoint::Endpoint;
 
 #[derive(Parser)]
 struct Args {
-    /// Public origin; the client appends the `/v2/txid/` paths.
+    /// Public server base; the client appends the `/transparent/v1/txid/`
+    /// paths below its path.
     #[arg(long, default_value = "https://transparent-pir.valargroup.dev")]
     url: String,
     /// The pinned `{"txid", "height", "entry_sha256"}` document.
@@ -97,12 +99,15 @@ fn judge(outcome: Result<TxidLookup, TxidError>, pin: &Pin) -> &'static str {
 /// Blocking HTTPS transport. Error text stays inside this process.
 struct Http {
     client: reqwest::blocking::Client,
-    base: String,
+    base: Endpoint,
 }
 
 impl TxidTransport for Http {
     fn send(&mut self, request: TxidRequest) -> Result<TxidReply, TransportError> {
-        let url = format!("{}{}", self.base, request.path());
+        let url = self
+            .base
+            .join(request.path())
+            .map_err(|_| TransportError("invalid route".into()))?;
         let builder = match request.method {
             Method::Get => self.client.get(url),
             Method::Post => self
@@ -153,10 +158,10 @@ fn probe(args: &Args) -> &'static str {
     else {
         return "unavailable";
     };
-    let mut transport = Http {
-        client,
-        base: args.url.trim_end_matches('/').to_string(),
+    let Ok(base) = Endpoint::parse(&args.url) else {
+        return "unavailable";
     };
+    let mut transport = Http { client, base };
     // A fresh client every run: the cold path, with no cached map or setups.
     let outcome = TxidDisplayClient::new().lookup(&mut transport, pin.txid, pin.height, &|| false);
     judge(outcome, &pin)

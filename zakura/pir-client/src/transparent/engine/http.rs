@@ -13,8 +13,10 @@ use crate::transparent::engine::sync::ServiceGeometry;
 use crate::transparent::engine::transport::{
     BoxError, FilterSource, ShardReply, ShardRequest, ShardTransport, TransferFailure, refusal,
 };
+use crate::transparent::routes;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use zakura_pir_protocol::endpoint::Endpoint;
 
 // Callers may explicitly choose a different finite success-body limit for a
 // larger publication. Error bodies never need the binary-response allowance.
@@ -475,7 +477,8 @@ impl HttpResourceClient {
 
 /// The private shard service over HTTP.
 pub struct HttpShardTransport {
-    base: String,
+    /// The server base; every request addresses a Transparent route below it.
+    base: Endpoint,
     client: reqwest::blocking::Client,
     observer: Option<HttpObserver>,
     retry: RetryPolicy,
@@ -497,9 +500,11 @@ impl HttpShardTransport {
         self
     }
 
+    /// The shard service below the server base `base_url`, whose path prefix
+    /// every request keeps. Refuses a base [`Endpoint::parse`] refuses.
     pub fn new(base_url: impl Into<String>, options: &HttpOptions) -> Result<Self, BoxError> {
         Ok(Self {
-            base: base_url.into().trim_end_matches('/').to_string(),
+            base: Endpoint::parse(&base_url.into())?,
             client: build(options)?,
             observer: None,
             retry: RetryPolicy {
@@ -564,7 +569,7 @@ impl HttpShardTransport {
         {
             return Err("revision digest must contain exactly 64 hexadecimal characters".into());
         }
-        let url = format!("{}{}", self.base, request.route());
+        let url = routes::url(&self.base, &request.operation())?;
         let (builder, binding) = match *request {
             ShardRequest::Manifest { shard_id, revision }
             | ShardRequest::Setup {
@@ -608,7 +613,7 @@ impl HttpShardTransport {
 impl ShardTransport for HttpShardTransport {
     fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
         let (bytes, len) = execute_measured(
-            self.client.get(format!("{}/v2/shards/init", self.base)),
+            self.client.get(routes::url(&self.base, "/shards/init")?),
             "init",
             0,
             None,
@@ -701,7 +706,8 @@ use experimental_parent_http::ParentExperiment;
 
 pub struct HttpFilterSource {
     parent_experiments: Vec<ParentExperiment>,
-    base: String,
+    /// The server base; every request addresses a Transparent route below it.
+    base: Endpoint,
     client: reqwest::blocking::Client,
     observer: Option<HttpObserver>,
     retry: RetryPolicy,
@@ -738,10 +744,20 @@ impl HttpFilterSource {
         self
     }
 
+    /// The URL of shard `shard_id`'s filter.
+    fn filter_url(&self, shard_id: u64) -> Result<String, BoxError> {
+        Ok(routes::url(
+            &self.base,
+            &format!("/filters/shards/{shard_id}/filter"),
+        )?)
+    }
+
+    /// The filter origin below the server base `base_url`, whose path prefix
+    /// every request keeps. Refuses a base [`Endpoint::parse`] refuses.
     pub fn new(base_url: impl Into<String>, options: &HttpOptions) -> Result<Self, BoxError> {
         Ok(Self {
             parent_experiments: Vec::new(),
-            base: base_url.into().trim_end_matches('/').to_string(),
+            base: Endpoint::parse(&base_url.into())?,
             client: build(options)?,
             observer: None,
             retry: RetryPolicy {
@@ -835,7 +851,7 @@ impl FilterSource for HttpFilterSource {
         // The map about to be read may number its shards differently.
         self.prefetched.clear();
         let (bytes, len) = execute_measured(
-            self.client.get(format!("{}/v2/filters/shards", self.base)),
+            self.client.get(routes::url(&self.base, "/filters/shards")?),
             "map",
             0,
             None,
@@ -872,15 +888,16 @@ impl FilterSource for HttpFilterSource {
                         }
                         let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some(&id) = wanted.get(at) else { break };
-                        match execute_measured(
-                            self.client
-                                .get(format!("{}/v2/filters/shards/{id}/filter", self.base)),
-                            "filters",
-                            0,
-                            None,
-                            &self.observer,
-                            self.retry,
-                        ) {
+                        match self.filter_url(id).and_then(|url| {
+                            execute_measured(
+                                self.client.get(url),
+                                "filters",
+                                0,
+                                None,
+                                &self.observer,
+                                self.retry,
+                            )
+                        }) {
                             Ok(bytes) => fetched.lock().expect("unpoisoned").push((id, bytes)),
                             Err(error) => {
                                 failed_bytes.fetch_add(
@@ -911,8 +928,7 @@ impl FilterSource for HttpFilterSource {
             return Ok((bytes, cost));
         }
         let (bytes, len) = execute_measured(
-            self.client
-                .get(format!("{}/v2/filters/shards/{shard_id}/filter", self.base)),
+            self.client.get(self.filter_url(shard_id)?),
             "filters",
             0,
             None,
@@ -1285,7 +1301,7 @@ mod observation_tests {
             let (bytes, cost) = source.filter(id).unwrap();
             assert_eq!(
                 bytes,
-                format!("/v2/filters/shards/{id}/filter").into_bytes()
+                format!("/transparent/v1/filters/shards/{id}/filter").into_bytes()
             );
             assert_eq!(cost, bytes.len() as u64);
         }
@@ -1341,7 +1357,7 @@ mod observation_tests {
         let paid = source.prefetch_charged(&[1, 2, 3]);
         let expected: u64 = [1, 2, 3]
             .iter()
-            .map(|id| format!("/v2/filters/shards/{id}/filter").len() as u64)
+            .map(|id| format!("/transparent/v1/filters/shards/{id}/filter").len() as u64)
             .sum();
         assert_eq!(
             paid, expected,
@@ -1860,5 +1876,81 @@ mod observation_tests {
         assert!(events[1].failed);
         assert_eq!(events[2].status, None);
         assert!(events[2].failed);
+    }
+
+    #[test]
+    fn history_requests_keep_the_base_path_below_the_transparent_namespace() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    if stream.read_exact(&mut byte).is_err() {
+                        break;
+                    }
+                    headers.push(byte[0]);
+                }
+                let line = String::from_utf8_lossy(&headers)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                let mut parts = line.split(' ');
+                let (method, path) = (parts.next().unwrap_or_default(), parts.next());
+                let length: usize = String::from_utf8_lossy(&headers)
+                    .lines()
+                    .find_map(|header| {
+                        header
+                            .to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|length| length.trim().parse().unwrap())
+                    })
+                    .unwrap_or(0);
+                let _ = stream.read_exact(&mut vec![0; length]);
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(format!("{method} {}", path.unwrap_or_default()));
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+            }
+        });
+        let base = format!("http://{address}/edge/");
+        let options = HttpOptions::default();
+        let mut filters = HttpFilterSource::new(&base, &options)
+            .unwrap()
+            .with_prefetch_concurrency(1);
+        let mut shards = HttpShardTransport::new(&base, &options).unwrap();
+        let revision = "ab".repeat(32);
+        filters.shard_map().unwrap();
+        filters.filter(7).unwrap();
+        shards.init().unwrap();
+        shards.manifest(7, &revision).unwrap();
+        shards.setup(7, &revision, Table::Pages(1), 0).unwrap();
+        shards.query(7, &revision, Table::Directory, b"q").unwrap();
+
+        let shard = format!("/edge/transparent/v1/shards/7/revisions/{revision}");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                "GET /edge/transparent/v1/filters/shards".to_owned(),
+                "GET /edge/transparent/v1/filters/shards/7/filter".to_owned(),
+                "GET /edge/transparent/v1/shards/init".to_owned(),
+                format!("GET {shard}/manifest"),
+                format!("GET {shard}/setup/pages-1/0"),
+                format!("POST {shard}/query/directory"),
+            ],
+            "every request is canonical; none falls back to a legacy route"
+        );
+        assert!(HttpShardTransport::new("https://pir.example/edge?legacy=1", &options).is_err());
     }
 }

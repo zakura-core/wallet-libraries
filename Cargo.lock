@@ -8167,6 +8167,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "zakura-pir-client",
+ "zakura-pir-protocol",
  "zakura-pir-query-server",
  "zakura-pir-server-core",
  "zakura-receiver-directory",

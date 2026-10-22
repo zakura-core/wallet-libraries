@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Transparent clients address only the canonical `/transparent/v1` routes:
+  `/v2/<route>` becomes `/transparent/v1/<route>` (shard map, filters, init,
+  manifests, setup, queries and txid display), and `/v1/filters/<route>` and
+  `/v1/health` move below `/transparent/v1`. Nothing falls back to a legacy
+  route. `HttpShardTransport`, `HttpFilterSource` and the filter
+  `HttpTransport` validate their base with `Endpoint::parse` and keep its path
+  prefix. `ShardRequest::route`, `HttpRequest::path` and `TxidRequest::path`
+  are origin-relative paths below the namespace.
+
 ## [0.0.1-rc2] - 2026-10-20
 
 ### Changed

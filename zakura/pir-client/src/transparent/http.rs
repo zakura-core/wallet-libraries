@@ -21,6 +21,7 @@ use crate::transparent::engine::client::Table;
 use crate::transparent::engine::transport::{
     BoxError, FilterSource, Overloaded, ShardRequest, ShardTransport, TransferFailure, refusal,
 };
+use crate::transparent::routes::origin_path;
 use crate::transparent::txid_client::{
     Method as TxidMethod, Route as TxidRoute, TransportError, TxidReply, TxidRequest, TxidTransport,
 };
@@ -66,7 +67,8 @@ fn table_template(table: Table) -> &'static str {
 pub struct HttpRequest {
     /// How the route is requested.
     pub method: HttpMethod,
-    /// Origin-relative, starting with `/v1/`. It names shard ids, revisions,
+    /// Origin-relative, starting with the Transparent namespace
+    /// `/transparent/v1/`; the exchange prefixes its base path. It names shard ids, revisions,
     /// tables and segments the public maps already name, never a script or a
     /// txid.
     pub path: String,
@@ -341,31 +343,33 @@ impl Route<'_> {
     /// The origin-relative path, naming the route's identifiers.
     fn path(&self) -> String {
         match *self {
-            Route::ShardMap => "/v2/filters/shards".to_owned(),
-            Route::Filter { shard_id } => format!("/v2/filters/shards/{shard_id}/filter"),
-            Route::Init => "/v2/shards/init".to_owned(),
+            Route::ShardMap => origin_path("/filters/shards"),
+            Route::Filter { shard_id } => {
+                origin_path(&format!("/filters/shards/{shard_id}/filter"))
+            }
+            Route::Init => origin_path("/shards/init"),
             Route::Shard(request) => request.route(),
         }
     }
 
     /// The path with its identifiers elided, for logs.
     fn template(&self) -> String {
-        match *self {
-            Route::ShardMap => "/v2/filters/shards".to_owned(),
-            Route::Filter { .. } => "/v2/filters/shards/{id}/filter".to_owned(),
-            Route::Init => "/v2/shards/init".to_owned(),
+        origin_path(&match *self {
+            Route::ShardMap => "/filters/shards".to_owned(),
+            Route::Filter { .. } => "/filters/shards/{id}/filter".to_owned(),
+            Route::Init => "/shards/init".to_owned(),
             Route::Shard(ShardRequest::Manifest { .. }) => {
-                "/v2/shards/{id}/revisions/{rev}/manifest".to_owned()
+                "/shards/{id}/revisions/{rev}/manifest".to_owned()
             }
             Route::Shard(ShardRequest::Setup { table, .. }) => format!(
-                "/v2/shards/{{id}}/revisions/{{rev}}/setup/{}/{{segment}}",
+                "/shards/{{id}}/revisions/{{rev}}/setup/{}/{{segment}}",
                 table_template(table)
             ),
             Route::Shard(ShardRequest::Query { table, .. }) => format!(
-                "/v2/shards/{{id}}/revisions/{{rev}}/query/{}",
+                "/shards/{{id}}/revisions/{{rev}}/query/{}",
                 table_template(table)
             ),
-        }
+        })
     }
 
     /// A query's opaque body; empty for a read.
@@ -547,32 +551,32 @@ mod tests {
             assert!(!filters.uses_parents());
             assert_eq!(shards.concurrency(), 1);
             let (map, cost) = filters.shard_map().unwrap();
-            assert_eq!(map, b"/v2/filters/shards");
+            assert_eq!(map, b"/transparent/v1/filters/shards");
             assert_eq!(cost, map.len() as u64);
         }
         http.exchange().sent.borrow_mut().clear();
         let results = every_route(&mut http);
 
-        let shard = format!("/v2/shards/{SHARD}/revisions/{REVISION}");
-        let template = "/v2/shards/{id}/revisions/{rev}";
+        let shard = format!("/transparent/v1/shards/{SHARD}/revisions/{REVISION}");
+        let template = "/transparent/v1/shards/{id}/revisions/{rev}";
         let none: &[u8] = &[];
         let expected = [
             (
                 HttpMethod::Get,
-                "/v2/filters/shards".to_owned(),
-                "/v2/filters/shards".to_owned(),
+                "/transparent/v1/filters/shards".to_owned(),
+                "/transparent/v1/filters/shards".to_owned(),
                 none,
             ),
             (
                 HttpMethod::Get,
-                format!("/v2/filters/shards/{SHARD}/filter"),
-                "/v2/filters/shards/{id}/filter".to_owned(),
+                format!("/transparent/v1/filters/shards/{SHARD}/filter"),
+                "/transparent/v1/filters/shards/{id}/filter".to_owned(),
                 none,
             ),
             (
                 HttpMethod::Get,
-                "/v2/shards/init".to_owned(),
-                "/v2/shards/init".to_owned(),
+                "/transparent/v1/shards/init".to_owned(),
+                "/transparent/v1/shards/init".to_owned(),
                 none,
             ),
             (
@@ -739,8 +743,8 @@ mod tests {
     fn debug_output_names_no_identifier() {
         let request = HttpRequest {
             method: HttpMethod::Post,
-            path: format!("/v2/shards/{SHARD}/revisions/{REVISION}/query/pages-1"),
-            template: "/v2/shards/{id}/revisions/{rev}/query/pages-{child}".to_owned(),
+            path: format!("/transparent/v1/shards/{SHARD}/revisions/{REVISION}/query/pages-1"),
+            template: "/transparent/v1/shards/{id}/revisions/{rev}/query/pages-{child}".to_owned(),
             body: QUERY.to_vec(),
             limit: LIMIT,
             error_limit: 0,
@@ -794,7 +798,11 @@ mod tests {
                 sent[0].path.as_str(),
                 sent[0].template.as_str()
             ),
-            (HttpMethod::Get, "/v2/txid/init", "/v2/txid/init")
+            (
+                HttpMethod::Get,
+                "/transparent/v1/txid/init",
+                "/transparent/v1/txid/init"
+            )
         );
         assert_eq!((sent[0].limit, sent[0].error_limit), (256 << 10, 0));
         for (route, limit) in [

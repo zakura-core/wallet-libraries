@@ -3,7 +3,7 @@
 //! with real native PIR ([`zakura_pir_client::transparent::testing::native`]).
 //!
 //! It serves the routes a lookup reads, with the production service's paths,
-//! documents and headers: `/v2/txid/init`, `/v2/txid/map` (the recent map of
+//! documents and headers: `/transparent/v1/txid/init`, `/transparent/v1/txid/map` (the recent map of
 //! the split, with `x-txid-map-sha256`), the canonical manifest, and the
 //! recent tier's setup and query of every bucket's table. A route it does not
 //! serve is 404, and a malformed request is 400.
@@ -156,14 +156,14 @@ impl DisplayService {
         const SETUP: &str = "shards/:shard_id/revisions/:digest/setup/:table/:segment";
         const QUERY: &str = "shards/:shard_id/revisions/:digest/query/:table";
         let router = Router::new()
-            .route("/v2/txid/init", get(init_route))
-            .route("/v2/txid/map", get(recent_map))
+            .route("/transparent/v1/txid/init", get(init_route))
+            .route("/transparent/v1/txid/map", get(recent_map))
             .route(
-                "/v2/txid/shards/:shard_id/revisions/:digest/manifest",
+                "/transparent/v1/txid/shards/:shard_id/revisions/:digest/manifest",
                 get(manifest_route),
             )
-            .route(&format!("/v2/txid/recent/{SETUP}"), get(setup))
-            .route(&format!("/v2/txid/recent/{QUERY}"), post(query))
+            .route(&format!("/transparent/v1/txid/recent/{SETUP}"), get(setup))
+            .route(&format!("/transparent/v1/txid/recent/{QUERY}"), post(query))
             .with_state(published);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

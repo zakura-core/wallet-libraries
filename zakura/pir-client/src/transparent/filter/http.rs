@@ -11,27 +11,37 @@ use crate::transparent::filter::envelope::{FilterBatch, MAX_BATCH_BYTES};
 use crate::transparent::filter::error::FilterError;
 use crate::transparent::filter::transport::{ByteCharges, FilterTransport, RangeRequest};
 use crate::transparent::filter::wire::{ChainEntry, FilterServiceHealth, FilterServiceInfo};
+use crate::transparent::routes;
+use zakura_pir_protocol::endpoint::Endpoint;
 
 // Metadata has a fixed shape; range and chain responses use the batch byte limit.
 const MAX_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_ERROR_BYTES: u64 = 800;
 
-/// Fetches ranges over HTTP.
+/// Fetches ranges over HTTP, from Transparent routes below one server base.
 pub struct HttpTransport {
     base_url: String,
+    /// `base_url`, parsed; every request addresses a Transparent route below it.
+    endpoint: Endpoint,
     client: reqwest::blocking::Client,
     timeout: Duration,
 }
 
 impl HttpTransport {
+    /// The filter service below the server base `base_url`, whose path prefix
+    /// every request keeps. Refuses a base [`Endpoint::parse`] refuses.
     pub fn new(base_url: impl Into<String>) -> Result<Self, FilterError> {
+        let base_url = base_url.into();
+        let endpoint = Endpoint::parse(&base_url)
+            .map_err(|error| FilterError::Response(format!("{base_url}: {error}")))?;
         let timeout = Duration::from_secs(120);
         let client = reqwest::blocking::Client::builder()
             .timeout(timeout)
             .build()
             .map_err(|error| FilterError::Response(error.to_string()))?;
         Ok(Self {
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            endpoint,
             client,
             timeout,
         })
@@ -41,11 +51,20 @@ impl HttpTransport {
         &self.base_url
     }
 
-    fn get(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, FilterError> {
-        let url = format!("{}{path}", self.base_url);
+    /// The URL of a Transparent `operation`, with an optional `query` string.
+    fn url(&self, operation: &str, query: Option<String>) -> Result<String, FilterError> {
+        let url = routes::url(&self.endpoint, operation)
+            .map_err(|error| FilterError::Response(format!("{operation}: {error}")))?;
+        Ok(match query {
+            Some(query) => format!("{url}?{query}"),
+            None => url,
+        })
+    }
+
+    fn get(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, FilterError> {
         let response = self
             .client
-            .get(&url)
+            .get(url)
             // The request timeout reaches the asynchronous body reader as an
             // absolute deadline. The blocking client's default alone is reset
             // on each Read call and would allow a peer to drip bytes forever.
@@ -93,13 +112,13 @@ impl HttpTransport {
     }
 
     pub fn info(&self) -> Result<FilterServiceInfo, FilterError> {
-        let bytes = self.get("/v1/filters/info", MAX_METADATA_BYTES)?;
+        let bytes = self.get(&self.url("/filters/info", None)?, MAX_METADATA_BYTES)?;
         serde_json::from_slice(&bytes)
             .map_err(|error| FilterError::Response(format!("info: {error}")))
     }
 
     pub fn health(&self) -> Result<FilterServiceHealth, FilterError> {
-        let bytes = self.get("/v1/health", MAX_METADATA_BYTES)?;
+        let bytes = self.get(&self.url("/health", None)?, MAX_METADATA_BYTES)?;
         serde_json::from_slice(&bytes)
             .map_err(|error| FilterError::Response(format!("health: {error}")))
     }
@@ -110,10 +129,11 @@ impl HttpTransport {
     /// same service that supplies the filters. It exists so the reference
     /// client can be exercised end to end against a live service.
     pub fn chain(&self, start_height: u64, count: u64) -> Result<Vec<ChainEntry>, FilterError> {
-        let bytes = self.get(
-            &format!("/v1/filters/chain?start_height={start_height}&count={count}"),
-            MAX_BATCH_BYTES,
+        let url = self.url(
+            "/filters/chain",
+            Some(format!("start_height={start_height}&count={count}")),
         )?;
+        let bytes = self.get(&url, MAX_BATCH_BYTES)?;
         serde_json::from_slice(&bytes)
             .map_err(|error| FilterError::Response(format!("chain: {error}")))
     }
@@ -124,16 +144,18 @@ impl FilterTransport for HttpTransport {
         &mut self,
         request: &RangeRequest,
     ) -> Result<(FilterBatch, ByteCharges), FilterError> {
-        let path = format!(
-            "/v1/filters/range?start_height={}&stop_block_hash={}",
-            request.start_height,
-            request.stop_block_hash.to_display_hex()
-        );
-        let url_bytes = (self.base_url.len() + path.len()) as u64;
-        let bytes = self.get(&path, MAX_BATCH_BYTES)?;
+        let url = self.url(
+            "/filters/range",
+            Some(format!(
+                "start_height={}&stop_block_hash={}",
+                request.start_height,
+                request.stop_block_hash.to_display_hex()
+            )),
+        )?;
+        let bytes = self.get(&url, MAX_BATCH_BYTES)?;
         let charges = ByteCharges {
             received: bytes.len() as u64,
-            sent: url_bytes,
+            sent: url.len() as u64,
             requests: 1,
         };
         let batch = FilterBatch::decode(&bytes)?;
@@ -176,8 +198,10 @@ mod tests {
             }
             handler(stream);
         });
+        let base_url = format!("http://{address}");
         let transport = HttpTransport {
-            base_url: format!("http://{address}"),
+            endpoint: Endpoint::parse(&base_url).unwrap(),
+            base_url,
             client: reqwest::blocking::Client::builder()
                 .no_proxy()
                 .timeout(timeout)
@@ -290,5 +314,48 @@ mod tests {
         worker.join().unwrap();
         assert!(error.contains("HTTP 500"), "unexpected error: {error}");
         assert!(error.ends_with(&"x".repeat(200)));
+    }
+
+    #[test]
+    fn requests_keep_the_base_path_below_the_transparent_namespace() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = thread::spawn(move || {
+            let mut lines = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                lines.push(
+                    String::from_utf8_lossy(&request)
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .to_owned(),
+                );
+                stream
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+            }
+            lines
+        });
+        let transport = HttpTransport::new(format!("http://{address}/edge/")).unwrap();
+        assert!(transport.health().is_err());
+        assert!(transport.chain(5, 2).is_err());
+        assert_eq!(
+            worker.join().unwrap(),
+            [
+                "GET /edge/transparent/v1/health HTTP/1.1",
+                "GET /edge/transparent/v1/filters/chain?start_height=5&count=2 HTTP/1.1",
+            ],
+            "a refused request is not retried on a legacy route"
+        );
+        assert!(HttpTransport::new("https://pir.example/edge?legacy=1").is_err());
     }
 }

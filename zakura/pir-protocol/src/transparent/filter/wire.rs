@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Response shape of `GET /v1/filters/info`.
+/// Response shape of `GET /transparent/v1/filters/info`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FilterServiceInfo {
     /// Genesis block hash in display hex; the chain's identity.
@@ -27,7 +27,7 @@ pub struct FilterServiceInfo {
     pub max_filter_bytes: usize,
 }
 
-/// Response shape of `GET /v1/health`.
+/// Response shape of `GET /transparent/v1/health`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FilterServiceHealth {
     /// `syncing`, `serving` or `failed`.
@@ -38,7 +38,7 @@ pub struct FilterServiceHealth {
     pub filters_stored: u64,
 }
 
-/// One entry of `GET /v1/filters/digests`.
+/// One entry of `GET /transparent/v1/filters/digests`.
 ///
 /// The digest is derivable from filter bytes the caller already holds, so this
 /// exists for the case where it does not hold them: comparing what different
@@ -54,7 +54,7 @@ pub struct FilterDigestEntry {
     pub filter_hash: String,
 }
 
-/// One entry of `GET /v1/filters/chain`.
+/// One entry of `GET /transparent/v1/filters/chain`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ChainEntry {
     pub height: u64,
@@ -132,7 +132,7 @@ pub struct ShardMapEntry {
     pub sealed: bool,
 }
 
-/// Response shape of `GET /v2/filters/shards`.
+/// Response shape of `GET /transparent/v1/filters/shards`.
 ///
 /// This is protocol data, not a convenience index. Shard boundaries are derived
 /// from chain content, so a wallet cannot recompute them arithmetically and an

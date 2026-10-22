@@ -13,6 +13,14 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
+use zakura_pir_protocol::endpoint::{Endpoint, PirProduct};
+
+/// The URL of one receiver operation, such as `/inventory`, below the configured server
+/// base `origin`: `{origin}/receiver/v1{operation}`, keeping any base path. This is the
+/// only place receiver routes are composed; nothing falls back to another route.
+fn receiver_url(origin: &str, operation: &str) -> Result<String, Error> {
+    Ok(Endpoint::parse(origin)?.product_url(PirProduct::Receiver, operation)?)
+}
 
 /// Hosts supply their route policy, cancellation, and timeout for every request.
 /// Enforce `limit` while streaming, reject non-success responses, and map HTTP
@@ -62,10 +70,7 @@ impl Segment {
         let payments = &publication.payments;
         let public = http
             .get(
-                &format!(
-                    "{origin}/v1/receiver/public/{}",
-                    hex::encode(payments.id()?)
-                ),
+                &receiver_url(origin, &format!("/public/{}", hex::encode(payments.id()?)))?,
                 public_bytes(payments.directory.rows)?,
             )
             .await?;
@@ -73,7 +78,7 @@ impl Segment {
         let witness = &publication.witnesses;
         let public = http
             .get(
-                &format!("{origin}/v1/receiver/public/{}", hex::encode(witness.id()?)),
+                &receiver_url(origin, &format!("/public/{}", hex::encode(witness.id()?)))?,
                 public_bytes(witness.table.rows)?,
             )
             .await?;
@@ -114,10 +119,7 @@ impl Inventories {
     /// local chain anchor for its end before capturing the inventory it names.
     pub async fn head<T: Transport>(origin: &str, http: &T, genesis: &Hash) -> Result<Head, Error> {
         let bytes = http
-            .get(
-                &format!("{}/v1/receiver/inventory", origin.trim_end_matches('/')),
-                MAX_MANIFEST_BYTES,
-            )
+            .get(&receiver_url(origin, "/inventory")?, MAX_MANIFEST_BYTES)
             .await?;
         if bytes.len() > MAX_MANIFEST_BYTES {
             return Err(Error::Malformed);
@@ -182,8 +184,10 @@ impl Inventories {
             Some(cache) => match Self::fetch(origin, http, head.clone(), budget, Some(cache)).await
             {
                 Ok(inventory) => inventory,
-                // Neither comes from a cached descriptor, so a full capture would repeat it.
-                Err(Fetched::Fresh(e @ (Error::Transport(_) | Error::Unsupported))) => {
+                // None comes from a cached descriptor, so a full capture would repeat it.
+                Err(Fetched::Fresh(
+                    e @ (Error::Transport(_) | Error::Unsupported | Error::Endpoint(_)),
+                )) => {
                     return Err(e);
                 }
                 // Anything else may come from the saved descriptors, which a full capture
@@ -213,7 +217,6 @@ impl Inventories {
         budget: usize,
         cache: Option<&DescriptorCache>,
     ) -> Result<Inventory, Fetched> {
-        let origin = origin.trim_end_matches('/');
         let inventory = hex::encode(head.inventory);
         let mut capture = Capture::new(head.clone(), budget).map_err(Fetched::Fresh)?;
         let mut cached = false;
@@ -225,7 +228,8 @@ impl Inventories {
             }
             let bytes = http
                 .get(
-                    &format!("{origin}/v1/receiver/inventory/{inventory}/{index}"),
+                    &receiver_url(origin, &format!("/inventory/{inventory}/{index}"))
+                        .map_err(Fetched::Fresh)?,
                     MAX_CHUNK_BYTES,
                 )
                 .await
@@ -249,13 +253,7 @@ impl Inventories {
         genesis: &[u8; 32],
     ) -> Result<receiver_directory::blocks::Head, Error> {
         let bytes = http
-            .get(
-                &format!(
-                    "{}/v1/receiver/block-filters/head",
-                    origin.trim_end_matches('/')
-                ),
-                16 * 1024,
-            )
+            .get(&receiver_url(origin, "/block-filters/head")?, 16 * 1024)
             .await?;
         if bytes.len() > 16 * 1024 {
             return Err(Error::Malformed);
@@ -277,13 +275,10 @@ impl Inventories {
         head.check_request(from, limit)?;
         let bytes = http
             .get(
-                &format!(
-                    "{}/v1/receiver/block-filters/{}/{}/{}",
-                    origin.trim_end_matches('/'),
-                    head.revision,
-                    from,
-                    limit
-                ),
+                &receiver_url(
+                    origin,
+                    &format!("/block-filters/{}/{from}/{limit}", head.revision),
+                )?,
                 receiver_directory::blocks::MAX_BATCH_BYTES,
             )
             .await?;
@@ -387,7 +382,7 @@ impl<T: Transport> InventoryClient<T> {
             sessions,
             screened: Mutex::new(HashMap::new()),
             traversals: Default::default(),
-            origin: origin.trim_end_matches('/').to_owned(),
+            origin: origin.to_owned(),
             http,
             inventory,
             filters,
@@ -449,16 +444,14 @@ impl<T: Transport> InventoryClient<T> {
         }
         let descriptor = self.inventory.shards().get(shard as usize)?;
         let reference = descriptor.filter.as_ref()?;
+        let url = receiver_url(
+            &self.origin,
+            &format!("/shard-filters/{}", hex::encode(reference.digest)),
+        )
+        .ok()?;
         let fetched = self
             .http
-            .get(
-                &format!(
-                    "{}/v1/receiver/shard-filters/{}",
-                    self.origin,
-                    hex::encode(reference.digest)
-                ),
-                reference.bytes as usize,
-            )
+            .get(&url, reference.bytes as usize)
             .await
             .ok()
             .filter(|bytes| bytes.len() == reference.bytes as usize)
@@ -536,7 +529,7 @@ impl<T: Transport> InventoryClient<T> {
         let body = self
             .http
             .post(
-                &format!("{}/v1/receiver/query", self.origin),
+                &receiver_url(&self.origin, "/query")?,
                 query.body().to_vec(),
                 response_bytes(segment.client.manifest().directory.rows)?,
             )
@@ -561,7 +554,7 @@ impl<T: Transport> InventoryClient<T> {
         let body = self
             .http
             .post(
-                &format!("{}/v1/receiver/query", self.origin),
+                &receiver_url(&self.origin, "/query")?,
                 query.body().to_vec(),
                 response_bytes(segment.witnesses.manifest().table.rows)?,
             )

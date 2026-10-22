@@ -20,6 +20,7 @@ use zakura_pir_client::transparent::{
     MapChecked, Provenance, Tier, TxidDisplayService, TxidError, TxidLookup,
     testing::TxidPublication,
 };
+use zakura_pir_protocol::endpoint::Endpoint;
 use zcash_client_backend::{
     data_api::{
         Account as _, WalletRead as _, WalletWrite as _,
@@ -44,7 +45,7 @@ type State = TestState<(), TestDb, LocalNetwork>;
 const VALUE: u64 = 2_000_000;
 /// Past a not-covered lookup's backoff of a day and up to a quarter.
 const PAST_BACKOFF: Duration = Duration::from_secs(31 * 3600);
-const MAP_PATH: &str = "/v2/txid/map";
+const MAP_PATH: &str = "/transparent/v1/txid/map";
 
 fn t0() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(2_000_000_000)
@@ -254,6 +255,9 @@ struct Service {
     serving: AtomicUsize,
     map: Mutex<MapAnswer>,
     malformed: AtomicBool,
+    /// A server base the service is mounted below; each request's URL is then recorded
+    /// in place of its path.
+    base: Option<Endpoint>,
     paths: Mutex<Vec<String>>,
 }
 
@@ -264,8 +268,15 @@ impl Service {
             serving: AtomicUsize::new(0),
             map: Mutex::new(MapAnswer::Serve),
             malformed: AtomicBool::new(false),
+            base: None,
             paths: Mutex::default(),
         }
+    }
+
+    /// The service mounted below `base`, which the exchange joins each path to.
+    fn below(mut self, base: &str) -> Self {
+        self.base = Some(Endpoint::parse(base).unwrap());
+        self
     }
 
     fn serve(&self, index: usize) {
@@ -296,8 +307,23 @@ impl Service {
 
 impl HttpExchange for Service {
     fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
-        self.paths.lock().unwrap().push(request.path.clone());
-        if request.path == MAP_PATH {
+        let path = match &self.base {
+            Some(base) => {
+                let url = base.join(&request.path).unwrap();
+                self.paths.lock().unwrap().push(url.clone());
+                // The service routes what follows its mount point.
+                let mount = base.join("/").unwrap();
+                format!(
+                    "/{}",
+                    url.strip_prefix(&mount).expect("a URL below the base")
+                )
+            }
+            None => {
+                self.paths.lock().unwrap().push(request.path.clone());
+                request.path.clone()
+            }
+        };
+        if path == MAP_PATH {
             match *self.map.lock().unwrap() {
                 MapAnswer::Serve => {}
                 MapAnswer::Status(status) => {
@@ -310,10 +336,10 @@ impl HttpExchange for Service {
             }
         }
         let publication = &self.publications[self.serving.load(Ordering::SeqCst)];
-        let mut reply = publication.answer(request.method, &request.path, &request.body);
+        let mut reply = publication.answer(request.method, &path, &request.body);
         // The last byte is a reply's payload, past every frame's binding and epoch: the reply
         // fails to decode, the one validation failure about the row.
-        if self.malformed.load(Ordering::SeqCst) && request.path.contains("/query/") {
+        if self.malformed.load(Ordering::SeqCst) && path.contains("/query/") {
             *reply.body.last_mut().unwrap() ^= 1;
         }
         Ok(reply)
@@ -346,6 +372,33 @@ fn hold(f: &mut Fixture, service: &TxidDisplayService, exchange: &Service, txid:
         Some((1, Some(NOT_COVERED), Some(exchange.map_sha256(0))))
     );
     assert_eq!(f.view(txid), Some(TransparentDisplayView::NotCovered));
+}
+
+/// Below a server base with a path, every detail request keeps the base path and addresses
+/// the canonical Transparent txid routes; none is a legacy route.
+#[test]
+fn detail_requests_keep_the_base_path_below_the_transparent_namespace() {
+    let mut f = wallet();
+    let txid = f.receipt(0x71, f.height);
+    let height = u64::from(f.height);
+    let exchange = Service::new(vec![TxidPublication::new(height - 5, height + 5)])
+        .below("https://pir.example/edge/");
+    let service = TxidDisplayService::new();
+    let run = f.plan(&service, t0(), 8, &[]);
+    assert_eq!(f.drive(run, &service, &exchange, t0()), [txid]);
+    assert_eq!(f.work_row(txid).map(|row| row.1), Some(Some(ABSENT)));
+
+    let urls = exchange.paths_since(0);
+    let routes: Vec<&str> = urls
+        .iter()
+        .map(|url| {
+            url.strip_prefix("https://pir.example/edge/transparent/v1/txid/")
+                .unwrap_or_else(|| panic!("{url} leaves the canonical namespace"))
+        })
+        .collect();
+    assert_eq!(routes[..2], ["init", "map"]);
+    assert!(routes.iter().any(|route| route.ends_with("/manifest")));
+    assert!(routes.iter().any(|route| route.contains("/query/")));
 }
 
 /// A lookup parked on the display map it saw becomes due once a refreshed map differs, within

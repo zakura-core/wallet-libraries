@@ -413,7 +413,7 @@ struct Routes {
 impl Routes {
     /// The status and body for `method` on `path`.
     fn answer(&self, method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
-        let route = path.strip_prefix("/v1/receiver/").unwrap_or(path);
+        let route = path.strip_prefix("/receiver/v1/").unwrap_or(path);
         let inventory = self.inventory.as_ref().unwrap();
         if (method, route) == ("POST", "query") {
             let session = body.get(4..36);
@@ -487,6 +487,8 @@ fn serve(st: &State, records: &[Record], end: ChainPoint) -> Directory {
 
 /// Serves a directory's routes in process and records every request.
 struct Directory {
+    /// The server base the client is configured with; requests must stay below it.
+    origin: String,
     routes: Mutex<Routes>,
     requests: Mutex<Vec<String>>,
 }
@@ -494,7 +496,13 @@ struct Directory {
 impl Directory {
     /// Serves `routes` at [`ORIGIN`].
     fn new(routes: Routes) -> Self {
+        Self::at(ORIGIN, routes)
+    }
+
+    /// Serves `routes` below the server base `origin`, which may carry a path.
+    fn at(origin: &str, routes: Routes) -> Self {
         Self {
+            origin: origin.to_owned(),
             routes: Mutex::new(routes),
             requests: Mutex::new(Vec::new()),
         }
@@ -519,8 +527,8 @@ impl Directory {
         limit: usize,
     ) -> Result<Vec<u8>, DirectoryError> {
         let path = url
-            .strip_prefix(ORIGIN)
-            .expect("requests stay on the origin");
+            .strip_prefix(&self.origin)
+            .expect("requests stay below the configured server base");
         self.requests
             .lock()
             .unwrap()
@@ -559,7 +567,7 @@ fn lookups(directory: &Directory) -> usize {
     let requests = directory.requests();
     requests
         .iter()
-        .filter(|r| *r == "POST /v1/receiver/query")
+        .filter(|r| *r == "POST /receiver/v1/query")
         .count()
 }
 
@@ -575,16 +583,16 @@ async fn connect_with(
     end: ChainPoint,
     filters: bool,
 ) -> InventoryClient<&Directory> {
-    let head = Inventories::head(ORIGIN, &directory, &GENESIS)
+    let head = Inventories::head(&directory.origin, &directory, &GENESIS)
         .await
         .unwrap();
-    let inventory = Inventories::capture(ORIGIN, &directory, head)
+    let inventory = Inventories::capture(&directory.origin, &directory, head)
         .await
         .unwrap();
     inventory
         .accept(&GENESIS, ACTIVATION, end.height.into(), &end.hash.0)
         .unwrap();
-    InventoryClient::new(ORIGIN, directory, inventory, filters)
+    InventoryClient::new(&directory.origin, directory, inventory, filters)
 }
 
 /// Completes bounded wallet work through encrypted payment and witness queries.
@@ -910,10 +918,46 @@ async fn shard_filters_skip_sealed_shards_that_exclude_a_receiver() {
         let fetched = directory
             .requests()
             .iter()
-            .filter(|r| r.starts_with("GET /v1/receiver/shard-filters/"))
+            .filter(|r| r.starts_with("GET /receiver/v1/shard-filters/"))
             .count();
         assert_eq!(fetched, usize::from(filters), "one fetch serves every key");
     }
+}
+
+/// A server base with a path keeps it for every receiver request: the inventory head and
+/// chunks, shard filters, both sessions' public setup, and payment and witness queries.
+#[tokio::test]
+async fn a_server_base_path_is_kept_for_every_receiver_request() {
+    let mut r = restored(&[0]);
+    let paid = BlockHeight::from(r.records[0].payment.height);
+    let plans = [Plan::sealed(paid), Plan::recent(r.through.height)];
+    let directory = Directory::at(
+        "http://127.0.0.1:8080/edge",
+        publish_with(&r.st, &r.records, &plans, &|_| 0),
+    );
+    let client = connect(&directory, r.through).await;
+    begin(&mut r, &client, true);
+    drain(&mut r.st, r.account, &client).await;
+    assert_eq!(one_time_value(&r.st), VALUE);
+    // The fixture records each path below the whole configured base, `/edge` included,
+    // and refuses any request outside it.
+    let requests = directory.requests();
+    for route in [
+        "GET /receiver/v1/inventory",
+        "GET /receiver/v1/inventory/",
+        "GET /receiver/v1/shard-filters/",
+        "GET /receiver/v1/public/",
+        "POST /receiver/v1/query",
+    ] {
+        assert!(
+            requests.iter().any(|r| r.starts_with(route)),
+            "no request to {route}: {requests:?}"
+        );
+    }
+    assert!(
+        requests.iter().all(|r| r.contains(" /receiver/v1/")),
+        "{requests:?}"
+    );
 }
 
 /// A filter that fails its digest is never a negative: the shard is read over PIR.
@@ -1182,7 +1226,7 @@ async fn recovery_continues_across_more_filters_than_the_cache_holds() {
     let fetched = directory
         .requests()
         .iter()
-        .filter(|r| r.starts_with("GET /v1/receiver/shard-filters/"))
+        .filter(|r| r.starts_with("GET /receiver/v1/shard-filters/"))
         .count();
     assert!(fetched > 3, "evicted filters are fetched again: {fetched}");
 }
@@ -1210,7 +1254,7 @@ async fn a_blind_restore_reopens_segments_beyond_the_session_budget() {
     let setups = directory
         .requests()
         .iter()
-        .filter(|r| r.starts_with("GET /v1/receiver/public/"))
+        .filter(|r| r.starts_with("GET /receiver/v1/public/"))
         .count();
     assert!(
         setups > 2 * plans.len(),

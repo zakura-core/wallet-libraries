@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `DisplayRecentMap::chunk_operation` names an index chunk's Transparent
+  operation, `/txid/map/{base}/{sha256}`. `chunk_path`, now behind
+  `http-endpoint`, returns it below `/transparent/v1` instead of `/v2`.
+
 ## [0.0.1-rc2] - 2026-10-20
 
 ### Changed
