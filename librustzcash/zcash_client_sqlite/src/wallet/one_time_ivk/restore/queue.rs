@@ -1854,7 +1854,9 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
     // Settling a refund, or a relabel ending a dispute, can retire a refund key from
     // automatic monitoring.
     fencing_monitoring(conn, &[owner.0], || {
-        admit_waiting(conn, params, sessions, account, owner.0, through, waiting, now)
+        admit_waiting(
+            conn, params, sessions, account, owner.0, through, waiting, now,
+        )
     })
 }
 

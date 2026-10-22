@@ -40,7 +40,10 @@ fn overhead_wallet(accounts: u8, enabled: bool) -> State {
         for account in ids {
             let db = st.wallet_mut().db_mut();
             db.set_one_time_recovery_enabled(account, true).unwrap();
-            assert!(db.begin_one_time_recovery(account, publication, true).unwrap());
+            assert!(
+                db.begin_one_time_recovery(account, publication, true)
+                    .unwrap()
+            );
             drain(&mut st, account, publication);
         }
     }
