@@ -3,7 +3,7 @@ use rusqlite::{Connection, params};
 use zakura_one_time_ivk::swap::{REFUND_MEMO_MAGIC, RefundMemo};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
-use crate::wallet::one_time_ivk::{KeyId, Purpose, account_key, register};
+use crate::wallet::one_time_ivk::{KeyId, Purpose, register};
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 /// Whether an internal funding record may still hold an unregistered refund index after
@@ -37,7 +37,7 @@ pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
     params: &P,
     account: AccountUuid,
 ) -> Result<(), SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
+    let owner = wallet::get_account_ref(conn, account)?;
     let records = conn
         .prepare_cached(
             "SELECT n.memo, t.mined_height FROM ironwood_received_notes n

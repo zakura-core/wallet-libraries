@@ -395,7 +395,7 @@ pub(crate) fn ensure_window<P: Parameters>(
     params: &P,
     account: AccountUuid,
 ) -> Result<(), SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
+    let owner = wallet::get_account_ref(conn, account)?;
     ensure_account(conn, owner.0)?;
     let end = super::super::swap::reservations::recovery_end(conn, owner.0)?;
     if end <= enrolled_end(conn, owner.0)? {
@@ -865,7 +865,7 @@ fn progress<P: Parameters>(
     params: &P,
     account: AccountUuid,
 ) -> Result<(), SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
+    let owner = wallet::get_account_ref(conn, account)?;
     // A complete replacement history can retire orphaned payment evidence. Operation
     // ownership remains independent, so a live quote still prevents address recycling, and
     // a promised receipt the chain no longer holds keeps the address out of reuse.
@@ -1029,7 +1029,7 @@ fn manual_progress<P: Parameters>(
     params: &P,
     account: AccountUuid,
 ) -> Result<(), SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
+    let owner = wallet::get_account_ref(conn, account)?;
     let mut handed = None;
     for _ in 0..STEP_BUDGET {
         let job: Option<(u8, Vec<u8>, Vec<u8>, u32)> = conn.query_row(
@@ -1657,16 +1657,17 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
     now: i64,
 ) -> Result<(), SqliteClientError> {
     check_deferred_receipts(conn, params)?;
-    let accounts: Vec<AccountUuid> = conn
+    // Enabling recovery validated each account's key, so the steps below look up only its
+    // row and leave decoding it, about 0.4 ms, to the rare calls that register a key.
+    let accounts: Vec<(AccountUuid, bool)> = conn
         .prepare(
-            "SELECT a.uuid FROM accounts a
+            "SELECT a.uuid, r.enabled FROM accounts a
         JOIN ironwood_one_time_recovery r ON r.account_id = a.id",
         )?
-        .query_map([], |r| r.get(0).map(AccountUuid))?
+        .query_map([], |r| Ok((AccountUuid(r.get(0)?), r.get(1)?)))?
         .collect::<Result<_, _>>()?;
-    for account in accounts {
-        let (owner, _) = account_key(conn, params, account)?;
-        if token(conn, owner.0)?.0 {
+    for (account, enabled) in accounts {
+        if enabled {
             recover_refund_memos(conn, params, account)?;
         }
         admit(conn, params, sessions, account, now)?;
@@ -1816,7 +1817,7 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
 ) -> Result<(), SqliteClientError> {
     // Settling a refund, or a relabel ending a dispute, can retire a refund key from
     // automatic monitoring.
-    let (owner, _) = account_key(conn, params, account)?;
+    let owner = wallet::get_account_ref(conn, account)?;
     fencing_monitoring(conn, &[owner.0], || {
         admit_waiting(conn, params, sessions, account, now)
     })
@@ -1833,7 +1834,7 @@ fn admit_waiting<P: Parameters>(
     let Some(through) = scanned_tip(conn)? else {
         return Ok(());
     };
-    let (owner, _) = account_key(conn, params, account)?;
+    let owner = wallet::get_account_ref(conn, account)?;
     #[allow(clippy::type_complexity)]
     let waiting: Vec<(i64, KeyId, TxId, u32, Vec<u8>, u32, [u8; 32], u64)> = conn
         .prepare(
