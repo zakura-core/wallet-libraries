@@ -7,9 +7,9 @@ pub const REFUND_MEMO_MAGIC: [u8; 5] = *b"\xffZSWP";
 /// The deposit address is not stored: the funding transaction's single transparent
 /// output already pays it, and recovery needs only the index.
 ///
-/// Decoding does not establish provenance. Accept a record only after
-/// authenticating an ordinary internal note and verifying that its transaction
-/// was the wallet's own send. Process zero-value and spent notes too.
+/// Decoding does not establish provenance. Accept a record only from an ordinary
+/// note the wallet decrypts with its internal key. Only the wallet can create such
+/// an output, so its inputs need not be known. Process zero-value and spent notes too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RefundMemo {
     index: u64,

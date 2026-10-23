@@ -35,6 +35,10 @@ and this library adheres to Rust's notion of
 - `WalletDb::close_finished_one_time_keys`, `WalletDb::mark_one_time_account_fresh` and `WalletDb::recheck_one_time_key_history`. `WalletDb::check_one_time_history` replaces the recheck.
 - The unused `now` argument of `WalletDb::set_one_time_recovery_enabled`, `WalletDb::begin_one_time_recovery`, `WalletDb::check_one_time_history` and `WalletDb::reserve_refund_key`, and the write-only `registered_at` key column.
 
+### Fixed
+
+- Refund recovery trusts a refund memo on any of the account's internal Ironwood notes, without requiring the funding transaction to spend a note the wallet knows. A second device or a restore that has not recovered the one-time notes a swap spent, or whose birthday falls after them, now registers the funded refund key instead of ignoring the memo and issuing the same refund index again. `WalletDb::reserve_refund_key` waits only while an internal note's memo has not been retrieved.
+
 ## [0.1.0-rc9.3] - 2026-10-20
 
 ### Changed
