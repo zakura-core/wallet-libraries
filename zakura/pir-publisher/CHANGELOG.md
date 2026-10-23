@@ -2,12 +2,18 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc3] - 2026-10-23
+
 ### Added
 
 - The `receiver` product: `receiver::snapshot::{SnapshotPublisherExt, assign_ordinals}`
   for payment table placement and `receiver::witness::TablePublisherExt` for companion
   witness tables. The `receiver-crypto` feature adds `receiver::witness::{ShardPaths,
   payloads}`, the lower inclusion paths. Built publications are byte-identical.
+
+### Changed
+
+- Use PIR protocol and server core `0.0.1-rc3`.
 
 ### Removed
 

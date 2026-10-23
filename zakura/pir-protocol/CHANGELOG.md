@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc3] - 2026-10-23
+
 ### Added
 
 - The `receiver` product: the receiver wire codec, payment and companion witness table

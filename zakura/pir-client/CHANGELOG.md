@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc3] - 2026-10-23
+
 ### Added
 
 - The `receiver` product: `receiver::{Client, WitnessClient}` and `receiver::transport`,
@@ -9,6 +11,10 @@
   transport.
 - The `receiver-wallet` feature: `receiver::{publication, lookup, witness, screen}`, the
   bounded network steps the wallet recovery queue consumes.
+
+### Changed
+
+- Use PIR protocol and server crates `0.0.1-rc3` and SQLite `0.1.0-rc9.4`.
 
 ### Removed
 

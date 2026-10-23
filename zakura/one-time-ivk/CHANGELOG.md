@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc4] - 2026-10-23
+
 ### Changed
 
 - `swap::Observation` has `receipts`, the Zcash transactions the provider reports as the operation's payouts or refunds, and no longer implements `Copy`.

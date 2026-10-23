@@ -7,6 +7,8 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9.4] - 2026-10-23
+
 ### Changed
 
 - Read transaction history outputs and received/spent amounts in batches to avoid repeatedly scanning the entire wallet for each transaction.
@@ -26,6 +28,7 @@ and this library adheres to Rust's notion of
 - `WalletDb::get_wallet_summary` computes scan and recovery progress without looking up
   each scanned block in the scan queue, which made it slow on wallets with millions of
   scanned blocks. The reported progress is unchanged.
+- Use backend `0.1.0-rc9.4` and one-time IVK `0.0.1-rc4`.
 
 ### Removed
 

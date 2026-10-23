@@ -2,9 +2,12 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc4] - 2026-10-23
+
 ### Changed
 
 - A refund key's `SUCCESS` without a positive `refundedAmount` now expects no refund (`ReceiptExpectation::None`) instead of `Unknown`, except an exact-output swap with no reported amount, which still expects its unused input. The refund key can then leave automatic monitoring once the swap ends. It was previously never conclusive.
+- Use one-time IVK `0.0.1-rc4`.
 
 ### Added
 
