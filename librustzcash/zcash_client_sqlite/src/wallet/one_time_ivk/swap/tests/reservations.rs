@@ -1409,6 +1409,48 @@ fn a_fast_clock_cannot_release_a_silent_quote_early() {
     assert_eq!(issue(&mut st, fast), Some(0));
 }
 
+/// A funded quote whose latest status awaits a deposit is held by its funding evidence past
+/// the day's limit. A late payout recovered then must not let that limit release it: a reorg
+/// that drops the payout and an empty replacement history mark the key unpaid again, and
+/// reissuing it would hand the funded quote's receiver to a second quote.
+#[test]
+fn a_reorged_late_payout_keeps_a_funded_quote_past_the_started_limit() {
+    let awaiting = zakura_one_time_ivk::swap::OperationStatus::AwaitingDeposit;
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let (key, _) = quote(&mut st, now, "funded", true);
+    assert!(report(&mut st, ("funded", None), awaiting, false, now + 2));
+    assert!(report(&mut st, ("funded", None), Active, true, now + 1));
+    let later = now + 60 + 25 * 3600;
+    chain_agrees(st.wallet().db(), later);
+    assert_ne!(issue(&mut st, later), Some(0));
+    assert!(held(&st, 0), "the funding evidence holds it");
+
+    let floor = tip(&st).height;
+    store::restore::tests::discovery::pay_candidate(&mut st, key);
+    catch_up(&mut st);
+    assert_eq!(
+        store::restore::tests::discovery::one_time_notes(&st),
+        [(100_000, false)]
+    );
+    chain_agrees(st.wallet().db(), later);
+    assert_ne!(issue(&mut st, later), Some(0));
+    assert!(held(&st, 0), "a paid key keeps needing a fresh status");
+
+    st.truncate_to_height(floor);
+    st.generate_and_scan_empty_blocks(3);
+    check_window(&mut st);
+    let used: bool = value(
+        st.wallet().conn(),
+        "SELECT used FROM ironwood_one_time_keys WHERE purpose = 1 AND key_index = ?1",
+        [0u64.to_be_bytes()],
+    );
+    assert!(!used, "the empty replacement history clears the payment");
+    chain_agrees(st.wallet().db(), later);
+    assert_ne!(issue(&mut st, later), Some(0));
+    assert!(held(&st, 0));
+}
+
 /// Beginning a request needs a future deadline, and each request gets a fresh identity.
 #[test]
 fn begin_needs_a_future_deadline_and_returns_a_fresh_request() {

@@ -101,8 +101,10 @@ fn deadline_clock(conn: &Connection, now: i64) -> Result<i64, SqliteClientError>
 }
 
 /// Releases expired reservations only when no current request can still own them.
-/// A started operation needs a recent conclusive status, or its deadline to have passed
-/// [`STARTED_STATUS_GRACE_SECONDS`] ago by the deadline clock. Funding evidence sticks.
+/// A started operation needs a recent conclusive status. On an unpaid key with no pending
+/// payment, which is what reissue requires, its deadline having passed
+/// [`STARTED_STATUS_GRACE_SECONDS`] ago by the deadline clock also does. A paid key keeps
+/// needing the status, since a reorg can make it unpaid again. Funding evidence sticks.
 pub(in crate::wallet::one_time_ivk) fn reap<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -122,7 +124,8 @@ pub(in crate::wallet::one_time_ivk) fn reap<P: Parameters>(
                  AND (o.deadline > :deadline_now OR
                      (o.reference IS NOT NULL AND o.expectation = 0) OR
                      (o.funded = 1 AND o.expectation != 1 AND k.used = 0) OR
-                     (o.started = 1 AND o.deadline > :deadline_now - :grace AND NOT (
+                     (o.started = 1 AND (o.deadline > :deadline_now - :grace
+                         OR k.used = 1 OR {RECEIVE_PENDING}) AND NOT (
                          o.observed_at BETWEEN :now - :fresh AND :now
                          AND (o.expectation = 1 OR (o.funded = 0 AND o.expectation IN (3, 4))
                               OR (k.used = 1 AND o.expectation IN (2, 3)))))))"
