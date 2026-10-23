@@ -1495,56 +1495,57 @@ pub(crate) fn record_lookup<P: Parameters>(
         previous = Some(record);
     }
     let discovery_enabled = token(conn, owner.0)?.0;
-    if let Some(segment) = page.segment {
-        for record in &page.records {
-            let candidate = directory_candidate(&record.payment).expect("validated above");
-            if (discovery_enabled
-                || repairable(conn, params, account, work.work.key, id, &candidate)?)
-                && !admitted(conn, id, &candidate)?
-            {
-                queue_payment(
-                    conn,
-                    params,
-                    account,
-                    work.work.key,
-                    &candidate,
-                    (segment.payments, segment.witnesses, record.ordinal),
-                )?;
+    // A candidate returns a retired key to monitoring, and completed history can end a
+    // displaced receipt's repair (see `REPAIR_KEY`), so the page applies inside the fence.
+    fencing_monitoring(conn, params, &[owner.0], || {
+        if let Some(segment) = page.segment {
+            for record in &page.records {
+                let candidate = directory_candidate(&record.payment).expect("validated above");
+                if (discovery_enabled
+                    || repairable(conn, params, account, work.work.key, id, &candidate)?)
+                    && !admitted(conn, id, &candidate)?
+                {
+                    queue_payment(
+                        conn,
+                        params,
+                        account,
+                        work.work.key,
+                        &candidate,
+                        (segment.payments, segment.witnesses, record.ordinal),
+                    )?;
+                }
             }
         }
-    }
-    if let Some(next) = &page.next {
-        let last = next
-            .last
-            .as_ref()
-            .map(|r| {
-                r.encode()
-                    .map(|b| b.to_vec())
-                    .map_err(|_| invalid("invalid cursor"))
-            })
-            .transpose()?;
-        conn.execute(
-            "UPDATE ironwood_one_time_lookups SET checked_height = COALESCE(?2, checked_height),
-            inventory = ?3, shard = ?4, segment = ?5, last_record = ?6, attempts = 0,
-            next_attempt_at = 0 WHERE one_time_key_id = ?1",
-            params![
-                id,
-                page.checked_through.map(u32::from),
-                next.inventory,
-                next.shard,
-                next.segment,
-                last
-            ],
-        )?;
-    } else {
-        let end = u32::from(publication.end.height);
-        // Coverage joins an earlier completion only when the two spans meet.
-        let joined = done
-            .zip(done_from)
-            .filter(|(d, f)| *f <= start && start <= d.saturating_add(1))
-            .map_or(start, |(_, f)| f);
-        // Completed history can end a displaced receipt's repair (see `REPAIR_KEY`).
-        fencing_monitoring(conn, params, &[owner.0], || {
+        if let Some(next) = &page.next {
+            let last = next
+                .last
+                .as_ref()
+                .map(|r| {
+                    r.encode()
+                        .map(|b| b.to_vec())
+                        .map_err(|_| invalid("invalid cursor"))
+                })
+                .transpose()?;
+            conn.execute(
+                "UPDATE ironwood_one_time_lookups SET checked_height = COALESCE(?2, checked_height),
+                inventory = ?3, shard = ?4, segment = ?5, last_record = ?6, attempts = 0,
+                next_attempt_at = 0 WHERE one_time_key_id = ?1",
+                params![
+                    id,
+                    page.checked_through.map(u32::from),
+                    next.inventory,
+                    next.shard,
+                    next.segment,
+                    last
+                ],
+            )?;
+        } else {
+            let end = u32::from(publication.end.height);
+            // Coverage joins an earlier completion only when the two spans meet.
+            let joined = done
+                .zip(done_from)
+                .filter(|(d, f)| *f <= start && start <= d.saturating_add(1))
+                .map_or(start, |(_, f)| f);
             conn.execute(
                 &format!(
                     "UPDATE ironwood_one_time_lookups SET checked_height = ?2, {CURSOR_RESET},
@@ -1554,20 +1555,20 @@ pub(crate) fn record_lookup<P: Parameters>(
                 ),
                 params![id, end, end >= target, discovery_enabled, joined],
             )?;
-            Ok(())
-        })?;
-        // A candidate this history did not bind again still lacks a usable witness, so the
-        // read cannot settle the key: its shard is read again later.
-        let unbound: Option<u32> = conn.query_row(
-            "SELECT MIN(height) FROM ironwood_one_time_payment_recovery
-             WHERE one_time_key_id = ?1 AND payments IS NULL",
-            [id],
-            |r| r.get(0),
-        )?;
-        if let Some(height) = unbound {
-            rewind_lookup(conn, id, height, now.saturating_add(60))?;
+            // A candidate this history did not bind again still lacks a usable witness, so the
+            // read cannot settle the key: its shard is read again later.
+            let unbound: Option<u32> = conn.query_row(
+                "SELECT MIN(height) FROM ironwood_one_time_payment_recovery
+                 WHERE one_time_key_id = ?1 AND payments IS NULL",
+                [id],
+                |r| r.get(0),
+            )?;
+            if let Some(height) = unbound {
+                rewind_lookup(conn, id, height, now.saturating_add(60))?;
+            }
         }
-    }
+        Ok(())
+    })?;
     admit(conn, params, sessions, account, now)?;
     progress(conn, params, account)?;
     Ok(true)

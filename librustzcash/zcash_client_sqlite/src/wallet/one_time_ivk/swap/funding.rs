@@ -106,14 +106,19 @@ pub(in crate::wallet::one_time_ivk) fn record_operation<P: Parameters>(
     if rebound {
         return Err(invalid("refund key is bound to another deposit"));
     }
-    // Until its funding transaction is stored, the operation expects no receipt.
+    // Until its funding transaction is stored, the operation expects no receipt. A first
+    // operation on a funded key replaces the memo-only rule, so it runs inside the fence.
     if !recorded {
-        conn.execute(
-            "INSERT INTO ironwood_one_time_operations
-                (one_time_key_id, reference, deadline, begun_at, expectation)
-             VALUES (?1, ?2, ?3, ?4, 1)",
-            params![key, deposit, deadline, now],
-        )?;
+        let (owner, _) = account_key(conn, params, account)?;
+        queue::fencing_monitoring(conn, params, &[owner.0], || {
+            conn.execute(
+                "INSERT INTO ironwood_one_time_operations
+                    (one_time_key_id, reference, deadline, begun_at, expectation)
+                 VALUES (?1, ?2, ?3, ?4, 1)",
+                params![key, deposit, deadline, now],
+            )?;
+            Ok(())
+        })?;
     }
     Ok(())
 }
