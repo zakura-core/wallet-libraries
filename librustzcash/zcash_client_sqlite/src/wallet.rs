@@ -4132,24 +4132,38 @@ fn select_truncation_height(
     requested_height: BlockHeight,
     checkpoint_candidates: bool,
 ) -> Result<BlockHeight, SqliteClientError> {
-    let checkpoints = if checkpoint_candidates {
-        "UNION SELECT checkpoint_id FROM sapling_tree_checkpoints
-         UNION SELECT checkpoint_id FROM orchard_tree_checkpoints
-         UNION SELECT checkpoint_id FROM ironwood_tree_checkpoints"
+    let tolerance = [
+        crate::SAPLING_TABLES_PREFIX,
+        crate::ORCHARD_TABLES_PREFIX,
+        crate::IRONWOOD_TABLES_PREFIX,
+    ]
+    .map(pool_truncation_tolerance_sql)
+    .join(" AND ");
+    let blocks = format!(
+        "SELECT MAX(height) FROM blocks
+         WHERE height <= :requested_height
+         AND {tolerance}"
+    );
+    // Each source takes its own maximum, so the `blocks` maximum keeps its index-ordered
+    // search instead of evaluating the tolerances at every stored height. The checkpoint
+    // tables hold at most a few hundred rows.
+    let query = if checkpoint_candidates {
+        format!(
+            "SELECT MAX(h) FROM (
+                 SELECT ({blocks}) AS h
+                 UNION ALL
+                 SELECT (SELECT MAX(height) FROM (
+                     SELECT checkpoint_id AS height FROM sapling_tree_checkpoints
+                     UNION SELECT checkpoint_id FROM orchard_tree_checkpoints
+                     UNION SELECT checkpoint_id FROM ironwood_tree_checkpoints)
+                  WHERE height <= :requested_height
+                  AND {tolerance}))"
+        )
     } else {
-        ""
+        blocks
     };
     conn.query_row(
-        &format!(
-            "SELECT MAX(height) FROM (SELECT height FROM blocks {checkpoints})
-             WHERE height <= :requested_height
-             AND {sapling_tolerance}
-             AND {orchard_tolerance}
-             AND {ironwood_tolerance}",
-            sapling_tolerance = pool_truncation_tolerance_sql(crate::SAPLING_TABLES_PREFIX),
-            orchard_tolerance = pool_truncation_tolerance_sql(crate::ORCHARD_TABLES_PREFIX),
-            ironwood_tolerance = pool_truncation_tolerance_sql(crate::IRONWOOD_TABLES_PREFIX),
-        ),
+        &query,
         named_params! {":requested_height": u32::from(requested_height)},
         |row| row.get::<_, Option<u32>>(0),
     )
@@ -6553,6 +6567,57 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    /// Counting checkpoint heights as candidates must not make selection evaluate the per-pool
+    /// tolerances at every stored block: on a long history, a shallow rewind to a height
+    /// checkpointed in every pool costs about as much as the scanned-block selection alone.
+    #[test]
+    fn checkpoint_candidates_keep_selection_cheap_on_long_histories() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        };
+
+        let mut conn = connection_with_checkpoint_tables();
+        conn.execute_batch(
+            "WITH RECURSIVE h(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM h WHERE x < 100000)
+             INSERT INTO blocks (height) SELECT x FROM h;
+             WITH RECURSIVE h(x) AS (SELECT 99901 UNION ALL SELECT x + 1 FROM h WHERE x < 100000)
+             INSERT INTO sapling_tree_checkpoints SELECT x FROM h;
+             INSERT INTO orchard_tree_checkpoints SELECT checkpoint_id FROM sapling_tree_checkpoints;
+             INSERT INTO ironwood_tree_checkpoints SELECT checkpoint_id FROM sapling_tree_checkpoints;
+             WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x + 1 FROM n WHERE x < 999)
+             INSERT INTO transactions (id_tx, mined_height) SELECT x + 1, 99901 + x % 100 FROM n;
+             INSERT INTO sapling_received_notes (transaction_id, commitment_tree_position)
+             SELECT id_tx, id_tx FROM transactions;",
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        let steps = |checkpoint_candidates| {
+            let count = Arc::new(AtomicU64::new(0));
+            let counter = count.clone();
+            tx.progress_handler(
+                100,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            );
+            assert_eq!(
+                select_truncation_height(&tx, BlockHeight::from_u32(99_995), checkpoint_candidates)
+                    .unwrap(),
+                BlockHeight::from_u32(99_995),
+            );
+            tx.progress_handler(100, None::<fn() -> bool>);
+            count.load(Ordering::Relaxed)
+        };
+        let blocks_only = steps(false);
+        let with_checkpoints = steps(true);
+        assert!(
+            with_checkpoints <= 2 * blocks_only + 100,
+            "{with_checkpoints} progress steps with checkpoint candidates, {blocks_only} without"
+        );
     }
 
     /// A pool whose checkpoints all lie at or below the requested height tolerates a
