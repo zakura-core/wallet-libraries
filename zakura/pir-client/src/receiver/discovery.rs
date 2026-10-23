@@ -5,6 +5,7 @@ use super::{
     session::Error as DirectoryError,
     transport::{InventoryClient, Segment, Transport},
 };
+use core::num::NonZeroUsize;
 use zcash_client_backend::data_api::one_time_ivk::restore::{
     LookupCursor, LookupPage, LookupWork, PublicationEnd, RECOVERY_PAGE_LIMIT, RecoveryPublication,
     SegmentRef, StepShard, WitnessAnswer, WitnessRequest,
@@ -24,6 +25,9 @@ fn checked(error: super::crypto::Error) -> DirectoryError {
 
 /// Most shards one step may cover through negative filters before returning.
 pub const FILTER_STEP_LIMIT: usize = 256;
+
+/// The pages [`lookup`] reads per step.
+const PAGE_LIMIT: NonZeroUsize = NonZeroUsize::new(RECOVERY_PAGE_LIMIT).unwrap();
 
 /// The wallet's view of a captured inventory: its identity and locally checkable frontier.
 /// The caller must still check network and activation coverage when capturing it.
@@ -47,11 +51,26 @@ pub fn publication(inventory: &Inventory) -> RecoveryPublication {
 /// without PIR; any other required shard, including the recent tier and a shard whose
 /// filter is missing, malformed or matching, is read in every segment through its final
 /// page. A cursor from another inventory is never reinterpreted: the step starts again
-/// from `work.from`.
+/// from `work.from`. A step reads at most [`RECOVERY_PAGE_LIMIT`] pages; [`lookup_pages`]
+/// takes a smaller cap.
 pub async fn lookup<T: Transport>(
     client: &InventoryClient<T>,
     work: &LookupWork,
 ) -> Result<LookupPage, DirectoryError> {
+    lookup_pages(client, work, PAGE_LIMIT).await
+}
+
+/// [`lookup`], reading at most `max_pages` pages (one PIR query each) from the segment,
+/// capped at [`RECOVERY_PAGE_LIMIT`]. A step that stops before the segment's final page
+/// returns a cursor after its last record, which the wallet records and the next step
+/// resumes from. A small cap lets a slow transport finish and record a step within its
+/// time budget.
+pub async fn lookup_pages<T: Transport>(
+    client: &InventoryClient<T>,
+    work: &LookupWork,
+    max_pages: NonZeroUsize,
+) -> Result<LookupPage, DirectoryError> {
+    let max_pages = max_pages.get().min(RECOVERY_PAGE_LIMIT) as u32;
     let inventory = client.inventory();
     let publication = publication(inventory);
     if publication.history_revision != work.token.history_revision
@@ -139,7 +158,8 @@ pub async fn lookup<T: Transport>(
             payments: connected.publication().payments.id()?,
             witnesses: connected.publication().witnesses.id()?,
         });
-        let finished = read_segment(client, &connected, receiver, last, &mut result).await?;
+        let finished =
+            read_segment(client, &connected, receiver, last, max_pages, &mut result).await?;
         result.next = if !finished {
             cursor(shard, segment, result.records.last().cloned())
         } else if (segment as usize) + 1 < descriptor.segments.len() {
@@ -205,14 +225,15 @@ fn checked_step(page: LookupPage, work: &LookupWork) -> Result<LookupPage, Direc
     }
 }
 
-/// Reads up to [`RECOVERY_PAGE_LIMIT`] consecutive pages of `receiver` in one segment after
-/// `last`, appending them to `result`. True once the segment's final page (or an empty
-/// history) has been read.
+/// Reads up to `pages` consecutive pages of `receiver` in one segment after `last`,
+/// appending them to `result`. True once the segment's final page (or an empty history)
+/// has been read.
 async fn read_segment<T: Transport>(
     client: &InventoryClient<T>,
     segment: &Segment,
     receiver: [u8; 43],
     last: Option<super::RawRecord>,
+    pages: u32,
     result: &mut LookupPage,
 ) -> Result<bool, DirectoryError> {
     let start = match &last {
@@ -220,7 +241,7 @@ async fn read_segment<T: Transport>(
         Some(saved) => saved.page + 1,
         None => 0,
     };
-    for offset in 0..RECOVERY_PAGE_LIMIT as u32 {
+    for offset in 0..pages {
         let page = start.checked_add(offset).ok_or(DirectoryError::Malformed)?;
         let Some(record) = client.page(segment, receiver, page).await? else {
             if page != 0 {

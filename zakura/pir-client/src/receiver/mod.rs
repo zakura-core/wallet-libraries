@@ -20,7 +20,7 @@ pub mod transport;
 
 pub use client::{Client, Query, WitnessClient, WitnessQuery};
 #[cfg(feature = "receiver-wallet")]
-pub use discovery::{FILTER_STEP_LIMIT, lookup, publication, screen, witness};
+pub use discovery::{FILTER_STEP_LIMIT, lookup, lookup_pages, publication, screen, witness};
 
 /// Zcash mainnet's genesis block hash, in internal byte order, which its directory
 /// publications commit to.

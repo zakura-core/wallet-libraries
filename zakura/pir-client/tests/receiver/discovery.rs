@@ -9,7 +9,7 @@ use zakura_pir_client::receiver::{
     RawRecord,
     crypto::{Payment, Receiver, Record},
     inventory::{FilterRef, Inventory, Shard},
-    lookup, publication as wallet_publication,
+    lookup, lookup_pages, publication as wallet_publication,
     session::{Error as DirectoryError, MIN_ROWS, Publication},
     shards::{Coverage, ShardFilter},
     snapshot::{Manifest, PROFILE, Snapshot},
@@ -24,15 +24,17 @@ use zakura_pir_query_server::receiver::server::{Server, WitnessServer};
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _,
     chain::BlockSource as _,
-    testing::{AddressType, IronwoodFvk, TestBuilder, TestState},
+    one_time_ivk::restore::RECOVERY_PAGE_LIMIT,
+    testing::{AddressType, IronwoodFvk, TestBuilder, TestRng, TestState},
     transparent_ledger::ChainPoint,
 };
 use zcash_client_sqlite::{
-    AccountUuid,
+    AccountUuid, WalletDb,
     testing::{
         BlockCache,
         db::{TestDb, TestDbFactory},
     },
+    util::testing::FixedClock,
     wallet::one_time_ivk::{KeyId, Purpose},
 };
 use zcash_primitives::block::BlockHash;
@@ -171,7 +173,12 @@ struct Restored {
 /// its key's lookup, scanning each before discovery knows the key, then scans one more
 /// block.
 fn restored(paid: &[u64]) -> Restored {
-    let mut st = ironwood_wallet_in(TestDbFactory::default());
+    restored_in(TestDbFactory::default(), paid)
+}
+
+/// [`restored`], with the wallet stored as `factory` makes it.
+fn restored_in(factory: TestDbFactory, paid: &[u64]) -> Restored {
+    let mut st = ironwood_wallet_in(factory);
     let account = st.test_account().unwrap().id();
     st.generate_and_scan_empty_blocks(1);
     let mut records = Vec::new();
@@ -1416,4 +1423,128 @@ async fn screening_a_round_traverses_each_filter_once() {
     assert_eq!(client.filter_traversals(), 1);
     drain(&mut r.st, r.account, &client).await;
     assert_eq!(one_time_value(&r.st), VALUE);
+}
+
+/// Drops `st`'s wallet handle and opens its database file again, keeping only what the
+/// wallet persisted.
+fn reopen(st: &mut State) {
+    let path = st.wallet().conn().path().unwrap().to_owned();
+    let clock = FixedClock::new(std::time::SystemTime::UNIX_EPOCH);
+    let reopened =
+        WalletDb::for_path(path, *st.network(), clock, TestRng::seed_from_u64(0)).unwrap();
+    *st.wallet_mut().db_mut() = reopened;
+}
+
+/// One address paid more times than a step may read, all in one segment, is recovered
+/// across capped steps. The first step stops mid-segment, the wallet restarts from what it
+/// recorded, and each later step resumes after the last page the previous one read. A cap
+/// above [`RECOVERY_PAGE_LIMIT`] reads that many, and an uncapped step finishes the
+/// segment. Every page is queried once and every payment is credited once.
+#[tokio::test]
+async fn capped_steps_recover_a_long_history_across_a_restart() {
+    use std::num::NonZeroUsize;
+    let payments = 2 * 7 + RECOVERY_PAGE_LIMIT + 2;
+    let mut r = restored_in(TestDbFactory::file_backed(), &vec![0; payments]);
+    let directory = serve(&r.st, &r.records, r.through);
+    let client = connect(&directory, r.through).await;
+    begin(&mut r, &client, true);
+    let key = KeyId::new(Purpose::Receive, 0);
+    let seven = NonZeroUsize::new(7).unwrap();
+    let mut read = vec![];
+
+    // Reads one step for the key, checks it resumes where the wallet's recorded cursor
+    // says, and records it; returns the page.
+    async fn step(
+        r: &mut Restored,
+        directory: &Directory,
+        client: &InventoryClient<&Directory>,
+        key: KeyId,
+        cap: Option<NonZeroUsize>,
+        read: &mut Vec<RawRecord>,
+    ) -> zcash_client_backend::data_api::one_time_ivk::restore::LookupPage {
+        let work = due(r, key);
+        assert_eq!(
+            work.cursor.as_ref().and_then(|c| c.last.as_ref()),
+            read.last(),
+            "the step resumes after the last recorded page"
+        );
+        let queries = lookups(directory);
+        let page = match cap {
+            Some(cap) => lookup_pages(client, &work, cap).await.unwrap(),
+            None => lookup(client, &work).await.unwrap(),
+        };
+        assert_eq!(lookups(directory) - queries, page.records.len());
+        assert!(
+            r.st.wallet_mut()
+                .db_mut()
+                .record_one_time_lookup(r.account, &work, &page, NOW)
+                .unwrap()
+        );
+        assert_eq!(due(r, key).cursor, page.next);
+        read.extend(page.records.iter().cloned());
+        page
+    }
+
+    let first = step(&mut r, &directory, &client, key, Some(seven), &mut read).await;
+    assert_eq!(first.records.len(), 7);
+    let next = first.next.clone().unwrap();
+    assert_eq!((next.shard, next.segment), (0, 0));
+    assert_eq!(first.checked_through, None);
+
+    // A restart keeps only the recorded cursor, so the second step resumes from it.
+    drop(client);
+    reopen(&mut r.st);
+    let client = connect(&directory, r.through).await;
+    let first_work = {
+        let mut work = due(&r, key);
+        work.cursor = None;
+        work
+    };
+    assert_eq!(
+        step(&mut r, &directory, &client, key, Some(seven), &mut read)
+            .await
+            .records
+            .len(),
+        7
+    );
+    // A late callback for the first step cannot record its pages again.
+    assert!(
+        !r.st
+            .wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(r.account, &first_work, &first, NOW)
+            .unwrap()
+    );
+    let wide = step(
+        &mut r,
+        &directory,
+        &client,
+        key,
+        NonZeroUsize::new(usize::MAX),
+        &mut read,
+    )
+    .await;
+    assert_eq!(wide.records.len(), RECOVERY_PAGE_LIMIT);
+    assert!(!wide.complete());
+    let last = step(&mut r, &directory, &client, key, None, &mut read).await;
+    assert_eq!(last.records.len(), 2);
+    assert!(last.complete());
+    assert_eq!(
+        read.iter().map(|r| r.page).collect::<Vec<_>>(),
+        (0..payments as u32).collect::<Vec<_>>()
+    );
+    assert!(read.iter().all(|r| r.total == payments as u32));
+
+    drain(&mut r.st, r.account, &client).await;
+    assert_eq!(one_time_value(&r.st), payments as u64 * VALUE);
+    let notes: usize =
+        r.st.wallet()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM ironwood_received_notes WHERE one_time_key_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(notes, payments);
 }
