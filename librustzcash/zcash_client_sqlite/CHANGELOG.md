@@ -35,6 +35,10 @@ and this library adheres to Rust's notion of
 - `WalletDb::close_finished_one_time_keys`, `WalletDb::mark_one_time_account_fresh` and `WalletDb::recheck_one_time_key_history`. `WalletDb::check_one_time_history` replaces the recheck.
 - The unused `now` argument of `WalletDb::set_one_time_recovery_enabled`, `WalletDb::begin_one_time_recovery`, `WalletDb::check_one_time_history` and `WalletDb::reserve_refund_key`, and the write-only `registered_at` key column.
 
+### Fixed
+
+- A reorg shortly after a wallet starts scanning no longer leaves it unable to rewind. `WalletDb::truncate_to_height` can now rewind to the tree state the wallet started scanning from, at `birthday - 1`, which is also the safe rewind height it reports. Before, a rewind past every scanned block with a shielded output was refused, and so was the retry at the reported safe height.
+
 ## [0.1.0-rc9.3] - 2026-10-20
 
 ### Changed
