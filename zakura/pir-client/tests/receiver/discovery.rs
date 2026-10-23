@@ -1452,8 +1452,8 @@ async fn capped_steps_recover_a_long_history_across_a_restart() {
     let seven = NonZeroUsize::new(7).unwrap();
     let mut read = vec![];
 
-    // Reads one step for the key, checks it resumes where the wallet's recorded cursor
-    // says, and records it; returns the page.
+    // Reads and records one step for the key, checking it resumes after the last page read
+    // and leaves the wallet holding exactly its continuation.
     async fn step(
         r: &mut Restored,
         directory: &Directory,
@@ -1480,7 +1480,15 @@ async fn capped_steps_recover_a_long_history_across_a_restart() {
                 .record_one_time_lookup(r.account, &work, &page, NOW)
                 .unwrap()
         );
-        assert_eq!(due(r, key).cursor, page.next);
+        let pending =
+            r.st.wallet()
+                .db()
+                .one_time_recovery(r.account, NOW)
+                .unwrap()
+                .lookups
+                .into_iter()
+                .find(|work| work.work.key == key);
+        assert_eq!(pending.and_then(|work| work.cursor), page.next);
         read.extend(page.records.iter().cloned());
         page
     }
