@@ -40,7 +40,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         else {
             return Ok(0);
         };
-        Ok(queue::direct_keys(self.conn.borrow(), owner.0)?.len())
+        Ok(queue::direct_keys(self.conn.borrow(), &self.params, owner.0)?.len())
     }
 
     /// Captures eligible receiver identities for local filter matching and its cancellation fence.

@@ -351,7 +351,7 @@ pub(in crate::wallet::one_time_ivk) fn record_status<P: Parameters>(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     for id in &operations {
-        record(conn, *id, &observation, now)?;
+        record(conn, params, *id, &observation, now)?;
     }
     reap(conn, params, account, now)?;
     Ok(!operations.is_empty())

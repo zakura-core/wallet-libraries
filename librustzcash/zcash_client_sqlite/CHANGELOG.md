@@ -38,6 +38,7 @@ and this library adheres to Rust's notion of
 ### Fixed
 
 - Refund recovery trusts a refund memo on any of the account's internal Ironwood notes, without requiring the funding transaction to spend a note the wallet knows. A second device or a restore that has not recovered the one-time notes a swap spent, or whose birthday falls after them, now registers the funded refund key instead of ignoring the memo and issuing the same refund index again. `WalletDb::reserve_refund_key` waits only while an internal note's memo has not been retrieved.
+- A refund key with no local operation, such as one recovered from its funding memo, leaves automatic monitoring once filters have checked seven days of chain time past its funding block, instead of being looked up on every catch-up forever. A key recovered after that still has its history read once, an explicit history check still covers it, and its index is never issued again.
 
 ## [0.1.0-rc9.3] - 2026-10-20
 

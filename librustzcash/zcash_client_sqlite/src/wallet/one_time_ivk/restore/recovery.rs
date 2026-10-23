@@ -59,7 +59,7 @@ pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
             account,
             KeyId::new(Purpose::Refund, memo.index()),
         )?;
-        super::queue::funded(conn, id, BlockHeight::from(height))?;
+        super::queue::funded(conn, params, id, BlockHeight::from(height))?;
     }
     Ok(())
 }

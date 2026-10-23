@@ -258,14 +258,14 @@ pub(crate) fn record_funded_refund_keys<P: Parameters>(
             .map(BlockHeight::from)
             .or_else(|| params.activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3))
             .ok_or_else(|| invalid("Ironwood is not active"))?;
-        queue::funded(conn, id, height)?;
+        queue::funded(conn, params, id, height)?;
         // The wallet's own funding is not a provider observation, so `funded` stays unset.
         let sent = Observation {
             status: OperationStatus::Active,
             funded: false,
             receipts: vec![],
         };
-        record(conn, operation, &sent, 0)?;
+        record(conn, params, operation, &sent, 0)?;
     }
     Ok(())
 }

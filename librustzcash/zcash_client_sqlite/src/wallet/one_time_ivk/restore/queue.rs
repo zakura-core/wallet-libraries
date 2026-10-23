@@ -11,7 +11,10 @@ use zcash_client_backend::data_api::{
     transparent_ledger::ChainPoint,
 };
 use zcash_primitives::{block::BlockHash, transaction::TxId};
-use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
+use zcash_protocol::{
+    consensus::{BlockHeight, NetworkUpgrade, Parameters, SECONDS_PER_BLOCK},
+    zip318::BlockSpacing,
+};
 
 use super::{
     apply::{Admission, Sessions, WitnessPath, apply_payment},
@@ -404,7 +407,7 @@ pub(crate) fn ensure_window<P: Parameters>(
     for index in end.saturating_sub(RECEIVE_GAP)..end {
         register(conn, params, account, KeyId::new(Purpose::Receive, index))?;
     }
-    enroll(conn, owner.0, end)
+    enroll(conn, params, owner.0, end)
 }
 
 /// The stored exclusive end of receive indexes enrolled for automatic discovery.
@@ -421,11 +424,16 @@ fn enrolled_end(conn: &Connection, owner: i64) -> Result<u64, SqliteClientError>
 /// mined window or the seed walk reached them. Each newly enrolled index, including one an
 /// earlier manual check already derived and completed, enters monitoring, which queues its
 /// history and advances the generation (see [`fencing_monitoring`]).
-fn enroll(conn: &Connection, owner: i64, end: u64) -> Result<(), SqliteClientError> {
+fn enroll<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    owner: i64,
+    end: u64,
+) -> Result<(), SqliteClientError> {
     if end <= enrolled_end(conn, owner)? {
         return Ok(());
     }
-    fencing_monitoring(conn, &[owner], || {
+    fencing_monitoring(conn, params, &[owner], || {
         conn.execute(
             "UPDATE ironwood_one_time_recovery SET receive_end = ?2 WHERE account_id = ?1",
             params![owner, end.to_be_bytes()],
@@ -450,26 +458,28 @@ pub(super) fn automatic_end(conn: &Connection, owner: i64) -> Result<u64, Sqlite
     Ok(super::super::swap::reservations::recovery_end(conn, owner)?.max(enrolled))
 }
 
-/// Records funded refund evidence. A key it brings into monitoring has its history queued
-/// from that height even if ordinary sync passed it (see [`fencing_monitoring`]), and an
-/// earlier funding height queues the history it adds.
-pub(crate) fn funded(
+/// Records funded refund evidence. New or earlier funding queues the key's history from
+/// that height even if ordinary sync passed it, including for a key already past
+/// [`MEMO_REFUND_WINDOW`], which never enters monitoring (see [`fencing_monitoring`]).
+pub(crate) fn funded<P: Parameters>(
     conn: &Connection,
+    params: &P,
     key: i64,
     height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
-    let (owner, lowered): (i64, bool) = conn.query_row(
-        "SELECT account_id, funding_height > ?2 FROM ironwood_one_time_keys WHERE id = ?1",
+    let (owner, changed): (i64, bool) = conn.query_row(
+        "SELECT account_id, IFNULL(funding_height > ?2, 1) FROM ironwood_one_time_keys
+         WHERE id = ?1",
         params![key, u32::from(height)],
-        |r| Ok((r.get(0)?, r.get::<_, Option<bool>>(1)?.unwrap_or(false))),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    fencing_monitoring(conn, &[owner], || {
+    fencing_monitoring(conn, params, &[owner], || {
         conn.execute(
             "UPDATE ironwood_one_time_keys SET funding_height = ?2
             WHERE id = ?1 AND (funding_height IS NULL OR funding_height > ?2)",
             params![key, u32::from(height)],
         )?;
-        if lowered {
+        if changed {
             register_history(conn, owner, key, u32::from(height))?;
         }
         Ok(())
@@ -622,7 +632,7 @@ pub(crate) fn begin<P: Parameters>(
         let keys = conn
             .prepare(&format!(
                 "SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {}",
-                *MONITORED
+                monitored(conn, params, owner.0)?
             ))?
             .query_map([owner.0], |r| r.get::<_, i64>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -658,66 +668,134 @@ pub(crate) fn begin<P: Parameters>(
         params![owner.0, height],
     )?;
     if direct {
-        let keys = direct_keys(conn, owner.0)?;
+        let keys = direct_keys(conn, params, owner.0)?;
         for key in keys {
             enqueue(conn, key, activation(params), height, AUTOMATIC)?;
         }
-        conn.execute("UPDATE ironwood_one_time_recovery SET skipped_height = MAX(COALESCE(skipped_height, 0), ?2),
-            filter_height = ?2, filter_hash = ?3 WHERE account_id = ?1 AND COALESCE(filter_height, 0) <= ?2",
-            params![owner.0, height, publication.end.hash])?;
+        // Advancing the frontier can age refund keys out of monitoring.
+        fencing_monitoring(conn, params, &[owner.0], || {
+            conn.execute("UPDATE ironwood_one_time_recovery SET skipped_height = MAX(COALESCE(skipped_height, 0), ?2),
+                filter_height = ?2, filter_hash = ?3 WHERE account_id = ?1 AND COALESCE(filter_height, 0) <= ?2",
+                params![owner.0, height, publication.end.hash])?;
+            Ok(())
+        })?;
     }
     progress(conn, params, account)?;
     Ok(true)
 }
 
 /// Selects the unfinished/lookahead set used by both catch-up and its bandwidth estimate.
-pub(super) fn direct_keys(conn: &Connection, owner: i64) -> Result<Vec<i64>, SqliteClientError> {
+pub(super) fn direct_keys<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    owner: i64,
+) -> Result<Vec<i64>, SqliteClientError> {
     let end = automatic_end(conn, owner)?;
+    let retired = refund_retired(memo_refund_cutoff(conn, params, owner)?);
     let keys: Vec<i64> = conn.prepare(&format!("SELECT k.id FROM ironwood_one_time_keys k
             WHERE k.account_id = ?1 AND ((k.purpose = 1 AND (k.key_index < ?2 OR k.reserved_at IS NOT NULL))
                 OR (k.purpose = 0 AND k.funding_height IS NOT NULL AND NOT {retired}))
-            AND (k.used = 0 OR {REPAIR_KEY} OR {UNSETTLED})", retired = *REFUND_RETIRED))?
+            AND (k.used = 0 OR {REPAIR_KEY} OR {UNSETTLED})"))?
             .query_map(params![owner, end.to_be_bytes()], |r| r.get(0))?.collect::<Result<_, _>>()?;
     Ok(keys)
 }
 
-/// SQL over key alias `k`: a refund key whose every local operation is conclusive, the
-/// provider having reported that no refund is coming or the expected refund being received
-/// and settled, with no dispute, repair work or payment candidate left. Refund keys are
-/// never reused, so it only leaves automatic monitoring; a manual history check still covers
-/// it. A key with no local operation, such as one recovered from a funding memo, stays.
-static REFUND_RETIRED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+/// How long after its funding block a refund key with no local operation on this device,
+/// such as one recovered from a funding memo, stays in automatic monitoring, in 75-second
+/// reference blocks. 1Click documents no bound from funding to refund, so this is 7 days.
+pub(in crate::wallet::one_time_ivk) const MEMO_REFUND_WINDOW: u32 =
+    7 * 24 * 60 * 60 / SECONDS_PER_BLOCK;
+
+/// The highest funding height of a refund key with no local operation that has left
+/// automatic monitoring, as of `owner`'s filter frontier (see [`aged_cutoff`]). `None`
+/// while the account has no frontier.
+fn memo_refund_cutoff<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    owner: i64,
+) -> Result<Option<u32>, SqliteClientError> {
+    let frontier: Option<u32> = conn
+        .query_row(
+            "SELECT filter_height FROM ironwood_one_time_recovery WHERE account_id = ?1",
+            [owner],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(frontier.and_then(|frontier| aged_cutoff(BlockSpacing::for_network(params), frontier)))
+}
+
+/// The highest height more than [`MEMO_REFUND_WINDOW`] of chain time before `frontier` on a
+/// chain with `spacing`, if any. Filters have checked that whole window after it.
+pub(in crate::wallet::one_time_ivk) fn aged_cutoff(
+    spacing: BlockSpacing,
+    frontier: u32,
+) -> Option<u32> {
+    let aged = |height: u32| spacing.exceeds(height.into(), frontier.into(), MEMO_REFUND_WINDOW);
+    if !aged(0) {
+        return None;
+    }
+    // `aged` holds up to the cutoff and fails above it, at `frontier` itself at the latest.
+    let (mut held, mut failed) = (0, frontier);
+    while failed - held > 1 {
+        let middle = held + (failed - held) / 2;
+        if aged(middle) {
+            held = middle;
+        } else {
+            failed = middle;
+        }
+    }
+    Some(held)
+}
+
+/// SQL over key alias `k`: a refund key out of automatic monitoring, given its account's
+/// [`memo_refund_cutoff`]. Either every local operation on it is conclusive, the provider
+/// having reported that no refund is coming or the expected refund being received and
+/// settled, or it has no local operation and was funded at or below `cutoff`. Neither holds
+/// while a dispute, repair work or payment candidate is left. Refund keys are never reused,
+/// so it only leaves automatic monitoring; a manual history check still covers it.
+fn refund_retired(cutoff: Option<u32>) -> String {
+    let aged = cutoff.map_or_else(|| "0".to_owned(), |c| format!("k.funding_height <= {c}"));
     format!(
         "(k.purpose = 0
-    AND EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id = k.id)
-    AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id = k.id
-        AND NOT ((o.expectation = 1 AND o.observed_at > 0) OR o.expectation = 2))
+    AND CASE WHEN EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id = k.id)
+        THEN NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id = k.id
+            AND NOT ((o.expectation = 1 AND o.observed_at > 0) OR o.expectation = 2))
+        ELSE {aged} END
     AND NOT {UNSETTLED} AND NOT {REPAIR_KEY}
     AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
         WHERE p.one_time_key_id = k.id))"
     )
-});
+}
 
 /// SQL over key alias `k` and owner `?1`: the key is monitored automatically, a receive
 /// index below the enrolled automatic end or a funded refund key not yet retired (see
-/// [`REFUND_RETIRED`]). Receive keys a manual check derived beyond that end are checked
+/// [`refund_retired`]). Receive keys a manual check derived beyond that end are checked
 /// only by that search.
-static MONITORED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-    format!(
+fn monitored<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    owner: i64,
+) -> Result<String, SqliteClientError> {
+    Ok(format!(
         "(k.purpose = 1 AND k.key_index < (SELECT receive_end
         FROM ironwood_one_time_recovery WHERE account_id = ?1)
     OR (k.funding_height IS NOT NULL AND NOT {}))",
-        *REFUND_RETIRED
-    )
-});
+        refund_retired(memo_refund_cutoff(conn, params, owner)?)
+    ))
+}
 
-/// The account's automatically monitored keys, ordered (see [`MONITORED`]).
-fn monitored_keys(conn: &Connection, owner: i64) -> Result<Vec<i64>, SqliteClientError> {
+/// The account's automatically monitored keys, ordered (see [`monitored`]).
+fn monitored_keys<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    owner: i64,
+) -> Result<Vec<i64>, SqliteClientError> {
     Ok(conn
         .prepare(&format!(
             "SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {}
              ORDER BY k.id",
-            *MONITORED
+            monitored(conn, params, owner)?
         ))?
         .query_map([owner], |r| r.get(0))?
         .collect::<Result<_, _>>()?)
@@ -730,18 +808,19 @@ fn monitored_keys(conn: &Connection, owner: i64) -> Result<Vec<i64>, SqliteClien
 /// a dispute or any other path, gets its history queued through the processed frontier
 /// (see [`register_history`]) in the same transaction. Filters already passed blocks where
 /// it was not watched, such as a payment to a refund key while it was retired.
-pub(in crate::wallet::one_time_ivk) fn fencing_monitoring<T>(
+pub(in crate::wallet::one_time_ivk) fn fencing_monitoring<P: Parameters, T>(
     conn: &Connection,
+    params: &P,
     owners: &[i64],
     change: impl FnOnce() -> Result<T, SqliteClientError>,
 ) -> Result<T, SqliteClientError> {
     let before = owners
         .iter()
-        .map(|owner| monitored_keys(conn, *owner))
+        .map(|owner| monitored_keys(conn, params, *owner))
         .collect::<Result<Vec<_>, _>>()?;
     let result = change()?;
     for (owner, before) in owners.iter().zip(before) {
-        let after = monitored_keys(conn, *owner)?;
+        let after = monitored_keys(conn, params, *owner)?;
         for key in after.iter().filter(|k| before.binary_search(k).is_err()) {
             register_history(conn, *owner, *key, history_start(conn, *key)?)?;
         }
@@ -785,7 +864,7 @@ pub(crate) fn receivers<P: Parameters>(
         conn.prepare(&format!(
             "SELECT k.purpose, k.key_index, k.receiver FROM ironwood_one_time_keys k
         WHERE k.account_id = ?1 AND {} ORDER BY k.purpose, k.key_index",
-            *MONITORED
+            monitored(conn, params, owner.0)?
         ))?
         .query_and_then([owner.0], |r| {
             Ok::<_, SqliteClientError>(DiscoveryWork {
@@ -837,12 +916,12 @@ pub(crate) fn record_filters<P: Parameters>(
         }
     }
     let end = blocks.last().expect("nonempty");
+    let monitored = monitored(conn, params, owner.0)?;
     for key in hits {
         let id = key_ref(conn, account, *key)?;
         let eligible: bool = conn.query_row(
             &format!(
-                "SELECT {} FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND k.id = ?2",
-                *MONITORED
+                "SELECT {monitored} FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND k.id = ?2"
             ),
             params![owner.0, id],
             |r| r.get(0),
@@ -858,8 +937,12 @@ pub(crate) fn record_filters<P: Parameters>(
             AUTOMATIC | INVALIDATED,
         )?;
     }
-    conn.execute("UPDATE ironwood_one_time_recovery SET filter_height = ?2, filter_hash = ?3 WHERE account_id = ?1",
-        params![owner.0, u32::from(end.height), end.hash.0])?;
+    // Advancing the frontier can age refund keys out of monitoring.
+    fencing_monitoring(conn, params, &[owner.0], || {
+        conn.execute("UPDATE ironwood_one_time_recovery SET filter_height = ?2, filter_hash = ?3 WHERE account_id = ?1",
+            params![owner.0, u32::from(end.height), end.hash.0])?;
+        Ok(())
+    })?;
     Ok(true)
 }
 
@@ -901,7 +984,7 @@ fn progress<P: Parameters>(
         let (id, _) = register(conn, params, account, KeyId::new(Purpose::Receive, next))?;
         // The walk advances on authenticated use before confirmation, so its reach must
         // outlast a reorg that removes that use.
-        enroll(conn, owner.0, index_after(next, 1)?)?;
+        enroll(conn, params, owner.0, index_after(next, 1)?)?;
         // An empty counts only with complete history from activation through the frontier,
         // so the four empties share compatible captured coverage.
         let checked: Option<bool> = conn.query_row("SELECT k.used FROM ironwood_one_time_keys k
@@ -1754,7 +1837,7 @@ pub(crate) fn check_raw_receipts<P: Parameters>(
         )?
         .query_map([tx.txid().as_ref()], |r| r.get(0))?
         .collect::<Result<_, _>>()?;
-    fencing_monitoring(conn, &owners, || {
+    fencing_monitoring(conn, params, &owners, || {
         dispute_raw_receipts(conn, activation(params), tx)
     })
 }
@@ -1876,7 +1959,7 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
     }
     // Settling a refund, or a relabel ending a dispute, can retire a refund key from
     // automatic monitoring.
-    fencing_monitoring(conn, &[owner.0], || {
+    fencing_monitoring(conn, params, &[owner.0], || {
         admit_waiting(
             conn, params, sessions, account, owner.0, through, waiting, now,
         )
