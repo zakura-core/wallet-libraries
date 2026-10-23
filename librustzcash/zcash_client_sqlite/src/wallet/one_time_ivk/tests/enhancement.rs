@@ -570,6 +570,39 @@ fn a_forged_refund_memo_within_the_gap_only_marks_its_index_used() {
     assert_eq!(next.unwrap().unwrap().key_id().index(), 6);
 }
 
+/// A device reserves more refund keys than the gap without funding them, then funds the
+/// next index from a note a restore also sees. That spend proves the memo is the wallet's
+/// own, so the restore recovers the index although it is beyond the gap.
+#[test]
+fn an_own_spend_recovers_a_refund_memo_beyond_the_gap() {
+    let (mut st, _) = ironwood_funded_wallet();
+    let account = st.test_account().cloned().unwrap();
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    let deposit = p2pkh(7).encode(st.network());
+    let now = clock_now();
+    let db = st.wallet_mut().db_mut();
+    let key = (0..=101)
+        .map(|_| reserve_refund(db, account.id(), tip).unwrap().unwrap())
+        .last()
+        .unwrap();
+    let index = key.key_id().index();
+    assert_eq!(index, 101);
+    db.record_refund_operation(account.id(), index, &deposit, now + 3_600, now)
+        .unwrap();
+    let memo = db
+        .refund_funding_memo(account.id(), index, &deposit)
+        .unwrap();
+    let pays = vec![payment(&p2pkh(7), 100_000, None)];
+    let (_, txid, mined) = send(&mut st, pays, &memo);
+
+    let restored = restore_through_funding(&mut st, account.birthday(), &[txid], mined);
+    assert!(spends_owned_note(&st, txid));
+    recover_memos(&mut st, restored);
+    assert_eq!(refund_keys(&st), [(101, u32::from(mined), true)]);
+    let next = reserve_refund(st.wallet_mut().db_mut(), restored, mined);
+    assert_eq!(next.unwrap().unwrap().key_id().index(), 102);
+}
+
 /// Another device funded refund indexes 0, 90 and 180, each within the gap of the one
 /// before, but mined 180 first and 0 last. A restore recovers all three in one call, since
 /// accepting 90 brings 180 within the gap, and likewise when 90 and 180 share a block.

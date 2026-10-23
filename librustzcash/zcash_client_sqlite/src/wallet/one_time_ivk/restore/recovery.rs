@@ -24,8 +24,9 @@ pub(in crate::wallet::one_time_ivk) fn refund_memos_pending(
     )?)
 }
 
-/// How far above the account's highest known refund index a memo may register one. Indexes
-/// are reserved in order, and 100 unused in a row is the gap seed discovery already assumes.
+/// How far above the account's highest known refund index a memo may register one without
+/// proof that this wallet spent in its transaction. Indexes are reserved in order, and 100
+/// unused in a row is the gap seed discovery already assumes.
 const REFUND_MEMO_GAP: u64 = 100;
 
 /// Registers the refund key named by each refund memo on this account's mined internal
@@ -34,10 +35,12 @@ const REFUND_MEMO_GAP: u64 = 100;
 /// notes not recovered yet or notes before its birthday.
 ///
 /// A viewing key can also derive internal addresses, so an index is accepted only within
-/// [`REFUND_MEMO_GAP`] of the highest known refund index, and a forged memo can at most
-/// mark a nearby index used. Memos are taken in mined order, and passes repeat until none
-/// is newly accepted, so a run of memos from another device raises the bound step by step
-/// in whatever order they were mined. Issuance runs this first, and each issued index
+/// [`REFUND_MEMO_GAP`] of the highest known refund index, or when the transaction spends a
+/// note this account owns, which a viewing key cannot forge. A forged memo can at most mark
+/// a nearby index used, and one beyond the gap without that proof is recovered only once
+/// the gap closes. Memos are taken in mined order, and passes repeat until none is newly
+/// accepted, so a run of memos from another device raises the bound step by step in
+/// whatever order they were mined. Issuance runs this first, and each issued index
 /// raises the bound, so an index another device funded is accepted before issuance could
 /// reach it.
 pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
@@ -48,23 +51,30 @@ pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
     let owner = wallet::get_account_ref(conn, account)?;
     let records = conn
         .prepare_cached(
-            "SELECT n.memo, t.mined_height FROM ironwood_received_notes n
+            "SELECT n.memo, t.mined_height,
+             EXISTS(SELECT 1 FROM v_received_output_spends s
+                 WHERE s.transaction_id = n.transaction_id AND s.account_id = n.account_id)
+         FROM ironwood_received_notes n
          JOIN transactions t ON t.id_tx = n.transaction_id
          WHERE n.account_id = ?1 AND n.recipient_key_scope = 1
            AND n.one_time_key_id IS NULL AND t.mined_height IS NOT NULL
            AND substr(n.memo, 1, 5) = ?2",
         )?
         .query_map(params![owner.0, REFUND_MEMO_MAGIC], |r| {
-            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, u32>(1)?))
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, u32>(1)?,
+                r.get::<_, bool>(2)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut memos: Vec<(u32, u64)> = records
+    let mut memos: Vec<(u32, u64, bool)> = records
         .into_iter()
-        .filter_map(|(bytes, height)| {
+        .filter_map(|(bytes, height, own_send)| {
             zcash_protocol::memo::MemoBytes::from_bytes(&bytes)
                 .ok()
                 .and_then(|bytes| RefundMemo::decode(bytes.as_array()))
-                .map(|memo| (height, memo.index()))
+                .map(|memo| (height, memo.index(), own_send))
         })
         .collect();
     memos.sort_unstable();
@@ -76,9 +86,9 @@ pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
     let mut highest = highest.map(decode_index).transpose()?.unwrap_or(0);
     loop {
         let mut deferred = vec![];
-        for (height, index) in memos {
-            if index > highest.saturating_add(REFUND_MEMO_GAP) {
-                deferred.push((height, index));
+        for (height, index, own_send) in memos {
+            if !own_send && index > highest.saturating_add(REFUND_MEMO_GAP) {
+                deferred.push((height, index, own_send));
                 continue;
             }
             let (id, _) = register(conn, params, account, KeyId::new(Purpose::Refund, index))?;
@@ -88,7 +98,7 @@ pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
         if deferred.is_empty()
             || deferred
                 .iter()
-                .all(|(_, i)| *i > highest.saturating_add(REFUND_MEMO_GAP))
+                .all(|(_, i, _)| *i > highest.saturating_add(REFUND_MEMO_GAP))
         {
             return Ok(());
         }
