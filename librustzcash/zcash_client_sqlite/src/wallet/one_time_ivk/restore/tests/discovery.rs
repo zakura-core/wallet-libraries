@@ -3766,8 +3766,9 @@ fn a_refund_to_a_retired_memo_only_key_is_found_by_a_history_check() {
 
 /// R0's refund is recovered, then a reorg replaces it with another transaction paying R0,
 /// which is recovered and reported. The displaced receipt stays unmined, which kept R0 in
-/// repair, and so monitored, forever. Once that transaction has expired at least the
-/// pruning depth below the scanned tip, no reorg can mine it again, so R0 retires.
+/// repair, and so monitored, forever. Expiry alone does not end that: the replacement chain
+/// might hold the transaction, so R0 stays in repair until its history is read past the
+/// expiry height. Then filters past the pruning depth beyond it retire R0.
 #[test]
 fn a_refund_replaced_by_a_reorg_still_retires() {
     use zakura_one_time_ivk::swap::{
@@ -3827,11 +3828,15 @@ fn a_refund_replaced_by_a_reorg_still_retires() {
         "UPDATE transactions SET expiry_height = ?1 WHERE txid = ?2",
         rusqlite::params![expiry, displaced.txid.as_ref()],
     );
-    let depth = crate::PRUNING_DEPTH;
-    let blocks = expiry + depth - 1 - u32::from(tip(&st).height);
+    let blocks = expiry + crate::PRUNING_DEPTH - u32::from(tip(&st).height);
     st.generate_and_scan_empty_blocks(blocks as usize);
-    assert_eq!(refunds_watched(&st, account), (vec![0], vec![0]));
-    st.generate_and_scan_empty_blocks(1);
+    assert_eq!(
+        refunds_watched(&st, account),
+        (vec![0], vec![0]),
+        "no history was read past the expiry"
+    );
+    let frontier = catch_up(&mut st, account);
+    assert_eq!(u32::from(frontier), expiry + crate::PRUNING_DEPTH);
     assert_eq!(refunds_watched(&st, account), (vec![], vec![]));
 }
 

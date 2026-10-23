@@ -72,15 +72,22 @@ const _: () = assert!(
 );
 
 /// SQL over key alias `k`: an already-owned receipt is [`UNPLACED`], or its transaction
-/// label is disputed (see [`check_raw_receipts`]), so it needs repair. A receipt whose
-/// transaction left the chain and expired at least [`PRUNING_DEPTH`] blocks below the
-/// scanned tip needs none: no reorg the wallet follows can mine it again, as when another
-/// transaction replaced it.
+/// label is disputed (see [`check_raw_receipts`]), so it needs repair.
+///
+/// A reorg-displaced receipt needs none once the key's completed history reaches its
+/// transaction's expiry height and filters have passed [`PRUNING_DEPTH`] blocks beyond it.
+/// A reorg clamps that history to the fork and reads it again from there, so the current
+/// chain does not hold the transaction, and no reorg the wallet follows can mine it again.
+/// That happens when another transaction replaced it. A paused account records no history,
+/// so it keeps repairing.
 const REPAIR_KEY: &str = "(EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
     ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = k.id
     AND (t.mined_height IS NULL OR n.commitment_tree_position IS NULL)
     AND NOT (t.mined_height IS NULL AND IFNULL(t.expiry_height, 0) > 0
-        AND t.expiry_height + 100 <= (SELECT IFNULL(MAX(height), 0) FROM blocks)))
+        AND t.expiry_height + 100 <= IFNULL((SELECT r.filter_height
+            FROM ironwood_one_time_recovery r WHERE r.account_id = k.account_id), 0)
+        AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
+            WHERE l.one_time_key_id = k.id AND l.done_height >= t.expiry_height)))
     OR EXISTS(SELECT 1 FROM ironwood_one_time_disputed_receipts d
         JOIN ironwood_received_notes n ON n.id = d.note_id WHERE n.one_time_key_id = k.id))";
 
@@ -1536,15 +1543,19 @@ pub(crate) fn record_lookup<P: Parameters>(
             .zip(done_from)
             .filter(|(d, f)| *f <= start && start <= d.saturating_add(1))
             .map_or(start, |(_, f)| f);
-        conn.execute(
-            &format!(
-                "UPDATE ironwood_one_time_lookups SET checked_height = ?2, {CURSOR_RESET},
-                read_complete = ?3, done_height = CASE WHEN ?4 THEN ?2 ELSE NULL END,
-                done_from = CASE WHEN ?4 THEN ?5 ELSE NULL END, attempts = 0, next_attempt_at = 0
-                WHERE one_time_key_id = ?1"
-            ),
-            params![id, end, end >= target, discovery_enabled, joined],
-        )?;
+        // Completed history can end a displaced receipt's repair (see `REPAIR_KEY`).
+        fencing_monitoring(conn, params, &[owner.0], || {
+            conn.execute(
+                &format!(
+                    "UPDATE ironwood_one_time_lookups SET checked_height = ?2, {CURSOR_RESET},
+                    read_complete = ?3, done_height = CASE WHEN ?4 THEN ?2 ELSE NULL END,
+                    done_from = CASE WHEN ?4 THEN ?5 ELSE NULL END, attempts = 0,
+                    next_attempt_at = 0 WHERE one_time_key_id = ?1"
+                ),
+                params![id, end, end >= target, discovery_enabled, joined],
+            )?;
+            Ok(())
+        })?;
         // A candidate this history did not bind again still lacks a usable witness, so the
         // read cannot settle the key: its shard is read again later.
         let unbound: Option<u32> = conn.query_row(
