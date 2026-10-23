@@ -1823,7 +1823,8 @@ fn check_deferred_receipts<P: Parameters>(
         .collect::<Result<_, _>>()?;
     for (id, txid) in deferred {
         if let Some((_, tx)) = crate::wallet::get_transaction(conn, params, txid)? {
-            check_raw_receipts(conn, params, &tx)?;
+            // These raw bytes are already stored.
+            check_raw_receipts(conn, params, &tx, || Ok(()))?;
             crate::wallet::ironwood_hooks::clear_ironwood_enhancement_work(conn, crate::TxRef(id))?;
         }
         conn.execute(
@@ -1840,13 +1841,15 @@ fn check_deferred_receipts<P: Parameters>(
 /// label, so a mismatch disputes the receipt's label: the note row stays with its spends,
 /// witness and position, nothing that trusts a transaction ID counts it, and its key's history
 /// is read again, even while discovery is disabled, until admission moves it to its true
-/// transaction (see `apply::apply_payment`). The caller
-/// keeps `tx`'s raw bytes either way, so a repeated mislabeled record is refused at
-/// admission.
+/// transaction (see `apply::apply_payment`). `store` then keeps `tx`'s raw bytes either way,
+/// so a repeated mislabeled record is refused at admission. It runs inside the same fence,
+/// since the expiry height those bytes record can end a displaced receipt's repair (see
+/// [`REPAIR_KEY`]).
 pub(crate) fn check_raw_receipts<P: Parameters>(
     conn: &Connection,
     params: &P,
     tx: &zcash_primitives::transaction::Transaction,
+    store: impl FnOnce() -> Result<(), SqliteClientError>,
 ) -> Result<(), SqliteClientError> {
     // A disputed refund receipt returns its key to automatic monitoring.
     let owners: Vec<i64> = conn
@@ -1859,7 +1862,8 @@ pub(crate) fn check_raw_receipts<P: Parameters>(
         .query_map([tx.txid().as_ref()], |r| r.get(0))?
         .collect::<Result<_, _>>()?;
     fencing_monitoring(conn, params, &owners, || {
-        dispute_raw_receipts(conn, activation(params), tx)
+        dispute_raw_receipts(conn, activation(params), tx)?;
+        store()
     })
 }
 

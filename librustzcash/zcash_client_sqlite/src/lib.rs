@@ -3669,13 +3669,11 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
                     self.conn.0,
                     &self.params,
                     d_tx.tx(),
-                )?;
-                self.put_tx_data(
-                    d_tx.tx(),
-                    None,
-                    None,
-                    None,
-                    d_tx.mined_height().unwrap_or(chain_tip + 1),
+                    || {
+                        let observed = d_tx.mined_height().unwrap_or(chain_tip + 1);
+                        wallet::put_tx_data(self.conn.0, d_tx.tx(), None, None, None, observed)
+                            .map(|_| ())
+                    },
                 )?;
             }
         }

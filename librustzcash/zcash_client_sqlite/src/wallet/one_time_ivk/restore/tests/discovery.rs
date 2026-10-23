@@ -3840,6 +3840,65 @@ fn a_refund_replaced_by_a_reorg_still_retires() {
     assert_eq!(refunds_watched(&st, account), (vec![], vec![]));
 }
 
+/// As in [`a_refund_replaced_by_a_reorg_still_retires`], but the displaced receipt's expiry
+/// height is unknown until its raw transaction is stored. Storing it retires R0, so it
+/// advances the generation, fencing held filter requests.
+#[test]
+fn storing_a_displaced_receipts_raw_transaction_fences_its_retirement() {
+    use zakura_one_time_ivk::swap::{
+        Observation,
+        OperationStatus::{Active, Terminal},
+        ReceiptExpectation,
+    };
+    use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let network = *st.network();
+    let now = clock_now();
+    let r0 = KeyId::new(Purpose::Refund, 0);
+    let floor = tip(&st).height;
+    let key = recover(st.wallet_mut().db_mut(), account, r0, floor);
+    let observe = |st: &mut State, status, receipts, at| {
+        let observation = Observation {
+            status,
+            funded: true,
+            receipts,
+        };
+        let db = st.wallet_mut().db_mut();
+        observe_with(db, account, r0, ("deposit-0", now + 3_600), observation, at).unwrap();
+    };
+    observe(&mut st, Active, vec![], now);
+    let displaced = external_payment(key.receiver(), &zcash_protocol::memo::MemoBytes::empty());
+    let (height, _) = st.generate_next_block_from_tx(1, &displaced);
+    payment_indexes(&st, height, 1);
+    st.scan_cached_blocks(height, 1);
+    catch_up(&mut st, account);
+    assert_eq!(one_time_notes(&st), [(50_000, false)]);
+
+    st.truncate_to_height(floor);
+    let replacement = pay_candidate(&mut st, r0);
+    catch_up(&mut st, account);
+    let refund = Terminal(ReceiptExpectation::Positive(Some(
+        Zatoshis::const_from_u64(100_000),
+    )));
+    observe(&mut st, refund, vec![replacement.txid], now + 60);
+    let expiry = u32::from(displaced.expiry_height());
+    let blocks = expiry + crate::PRUNING_DEPTH - u32::from(tip(&st).height);
+    st.generate_and_scan_empty_blocks(blocks as usize);
+    catch_up(&mut st, account);
+    assert_eq!(
+        refunds_watched(&st, account),
+        (vec![0], vec![0]),
+        "the expiry height is unknown"
+    );
+
+    let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &displaced, None).unwrap();
+    assert_eq!(refunds_watched(&st, account), (vec![], vec![]));
+    let (current, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert_ne!(current, held, "retiring R0 fences held filter requests");
+}
+
 /// R0's empty history is checked through the tip and a "no refund" status retires it. A
 /// refund then reaches R0 while rolling filters, no longer watching it, pass that block. A
 /// newer status reports the refund, returning R0 to monitoring, and that alone queues its
