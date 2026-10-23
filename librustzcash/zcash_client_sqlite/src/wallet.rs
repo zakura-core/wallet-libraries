@@ -4116,26 +4116,32 @@ fn pool_truncation_tolerance_sql(table_prefix: &str) -> String {
 /// classification, rendered in SQL by [`pool_truncation_tolerance_sql`]. This returns the
 /// maximum qualifying height at or below `requested_height`.
 ///
-/// Candidate heights are those of scanned blocks and of note commitment tree checkpoints. A
-/// checkpoint records a tree state the wallet can rewind to even when no `blocks` row exists
-/// at its height. The first scan of a wallet stores its starting tree state as a checkpoint
-/// at `birthday - 1`, so without these candidates a reorg in the first scanned blocks could
-/// leave no height to rewind to.
+/// Candidate heights are those of scanned blocks and, with `checkpoint_candidates`, of note
+/// commitment tree checkpoints. A checkpoint records a tree state the wallet can rewind to
+/// even when no `blocks` row exists at its height. The first scan of a wallet stores its
+/// starting tree state as a checkpoint at `birthday - 1`, so without these candidates a reorg
+/// in the first scanned blocks could leave no height to rewind to. [`truncate_to_chain_state`]
+/// passes `false`: when no scanned block qualifies it first truncates to the minimum shared
+/// checkpoint to free checkpoint capacity before inserting its own, and a retained checkpoint
+/// selected here would skip that step and let the insertion prune the target checkpoint.
 ///
 /// The orchard and ironwood tables exist unconditionally but are empty when the `orchard`
 /// feature is not active, in which case their trees qualify at every height.
 fn select_truncation_height(
     conn: &rusqlite::Transaction,
     requested_height: BlockHeight,
+    checkpoint_candidates: bool,
 ) -> Result<BlockHeight, SqliteClientError> {
+    let checkpoints = if checkpoint_candidates {
+        "UNION SELECT checkpoint_id FROM sapling_tree_checkpoints
+         UNION SELECT checkpoint_id FROM orchard_tree_checkpoints
+         UNION SELECT checkpoint_id FROM ironwood_tree_checkpoints"
+    } else {
+        ""
+    };
     conn.query_row(
         &format!(
-            "SELECT MAX(height) FROM (
-                 SELECT height FROM blocks
-                 UNION SELECT checkpoint_id FROM sapling_tree_checkpoints
-                 UNION SELECT checkpoint_id FROM orchard_tree_checkpoints
-                 UNION SELECT checkpoint_id FROM ironwood_tree_checkpoints
-             )
+            "SELECT MAX(height) FROM (SELECT height FROM blocks {checkpoints})
              WHERE height <= :requested_height
              AND {sapling_tolerance}
              AND {orchard_tolerance}
@@ -4190,7 +4196,7 @@ pub(crate) fn truncate_to_height<P: consensus::Parameters>(
     #[cfg(feature = "transparent-inputs")] gap_limits: &GapLimits,
     max_height: BlockHeight,
 ) -> Result<BlockHeight, SqliteClientError> {
-    let truncation_height = select_truncation_height(conn, max_height)?;
+    let truncation_height = select_truncation_height(conn, max_height, true)?;
     truncate_to_height_internal(
         conn,
         params,
@@ -4670,7 +4676,7 @@ pub(crate) fn truncate_to_chain_state<P: consensus::Parameters, CL, R>(
     if truncate_trees {
         // Try the simple case first: if a checkpoint exists at or below the target height,
         // truncate_to_height will succeed directly.
-        match select_truncation_height(wdb.conn.0, target_height) {
+        match select_truncation_height(wdb.conn.0, target_height, false) {
             Ok(h) => {
                 if h == target_height {
                     // There is a checkpoint for the requested height, we can just truncate to
@@ -6565,7 +6571,7 @@ mod tests {
 
         let tx = conn.transaction().unwrap();
         assert_eq!(
-            select_truncation_height(&tx, BlockHeight::from_u32(11)).unwrap(),
+            select_truncation_height(&tx, BlockHeight::from_u32(11), true).unwrap(),
             BlockHeight::from_u32(11),
         );
     }
@@ -6586,7 +6592,7 @@ mod tests {
 
         let tx = conn.transaction().unwrap();
         assert_eq!(
-            select_truncation_height(&tx, BlockHeight::from_u32(11)).unwrap(),
+            select_truncation_height(&tx, BlockHeight::from_u32(11), true).unwrap(),
             BlockHeight::from_u32(11),
         );
     }
@@ -6607,7 +6613,7 @@ mod tests {
 
         let tx = conn.transaction().unwrap();
         assert_eq!(
-            select_truncation_height(&tx, BlockHeight::from_u32(10)).unwrap(),
+            select_truncation_height(&tx, BlockHeight::from_u32(10), true).unwrap(),
             BlockHeight::from_u32(9),
         );
     }
@@ -6698,7 +6704,7 @@ mod tests {
 
         let tx = conn.transaction().unwrap();
         assert_matches!(
-            select_truncation_height(&tx, BlockHeight::from_u32(11)),
+            select_truncation_height(&tx, BlockHeight::from_u32(11), true),
             Err(SqliteClientError::RequestedRewindInvalid {
                 safe_rewind_height: None,
                 ..
@@ -8577,6 +8583,26 @@ mod tests {
     #[cfg(feature = "orchard")]
     fn truncate_to_height_reaches_birthday_checkpoint_over_ironwood_output() {
         truncate_to_height_reaches_birthday_checkpoint(IronwoodFvk(stranger_orchard_fvk()));
+    }
+
+    /// Only `truncate_to_height` treats checkpoint heights without a `blocks` row as rewind
+    /// targets. [`truncate_to_chain_state`] keeps selecting among scanned blocks, so after a
+    /// first scan the birthday checkpoint at `b - 1` is still refused there and it takes its
+    /// own path through the minimum shared checkpoint.
+    #[test]
+    fn chain_state_truncation_selects_only_scanned_blocks() {
+        let (mut st, b) = wallet_after_first_scan(Some(
+            &ExtendedSpendingKey::master(&[7; 32]).to_diversifiable_full_viewing_key(),
+        ));
+        let tx = st.wallet_mut().conn_mut().transaction().unwrap();
+        assert_eq!(select_truncation_height(&tx, b + 2, true).unwrap(), b - 1);
+        assert_matches!(
+            select_truncation_height(&tx, b + 2, false),
+            Err(SqliteClientError::RequestedRewindInvalid {
+                safe_rewind_height: Some(h),
+                ..
+            }) if h == b - 1
+        );
     }
 
     /// A rewind target below a wallet's first scanned block is refused even with no outputs,
