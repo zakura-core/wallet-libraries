@@ -3764,6 +3764,77 @@ fn a_refund_to_a_retired_memo_only_key_is_found_by_a_history_check() {
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
+/// R0's refund is recovered, then a reorg replaces it with another transaction paying R0,
+/// which is recovered and reported. The displaced receipt stays unmined, which kept R0 in
+/// repair, and so monitored, forever. Once that transaction has expired at least the
+/// pruning depth below the scanned tip, no reorg can mine it again, so R0 retires.
+#[test]
+fn a_refund_replaced_by_a_reorg_still_retires() {
+    use zakura_one_time_ivk::swap::{
+        Observation,
+        OperationStatus::{Active, Terminal},
+        ReceiptExpectation,
+    };
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let now = clock_now();
+    let r0 = KeyId::new(Purpose::Refund, 0);
+    let floor = tip(&st).height;
+    recover(st.wallet_mut().db_mut(), account, r0, floor);
+    let observe = |st: &mut State, status, receipts, at| {
+        let observation = Observation {
+            status,
+            funded: true,
+            receipts,
+        };
+        let db = st.wallet_mut().db_mut();
+        observe_with(db, account, r0, ("deposit-0", now + 3_600), observation, at).unwrap();
+    };
+    observe(&mut st, Active, vec![], now);
+    let displaced = pay_candidate(&mut st, r0);
+    catch_up(&mut st, account);
+
+    st.truncate_to_height(floor);
+    let replacement = pay_candidate(&mut st, r0);
+    assert_ne!(replacement.txid, displaced.txid);
+    catch_up(&mut st, account);
+    let refund = Terminal(ReceiptExpectation::Positive(Some(
+        Zatoshis::const_from_u64(100_000),
+    )));
+    observe(&mut st, refund, vec![replacement.txid], now + 60);
+    let receipts: Vec<(Option<u32>, Vec<u8>)> = rows(
+        st.wallet().conn(),
+        "SELECT t.mined_height, t.txid FROM ironwood_received_notes n
+         JOIN transactions t ON t.id_tx = n.transaction_id
+         WHERE n.one_time_key_id IS NOT NULL ORDER BY n.id",
+        [],
+    );
+    assert_eq!(
+        receipts,
+        [
+            (None, displaced.txid.as_ref().to_vec()),
+            (
+                Some(u32::from(replacement.height)),
+                replacement.txid.as_ref().to_vec()
+            ),
+        ]
+    );
+
+    // Enhancement records the displaced transaction's expiry height.
+    let expiry = u32::from(displaced.height) + 40;
+    exec(
+        st.wallet().conn(),
+        "UPDATE transactions SET expiry_height = ?1 WHERE txid = ?2",
+        rusqlite::params![expiry, displaced.txid.as_ref()],
+    );
+    let depth = crate::PRUNING_DEPTH;
+    let blocks = expiry + depth - 1 - u32::from(tip(&st).height);
+    st.generate_and_scan_empty_blocks(blocks as usize);
+    assert_eq!(refunds_watched(&st, account), (vec![0], vec![0]));
+    st.generate_and_scan_empty_blocks(1);
+    assert_eq!(refunds_watched(&st, account), (vec![], vec![]));
+}
+
 /// R0's empty history is checked through the tip and a "no refund" status retires it. A
 /// refund then reaches R0 while rolling filters, no longer watching it, pass that block. A
 /// newer status reports the refund, returning R0 to monitoring, and that alone queues its

@@ -28,7 +28,7 @@ use crate::wallet::one_time_ivk::{
     KeyId, Purpose, account_key, corrupt, decode_index, index_after, invalid, key_ref,
     one_time_account, register, stored_key_id,
 };
-use crate::{AccountUuid, error::SqliteClientError, wallet};
+use crate::{AccountUuid, PRUNING_DEPTH, error::SqliteClientError, wallet};
 
 const AUTOMATIC: u8 = 1;
 /// Lookup reason bit marking history an event invalidated: a positive filter hint, a
@@ -66,11 +66,21 @@ pub(crate) fn activation<P: Parameters>(params: &P) -> u32 {
 /// mined while a sibling receipt still waits for its own position and witness.
 const UNPLACED: &str = "(t.mined_height IS NULL OR n.commitment_tree_position IS NULL)";
 
+const _: () = assert!(
+    PRUNING_DEPTH == 100,
+    "REPAIR_KEY writes the pruning depth inline"
+);
+
 /// SQL over key alias `k`: an already-owned receipt is [`UNPLACED`], or its transaction
-/// label is disputed (see [`check_raw_receipts`]), so it needs repair.
+/// label is disputed (see [`check_raw_receipts`]), so it needs repair. A receipt whose
+/// transaction left the chain and expired at least [`PRUNING_DEPTH`] blocks below the
+/// scanned tip needs none: no reorg the wallet follows can mine it again, as when another
+/// transaction replaced it.
 const REPAIR_KEY: &str = "(EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
     ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = k.id
-    AND (t.mined_height IS NULL OR n.commitment_tree_position IS NULL))
+    AND (t.mined_height IS NULL OR n.commitment_tree_position IS NULL)
+    AND NOT (t.mined_height IS NULL AND IFNULL(t.expiry_height, 0) > 0
+        AND t.expiry_height + 100 <= (SELECT IFNULL(MAX(height), 0) FROM blocks)))
     OR EXISTS(SELECT 1 FROM ironwood_one_time_disputed_receipts d
         JOIN ironwood_received_notes n ON n.id = d.note_id WHERE n.one_time_key_id = k.id))";
 
