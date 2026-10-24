@@ -102,6 +102,9 @@ def main():
         ("receiver-wallet", "zakura/pir-client", ["receiver-wallet"], {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"} | native_evaluators | server_roles, {"zakura-filters", "reinspiring"}),
         # The borrowed reader needs only protocol value types and the txid hashes.
         ("transaction-wire", "zakura/transaction-wire", [], recovery_forbidden | wallet_roles - {"zakura-protocol"} | server_roles | {"zakura-transparent", "zakura-redjubjub", "zakura-pasta-curves", "zakura-jubjub", "zakura-bls12-381"}, {"zakura-protocol", "sha2", "blake2b_simd"}),
+        # Config resolution is shared with zcash_voting and must stay free of
+        # wallet, PIR, server, async runtime and HTTP crates.
+        ("service-config", "zakura/service-config", [], wallet_roles | server_roles | native_evaluators | endpoint_stack | {"zakura-pir-protocol", "tokio", "reqwest", "hyper"}, {"serde_json", "sha2"}),
         ("test-support", "librustzcash/zcash_client_sqlite", ["test-dependencies"], {"wagyu-zcash-parameters"}, set()),
         ("proving", "librustzcash/zcash_client_sqlite", ["pczt-tests"], set(), {"wagyu-zcash-parameters"}),
     ]

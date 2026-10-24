@@ -48,6 +48,7 @@ python3 scripts/dev.py verify
 | `transaction-status-lightwalletd` | Status policy plus the explicit lightwalletd adapter, including payload validation and cancellation |
 | `receiver-protocol` | PIR protocol; `receiver` alone: the receiver codec and formats without Common |
 | `transaction-wire` | Unpublished borrowed transaction wire reader, with the typed decoders as dev-only differential oracles |
+| `service-config` | Transport-free static/dynamic service config resolution: hash pins, mirrors and pluggable attestation |
 | `one-time-ivk-scenarios` | PIR-only wallet scenarios with an independent chain oracle (see its README). CI runs it nightly, not on PRs |
 
 `default` builds the backend and SQLite crates without Orchard or transparent
@@ -202,6 +203,11 @@ placeholder release. Trusted Publishing needs existing crate names.
 Before a release, reserve the five new `zakura-pir-{protocol,client,publisher,query-server,server-core}`
 names and configure their Trusted Publishers. The packaging POC itself does not
 publish crates or change publisher settings. No permanent API token or new Infisical secret is required.
+
+`zakura-service-config` is also selected for release. Before its first release,
+publish its reserved `0.0.0` placeholder and configure the same Trusted Publisher
+for that crate. A reservation merged into `zakura-core/reserved` does not register
+the name on crates.io until the placeholder is published.
 
 Choose **publish** for an actual release. It repeats verification for the dispatch
 commit, requires environment approval, then acquires its temporary credential.

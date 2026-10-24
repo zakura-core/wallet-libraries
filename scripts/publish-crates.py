@@ -18,6 +18,7 @@ import dependency_boundary  # noqa: E402
 # Include optional and development dependencies in the order, since Cargo
 # resolves them when it prepares the package for the registry.
 ORDER = (
+    "zakura/service-config",
     "zakura/filters",
     "zakura/pir-protocol",
     "zakura/pir-server-core",

@@ -24,6 +24,7 @@ members = [
     "zakura/near-intents",
     "zakura/one-time-ivk-scenarios",
     "zakura/transaction-wire",
+    "zakura/service-config",
 ]
 
 resolver = "2"

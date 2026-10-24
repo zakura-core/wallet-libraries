@@ -1,0 +1,23 @@
+[package]
+name = "zakura-service-config"
+description = "Transport-free static and dynamic service config resolution with hash pins, mirrors and pluggable attestation"
+version = "0.1.0"
+edition.workspace = true
+# Declared explicitly rather than inherited: zcash_voting consumes this package
+# from git, so a later wallet-libraries toolchain bump must not raise its MSRV.
+rust-version = "1.97"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "zakura_service_config"
+
+# Kept to parsing and hashing crates. No async runtime, HTTP client, wallet
+# backend, PIR engine or voting crate may appear here: applications own
+# transport, scheduling and persistence.
+[dependencies]
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
