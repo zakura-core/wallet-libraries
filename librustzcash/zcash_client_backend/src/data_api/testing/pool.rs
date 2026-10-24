@@ -7087,6 +7087,65 @@ pub fn scan_decrypted_blocks_scans_replaced_blocks<T: ShieldedPoolTester, Dsf>(
     assert_eq!(source.reads.get(), 1);
 }
 
+/// A range is scanned for the accounts whose birthday is at or below its last block. A
+/// range that ends below an account's birthday, decrypted ahead or not, leaves the account
+/// out; a range that reaches the birthday finds the account's notes in all of its blocks.
+pub fn scan_leaves_out_accounts_born_after_the_range<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
+{
+    use secrecy::{ExposeSecret, SecretVec};
+
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
+    let account = st.test_account().cloned().unwrap();
+    let dfvk = T::test_account_fvk(&st);
+    let zats = Zatoshis::const_from_u64;
+
+    // The next account under the test seed takes ZIP 32 index 1, so its key can be derived
+    // before the account exists.
+    let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
+    let index = zip32::AccountId::ZERO.next().unwrap();
+    let usk2 = UnifiedSpendingKey::from_seed(st.network(), seed.expose_secret(), index).unwrap();
+    let dfvk2 = T::sk_to_fvk(T::usk_to_sk(&usk2));
+
+    // Three blocks pay the second account below its birthday h4, two at and after it, and a
+    // last one pays the first account.
+    let (h1, _, _) = st.generate_next_block(&dfvk2, AddressType::DefaultExternal, zats(10000));
+    let (h2, _, _) = st.generate_next_block(&dfvk2, AddressType::DefaultExternal, zats(20000));
+    let (h3, _, _) = st.generate_next_block(&dfvk2, AddressType::DefaultExternal, zats(30000));
+    let birthday = AccountBirthday::from_parts(
+        st.latest_cached_block().unwrap().chain_state().clone(),
+        None,
+    );
+    let (h4, _, _) = st.generate_next_block(&dfvk2, AddressType::DefaultExternal, zats(40000));
+    assert_eq!(birthday.height(), h4);
+    let (h5, _, _) = st.generate_next_block(&dfvk2, AddressType::DefaultExternal, zats(50000));
+    st.generate_next_block(&dfvk, AddressType::DefaultExternal, zats(60000));
+    let (account2, _) = st
+        .wallet_mut()
+        .create_account("account2", &seed, &birthday, None)
+        .unwrap();
+
+    let summary = st.scan_cached_blocks(h1, 1);
+    assert_eq!(T::received_note_count(&summary), 0);
+    let decryption = st.decrypt_cached_blocks(h2, 1);
+    let summary = st.scan_decrypted_blocks(h2, 1, decryption);
+    assert_eq!(T::received_note_count(&summary), 0);
+
+    // This range starts below the birthday and reaches it.
+    let summary = st.scan_cached_blocks(h3, 2);
+    assert_eq!(T::received_note_count(&summary), 2);
+    let decryption = st.decrypt_cached_blocks(h5, 2);
+    let summary = st.scan_decrypted_blocks(h5, 2, decryption);
+    assert_eq!(T::received_note_count(&summary), 2);
+
+    assert_eq!(st.get_total_balance(account2), zats(120000));
+    assert_eq!(st.get_total_balance(account.id()), zats(60000));
+}
+
 /// The blocks `source` holds from `from_height`, at most `limit` of them.
 fn read_blocks<S: BlockSource>(
     source: &S,
