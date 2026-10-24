@@ -33,14 +33,16 @@ use crate::{
 
 use super::{policy::pending_details, resolve_mode};
 
-use activity::{ActivityEvidence, activity, has_orchard_spend, read_outputs, summarize};
+use activity::{
+    ActivityEvidence, activity, has_orchard_spend, read_outputs, read_outputs_batch, summarize,
+};
 use classify::{
     account_fee, aggregate_payment, classification, inferred_outgoing, inferred_payment,
     is_private_shielding, whole_fee,
 };
 use completeness::{EffectEvidence, has_unretrieved_memo};
 use evidence::{
-    known_amounts, metadata_evidence, qualified_owned_spend_inputs, sent_elsewhere,
+    known_amounts_batch, metadata_evidence, qualified_owned_spend_inputs, sent_elsewhere,
     transaction_facts,
 };
 
@@ -76,13 +78,26 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
     #[cfg(feature = "transparent-inputs")]
     let discovery = transparent_discovery(conn, params, gap_limits, mode, account)?;
 
+    let facts = txids
+        .iter()
+        .map(|txid| transaction_facts(conn, txid))
+        .collect::<Result<Vec<_>, _>>()?;
+    let transaction_ids = facts
+        .iter()
+        .flatten()
+        .map(|facts| facts.id)
+        .collect::<Vec<_>>();
+    let outputs_by_transaction = read_outputs_batch(conn, account, account_id, &transaction_ids)?;
+    let amounts_by_transaction = known_amounts_batch(conn, account_id, &transaction_ids)?;
     let mut entries = vec![];
-    for txid in txids {
-        // Load the transaction row and the account's recorded amounts in it.
-        let Some(tx_facts) = transaction_facts(conn, txid)? else {
+    for (txid, tx_facts) in txids.iter().zip(facts) {
+        let Some(tx_facts) = tx_facts else {
             continue;
         };
-        let recorded_amounts = known_amounts(conn, account_id, tx_facts.id)?;
+        let recorded_amounts = amounts_by_transaction
+            .get(&tx_facts.id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         #[cfg(feature = "transparent-inputs")]
         let involved =
             !recorded_amounts.is_empty() || has_active_ledger_spend(conn, account_id, txid)?;
@@ -125,7 +140,7 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             #[cfg(feature = "transparent-inputs")]
             discovery: &discovery,
         };
-        let effects = effect_evidence.pool_effects(&recorded_amounts)?;
+        let effects = effect_evidence.pool_effects(recorded_amounts)?;
         let transaction_metadata = metadata_evidence(conn, account_id, txid)?;
         let settled = effects.iter().all(|e| e.completeness.is_settled());
         let spent: u64 = recorded_amounts
@@ -265,8 +280,11 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
                 .map(Zatoshis::into_u64),
             inferred_outgoing: inferred_outgoing_value.map(Zatoshis::into_u64),
         };
-        let outputs = read_outputs(conn, account, account_id, tx_facts.id)?;
-        let summary = summarize(&activity_evidence, &outputs)?;
+        let outputs = outputs_by_transaction
+            .get(&tx_facts.id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let summary = summarize(&activity_evidence, outputs)?;
         let activity = activity(&activity_evidence, &summary)?;
 
         entries.push(TransactionHistoryDetails {

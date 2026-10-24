@@ -3509,9 +3509,12 @@ fn conclusive_refund_keys_leave_automatic_monitoring() {
             "SELECT id FROM accounts WHERE uuid = ?1",
             [account.0],
         );
-        let ids =
-            crate::wallet::one_time_ivk::restore::queue::direct_keys(st.wallet().conn(), owner)
-                .unwrap();
+        let ids = crate::wallet::one_time_ivk::restore::queue::direct_keys(
+            st.wallet().conn(),
+            st.network(),
+            owner,
+        )
+        .unwrap();
         let mut direct: Vec<u64> = ids
             .into_iter()
             .filter_map(|id: i64| {
@@ -3576,6 +3579,400 @@ fn conclusive_refund_keys_leave_automatic_monitoring() {
     drain(&mut st, account, publication);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
     assert_eq!(watched(&st), (vec![1, 2], vec![1, 2]));
+}
+
+/// The refund indexes `account` monitors automatically: in its filter receiver set and in
+/// direct catch-up.
+fn refunds_watched(st: &State, account: AccountUuid) -> (Vec<u64>, Vec<u64>) {
+    let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
+    let filters = receivers
+        .iter()
+        .filter(|w| w.key.purpose() == Purpose::Refund)
+        .map(|w| w.key.index())
+        .collect();
+    let conn = st.wallet().conn();
+    let owner: i64 = value(conn, "SELECT id FROM accounts WHERE uuid = ?1", [account.0]);
+    let ids = crate::wallet::one_time_ivk::restore::queue::direct_keys(conn, st.network(), owner)
+        .unwrap();
+    let mut direct: Vec<u64> = ids
+        .into_iter()
+        .filter_map(|id: i64| {
+            let (purpose, index): (u8, Vec<u8>) = row(
+                conn,
+                "SELECT purpose, key_index FROM ironwood_one_time_keys WHERE id = ?1",
+                [id],
+            );
+            (purpose == 0).then(|| u64::from_be_bytes(index.try_into().unwrap()))
+        })
+        .collect();
+    direct.sort();
+    (filters, direct)
+}
+
+/// Starts recovery at the tip with direct catch-up and drains it, so filters have checked
+/// through the tip. Returns that frontier.
+fn catch_up(st: &mut State, account: AccountUuid) -> BlockHeight {
+    let publication = publication_at(st, tip(st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    drain(st, account, publication);
+    status(st.wallet().db(), account)
+        .filter_frontier
+        .unwrap()
+        .height
+}
+
+/// Mines and scans one empty block and passes filters over it with no hit.
+fn filter_one_block(st: &mut State, account: AccountUuid, frontier: BlockHeight) {
+    st.generate_and_scan_empty_blocks(1);
+    let (token, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    let passed = blocks_above(st, frontier);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_filters(account, token, 0, &passed, &[])
+            .unwrap()
+    );
+}
+
+/// The memo-only window in blocks is the chain time it spans, so after NU7's 25-second
+/// blocks it covers three times as many blocks, and a window across activation counts each
+/// side at its own spacing.
+#[test]
+fn the_memo_refund_window_is_measured_in_chain_time() {
+    use crate::wallet::one_time_ivk::restore::queue::{MEMO_REFUND_WINDOW, aged_cutoff};
+    use zcash_protocol::zip318::BlockSpacing;
+    let window = MEMO_REFUND_WINDOW;
+    assert_eq!(window, 8_064, "7 days of 75-second blocks");
+    let uniform = BlockSpacing::UNIFORM;
+    assert_eq!(aged_cutoff(uniform, window), None);
+    assert_eq!(aged_cutoff(uniform, window + 1), Some(0));
+    assert_eq!(aged_cutoff(uniform, 100_000), Some(100_000 - window - 1));
+    let nu7 = 1_000_000;
+    let spacing = BlockSpacing::with_nu7_activation(BlockHeight::from(nu7));
+    assert_eq!(aged_cutoff(spacing, nu7 - 1), Some(nu7 - 1 - window - 1));
+    assert_eq!(aged_cutoff(spacing, nu7 + 3 * window), Some(nu7 - 1));
+    assert_eq!(aged_cutoff(spacing, nu7 + 3 * window + 6), Some(nu7 + 5));
+    // A third of the window after activation leaves two thirds before it.
+    assert_eq!(
+        aged_cutoff(spacing, nu7 + window),
+        Some(nu7 - 2 * window / 3 - 1)
+    );
+}
+
+/// A refund key known only from its funding memo has no local operation, so no provider
+/// status can retire it. It leaves automatic monitoring once filters have checked more than
+/// the memo-only window past its funding block, which fences held filter requests, and a key
+/// already past the window when recovered still has its history read once. A key with a
+/// local operation keeps the conclusive-operation rule, and retirement never makes an index
+/// issuable again.
+#[test]
+fn a_memo_only_refund_key_retires_after_its_window() {
+    use crate::wallet::one_time_ivk::restore::queue::MEMO_REFUND_WINDOW;
+    use zakura_one_time_ivk::swap::{Observation, OperationStatus::Active};
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let frontier = catch_up(&mut st, account);
+    let refund = |i| KeyId::new(Purpose::Refund, i);
+    let edge = frontier - MEMO_REFUND_WINDOW;
+    let db = st.wallet_mut().db_mut();
+    recover(db, account, refund(0), edge);
+    recover(db, account, refund(1), edge - 1);
+    recover(db, account, refund(2), edge - 1);
+    let active = Observation {
+        status: Active,
+        funded: true,
+        receipts: vec![],
+    };
+    let now = clock_now();
+    observe_with(
+        db,
+        account,
+        refund(2),
+        ("deposit-2", now + 3_600),
+        active,
+        now,
+    )
+    .unwrap();
+    assert_eq!(refunds_watched(&st, account), (vec![0, 2], vec![0, 2]));
+    // R1 was already past the window, so it was never watched, but its history is read.
+    let r1 = key_ref(&st.wallet().db().conn, account, refund(1)).unwrap();
+    let queued: bool = value(
+        st.wallet().conn(),
+        "SELECT target_height IS NOT NULL FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+        [r1],
+    );
+    assert!(queued);
+
+    let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    filter_one_block(&mut st, account, frontier);
+    assert_eq!(refunds_watched(&st, account), (vec![2], vec![2]));
+    let (current, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert_ne!(current, held, "retiring R0 fences held filter requests");
+
+    let tip = tip(&st).height;
+    let next = reserve_refund(st.wallet_mut().db_mut(), account, tip);
+    assert_eq!(next.unwrap().unwrap().key_id().index(), 3);
+}
+
+/// A refund to a memo-only key after it retired is missed by automatic recovery, as the
+/// filters no longer watch it, but an explicit history check still finds it.
+#[test]
+fn a_refund_to_a_retired_memo_only_key_is_found_by_a_history_check() {
+    use crate::wallet::one_time_ivk::restore::queue::MEMO_REFUND_WINDOW;
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let frontier = catch_up(&mut st, account);
+    let r0 = KeyId::new(Purpose::Refund, 0);
+    recover(
+        st.wallet_mut().db_mut(),
+        account,
+        r0,
+        frontier - MEMO_REFUND_WINDOW,
+    );
+    let frontier = catch_up(&mut st, account);
+    filter_one_block(&mut st, account, frontier);
+    assert_eq!(refunds_watched(&st, account), (vec![], vec![]));
+
+    let frontier = status(st.wallet().db(), account)
+        .filter_frontier
+        .unwrap()
+        .height;
+    pay_candidate(&mut st, r0);
+    filter_one_block(&mut st, account, frontier);
+    let publication = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    assert!(
+        one_time_notes(&st).is_empty(),
+        "automatic recovery skips R0"
+    );
+
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.check_one_time_history(account, publication, None)
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// R0's refund is recovered, then a reorg replaces it with another transaction paying R0,
+/// which is recovered and reported. The displaced receipt stays unmined, which kept R0 in
+/// repair, and so monitored, forever. Expiry alone does not end that: the replacement chain
+/// might hold the transaction, so R0 stays in repair until its history is read past the
+/// expiry height. Then filters past the pruning depth beyond it retire R0.
+#[test]
+fn a_refund_replaced_by_a_reorg_still_retires() {
+    use zakura_one_time_ivk::swap::{
+        Observation,
+        OperationStatus::{Active, Terminal},
+        ReceiptExpectation,
+    };
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let now = clock_now();
+    let r0 = KeyId::new(Purpose::Refund, 0);
+    let floor = tip(&st).height;
+    recover(st.wallet_mut().db_mut(), account, r0, floor);
+    let observe = |st: &mut State, status, receipts, at| {
+        let observation = Observation {
+            status,
+            funded: true,
+            receipts,
+        };
+        let db = st.wallet_mut().db_mut();
+        observe_with(db, account, r0, ("deposit-0", now + 3_600), observation, at).unwrap();
+    };
+    observe(&mut st, Active, vec![], now);
+    let displaced = pay_candidate(&mut st, r0);
+    catch_up(&mut st, account);
+
+    st.truncate_to_height(floor);
+    let replacement = pay_candidate(&mut st, r0);
+    assert_ne!(replacement.txid, displaced.txid);
+    catch_up(&mut st, account);
+    let refund = Terminal(ReceiptExpectation::Positive(Some(
+        Zatoshis::const_from_u64(100_000),
+    )));
+    observe(&mut st, refund, vec![replacement.txid], now + 60);
+    let receipts: Vec<(Option<u32>, Vec<u8>)> = rows(
+        st.wallet().conn(),
+        "SELECT t.mined_height, t.txid FROM ironwood_received_notes n
+         JOIN transactions t ON t.id_tx = n.transaction_id
+         WHERE n.one_time_key_id IS NOT NULL ORDER BY n.id",
+        [],
+    );
+    assert_eq!(
+        receipts,
+        [
+            (None, displaced.txid.as_ref().to_vec()),
+            (
+                Some(u32::from(replacement.height)),
+                replacement.txid.as_ref().to_vec()
+            ),
+        ]
+    );
+
+    // Enhancement records the displaced transaction's expiry height.
+    let expiry = u32::from(displaced.height) + 40;
+    exec(
+        st.wallet().conn(),
+        "UPDATE transactions SET expiry_height = ?1 WHERE txid = ?2",
+        rusqlite::params![expiry, displaced.txid.as_ref()],
+    );
+    let blocks = expiry + crate::PRUNING_DEPTH - u32::from(tip(&st).height);
+    st.generate_and_scan_empty_blocks(blocks as usize);
+    assert_eq!(
+        refunds_watched(&st, account),
+        (vec![0], vec![0]),
+        "no history was read past the expiry"
+    );
+    let frontier = catch_up(&mut st, account);
+    assert_eq!(u32::from(frontier), expiry + crate::PRUNING_DEPTH);
+    assert_eq!(refunds_watched(&st, account), (vec![], vec![]));
+}
+
+/// A manual check finds a payment to a retired memo-only key, and its candidate waits for
+/// a witness, which returns the key to monitoring. That advances the generation, so a
+/// filter request captured without the key cannot commit past blocks that may pay it again,
+/// and the key's history since its earlier completed read is queued automatically.
+#[test]
+fn a_candidate_that_returns_a_retired_key_to_monitoring_fences_held_filters() {
+    use crate::wallet::one_time_ivk::restore::queue::MEMO_REFUND_WINDOW;
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let frontier = catch_up(&mut st, account);
+    let r0 = KeyId::new(Purpose::Refund, 0);
+    let db = st.wallet_mut().db_mut();
+    recover(db, account, r0, frontier - MEMO_REFUND_WINDOW);
+    let frontier = catch_up(&mut st, account);
+    filter_one_block(&mut st, account, frontier);
+    assert_eq!(refunds_watched(&st, account), (vec![], vec![]));
+
+    let frontier = status(st.wallet().db(), account)
+        .filter_frontier
+        .unwrap()
+        .height;
+    pay_candidate(&mut st, r0);
+    let publication = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.check_one_time_history(account, publication, None)
+            .unwrap()
+    );
+    let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert!(answer_lookup(&mut st, account, publication));
+    assert_eq!(candidates(&st), 1, "the payment waits for its witness");
+    assert_eq!(refunds_watched(&st, account), (vec![0], vec![0]));
+
+    let passed = blocks_above(&st, frontier);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        !db.record_one_time_filters(account, held, 0, &passed, &[])
+            .unwrap(),
+        "a request captured without R0 cannot commit"
+    );
+    let id = key_ref(&st.wallet().db().conn, account, r0).unwrap();
+    let (target, reasons): (Option<u32>, u8) = row(
+        st.wallet().conn(),
+        "SELECT target_height, reasons FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+        [id],
+    );
+    assert!(target >= Some(u32::from(tip(&st).height)));
+    assert_ne!(reasons & 1, 0, "R0's history is queued automatically");
+}
+
+/// Recording a first local operation on a retired memo-only key replaces the memo-only
+/// rule with the operation rule, which returns it to monitoring and fences held filters.
+#[test]
+fn a_first_operation_on_a_retired_memo_only_key_fences_held_filters() {
+    use crate::wallet::one_time_ivk::restore::queue::MEMO_REFUND_WINDOW;
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let frontier = catch_up(&mut st, account);
+    let r0 = KeyId::new(Purpose::Refund, 0);
+    let db = st.wallet_mut().db_mut();
+    recover(db, account, r0, frontier - MEMO_REFUND_WINDOW);
+    let frontier = catch_up(&mut st, account);
+    filter_one_block(&mut st, account, frontier);
+    assert_eq!(refunds_watched(&st, account), (vec![], vec![]));
+
+    let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    let deposit = p2pkh(7).encode(st.network());
+    let now = clock_now();
+    let db = st.wallet_mut().db_mut();
+    db.record_refund_operation(account, 0, &deposit, now + 3_600, now)
+        .unwrap();
+    assert_eq!(refunds_watched(&st, account), (vec![0], vec![0]));
+    let (current, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert_ne!(current, held);
+}
+
+/// As in [`a_refund_replaced_by_a_reorg_still_retires`], but the displaced receipt's expiry
+/// height is unknown until its raw transaction is stored. Storing it retires R0, so it
+/// advances the generation, fencing held filter requests.
+#[test]
+fn storing_a_displaced_receipts_raw_transaction_fences_its_retirement() {
+    use zakura_one_time_ivk::swap::{
+        Observation,
+        OperationStatus::{Active, Terminal},
+        ReceiptExpectation,
+    };
+    use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let network = *st.network();
+    let now = clock_now();
+    let r0 = KeyId::new(Purpose::Refund, 0);
+    let floor = tip(&st).height;
+    let key = recover(st.wallet_mut().db_mut(), account, r0, floor);
+    let observe = |st: &mut State, status, receipts, at| {
+        let observation = Observation {
+            status,
+            funded: true,
+            receipts,
+        };
+        let db = st.wallet_mut().db_mut();
+        observe_with(db, account, r0, ("deposit-0", now + 3_600), observation, at).unwrap();
+    };
+    observe(&mut st, Active, vec![], now);
+    let displaced = external_payment(key.receiver(), &zcash_protocol::memo::MemoBytes::empty());
+    let (height, _) = st.generate_next_block_from_tx(1, &displaced);
+    payment_indexes(&st, height, 1);
+    st.scan_cached_blocks(height, 1);
+    catch_up(&mut st, account);
+    assert_eq!(one_time_notes(&st), [(50_000, false)]);
+
+    st.truncate_to_height(floor);
+    let replacement = pay_candidate(&mut st, r0);
+    catch_up(&mut st, account);
+    let refund = Terminal(ReceiptExpectation::Positive(Some(
+        Zatoshis::const_from_u64(100_000),
+    )));
+    observe(&mut st, refund, vec![replacement.txid], now + 60);
+    let expiry = u32::from(displaced.expiry_height());
+    let blocks = expiry + crate::PRUNING_DEPTH - u32::from(tip(&st).height);
+    st.generate_and_scan_empty_blocks(blocks as usize);
+    catch_up(&mut st, account);
+    assert_eq!(
+        refunds_watched(&st, account),
+        (vec![0], vec![0]),
+        "the expiry height is unknown"
+    );
+
+    let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &displaced, None).unwrap();
+    assert_eq!(refunds_watched(&st, account), (vec![], vec![]));
+    let (current, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert_ne!(current, held, "retiring R0 fences held filter requests");
 }
 
 /// R0's empty history is checked through the tip and a "no refund" status retires it. A
@@ -4416,9 +4813,7 @@ fn drain_sharded(
 /// transaction with the dispute cleared.
 #[test]
 fn a_dispute_after_its_label_moved_rereads_the_whole_history() {
-    use zcash_client_backend::data_api::{
-        TransactionStatus, wallet::decrypt_and_store_transaction,
-    };
+    use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
     let Mislabeled {
         mut st,
         candidate,
@@ -4549,4 +4944,239 @@ fn a_step_that_skips_the_required_shards_is_refused() {
         );
         assert_eq!(progress(&st), before, "replaced {replaced}");
     }
+}
+
+/// Every scan batch looks for deferred raw receipt checks. The query starts from that
+/// queue, which a wallet without one-time state never fills, so its cost does not grow with
+/// the wallet's transaction history.
+#[test]
+fn the_deferred_receipt_check_starts_from_its_queue() {
+    let st = scanned_wallet();
+    let plan: Vec<String> = st
+        .wallet()
+        .conn()
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            crate::wallet::one_time_ivk::restore::queue::DEFERRED_RECEIPTS
+        ))
+        .unwrap()
+        .query_map([], |r| r.get(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(plan[0].starts_with("SCAN u"), "{plan:?}");
+    assert!(plan[1].starts_with("SEARCH t"), "{plan:?}");
+}
+
+/// An account that never enabled one-time recovery gains no progress row from any public
+/// one-time call: reads, pausing, recovery steps, history checks, upgrade reports and every
+/// swap call report disabled, refuse or do nothing, so scanning does none of the
+/// per-account recovery work. View-only accounts with no Orchard key, one imported from a
+/// Sapling-only key and one from an incoming viewing key, read and pause as disabled too,
+/// and the calls that would issue keys refuse them. Enabling, pausing and enabling again
+/// still behave as before.
+#[test]
+fn a_never_enabled_account_reads_as_disabled_without_state() {
+    use zcash_client_backend::data_api::{
+        Account as _, AccountBirthday, AccountPurpose, AccountSource, chain::ChainState,
+    };
+    use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
+    let mut st = restored_wallet();
+    let network = *st.network();
+    let rows = |st: &State| -> u32 {
+        value(
+            st.wallet().conn(),
+            "SELECT COUNT(*) FROM ironwood_one_time_recovery",
+            [],
+        )
+    };
+    let anchor = tip(&st);
+    let birthday = AccountBirthday::from_parts(ChainState::empty(anchor.height, anchor.hash), None);
+    let mut accounts = vec![(st.test_account().unwrap().id(), true)];
+    for incoming_only in [false, true] {
+        let ufvk = UnifiedSpendingKey::from_seed(
+            &network,
+            &[if incoming_only { 8 } else { 7 }; 32],
+            zip32::AccountId::ZERO,
+        )
+        .unwrap()
+        .to_unified_full_viewing_key();
+        let key = if incoming_only {
+            crate::wallet::ViewingKey::Incoming(Box::new(ufvk.to_unified_incoming_viewing_key()))
+        } else {
+            crate::wallet::ViewingKey::Full(Box::new(
+                UnifiedFullViewingKey::new(
+                    #[cfg(feature = "transparent-inputs")]
+                    None,
+                    ufvk.sapling().cloned(),
+                    None,
+                )
+                .unwrap(),
+            ))
+        };
+        let account = st
+            .wallet_mut()
+            .db_mut()
+            .transactionally(|db| {
+                crate::wallet::add_account(
+                    db.conn.0,
+                    db.params,
+                    "viewing",
+                    &AccountSource::Imported {
+                        purpose: AccountPurpose::ViewOnly,
+                        key_source: None,
+                    },
+                    key,
+                    &birthday,
+                    #[cfg(feature = "transparent-inputs")]
+                    &crate::GapLimits::default(),
+                )
+            })
+            .unwrap();
+        accounts.push((account.id(), false));
+    }
+    let publication = publication_at(&st, anchor.height);
+    let work = LookupWork {
+        token: zcash_client_backend::data_api::one_time_ivk::restore::RecoveryToken {
+            generation: 0,
+            history_revision: 0,
+        },
+        work: zcash_client_backend::data_api::one_time_ivk::restore::DiscoveryWork {
+            key: key8(),
+            receiver: [0; 43],
+        },
+        from: publication.start_height,
+        through: publication.end.height,
+        cursor: None,
+    };
+    let page = whole(publication, vec![]);
+    let request = WitnessRequest {
+        key: key8(),
+        position: 0,
+        cmx: [0; 32],
+        payments: [1; 32],
+        witnesses: [7; 32],
+        ordinal: 0,
+    };
+    let answer = WitnessAnswer {
+        payments: [1; 32],
+        revision: [7; 32],
+        context: publication.end,
+        payload: [0; 512],
+    };
+    for (account, orchard) in accounts {
+        let db = st.wallet_mut().db_mut();
+        // Receivers come first: with no progress row they must still read as disabled.
+        let (_, receivers) = db.one_time_receivers(account).unwrap();
+        assert!(receivers.is_empty());
+        assert_eq!(db.one_time_direct_query_count(account).unwrap(), 0);
+        db.set_one_time_recovery_enabled(account, false).unwrap();
+        let state = db.one_time_recovery(account, clock_now()).unwrap();
+        assert!(!state.enabled && state.lookups.is_empty() && state.witnesses.is_empty());
+        assert!(
+            !db.begin_one_time_recovery(account, publication, true)
+                .unwrap()
+        );
+        assert!(
+            !db.check_one_time_history(account, publication, Some(4))
+                .unwrap()
+        );
+        let _ = db.cancel_one_time_history(account);
+        db.require_one_time_upgrade(account).unwrap();
+        let token = db.one_time_recovery(account, clock_now()).unwrap().token;
+        let _ = db.record_one_time_filters(account, token, 0, &[], &[]);
+        let _ = db.defer_one_time_lookup(account, &work, clock_now());
+        let _ = db.record_one_time_lookup(account, &work, &page, clock_now());
+        let _ = db.record_one_time_witness(account, token, request, &answer, clock_now());
+        let _ = db.refresh_one_time_witness(account, token, request);
+        let issued = [
+            db.prepare_receive_reservation(account, clock_now())
+                .map(|r| r.map(drop)),
+            db.reserve_refund_key(account, anchor.height)
+                .map(|r| r.map(drop)),
+            db.begin_receive_operation(account, 0, clock_now() + 60, clock_now())
+                .map(|r| r.map(drop)),
+            db.start_receive_operation(account, "request", clock_now())
+                .map(|r| r.map(drop)),
+        ];
+        for result in issued {
+            if orchard {
+                assert!(matches!(result, Ok(Err(ReservationPolicy::Disabled))));
+            } else {
+                assert!(matches!(result, Err(SqliteClientError::BadAccountData(_))));
+            }
+        }
+        assert!(
+            db.record_refund_operation(account, 0, "deposit", clock_now() + 60, clock_now())
+                .is_err()
+        );
+        let _ = db.finish_receive_operation(account, "request", &OperationOutcome::Rejected);
+        let observation = Observation {
+            status: OperationStatus::Active,
+            funded: false,
+            receipts: vec![],
+        };
+        let _ = db.record_operation_status(account, "deposit", None, observation, clock_now());
+        let _ = db.refund_funding_memo(account, 0, "deposit");
+        if !orchard {
+            assert!(matches!(
+                db.set_one_time_recovery_enabled(account, true),
+                Err(SqliteClientError::BadAccountData(_))
+            ));
+        }
+        assert_eq!(rows(&st), 0, "orchard {orchard}");
+    }
+    st.generate_and_scan_empty_blocks(2);
+    assert_eq!(rows(&st), 0);
+
+    // Only enabling creates progress, and pausing and enabling again keep their behavior.
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet_mut().db_mut();
+    db.set_one_time_recovery_enabled(account, true).unwrap();
+    assert!(db.one_time_recovery(account, clock_now()).unwrap().enabled);
+    db.set_one_time_recovery_enabled(account, false).unwrap();
+    assert!(!db.one_time_recovery(account, clock_now()).unwrap().enabled);
+    assert_eq!(
+        db.prepare_receive_reservation(account, clock_now())
+            .unwrap()
+            .map(drop),
+        Err(ReservationPolicy::Disabled)
+    );
+    db.set_one_time_recovery_enabled(account, true).unwrap();
+    assert!(db.one_time_recovery(account, clock_now()).unwrap().enabled);
+    assert_ne!(
+        db.prepare_receive_reservation(account, clock_now())
+            .unwrap()
+            .map(drop),
+        Err(ReservationPolicy::Disabled)
+    );
+    assert_eq!(rows(&st), 1);
+}
+
+/// Pausing an account that is not enabled, or reporting an upgrade it already waits for, only
+/// reads: both succeed on a read-only connection, before and after the account has a row.
+#[test]
+fn pausing_a_disabled_account_needs_no_write() {
+    let mut st = restored_wallet();
+    let account = st.test_account().unwrap().id();
+    let read_only = |st: &mut State, on: bool| {
+        st.wallet()
+            .conn()
+            .pragma_update(None, "query_only", on)
+            .unwrap()
+    };
+    read_only(&mut st, true);
+    let db = st.wallet_mut().db_mut();
+    db.set_one_time_recovery_enabled(account, false).unwrap();
+    db.require_one_time_upgrade(account).unwrap();
+    read_only(&mut st, false);
+    let db = st.wallet_mut().db_mut();
+    db.set_one_time_recovery_enabled(account, true).unwrap();
+    db.set_one_time_recovery_enabled(account, false).unwrap();
+    db.require_one_time_upgrade(account).unwrap();
+    read_only(&mut st, true);
+    let db = st.wallet_mut().db_mut();
+    db.set_one_time_recovery_enabled(account, false).unwrap();
+    db.require_one_time_upgrade(account).unwrap();
+    read_only(&mut st, false);
 }

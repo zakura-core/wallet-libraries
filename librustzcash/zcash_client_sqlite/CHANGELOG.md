@@ -7,7 +7,11 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9.4] - 2026-10-23
+
 ### Changed
+
+- Read transaction history outputs and received/spent amounts in batches to avoid repeatedly scanning the entire wallet for each transaction.
 
 - Replace one-time-key discovery passes and scan watches with a durable PIR recovery queue. Seed recovery stops after four complete empty receive histories, receive issuance recycles unpaid holes in a four-index window that extends once a payment is mined and hands out an index only after its own history lookup completes (`ReservationPolicy::ReceiveHistory` until then), and refunds use authenticated funding evidence. Manual history checks support cancellation, restart and an explicit receive bound.
 - Remove provider seen gates, broad one-time-key decryption, scan hints, replay state and their old APIs. Ordinary sync never waits for receiver discovery. Retain targeted payment authentication, chain proofs, spend-journal checks and existing note ownership. Rewinds and earlier birthdays requeue affected history even while discovery is disabled.
@@ -18,16 +22,29 @@ and this library adheres to Rust's notion of
 - Rebaseline the unlaunched one-time-key schema. The cutover drops abandoned discovery progress while preserving accounts, note ownership and unrelated wallet data. Recovery starts disabled.
 - One-time IVK issuance no longer reads a provider seen set. `WalletDb::prepare_receive_reservation`, `WalletDb::begin_receive_operation` and `WalletDb::reserve_refund_key` drop their `seen` argument, and keys no longer stop being watched `COMPLETION_LIMIT_SECS` after their last deadline. `ReservationPolicy` gains `Disabled`, `FundingHistory` and `ReceiveHistory`.
 - A build without `orchard` that stores a transaction holding a private one-time receipt keeps that receipt's private enhancement work and leaves its raw-transaction check to an Orchard build, which runs it when it next stores blocks.
+- Storing scanned blocks looks for those deferred raw-transaction checks from their queue, so a wallet with no one-time state no longer walks its whole transaction table on every scan batch.
+- No one-time call creates recovery state for an account that never enabled it, so scanning does no per-account recovery work for it. `WalletDb::one_time_recovery`, `WalletDb::one_time_receivers` and `WalletDb::one_time_direct_query_count` are pure reads, `WalletDb::set_one_time_recovery_enabled(.., false)`, `WalletDb::require_one_time_upgrade` and `WalletDb::check_one_time_history` change nothing, `WalletDb::begin_one_time_recovery` returns `false` unless the account already holds receipts needing repair, and the swap calls answer `ReservationPolicy::Disabled` or their disabled error. The reads and these calls also report disabled for an account without an Orchard full viewing key instead of failing. Enabling recovery and issuing keys still refuse such an account. Pausing an account that is not enabled, or reporting an upgrade it already waits for, only reads, so it works on a read-only connection and never waits on another writer.
+- Storing scanned blocks no longer decodes the viewing key of each account with one-time recovery enabled several times per batch. Its bookkeeping looks up only the account's row, decodes the key only to register a new one-time key, and skips admission's monitoring reads when no payment awaits admission.
 - `WalletDb::get_wallet_summary` computes scan and recovery progress without looking up
   each scanned block in the scan queue, which made it slow on wallets with millions of
   scanned blocks. The reported progress is unchanged.
+- Use backend `0.1.0-rc9.4` and one-time IVK `0.0.1-rc4`.
 
 ### Removed
 
 - `WalletDb::get_one_time_key_for_receiver`, which only tests used, and its receiver index.
+- `SqliteClientError::OneTimeIvksNotUsed`, which only the removed one-time scanning APIs returned.
 - `ReservationPolicy::Coverage`, `ReservationPolicy::SeenUnavailable`, `ProviderSeen`, `ISSUANCE_TIP_LAG`, `RECEIVE_GAP_LIMIT`, `RECEIVE_RECLAIM_SECONDS` and `SEEN_SLACK_SECONDS`.
 - `WalletDb::close_finished_one_time_keys`, `WalletDb::mark_one_time_account_fresh` and `WalletDb::recheck_one_time_key_history`. `WalletDb::check_one_time_history` replaces the recheck.
 - The unused `now` argument of `WalletDb::set_one_time_recovery_enabled`, `WalletDb::begin_one_time_recovery`, `WalletDb::check_one_time_history` and `WalletDb::reserve_refund_key`, and the write-only `registered_at` key column.
+
+### Fixed
+
+- Refund recovery trusts a refund memo on any of the account's internal Ironwood notes, without requiring the funding transaction to spend a note the wallet knows. A second device or a restore that has not recovered the one-time notes a swap spent, or whose birthday falls after them, now registers the funded refund key instead of ignoring the memo and issuing the same refund index again. `WalletDb::reserve_refund_key` waits only while an internal note's memo has not been retrieved. Since a viewing key can also pay internal addresses, a memo registers its index only within 100 of the highest refund index the account knows, or when its transaction spends a note the account owns, so a forged memo cannot exhaust the index space. A memo beyond the gap without that spend is recovered only once the gap closes.
+- A refund key with no local operation, such as one recovered from its funding memo, leaves automatic monitoring once filters have checked seven days of chain time past its funding block, instead of being looked up on every catch-up forever. A key recovered after that still has its history read once, an explicit history check still covers it, and its index is never issued again.
+- A one-time receipt that a reorg displaced no longer keeps its key in repair, and so in automatic monitoring, forever. Once the key's history has been read past its transaction's expiry height, and filters have passed the pruning depth (100 blocks) beyond it, the current chain does not hold it and no reorg the wallet follows can mine it again, so the key can retire, for example after a replacement transaction paid the same refund. A paused account keeps repairing.
+- A reorg shortly after a wallet starts scanning no longer leaves it unable to rewind. `WalletDb::truncate_to_height` can now rewind to the tree state the wallet started scanning from, at `birthday - 1`, which is also the safe rewind height it reports. Before, a rewind past every scanned block with a shielded output was refused, and so was the retry at the reported safe height.
+- A started incoming quote that never gets a fresh conclusive provider status no longer holds its receive slot forever. If its address is unpaid with no payment pending, the slot is released 24 hours after the quote's deadline, measured by the earlier of the device clock and the latest block time, so a fast device clock cannot release it early. A paid address still needs a fresh status, since a reorg can make it unpaid again. A quote seen funded, or whose last status was active, still keeps its slot. The released address stays monitored, so a late payment to it is still recovered.
 
 ## [0.1.0-rc9.3] - 2026-10-20
 

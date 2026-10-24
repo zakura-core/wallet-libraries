@@ -6,8 +6,8 @@ use harness::{
     directory::{Directory, ORIGIN},
 };
 use orchard::keys::Scope;
-use receiver_pir::transport::Inventories;
 use zakura_one_time_ivk::{KeyId, Purpose};
+use zakura_pir_client::receiver::transport::Inventories;
 use zcash_client_backend::{
     data_api::{WalletRead as _, WalletWrite as _, transparent_ledger::ChainPoint},
     wallet::OvkPolicy,
@@ -55,7 +55,7 @@ fn seed_gap_and_recycled_hole() {
             .db
             .check_one_time_history(
                 desktop.account,
-                zakura_pir_receiver::publication(client.inventory()),
+                zakura_pir_client::receiver::publication(client.inventory()),
                 Some(42),
             )
             .unwrap();
@@ -89,7 +89,11 @@ fn live_filters_and_late_publication() {
         let work = desktop.status(&chain).lookups[0].clone();
         assert!(work.through >= payment.height);
         let client = desktop.connect(&lagged).await;
-        assert!(zakura_pir_receiver::lookup(&client, &work).await.is_err());
+        assert!(
+            zakura_pir_client::receiver::lookup(&client, &work)
+                .await
+                .is_err()
+        );
         assert_eq!(lagged.counts().0, 0);
         chain.mine(4);
         desktop.scan(&chain);
@@ -177,7 +181,7 @@ fn offline_repeat_requires_manual_history() {
             .db
             .check_one_time_history(
                 phone.account,
-                zakura_pir_receiver::publication(client.inventory()),
+                zakura_pir_client::receiver::publication(client.inventory()),
                 None,
             )
             .unwrap();
@@ -266,7 +270,7 @@ fn refund_after_birthday_requires_earlier_funding_memo() {
                 .db
                 .check_one_time_history(
                     desktop.account,
-                    zakura_pir_receiver::publication(client.inventory()),
+                    zakura_pir_client::receiver::publication(client.inventory()),
                     None
                 )
                 .unwrap()
@@ -423,17 +427,23 @@ fn failures_and_manual_cancellation_survive_restart() {
         wallet.recover(&chain, &directory).await;
         assert_eq!(wallet.unspent_one_time_value(), 0);
         let client = wallet.connect(&directory).await;
-        let publication = zakura_pir_receiver::publication(client.inventory());
+        let publication = zakura_pir_client::receiver::publication(client.inventory());
         wallet
             .db
             .check_one_time_history(wallet.account, publication, Some(10))
             .unwrap();
         let held = wallet.status(&chain).lookups[0].clone();
         directory.unavailable.store(true, Ordering::SeqCst);
-        assert!(zakura_pir_receiver::lookup(&client, &held).await.is_err());
+        assert!(
+            zakura_pir_client::receiver::lookup(&client, &held)
+                .await
+                .is_err()
+        );
         assert_eq!(wallet.status(&chain).manual.unwrap().next, 4);
         directory.unavailable.store(false, Ordering::SeqCst);
-        let answer = zakura_pir_receiver::lookup(&client, &held).await.unwrap();
+        let answer = zakura_pir_client::receiver::lookup(&client, &held)
+            .await
+            .unwrap();
         wallet.db.cancel_one_time_history(wallet.account).unwrap();
         wallet.reopen();
         assert!(
@@ -629,7 +639,7 @@ fn randomized_cross_device_payment_oracle() {
                     .db
                     .check_one_time_history(
                         desktop.account,
-                        zakura_pir_receiver::publication(client.inventory()),
+                        zakura_pir_client::receiver::publication(client.inventory()),
                         None
                     )
                     .unwrap()
@@ -648,7 +658,7 @@ fn randomized_cross_device_payment_oracle() {
                     .db
                     .check_one_time_history(
                         desktop.account,
-                        zakura_pir_receiver::publication(client.inventory()),
+                        zakura_pir_client::receiver::publication(client.inventory()),
                         Some(wide)
                     )
                     .unwrap()
@@ -672,7 +682,7 @@ fn randomized_cross_device_payment_oracle() {
                     .db
                     .check_one_time_history(
                         desktop.account,
-                        zakura_pir_receiver::publication(client.inventory()),
+                        zakura_pir_client::receiver::publication(client.inventory()),
                         Some(wide)
                     )
                     .unwrap()
@@ -688,7 +698,9 @@ fn randomized_cross_device_payment_oracle() {
                 else {
                     break;
                 };
-                let page = zakura_pir_receiver::lookup(&client, &work).await.unwrap();
+                let page = zakura_pir_client::receiver::lookup(&client, &work)
+                    .await
+                    .unwrap();
                 assert!(
                     desktop
                         .db

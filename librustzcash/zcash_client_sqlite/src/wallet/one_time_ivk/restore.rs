@@ -36,8 +36,11 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         &self,
         account: AccountUuid,
     ) -> Result<usize, SqliteClientError> {
-        let (owner, _) = super::account_key(self.conn.borrow(), &self.params, account)?;
-        Ok(queue::direct_keys(self.conn.borrow(), owner.0)?.len())
+        let Some(owner) = super::one_time_account(self.conn.borrow(), &self.params, account)?
+        else {
+            return Ok(0);
+        };
+        Ok(queue::direct_keys(self.conn.borrow(), &self.params, owner.0)?.len())
     }
 
     /// Captures eligible receiver identities for local filter matching and its cancellation fence.

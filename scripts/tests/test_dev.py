@@ -81,8 +81,8 @@ class WorkflowTests(unittest.TestCase):
             with dev.Lease(Path(root), "test") as reused:
                 self.assertEqual(first, reused.path)
 
-    def run_filtered(self, listing, states=None):
-        args = argparse.Namespace(command="test", config="transparent", package=["zakura-client-sqlite"], profile=None, only=None, filter="ledger", exact=False)
+    def run_filtered(self, listing, states=None, ignored=False):
+        args = argparse.Namespace(command="test", config="transparent", package=["zakura-client-sqlite"], profile=None, only=None, filter="ledger", exact=False, ignored=ignored)
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"WALLET_LIB_BUILD_ROOT": root}), patch.object(dev, "build_identity", return_value="test"), patch.object(dev, "source_state", side_effect=states or [{"sha": "a", "inputs": "b"}] * 3), patch.object(dev, "run", side_effect=[subprocess.CompletedProcess([], 0, listing), subprocess.CompletedProcess([], 0)]) as run:
             code = dev.execute(args)
             result = json.loads(next(Path(root).glob("**/last-result.json")).read_text())
@@ -102,6 +102,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("orchard,transparent-inputs,test-dependencies,unstable", command)
         self.assertIn("zakura-client-sqlite", command)
         self.assertEqual(result["status"], "pass")
+
+    def test_ignored_tests_run_under_the_lease_with_their_output(self):
+        code, result, calls = self.run_filtered("wallet::ledger: test\n", ignored=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[0].args[0][-3:], ["--", "--list", "--ignored"])
+        self.assertEqual(calls[1].args[0][-3:], ["--", "--ignored", "--nocapture"])
+        self.assertTrue(calls[1].args[1]["CARGO_TARGET_DIR"].endswith("/0"))
+        self.assertEqual(result["status"], "pass")
+        with self.assertRaises(SystemExit):
+            dev.main(["test", "--ignored"])
 
     def test_changed_inputs_invalidate_success(self):
         old, new = {"sha": "a", "inputs": "b"}, {"sha": "a", "inputs": "c"}

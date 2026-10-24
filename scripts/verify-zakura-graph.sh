@@ -36,11 +36,10 @@ PY
 cargo check --manifest-path "$repo_root/Cargo.toml" \
   --workspace --exclude "$facade" --all-targets --all-features --locked
 
-# No development lane builds the transparent PIR adapter or the receiver PIR
-# client without `wallet`: their tests serve shards or directories in process,
-# so the `default` lane leaves them out.
+# No development lane builds the PIR client library alone: its product tests
+# serve shards or directories in process, so the `default` lane leaves it out.
 cargo check --manifest-path "$repo_root/Cargo.toml" \
-  -p zakura-pir-client -p zakura-pir-receiver --lib --locked
+  -p zakura-pir-client --lib --locked
 
 cargo metadata --locked --manifest-path "$repo_root/Cargo.toml" \
   --format-version 1 --all-features \

@@ -38,11 +38,9 @@ pub struct NearStatus<'a> {
 /// expected receipt.
 ///
 /// A refund key expects ZEC whenever the provider reports a positive refunded
-/// amount. A `SUCCESS` of a recognized swap type that reports a zero refunded
-/// amount expects none. Without a reported amount, an exact-output `SUCCESS`
-/// still expects one, since it returns unused input once the swap completes,
-/// while an exact-input one (excess deposits are refunded for either type) or a
-/// missing or unrecognized swap type is [`ReceiptExpectation::Unknown`]. 1Click
+/// amount. Without a reported amount, an exact-output `SUCCESS` still expects one,
+/// since it returns unused input once the swap completes. Any other `SUCCESS` with
+/// no positive refunded amount expects none, so its refund key can retire. 1Click
 /// refunds a `FAILED` swap's deposit like a `REFUNDED` one, and a refund on the
 /// source chain is not a Zcash receipt. A zero payout amount is treated as
 /// unreported. Every status from `KNOWN_DEPOSIT_TX` on, including `FAILED`,
@@ -53,7 +51,7 @@ pub struct NearStatus<'a> {
 /// as a canonical Zcash transaction ID, and one that is not is skipped.
 pub fn near_observation(purpose: Purpose, status: &NearStatus<'_>) -> Observation {
     use OperationStatus::*;
-    use ReceiptExpectation::{Positive, Unknown};
+    use ReceiptExpectation::Positive;
     let refund = status.refunded_amount.filter(|v| !v.is_zero());
     let refund_reported = status.refunded_amount.is_some();
     let outcome = match (status.status, purpose) {
@@ -65,11 +63,8 @@ pub fn near_observation(purpose: Purpose, status: &NearStatus<'_>) -> Observatio
         }
         ("SUCCESS", Purpose::Refund) => Terminal(match (refund, status.swap_type) {
             (Some(value), _) => Positive(Some(value)),
-            (None, Some("EXACT_INPUT" | "EXACT_OUTPUT")) if refund_reported => {
-                ReceiptExpectation::None
-            }
-            (None, Some("EXACT_OUTPUT")) => Positive(None),
-            (None, _) => Unknown,
+            (None, Some("EXACT_OUTPUT")) if !refund_reported => Positive(None),
+            (None, _) => ReceiptExpectation::None,
         }),
         ("REFUNDED" | "FAILED", Purpose::Refund) => Terminal(Positive(refund)),
         ("REFUNDED" | "FAILED", Purpose::Receive) => Terminal(ReceiptExpectation::None),
@@ -129,7 +124,7 @@ mod tests {
         assert_eq!(observe(Receive, status("SUCCESS")), positive(None));
         assert_eq!(
             observe(Refund, status("SUCCESS")),
-            Some(OperationStatus::Terminal(ReceiptExpectation::Unknown))
+            Some(OperationStatus::Terminal(ReceiptExpectation::None))
         );
         // 1Click returns a failed swap's deposit to the refund address on the origin chain.
         assert_eq!(observe(Refund, status("FAILED")), positive(None));
@@ -240,17 +235,19 @@ mod tests {
         }
     }
 
+    /// A refund `SUCCESS` is conclusive. Without a positive refunded amount it expects no
+    /// refund, whatever the swap type, except that an exact-output swap with no reported
+    /// amount still expects its unused input back.
     #[test]
-    fn refund_success_requires_a_recognized_swap_type() {
-        use ReceiptExpectation::{None as NoReceipt, Positive, Unknown};
+    fn refund_success_expects_a_refund_only_when_one_is_due() {
+        use ReceiptExpectation::{None as NoReceipt, Positive};
         let amount = Zatoshis::const_from_u64(1_000);
         // The expectations with an absent and a zero refunded amount.
         let cases = [
-            (None, Unknown, Unknown),
-            (Some(""), Unknown, Unknown),
-            (Some("FLEX_INPUT"), Unknown, Unknown),
-            // Exact-input swaps also refund excess deposits.
-            (Some("EXACT_INPUT"), Unknown, NoReceipt),
+            (None, NoReceipt, NoReceipt),
+            (Some(""), NoReceipt, NoReceipt),
+            (Some("FLEX_INPUT"), NoReceipt, NoReceipt),
+            (Some("EXACT_INPUT"), NoReceipt, NoReceipt),
             // A reported zero is the exact-output refund, so none is expected.
             (Some("EXACT_OUTPUT"), Positive(None), NoReceipt),
         ];

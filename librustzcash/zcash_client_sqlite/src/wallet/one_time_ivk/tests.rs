@@ -149,7 +149,7 @@ pub(super) fn reserve_in(
         rusqlite::params![id, now],
     )?;
     if purpose == Purpose::Refund {
-        store::restore::queue::funded(c, id, from)?;
+        store::restore::queue::funded(c, p, id, from)?;
     }
     Ok(key)
 }
@@ -175,7 +175,7 @@ pub(super) fn recover(
     tx(db, |c, p| {
         let (id, key) = register(c, p, account, key)?;
         if key.key_id().purpose() == Purpose::Refund {
-            store::restore::queue::funded(c, id, from)?;
+            store::restore::queue::funded(c, p, id, from)?;
         }
         Ok(key)
     })
@@ -201,7 +201,7 @@ pub(super) fn observe_with(
     observation: Observation,
     now: i64,
 ) -> Result<(), SqliteClientError> {
-    tx(db, |c, _| {
+    tx(db, |c, p| {
         let key = key_ref(c, account, key)?;
         let id = c.query_row(
             "SELECT id FROM ironwood_one_time_operations
@@ -219,7 +219,7 @@ pub(super) fn observe_with(
                 |r| r.get(0),
             )?,
         };
-        store::swap::lifecycle::record(c, id, &observation, now).map(|_| ())
+        store::swap::lifecycle::record(c, p, id, &observation, now).map(|_| ())
     })
 }
 
@@ -783,7 +783,10 @@ fn concurrent_connections_never_return_the_same_reservation() {
             std::thread::spawn(move || {
                 let mut db = WalletDb::for_path(path, network, test_clock(), test_rng()).unwrap();
                 barrier.wait();
-                for _ in 0..20 {
+                // A loaded CI runner can hold the other writer's lock far longer than a
+                // fixed retry count allows, so retry until a generous deadline instead.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while std::time::Instant::now() < deadline {
                     match reserve(&mut db, account, Purpose::Refund, start()) {
                         Ok(key) => return key.key_id().index(),
                         Err(SqliteClientError::DbError(rusqlite::Error::SqliteFailure(e, _)))

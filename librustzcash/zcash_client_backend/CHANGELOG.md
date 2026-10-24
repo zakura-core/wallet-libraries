@@ -7,16 +7,21 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9.4] - 2026-10-23
+
 ### Changed
 
+- The receiver record and witness payload codec re-exported by `one_time_ivk::restore` comes from `zakura-pir-protocol`'s `receiver::wire`, which replaces `zakura-receiver-crypto`. The `orchard` feature enables `zakura-pir-protocol/receiver`.
 - Replace the one-time-key restore traits and broad block/transaction scanning APIs with bounded PIR queue records and cancellation tokens. Ordinary sync uses account keys. Private payment recovery retains targeted note authentication, identity and spending support.
+- `sync::SyncWallet` is now `WalletWrite` in every build, implemented for every `WalletWrite` store. With `orchard` it no longer requires one-time IVK storage, which ordinary sync no longer uses.
 - `one_time_ivk::restore::RecoveryPublication` identifies a captured shard inventory. `LookupWork` carries the first unchecked height and a `LookupCursor` (inventory, shard, segment, last page), and `LookupPage` reports the segment read, the height checked through and the next cursor.
 - `one_time_ivk::restore::RecoveryStatus::upgrade_required` reports that the receiver service needs a newer client; no work is exposed until recovery begins again with a supported publication.
 - `one_time_ivk::restore::WitnessRequest` names the payment session, its companion witness session and the witness ordinal a candidate was read under, and `WitnessAnswer` carries one companion witness payload with its revision and construction tree. The common witness file is gone.
+- Use PIR protocol `0.0.1-rc3` and one-time IVK `0.0.1-rc4`.
 
 ### Removed
 
-- `data_api::one_time_ivk::{OneTimeIvkRead, OneTimeIvkWrite}`, `data_api::one_time_ivk::restore::{OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite, DirectoryPayment, DiscoveryStatus, EnumerationCursor, FilterCheck}`, `data_api::chain::scan_cached_blocks_with_one_time_ivks`, `data_api::wallet::decrypt_and_store_transaction_with_one_time_ivks`, and the `TestState` helpers that scanned with one-time keys.
+- `data_api::one_time_ivk::{OneTimeIvkRead, OneTimeIvkWrite}`, `data_api::one_time_ivk::restore::{OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite, DirectoryPayment, DiscoveryStatus, EnumerationCursor, FilterCheck}`, `data_api::chain::scan_cached_blocks_with_one_time_ivks`, `data_api::wallet::decrypt_and_store_transaction_with_one_time_ivks`, `decrypt::decrypt_transaction_with_one_time_ivks`, `data_api::DecryptedTransaction::one_time_ivks_applied`, `decrypt::DecryptedOutput::one_time_key_id`, `scanning::ScanningKeyOps::one_time_key_id`, the `scanning::one_time_ivk` module, and the `TestState` helpers that scanned with one-time keys.
 
 ## [0.1.0-rc9.3] - 2026-10-20
 

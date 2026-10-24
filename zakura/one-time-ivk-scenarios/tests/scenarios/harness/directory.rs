@@ -2,24 +2,25 @@
 //! through a counted transport. History is sealed into shards every [`SEAL_BLOCKS`] blocks,
 //! the last partial shard being the recent tier.
 use super::chain::{ACTIVATION, Chain, GENESIS};
-use receiver_directory::{
-    RawRecord,
-    blocks::{Batch, BlockFilter, BlockId, Head},
-    shards::{Coverage, ShardFilter},
-    snapshot::{Manifest, PROFILE, Snapshot, assign_ordinals},
-    witness,
-};
-use receiver_pir::{
-    MIN_ROWS, Publication,
-    inventory::{FilterRef, Inventory, Shard},
-    server::{Server, WitnessServer},
-};
 use std::sync::{
     Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use zakura_pir_receiver::{DirectoryError, Transport};
-use zakura_receiver_crypto::witness::payloads;
+use zakura_pir_client::receiver::{
+    RawRecord,
+    blocks::{Batch, BlockFilter, BlockId, Head},
+    inventory::{FilterRef, Inventory, Shard},
+    session::{Error as DirectoryError, MIN_ROWS, Publication},
+    shards::{Coverage, ShardFilter},
+    snapshot::{Manifest, PROFILE, Snapshot},
+    transport::Transport,
+    witness,
+};
+use zakura_pir_publisher::receiver::{
+    snapshot::{SnapshotPublisherExt, assign_ordinals},
+    witness::{TablePublisherExt, payloads},
+};
+use zakura_pir_query_server::receiver::server::{Server, WitnessServer};
 
 pub const ORIGIN: &str = "https://receiver.test";
 /// Blocks per sealed shard.

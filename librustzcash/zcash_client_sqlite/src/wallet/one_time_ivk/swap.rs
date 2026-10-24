@@ -11,7 +11,7 @@ pub use reservations::{OperationOutcome, ReceiveDeposit};
 use super::{OneTimeKey, account_key, restore::queue};
 use crate::{AccountUuid, WalletDb, error::SqliteClientError, util::Clock};
 use rand_core::Rng;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::borrow::{Borrow, BorrowMut};
 use zakura_one_time_ivk::swap::Observation;
 use zcash_protocol::{
@@ -170,19 +170,23 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
 /// SQL condition on `ironwood_one_time_keys k`: local receive reservation ownership.
 const RESERVED: &str = "(k.reserved_at IS NOT NULL AND k.released_at IS NULL)";
 
-/// Reads the durable toggle inside the same transaction as the issuance mutation.
+/// Reads the durable toggle inside the same transaction as the issuance mutation. An
+/// account that never enabled recovery has no progress row and is disabled. One without an
+/// Orchard key is refused, since these calls issue keys.
 fn enabled<P: Parameters>(
     conn: &Connection,
     params: &P,
     account: AccountUuid,
 ) -> Result<bool, SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
-    queue::ensure_account(conn, owner.0)?;
-    Ok(conn.query_row(
-        "SELECT enabled FROM ironwood_one_time_recovery WHERE account_id = ?1",
-        [owner.0],
-        |r| r.get(0),
-    )?)
+    Ok(conn
+        .query_row(
+            "SELECT enabled FROM ironwood_one_time_recovery WHERE account_id = ?1",
+            [owner.0],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
 }
 
 #[cfg(test)]

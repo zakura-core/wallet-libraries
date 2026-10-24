@@ -23,8 +23,6 @@ ORDER = (
     "zakura/pir-server-core",
     "zakura/pir-publisher",
     "zakura/pir-query-server",
-    "zakura/receiver-crypto",
-    "zakura/receiver-directory",
     "zakura/one-time-ivk",
     "zakura/near-intents",
     "librustzcash/pczt",
@@ -32,7 +30,6 @@ ORDER = (
     "librustzcash/zcash_client_sqlite",
     "wallet-lib",
     "zakura/pir-client",
-    "zakura/receiver-pir",
 )
 
 

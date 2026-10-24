@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc3] - 2026-10-23
+
+### Added
+
+- The `receiver` product: `receiver::server::{Server, WitnessServer}`, the receiver PIR
+  evaluator, which scans rows with `ipir-sp`. It no longer depends on the PIR client.
+
+### Changed
+
+- Use PIR protocol and server core `0.0.1-rc3`.
+
+### Removed
+
+- The receiver evaluator formerly behind `zakura-receiver-pir`'s `server` feature;
+  `zakura-receiver-pir` is removed.
+
 ## [0.0.1-rc2] - 2026-10-20
 
 ### Changed
