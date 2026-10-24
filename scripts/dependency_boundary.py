@@ -123,7 +123,7 @@ def main():
     # Fresh lockfiles prove downstream resolution independently of repository locks.
     with tempfile.TemporaryDirectory(prefix="wallet-boundary-consumers-") as temporary:
         for kind, dependency in (
-            ("wallet", f'zakura-receiver-crypto = {{ path = "{ROOT / "zakura/receiver-crypto"}" }}'),
+            ("wallet", f'zakura-pir-protocol = {{ path = "{ROOT / "zakura/pir-protocol"}", features = ["receiver-crypto"] }}'),
             ("facade-default", f'zakura-wallet-lib = {{ path = "{ROOT / "wallet-lib"}" }}'),
             ("facade-zakura", f'zakura-wallet-lib = {{ path = "{ROOT / "wallet-lib"}", default-features = false, features = ["zakura"] }}'),
             ("facade-lrz", f'zakura-wallet-lib = {{ path = "{ROOT / "wallet-lib"}", default-features = false, features = ["lrz"] }}'),
@@ -133,7 +133,7 @@ def main():
             (consumer / "Cargo.toml").write_text(
                 f'[package]\nname = "{kind}-boundary-consumer"\nversion = "0.0.0"\nedition = "2024"\n'
                 f'[dependencies]\n{dependency}\n')
-            source = ('fn main() { let _ = zakura_receiver_crypto::RECORD_BYTES; }\n'
+            source = ('fn main() { let _ = zakura_pir_protocol::receiver::crypto::RECORD_BYTES; }\n'
                       if kind == "wallet" else "fn main() {}\n")
             (consumer / "src/main.rs").write_text(source)
             errors.extend(problems(metadata(consumer / "Cargo.toml", locked=False), owned, nodes))

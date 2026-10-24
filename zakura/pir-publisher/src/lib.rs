@@ -5,6 +5,8 @@ pub mod enhance {
     pub use crate::native;
     pub use zakura_pir_protocol::enhance::*;
 }
+#[cfg(feature = "receiver")]
+pub mod receiver;
 #[cfg(feature = "status")]
 pub mod status {
     pub use crate::native;

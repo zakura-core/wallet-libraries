@@ -91,7 +91,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        config: [pir-protocol, pir-client, pir-server, default, sync, zewif, orchard, transparent, transparent-import, proving, pczt, pczt-wallet, sqlite, enhance-wallet, enhance, transparent-filter-client, enhance-testing, transparent-engine, transparent-engine-store, transparent-pir, transparent-pir-sqlite, transparent-pir-testing, pir-receiver, transaction-status-core, transaction-status-lightwalletd, receiver-wire, receiver-pir-server, transaction-wire, service-config]
+        config: [pir-protocol, pir-client, pir-server, default, sync, zewif, orchard, transparent, transparent-import, proving, pczt, pczt-wallet, sqlite, enhance-wallet, enhance, transparent-filter-client, enhance-testing, transparent-engine, transparent-engine-store, transparent-pir, transparent-pir-sqlite, transparent-pir-testing, receiver-wallet, transaction-status-core, transaction-status-lightwalletd, receiver-protocol, transaction-wire, service-config]
     env:
       WALLET_LIB_BUILD_ROOT: ${{ github.workspace }}/target/dev-lanes
     steps:

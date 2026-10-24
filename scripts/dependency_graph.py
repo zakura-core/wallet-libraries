@@ -38,7 +38,7 @@ def check_role_api(directory, product, role):
     command = ["cargo", "check", "--locked", "--quiet", "--manifest-path", str(directory / "Cargo.toml")]
     source.write_text(f"pub use subject::{product};\n")
     subprocess.run(command, check=True)
-    forbidden = [f"subject::{other}" for other in ("enhance", "status", "transparent") if other != product]
+    forbidden = [f"subject::{other}" for other in ("enhance", "status", "transparent", "receiver") if other != product]
     forbidden.append({"client": "subject::native::parse_selection", "publisher": "subject::native::ProfileQueryExt", "query-server": "subject::native::prepare_with"}[role])
     for symbol in forbidden:
         source.write_text(f"pub use {symbol};\n")
@@ -94,12 +94,12 @@ def main():
         ("pir", "zakura/pir-client", ["native"], native_evaluators | server_roles | {"sha1"}, {"reinspiring"}),
         ("status-policy", "zakura/pir-client", ["status"], recovery_forbidden | server_roles | native_evaluators | {"tonic", "tonic-prost", "tokio", "hyper", "hyper-util", "h2"}, {"zakura-protocol"}),
         ("status-lightwalletd", "zakura/pir-client", ["lightwalletd"], server_roles, {"zakura-client-backend", "tonic", "tokio"}),
-        ("receiver-client", "zakura/receiver-pir", [], native_evaluators | server_roles | {"sha1"}, {"reinspiring"}),
-        ("receiver-server", "zakura/receiver-pir", ["server"], set(), {"ipir-sp", "simplepir-kernel"}),
+        # The receiver evaluator scans with ipir-sp, which brings IPIR's native client.
+        ("receiver-evaluator", "zakura/pir-query-server", ["receiver"], wallet_roles - {"ipir-native-client"} | {"zakura-pir-publisher", "zakura-server-chain"}, {"ipir-sp", "simplepir-kernel"}),
         ("filter", "zakura/pir-protocol", ["transparent"], {"bitcoin", "secp256k1", "secp256k1-sys", "zakura-protocol", "zakura-transparent"} | server_roles, {"bitcoin_hashes"}),
         ("filters", "zakura/filters", [], {"bitcoin", "secp256k1", "secp256k1-sys"}, {"bitcoin_hashes"}),
-        ("receiver-directory", "zakura/receiver-directory", [], {"bitcoin", "secp256k1", "secp256k1-sys"}, {"zakura-filters", "bitcoin_hashes"}),
-        ("receiver-wallet", "zakura/pir-receiver", ["wallet"], {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"} | native_evaluators | server_roles, {"zakura-filters", "reinspiring"}),
+        ("receiver-formats", "zakura/pir-protocol", ["receiver"], {"bitcoin", "secp256k1", "secp256k1-sys"} | server_roles | wallet_roles, {"zakura-filters", "bitcoin_hashes"}),
+        ("receiver-wallet", "zakura/pir-client", ["receiver-wallet"], {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"} | native_evaluators | server_roles, {"zakura-filters", "reinspiring"}),
         # The borrowed reader needs only protocol value types and the txid hashes.
         ("transaction-wire", "zakura/transaction-wire", [], recovery_forbidden | wallet_roles - {"zakura-protocol"} | server_roles | {"zakura-transparent", "zakura-redjubjub", "zakura-pasta-curves", "zakura-jubjub", "zakura-bls12-381"}, {"zakura-protocol", "sha2", "blake2b_simd"}),
         # Config resolution is shared with zcash_voting and must stay free of
@@ -108,11 +108,12 @@ def main():
         ("test-support", "librustzcash/zcash_client_sqlite", ["test-dependencies"], {"wagyu-zcash-parameters"}, set()),
         ("proving", "librustzcash/zcash_client_sqlite", ["pczt-tests"], set(), {"wagyu-zcash-parameters"}),
     ]
-    for product in ("enhance", "status", "transparent"):
+    for product in ("enhance", "status", "transparent", "receiver"):
+        evaluator = {"ipir-native-client"} if product == "receiver" else set()
         cases.extend([
             (f"{product}-client", "zakura/pir-client", [product], server_roles | native_evaluators | endpoint_stack, {"zakura-pir-protocol", "reinspiring"}),
             (f"{product}-publisher", "zakura/pir-publisher", [product], wallet_roles | {"zakura-pir-query-server", "zakura-server-chain"}, {"zakura-pir-protocol", "zakura-pir-server-core"}),
-            (f"{product}-query-server", "zakura/pir-query-server", [product], wallet_roles | {"zakura-pir-publisher", "zakura-server-chain"}, {"zakura-pir-protocol", "zakura-pir-server-core"}),
+            (f"{product}-query-server", "zakura/pir-query-server", [product], wallet_roles - evaluator | {"zakura-pir-publisher", "zakura-server-chain"}, {"zakura-pir-protocol", "zakura-pir-server-core"}),
         ])
     defaults_disabled = set()
     receipt = {}
@@ -159,12 +160,11 @@ def main():
                     ["cargo", "check", "--locked", "--quiet", "--manifest-path",
                      str(Path(temporary) / name / "Cargo.toml")], check=True,
                 )
-            if name in {"receiver-client", "receiver-server"}:
-                source = "pub use subject::Client;\n" if name == "receiver-client" else "pub use subject::server::Server;\n"
-                (Path(temporary) / name / "src/lib.rs").write_text(source)
+            if name == "receiver-evaluator":
+                (Path(temporary) / name / "src/lib.rs").write_text("pub use subject::receiver::server::Server;\n")
                 subprocess.run(["cargo", "check", "--locked", "--quiet", "--manifest-path",
                                 str(Path(temporary) / name / "Cargo.toml")], check=True)
-            for product in ("enhance", "status", "transparent"):
+            for product in ("enhance", "status", "transparent", "receiver"):
                 for role in ("client", "publisher", "query-server"):
                     if name == f"{product}-{role}":
                         check_role_api(Path(temporary) / name, product, role)

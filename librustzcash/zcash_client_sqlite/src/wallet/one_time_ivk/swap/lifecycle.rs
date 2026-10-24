@@ -5,6 +5,7 @@ use crate::{
 };
 use rusqlite::{Connection, params};
 use zakura_one_time_ivk::swap::{Observation, OperationStatus, ReceiptExpectation};
+use zcash_protocol::consensus::Parameters;
 
 /// Records `observation`, requested at `now`, on operation `id` unless a newer one is
 /// stored, and merges its `funded` and reported receipt transactions in either case (see
@@ -16,8 +17,9 @@ use zakura_one_time_ivk::swap::{Observation, OperationStatus, ReceiptExpectation
 /// or less, or an inconclusive end with no receipt, either of which could discard an obligation.
 /// A status can retire a refund key or return it to automatic monitoring, so it runs inside
 /// the monitoring fence (see `restore::queue::fencing_monitoring`).
-pub(in crate::wallet::one_time_ivk) fn record(
+pub(in crate::wallet::one_time_ivk) fn record<P: Parameters>(
     conn: &Connection,
+    params: &P,
     id: i64,
     observation: &Observation,
     now: i64,
@@ -42,7 +44,7 @@ pub(in crate::wallet::one_time_ivk) fn record(
         [id],
         |r| r.get(0),
     )?;
-    fencing_monitoring(conn, &[owner], || {
+    fencing_monitoring(conn, params, &[owner], || {
         conn.execute(
             "UPDATE ironwood_one_time_operations SET funded = MAX(funded, ?2) WHERE id = ?1",
             params![id, observation.funded],

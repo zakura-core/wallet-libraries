@@ -133,9 +133,68 @@ fn main() {
                 db.put_received_transparent_utxo(&output).unwrap();
             }
         }
+        // Uses rc9.2's one-time feature the way an app did before the PIR queue: a fresh
+        // account reserves a receive address and quotes it, and reserves a refund key and
+        // binds a refund quote. The check script marks the chain scanned through the tip
+        // first, since this probe stores no blocks. The deposits are well-formed mainnet
+        // P2PKH addresses of fixed placeholder hashes.
+        #[cfg(feature = "one-time-rc9")]
+        "one-time" => {
+            use zcash_client_sqlite::wallet::one_time_ivk::swap::{
+                OperationOutcome, ProviderSeen, ReceiveDeposit,
+            };
+            WalletMigrator::new().init_or_migrate(&mut db).unwrap();
+            let account = db.get_account_ids().unwrap()[0];
+            let now = ONE_TIME_NOW;
+            let tip = BlockHeight::from_u32(TIP);
+            db.mark_one_time_account_fresh(account).unwrap();
+            let unseen = |receivers: &[[u8; 43]]| vec![false; receivers.len()];
+            let seen = ProviderSeen {
+                since: now - 86_400,
+                until: now,
+                contains: &unseen,
+            };
+            let key = db
+                .prepare_receive_reservation(account, now, tip, Some(&seen))
+                .unwrap()
+                .unwrap();
+            let request = db
+                .begin_receive_operation(account, key.key_id().index(), now + 600, now, Some(&seen))
+                .unwrap()
+                .unwrap();
+            db.finish_receive_operation(
+                account,
+                &request,
+                &OperationOutcome::Accepted(ReceiveDeposit {
+                    address: "t1KRqwQhktLV4BjbNLiuH6pb3AMoszZKcQB".into(),
+                    memo: None,
+                    deadline: now + 600,
+                }),
+            )
+            .unwrap();
+            db.start_receive_operation(account, &request, now)
+                .unwrap()
+                .unwrap();
+            let refund = db
+                .reserve_refund_key(account, now, tip, Some(&seen))
+                .unwrap()
+                .unwrap();
+            db.record_refund_operation(
+                account,
+                refund.key_id().index(),
+                "t1Lz5sUzNoMBWmq8qk1zS4q5A54RgF5e4Ua",
+                now + 600,
+                now,
+            )
+            .unwrap();
+        }
         _ => panic!("unexpected command"),
     }
 }
 
 /// The fixture's chain tip and mined height.
 const TIP: u32 = 3_483_367;
+
+/// The caller's clock for the one-time fixture, in Unix seconds.
+#[cfg(feature = "one-time-rc9")]
+const ONE_TIME_NOW: i64 = 1_790_000_000;

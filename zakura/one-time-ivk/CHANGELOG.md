@@ -2,9 +2,12 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc4] - 2026-10-23
+
 ### Changed
 
 - `swap::Observation` has `receipts`, the Zcash transactions the provider reports as the operation's payouts or refunds, and no longer implements `Copy`.
+- `swap::RefundMemo` no longer asks wallets to verify that the funding transaction was their own send. A memo on an ordinary note the wallet decrypts with its internal key is authentic, since only the wallet can create that output.
 
 ### Removed
 

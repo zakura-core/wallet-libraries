@@ -10,7 +10,7 @@ use crate::data_api::transparent_ledger::ChainPoint;
 
 pub mod recovery;
 
-pub use zakura_receiver_crypto::wire::{
+pub use zakura_pir_protocol::receiver::wire::{
     PAYLOAD_BYTES as WITNESS_PAYLOAD_BYTES, Payment as DirectoryPayment,
     RawRecord as DirectoryRecord, decode_payload as decode_witness_payload,
     is_final as witness_is_final,

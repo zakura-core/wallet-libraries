@@ -60,8 +60,9 @@ own incoming viewing keys, and refund memo helpers, with an Ironwood proof test 
 mixed ordinary, refund, and incoming inputs. The
 [NEAR Intents adapter](zakura/near-intents/README.md) (`zakura-near-intents`)
 normalizes 1Click swap statuses into the observations one-time IVK stores record.
-The unpublished [receiver PIR](zakura/pir-receiver/README.md) crate runs the
-discovery that finds payments to those keys through a receiver directory.
+[Receiver PIR](docs/receiver-pir.md), the `receiver` product of the PIR packages,
+provides the bounded network steps the wallet's recovery queue uses to find payments
+to those keys in a receiver directory.
 
 ## How the rewiring works
 
@@ -70,7 +71,7 @@ Nothing is patched at the source level. `manifests/sources.toml` holds a
 Cargo dependency rename:
 
 ```toml
-orchard = { version = "4.0.0-rc0", package = "zakura-orchard" }
+orchard = { version = "4.0.0", package = "zakura-orchard" }
 ```
 
 The dependency key stays `orchard`, so every `orchard::` path in the vendored
@@ -120,10 +121,10 @@ use zakura_wallet_lib::{client_backend, orchard};
 
 ```toml
 # Vizor: complete Zakura capability set, the default
-zakura-wallet-lib = "0.1.0-rc8"
+zakura-wallet-lib = "0.1.0-rc9.4"
 
 # Gemini: equivalent upstream LRZ capability set
-zakura-wallet-lib = { version = "0.1.0-rc8", default-features = false, features = ["lrz"] }
+zakura-wallet-lib = { version = "0.1.0-rc9.4", default-features = false, features = ["lrz"] }
 ```
 
 The two features are mutually exclusive. Cargo features are additive and there
@@ -146,9 +147,9 @@ all — it declares the packages it wants directly, as below.
 The dependency keys keep their upstream names, so wallet source needs no changes:
 
 ```toml
-zcash_client_backend = { version = "0.1.0-rc9", package = "zakura-client-backend" }
-zcash_client_sqlite = { version = "0.1.0-rc9", package = "zakura-client-sqlite" }
-pczt = { version = "0.1.0-rc6", package = "zakura-pczt" }
+zcash_client_backend = { version = "0.1.0-rc9.4", package = "zakura-client-backend" }
+zcash_client_sqlite = { version = "0.1.0-rc9.4", package = "zakura-client-sqlite" }
+pczt = { version = "0.1.0-rc9", package = "zakura-pczt" }
 ```
 
 The crypto stack comes from crates.io as `zakura-*`; do not also declare the

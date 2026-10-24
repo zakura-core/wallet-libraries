@@ -106,14 +106,19 @@ pub(in crate::wallet::one_time_ivk) fn record_operation<P: Parameters>(
     if rebound {
         return Err(invalid("refund key is bound to another deposit"));
     }
-    // Until its funding transaction is stored, the operation expects no receipt.
+    // Until its funding transaction is stored, the operation expects no receipt. A first
+    // operation on a funded key replaces the memo-only rule, so it runs inside the fence.
     if !recorded {
-        conn.execute(
-            "INSERT INTO ironwood_one_time_operations
-                (one_time_key_id, reference, deadline, begun_at, expectation)
-             VALUES (?1, ?2, ?3, ?4, 1)",
-            params![key, deposit, deadline, now],
-        )?;
+        let (owner, _) = account_key(conn, params, account)?;
+        queue::fencing_monitoring(conn, params, &[owner.0], || {
+            conn.execute(
+                "INSERT INTO ironwood_one_time_operations
+                    (one_time_key_id, reference, deadline, begun_at, expectation)
+                 VALUES (?1, ?2, ?3, ?4, 1)",
+                params![key, deposit, deadline, now],
+            )?;
+            Ok(())
+        })?;
     }
     Ok(())
 }
@@ -258,14 +263,14 @@ pub(crate) fn record_funded_refund_keys<P: Parameters>(
             .map(BlockHeight::from)
             .or_else(|| params.activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3))
             .ok_or_else(|| invalid("Ironwood is not active"))?;
-        queue::funded(conn, id, height)?;
+        queue::funded(conn, params, id, height)?;
         // The wallet's own funding is not a provider observation, so `funded` stays unset.
         let sent = Observation {
             status: OperationStatus::Active,
             funded: false,
             receipts: vec![],
         };
-        record(conn, operation, &sent, 0)?;
+        record(conn, params, operation, &sent, 0)?;
     }
     Ok(())
 }
