@@ -8,7 +8,6 @@ edition.workspace = true
 rust-version = "1.97"
 license.workspace = true
 repository.workspace = true
-publish = false
 
 [lib]
 name = "zakura_service_config"
