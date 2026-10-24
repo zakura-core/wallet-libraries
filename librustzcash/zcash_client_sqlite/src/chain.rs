@@ -561,6 +561,17 @@ mod tests {
     }
 
     #[test]
+    fn scan_leaves_out_accounts_born_after_the_range_sapling() {
+        testing::pool::scan_leaves_out_accounts_born_after_the_range::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn scan_leaves_out_accounts_born_after_the_range_orchard() {
+        testing::pool::scan_leaves_out_accounts_born_after_the_range::<OrchardPoolTester>()
+    }
+
+    #[test]
     fn scan_cached_blocks_finds_change_notes_sapling() {
         testing::pool::scan_cached_blocks_finds_change_notes::<SaplingPoolTester>()
     }
