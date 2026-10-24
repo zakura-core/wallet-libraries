@@ -25,6 +25,7 @@ members = [
     "zakura/one-time-ivk-scenarios",
     "zakura/transaction-wire",
     "zakura/service-config",
+    "zakura/pir-config",
 ]
 
 resolver = "2"

@@ -17,6 +17,9 @@ instructions still apply; do not duplicate them here.
   static/dynamic config resolution shared with zcash_voting (git dependency).
   Keep it free of wallet, PIR, server, async-runtime and HTTP crates, and keep
   its explicit `rust-version` at or below zcash_voting's MSRV.
+- `zakura/pir-config`: package `zakura-pir-config`, the wallet PIR config
+  profile on top of service-config, plus the `wallet-pir-config` CLI used by
+  the config repository's CI. Same transport-free boundary.
 - Node chain readers live in wallet-pir; never add node or wallet-pir packages
   to this repository's dependency graph.
 - `wallet-lib/`: package `zakura-wallet-lib`; its `zakura` and `lrz` backends

@@ -49,6 +49,7 @@ python3 scripts/dev.py verify
 | `receiver-protocol` | PIR protocol; `receiver` alone: the receiver codec and formats without Common |
 | `transaction-wire` | Unpublished borrowed transaction wire reader, with the typed decoders as dev-only differential oracles |
 | `service-config` | Transport-free static/dynamic service config resolution: hash pins, mirrors and pluggable attestation |
+| `pir-config` | Wallet PIR config profile (schema, normalized server identity, explicit server selection) and its `wallet-pir-config` CLI |
 | `one-time-ivk-scenarios` | PIR-only wallet scenarios with an independent chain oracle (see its README). CI runs it nightly, not on PRs |
 
 `default` builds the backend and SQLite crates without Orchard or transparent
@@ -204,10 +205,16 @@ Before a release, reserve the five new `zakura-pir-{protocol,client,publisher,qu
 names and configure their Trusted Publishers. The packaging POC itself does not
 publish crates or change publisher settings. No permanent API token or new Infisical secret is required.
 
-`zakura-service-config` is also selected for release. Before its first release,
-publish its reserved `0.0.0` placeholder and configure the same Trusted Publisher
-for that crate. A reservation merged into `zakura-core/reserved` does not register
-the name on crates.io until the placeholder is published.
+`zakura-service-config` and `zakura-pir-config` are also selected for release,
+in dependency order after any packages they use. Before their first release,
+publish each reserved `0.0.0` placeholder from `zakura-core/reserved` and configure
+the same Trusted Publisher for each crate: owner `zakura-core`, repository
+`wallet-libraries`, workflow `publish-crates.yml`, and environment `crates-io`.
+A reservation merged into `zakura-core/reserved` does not register the name on
+crates.io until the placeholder is published. Trusted Publishing can only be
+configured after that initial publication. The `verify` workflow's successful
+token exchange alone does not prove that either new crate grants permission to
+publish; confirm both crates' publisher settings before dispatching `publish`.
 
 Choose **publish** for an actual release. It repeats verification for the dispatch
 commit, requires environment approval, then acquires its temporary credential.

@@ -21,6 +21,7 @@ ORDER = (
     "zakura/service-config",
     "zakura/filters",
     "zakura/pir-protocol",
+    "zakura/pir-config",
     "zakura/pir-server-core",
     "zakura/pir-publisher",
     "zakura/pir-query-server",

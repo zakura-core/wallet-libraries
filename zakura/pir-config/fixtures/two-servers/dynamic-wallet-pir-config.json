@@ -1,0 +1,8 @@
+{
+  "config_version": 1,
+  "network": "mainnet",
+  "servers": [
+    { "label": "Example server A", "url": "https://pir-a.example" },
+    { "label": "Example server B", "url": "https://pir-b.example/wallet" }
+  ]
+}
