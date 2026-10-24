@@ -4113,27 +4113,57 @@ fn pool_truncation_tolerance_sql(table_prefix: &str) -> String {
 /// roots (a tree whose scanned state postdates the truncation point, e.g. because a
 /// post-migration rescan has so far only reached blocks near the chain tip). The per-pool
 /// tolerance is [`plan_tree_truncation`]'s
-/// classification, rendered in SQL by [`pool_truncation_tolerance_sql`]; the qualifying
-/// height must also be present in the `blocks` table. This returns the maximum qualifying
-/// height at or below `requested_height`.
+/// classification, rendered in SQL by [`pool_truncation_tolerance_sql`]. This returns the
+/// maximum qualifying height at or below `requested_height`.
+///
+/// Candidate heights are those of scanned blocks and, with `checkpoint_candidates`, of note
+/// commitment tree checkpoints. A checkpoint records a tree state the wallet can rewind to
+/// even when no `blocks` row exists at its height. The first scan of a wallet stores its
+/// starting tree state as a checkpoint at `birthday - 1`, so without these candidates a reorg
+/// in the first scanned blocks could leave no height to rewind to. [`truncate_to_chain_state`]
+/// passes `false`: when no scanned block qualifies it first truncates to the minimum shared
+/// checkpoint to free checkpoint capacity before inserting its own, and a retained checkpoint
+/// selected here would skip that step and let the insertion prune the target checkpoint.
 ///
 /// The orchard and ironwood tables exist unconditionally but are empty when the `orchard`
 /// feature is not active, in which case their trees qualify at every height.
 fn select_truncation_height(
     conn: &rusqlite::Transaction,
     requested_height: BlockHeight,
+    checkpoint_candidates: bool,
 ) -> Result<BlockHeight, SqliteClientError> {
+    let tolerance = [
+        crate::SAPLING_TABLES_PREFIX,
+        crate::ORCHARD_TABLES_PREFIX,
+        crate::IRONWOOD_TABLES_PREFIX,
+    ]
+    .map(pool_truncation_tolerance_sql)
+    .join(" AND ");
+    let blocks = format!(
+        "SELECT MAX(height) FROM blocks
+         WHERE height <= :requested_height
+         AND {tolerance}"
+    );
+    // Each source takes its own maximum, so the `blocks` maximum keeps its index-ordered
+    // search instead of evaluating the tolerances at every stored height. The checkpoint
+    // tables hold at most a few hundred rows.
+    let query = if checkpoint_candidates {
+        format!(
+            "SELECT MAX(h) FROM (
+                 SELECT ({blocks}) AS h
+                 UNION ALL
+                 SELECT (SELECT MAX(height) FROM (
+                     SELECT checkpoint_id AS height FROM sapling_tree_checkpoints
+                     UNION SELECT checkpoint_id FROM orchard_tree_checkpoints
+                     UNION SELECT checkpoint_id FROM ironwood_tree_checkpoints)
+                  WHERE height <= :requested_height
+                  AND {tolerance}))"
+        )
+    } else {
+        blocks
+    };
     conn.query_row(
-        &format!(
-            "SELECT MAX(height) FROM blocks
-             WHERE height <= :requested_height
-             AND {sapling_tolerance}
-             AND {orchard_tolerance}
-             AND {ironwood_tolerance}",
-            sapling_tolerance = pool_truncation_tolerance_sql(crate::SAPLING_TABLES_PREFIX),
-            orchard_tolerance = pool_truncation_tolerance_sql(crate::ORCHARD_TABLES_PREFIX),
-            ironwood_tolerance = pool_truncation_tolerance_sql(crate::IRONWOOD_TABLES_PREFIX),
-        ),
+        &query,
         named_params! {":requested_height": u32::from(requested_height)},
         |row| row.get::<_, Option<u32>>(0),
     )
@@ -4141,10 +4171,10 @@ fn select_truncation_height(
     .flatten()
     .map_or_else(
         || {
-            // If no height at or below the requested truncation height qualifies, query for
-            // the minimum shared checkpoint height so that we can report a safe rewind height
-            // to the caller. (This reports a height that is guaranteed to qualify, but under
-            // the per-pool tolerances above it is not necessarily the minimum such height.)
+            // If no height at or below the requested truncation height qualifies, report the
+            // minimum shared checkpoint height as a safe rewind height. It qualifies because
+            // checkpoint heights are candidates and every pool with checkpoints has one there.
+            // Under the per-pool tolerances it is not necessarily the minimum such height.
             Err(SqliteClientError::RequestedRewindInvalid {
                 safe_rewind_height: min_shared_checkpoint_height(conn)?,
                 requested_height,
@@ -4161,7 +4191,8 @@ fn select_truncation_height(
 ///
 /// This should only be executed inside a transactional context.
 ///
-/// Returns the block height to which the database was truncated.
+/// Returns the block height to which the database was truncated. This can be a checkpoint
+/// height with no scanned block, such as `birthday - 1` (see [`select_truncation_height`]).
 ///
 /// # Errors
 ///
@@ -4179,7 +4210,7 @@ pub(crate) fn truncate_to_height<P: consensus::Parameters>(
     #[cfg(feature = "transparent-inputs")] gap_limits: &GapLimits,
     max_height: BlockHeight,
 ) -> Result<BlockHeight, SqliteClientError> {
-    let truncation_height = select_truncation_height(conn, max_height)?;
+    let truncation_height = select_truncation_height(conn, max_height, true)?;
     truncate_to_height_internal(
         conn,
         params,
@@ -4659,7 +4690,7 @@ pub(crate) fn truncate_to_chain_state<P: consensus::Parameters, CL, R>(
     if truncate_trees {
         // Try the simple case first: if a checkpoint exists at or below the target height,
         // truncate_to_height will succeed directly.
-        match select_truncation_height(wdb.conn.0, target_height) {
+        match select_truncation_height(wdb.conn.0, target_height, false) {
             Ok(h) => {
                 if h == target_height {
                     // There is a checkpoint for the requested height, we can just truncate to
@@ -6456,8 +6487,8 @@ mod tests {
         error::RewindError,
         testing::{
             AddressType, DataStoreFactory, FakeCompactOutput, InitialChainState, TestBuilder,
-            TestRng, TestState, pool::ShieldedPoolTester, random_frontier_with_prior_subtree_roots,
-            sapling::SaplingPoolTester,
+            TestFvk, TestRng, TestState, pool::ShieldedPoolTester,
+            random_frontier_with_prior_subtree_roots, sapling::SaplingPoolTester,
         },
         wallet::ConfirmationsPolicy,
     };
@@ -6482,12 +6513,14 @@ mod tests {
     };
 
     use incrementalmerkletree::frontier::Frontier;
+    use zcash_protocol::local_consensus::LocalNetwork;
     #[cfg(feature = "orchard")]
     use {
-        crate::testing::db::TestDb, ::orchard::tree::MerkleHashOrchard,
-        incrementalmerkletree::Hashable as _, shardtree::error::ShardTreeError,
-        zcash_client_backend::data_api::WalletCommitmentTrees,
-        zcash_protocol::local_consensus::LocalNetwork,
+        crate::testing::db::TestDb,
+        ::orchard::tree::MerkleHashOrchard,
+        incrementalmerkletree::Hashable as _,
+        shardtree::error::ShardTreeError,
+        zcash_client_backend::data_api::{WalletCommitmentTrees, testing::IronwoodFvk},
     };
 
     fn random_sapling_frontier<const DEPTH: u8>(
@@ -6536,6 +6569,57 @@ mod tests {
         conn
     }
 
+    /// Counting checkpoint heights as candidates must not make selection evaluate the per-pool
+    /// tolerances at every stored block: on a long history, a shallow rewind to a height
+    /// checkpointed in every pool costs about as much as the scanned-block selection alone.
+    #[test]
+    fn checkpoint_candidates_keep_selection_cheap_on_long_histories() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        };
+
+        let mut conn = connection_with_checkpoint_tables();
+        conn.execute_batch(
+            "WITH RECURSIVE h(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM h WHERE x < 100000)
+             INSERT INTO blocks (height) SELECT x FROM h;
+             WITH RECURSIVE h(x) AS (SELECT 99901 UNION ALL SELECT x + 1 FROM h WHERE x < 100000)
+             INSERT INTO sapling_tree_checkpoints SELECT x FROM h;
+             INSERT INTO orchard_tree_checkpoints SELECT checkpoint_id FROM sapling_tree_checkpoints;
+             INSERT INTO ironwood_tree_checkpoints SELECT checkpoint_id FROM sapling_tree_checkpoints;
+             WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x + 1 FROM n WHERE x < 999)
+             INSERT INTO transactions (id_tx, mined_height) SELECT x + 1, 99901 + x % 100 FROM n;
+             INSERT INTO sapling_received_notes (transaction_id, commitment_tree_position)
+             SELECT id_tx, id_tx FROM transactions;",
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        let steps = |checkpoint_candidates| {
+            let count = Arc::new(AtomicU64::new(0));
+            let counter = count.clone();
+            tx.progress_handler(
+                100,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            );
+            assert_eq!(
+                select_truncation_height(&tx, BlockHeight::from_u32(99_995), checkpoint_candidates)
+                    .unwrap(),
+                BlockHeight::from_u32(99_995),
+            );
+            tx.progress_handler(100, None::<fn() -> bool>);
+            count.load(Ordering::Relaxed)
+        };
+        let blocks_only = steps(false);
+        let with_checkpoints = steps(true);
+        assert!(
+            with_checkpoints <= 2 * blocks_only + 100,
+            "{with_checkpoints} progress steps with checkpoint candidates, {blocks_only} without"
+        );
+    }
+
     /// A pool whose checkpoints all lie at or below the requested height tolerates a
     /// truncation to that height (its tree holds nothing the truncation must remove), so the
     /// requested height itself qualifies even though the pool has no checkpoint there.
@@ -6552,7 +6636,7 @@ mod tests {
 
         let tx = conn.transaction().unwrap();
         assert_eq!(
-            select_truncation_height(&tx, BlockHeight::from_u32(11)).unwrap(),
+            select_truncation_height(&tx, BlockHeight::from_u32(11), true).unwrap(),
             BlockHeight::from_u32(11),
         );
     }
@@ -6573,7 +6657,7 @@ mod tests {
 
         let tx = conn.transaction().unwrap();
         assert_eq!(
-            select_truncation_height(&tx, BlockHeight::from_u32(11)).unwrap(),
+            select_truncation_height(&tx, BlockHeight::from_u32(11), true).unwrap(),
             BlockHeight::from_u32(11),
         );
     }
@@ -6594,7 +6678,7 @@ mod tests {
 
         let tx = conn.transaction().unwrap();
         assert_eq!(
-            select_truncation_height(&tx, BlockHeight::from_u32(10)).unwrap(),
+            select_truncation_height(&tx, BlockHeight::from_u32(10), true).unwrap(),
             BlockHeight::from_u32(9),
         );
     }
@@ -6685,7 +6769,7 @@ mod tests {
 
         let tx = conn.transaction().unwrap();
         assert_matches!(
-            select_truncation_height(&tx, BlockHeight::from_u32(11)),
+            select_truncation_height(&tx, BlockHeight::from_u32(11), true),
             Err(SqliteClientError::RequestedRewindInvalid {
                 safe_rewind_height: None,
                 ..
@@ -8015,7 +8099,6 @@ mod tests {
         assert_eq!(tree_state(&mut st), before);
     }
 
-    #[cfg(feature = "orchard")]
     fn max_block_height(conn: &Connection) -> Option<BlockHeight> {
         conn.query_row("SELECT MAX(height) FROM blocks", [], |row| {
             row.get::<_, Option<u32>>(0)
@@ -8460,6 +8543,223 @@ mod tests {
             table_row_count(st.wallet().conn(), "ironwood_tree_shards"),
             0
         );
+    }
+
+    /// Builds a wallet with its birthday at the Sapling activation height `b` and scans its
+    /// first five blocks, `b..b + 5`, in one batch. Only block `b + 3` has a shielded output,
+    /// paid to `stranger` (not the wallet), unless `stranger` is `None`. Returns the wallet and
+    /// `b`.
+    ///
+    /// The note commitment trees end up checkpointed at `b - 1`, the birthday tree state that
+    /// has no `blocks` row, and at `b + 3` if it has an output.
+    fn wallet_after_first_scan<F: TestFvk>(
+        stranger: Option<&F>,
+    ) -> (
+        TestState<BlockCache, crate::testing::db::TestDb, LocalNetwork>,
+        BlockHeight,
+    ) {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let b = st.sapling_activation_height();
+
+        st.generate_empty_block();
+        st.generate_empty_block();
+        st.generate_empty_block();
+        match stranger {
+            Some(fvk) => {
+                st.generate_next_block_multi(&[FakeCompactOutput::new(
+                    fvk,
+                    AddressType::DefaultExternal,
+                    Zatoshis::const_from_u64(100_000),
+                )]);
+            }
+            None => {
+                st.generate_empty_block();
+            }
+        }
+        st.generate_empty_block();
+        st.scan_cached_blocks(b, 5);
+
+        let mut expected_checkpoints = vec![b - 1];
+        if stranger.is_some() {
+            expected_checkpoints.push(b + 3);
+        }
+        assert_eq!(
+            sapling_checkpoint_heights(st.wallet().conn()),
+            expected_checkpoints
+        );
+        assert_eq!(max_block_height(st.wallet().conn()), Some(b + 4));
+
+        (st, b)
+    }
+
+    /// Returns the heights of the wallet's Sapling note commitment tree checkpoints, in order.
+    fn sapling_checkpoint_heights(conn: &Connection) -> Vec<BlockHeight> {
+        let mut stmt = conn
+            .prepare("SELECT checkpoint_id FROM sapling_tree_checkpoints ORDER BY checkpoint_id")
+            .unwrap();
+        stmt.query_map([], |row| row.get::<_, u32>(0).map(BlockHeight::from))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// A two-block reorg right after a wallet's first scan needs a rewind to `b + 2`. The only
+    /// checkpoint at or below that is the birthday tree state at `b - 1`, which has no `blocks`
+    /// row. The rewind must land there rather than be refused.
+    fn truncate_to_height_reaches_birthday_checkpoint<F: TestFvk>(stranger: F) {
+        let (mut st, b) = wallet_after_first_scan(Some(&stranger));
+
+        assert_eq!(st.wallet_mut().truncate_to_height(b + 2).unwrap(), b - 1);
+        assert_eq!(max_block_height(st.wallet().conn()), None);
+        assert_eq!(sapling_checkpoint_heights(st.wallet().conn()), vec![b - 1]);
+    }
+
+    /// Runs [`truncate_to_height_reaches_birthday_checkpoint`] with a Sapling output above the
+    /// fork.
+    #[test]
+    fn truncate_to_height_reaches_birthday_checkpoint_over_sapling_output() {
+        truncate_to_height_reaches_birthday_checkpoint(
+            ExtendedSpendingKey::master(&[7; 32]).to_diversifiable_full_viewing_key(),
+        );
+    }
+
+    /// Returns an Orchard full viewing key that the test wallet does not own.
+    #[cfg(feature = "orchard")]
+    fn stranger_orchard_fvk() -> ::orchard::keys::FullViewingKey {
+        let sk = ::orchard::keys::SpendingKey::from_bytes([7; 32]).unwrap();
+        ::orchard::keys::FullViewingKey::from(&sk)
+    }
+
+    /// Runs [`truncate_to_height_reaches_birthday_checkpoint`] with an Orchard output above the
+    /// fork.
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn truncate_to_height_reaches_birthday_checkpoint_over_orchard_output() {
+        truncate_to_height_reaches_birthday_checkpoint(stranger_orchard_fvk());
+    }
+
+    /// Runs [`truncate_to_height_reaches_birthday_checkpoint`] with an Ironwood output above
+    /// the fork.
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn truncate_to_height_reaches_birthday_checkpoint_over_ironwood_output() {
+        truncate_to_height_reaches_birthday_checkpoint(IronwoodFvk(stranger_orchard_fvk()));
+    }
+
+    /// Only `truncate_to_height` treats checkpoint heights without a `blocks` row as rewind
+    /// targets. [`truncate_to_chain_state`] keeps selecting among scanned blocks, so after a
+    /// first scan the birthday checkpoint at `b - 1` is still refused there and it takes its
+    /// own path through the minimum shared checkpoint.
+    #[test]
+    fn chain_state_truncation_selects_only_scanned_blocks() {
+        let (mut st, b) = wallet_after_first_scan(Some(
+            &ExtendedSpendingKey::master(&[7; 32]).to_diversifiable_full_viewing_key(),
+        ));
+        let tx = st.wallet_mut().conn_mut().transaction().unwrap();
+        assert_eq!(select_truncation_height(&tx, b + 2, true).unwrap(), b - 1);
+        assert_matches!(
+            select_truncation_height(&tx, b + 2, false),
+            Err(SqliteClientError::RequestedRewindInvalid {
+                safe_rewind_height: Some(h),
+                ..
+            }) if h == b - 1
+        );
+    }
+
+    /// A rewind target below a wallet's first scanned block is refused even with no outputs,
+    /// but the safe rewind height the error reports, the birthday tree state at `b - 1`, must
+    /// itself be accepted.
+    #[test]
+    fn truncate_to_height_accepts_reported_safe_height_below_first_scanned_block() {
+        let (mut st, b) =
+            wallet_after_first_scan::<sapling::zip32::DiversifiableFullViewingKey>(None);
+
+        assert_matches!(
+            st.wallet_mut().truncate_to_height(b - 5),
+            Err(SqliteClientError::RequestedRewindInvalid {
+                safe_rewind_height: Some(h),
+                ..
+            }) if h == b - 1
+        );
+        assert_eq!(st.wallet_mut().truncate_to_height(b - 1).unwrap(), b - 1);
+        assert_eq!(max_block_height(st.wallet().conn()), None);
+    }
+
+    /// Follows a reorg right after a wallet's first scan: rewinds to the birthday tree state,
+    /// rescans a replacement branch from the birthday, then rewinds again. The note the wallet
+    /// received on the orphaned branch ends up unmined, and the note on the new branch is mined.
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn truncate_to_height_follows_reorg_after_first_scan() {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let b = st.sapling_activation_height();
+        let own = st.test_account_orchard().unwrap().clone();
+        let stranger = IronwoodFvk(stranger_orchard_fvk());
+        let orphaned_value = Zatoshis::const_from_u64(50_000);
+        let new_value = Zatoshis::const_from_u64(20_000);
+
+        st.generate_empty_block();
+        st.generate_empty_block();
+        st.generate_empty_block();
+        st.generate_next_block_multi(&[FakeCompactOutput::new(
+            &stranger,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(100_000),
+        )]);
+        st.generate_next_block(&own, AddressType::DefaultExternal, orphaned_value);
+        st.scan_cached_blocks(b, 5);
+
+        assert_eq!(st.wallet_mut().truncate_to_height(b + 2).unwrap(), b - 1);
+
+        // Replace `b + 3` and `b + 4` with a new branch and rescan from the birthday.
+        st.truncate_to_height(b + 2);
+        st.generate_empty_block();
+        st.generate_next_block_multi(&[FakeCompactOutput::new(
+            &stranger,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(70_000),
+        )]);
+        st.generate_next_block(&own, AddressType::DefaultExternal, new_value);
+        st.scan_cached_blocks(b, 6);
+        assert_eq!(max_block_height(st.wallet().conn()), Some(b + 5));
+
+        let mut stmt = st
+            .wallet()
+            .conn()
+            .prepare(
+                "SELECT rn.value, t.mined_height
+                 FROM orchard_received_notes rn
+                 JOIN transactions t ON t.id_tx = rn.transaction_id
+                 ORDER BY rn.id",
+            )
+            .unwrap();
+        let notes = stmt
+            .query_map([], |row| {
+                Ok((
+                    Zatoshis::const_from_u64(row.get(0)?),
+                    row.get::<_, Option<u32>>(1)?.map(BlockHeight::from),
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        drop(stmt);
+        assert_eq!(
+            notes,
+            vec![(orphaned_value, None), (new_value, Some(b + 5))]
+        );
+
+        // No block up to `b + 3` on the new branch has an output, so a second shallow reorg
+        // again rewinds to the birthday tree state.
+        assert_eq!(st.wallet_mut().truncate_to_height(b + 3).unwrap(), b - 1);
     }
 
     /// The name of the received-note table for a pool, written out rather than derived from

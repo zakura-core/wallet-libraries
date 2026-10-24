@@ -3,6 +3,8 @@
 pub mod enhance;
 #[cfg(feature = "native")]
 pub mod native;
+#[cfg(feature = "receiver")]
+pub mod receiver;
 #[cfg(feature = "status")]
 pub mod status;
 #[cfg(feature = "transparent")]

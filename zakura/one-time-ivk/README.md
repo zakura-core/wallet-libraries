@@ -15,8 +15,9 @@ issuing live addresses.
 3. Register the receiver identity for PIR and retain its purpose/index with authenticated received notes.
 4. For a refund, encode `swap::RefundMemo` in an ordinary internal note in the
    funding transaction, whose only transparent output pays the P2PKH or P2SH
-   deposit. Decode only after note authentication and verification that the
-   transaction was the wallet's own send, including zero-value and spent notes.
+   deposit. Decode only memos on ordinary notes the wallet decrypts with its
+   internal key, including zero-value and spent notes. Only the wallet can create
+   such an output, so the funding inputs need not be known.
 5. Reconstruct inputs with their derived FVKs. Use the account's spending key to
    sign, and its ordinary internal key for change.
 
@@ -25,7 +26,7 @@ There is no alternate balance store in this crate.
 
 The SQLite backend implements this contract with its `orchard` feature: durable
 key registration, bounded issuance, a durable recovery queue and payment admission.
-`zakura-pir-receiver` supplies its network steps. Its rustdoc, starting at
+`zakura-pir-client`'s `receiver-wallet` feature supplies its network steps. Its rustdoc, starting at
 `zcash_client_sqlite::wallet::one_time_ivk`, documents the calls a wallet makes.
 
 Software PCZT signing of one-time-key notes works through the same builder.
@@ -73,9 +74,11 @@ index has no valid key, and derivation returns an error.
 | 15 | 497 | Reserved: written as zero, ignored on decode |
 
 The memo does not store the deposit address. A restored refund key needs none: it
-is queried through receiver PIR until a payment is authenticated. An empty funded
-key remains unfinished even if the provider reports success without a refund.
-Further payments after completion are found by retained block filters or an explicit
+is queried through receiver PIR until a payment is authenticated. A funded key
+leaves automatic monitoring only once every local operation on it is conclusive:
+the provider reported that no refund is coming, or the expected refund was received
+and settled. A key restored from its memo alone has no local operation, so it stays
+monitored until its funding is seven days old in chain time. Further payments after completion are found by retained block filters or an explicit
 history check. Incoming indices are recovered through four-index lookahead. `RefundMemo::decode` returns `None`
 for any memo that is not a v1 record, and a wallet ignores such a memo even when it
 starts with `swap::REFUND_MEMO_MAGIC`.

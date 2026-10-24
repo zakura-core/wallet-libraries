@@ -12,6 +12,35 @@
   `HttpTransport` validate their base with `Endpoint::parse` and keep its path
   prefix. `ShardRequest::route`, `HttpRequest::path` and `TxidRequest::path`
   are origin-relative paths below the namespace.
+- Receiver requests use `{base}/receiver/v1/<operation>`, preserving the configured
+  base path. Invalid bases fail with `receiver::session::Error::Endpoint` before
+  any request; clients do not fall back to `/v1/receiver/...`.
+
+### Added
+
+- `receiver::lookup_pages`, a one-time IVK lookup step that reads at most a caller-chosen
+  number of pages. A wallet on a slow transport can record progress through an address
+  with many payments in one segment instead of timing out and starting over.
+
+## [0.0.1-rc3] - 2026-10-23
+
+### Added
+
+- The `receiver` product: `receiver::{Client, WitnessClient}` and `receiver::transport`,
+  which read payment rows, witness payloads, inventories and filters over a caller-owned
+  transport.
+- The `receiver-wallet` feature: `receiver::{publication, lookup, witness, screen}`, the
+  bounded network steps the wallet recovery queue consumes.
+
+### Changed
+
+- Use PIR protocol and server crates `0.0.1-rc3` and SQLite `0.1.0-rc9.4`.
+
+### Removed
+
+- `zakura-receiver-pir` and the unpublished `zakura-pir-receiver` are removed; their
+  client, transport and wallet steps live here. `zakura-pir-receiver`'s `DirectoryError`
+  is `receiver::session::Error`.
 
 ## [0.0.1-rc2] - 2026-10-20
 

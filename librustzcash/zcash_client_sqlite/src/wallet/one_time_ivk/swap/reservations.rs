@@ -16,6 +16,9 @@ use zcash_client_backend::data_api::one_time_ivk::restore::RECEIVE_GAP;
 /// How recent a status must be to reclaim a started reservation.
 const STATUS_FRESH_SECONDS: i64 = 120;
 
+/// How long past its deadline a started quote keeps its slot without a fresh conclusive status.
+const STARTED_STATUS_GRACE_SECONDS: i64 = 86_400;
+
 /// Deposit instructions of an accepted incoming quote, as the provider issued them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReceiveDeposit {
@@ -98,7 +101,10 @@ fn deadline_clock(conn: &Connection, now: i64) -> Result<i64, SqliteClientError>
 }
 
 /// Releases expired reservations only when no current request can still own them.
-/// A started operation needs a recent conclusive status. Funding evidence sticks.
+/// A started operation needs a recent conclusive status. On an unpaid key with no pending
+/// payment, which is what reissue requires, its deadline having passed
+/// [`STARTED_STATUS_GRACE_SECONDS`] ago by the deadline clock also does. A paid key keeps
+/// needing the status, since a reorg can make it unpaid again. Funding evidence sticks.
 pub(in crate::wallet::one_time_ivk) fn reap<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -118,14 +124,15 @@ pub(in crate::wallet::one_time_ivk) fn reap<P: Parameters>(
                  AND (o.deadline > :deadline_now OR
                      (o.reference IS NOT NULL AND o.expectation = 0) OR
                      (o.funded = 1 AND o.expectation != 1 AND k.used = 0) OR
-                     (o.started = 1 AND NOT (
+                     (o.started = 1 AND (o.deadline > :deadline_now - :grace
+                         OR k.used = 1 OR {RECEIVE_PENDING}) AND NOT (
                          o.observed_at BETWEEN :now - :fresh AND :now
                          AND (o.expectation = 1 OR (o.funded = 0 AND o.expectation IN (3, 4))
                               OR (k.used = 1 AND o.expectation IN (2, 3)))))))"
         ))?
         .query_map(
             named_params![":account": owner.0, ":deadline_now": deadline_now,
-        ":now": now, ":fresh": STATUS_FRESH_SECONDS],
+        ":now": now, ":fresh": STATUS_FRESH_SECONDS, ":grace": STARTED_STATUS_GRACE_SECONDS],
             |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
         )?
         .collect::<Result<Vec<_>, _>>()?;
@@ -351,7 +358,7 @@ pub(in crate::wallet::one_time_ivk) fn record_status<P: Parameters>(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     for id in &operations {
-        record(conn, *id, &observation, now)?;
+        record(conn, params, *id, &observation, now)?;
     }
     reap(conn, params, account, now)?;
     Ok(!operations.is_empty())

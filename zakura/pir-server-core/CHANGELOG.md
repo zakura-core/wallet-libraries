@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc3] - 2026-10-23
+
+### Changed
+
+- Use PIR protocol `0.0.1-rc3`.
+
 ## [0.0.1-rc2] - 2026-10-20
 
 ### Changed

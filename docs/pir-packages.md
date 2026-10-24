@@ -1,13 +1,13 @@
 # PIR packages
 
-Enhance, Status and Transparent use the same package structure. Select products
-with `enhance`, `status` and `transparent`; defaults select none.
+Enhance, Status, Transparent and Receiver use the same package structure. Select
+products with `enhance`, `status`, `transparent` and `receiver`; defaults select none.
 
 | Consumer | Entry package | Main modules |
 | --- | --- | --- |
-| Wallet or probe | `zakura-pir-client` | `enhance`, `status`, `transparent` |
-| Publication builder | `zakura-pir-publisher` | `enhance`, `status`, `transparent` |
-| Query server | `zakura-pir-query-server` | `enhance`, `status`, `transparent` |
+| Wallet or probe | `zakura-pir-client` | `enhance`, `status`, `transparent`, `receiver` |
+| Publication builder | `zakura-pir-publisher` | `enhance`, `status`, `transparent`, `receiver` |
+| Query server | `zakura-pir-query-server` | `enhance`, `status`, `transparent`, `receiver` |
 | Shared formats | `zakura-pir-protocol` | records, manifests, codecs and identities |
 
 Publishers and query servers independently use `zakura-pir-server-core` for
@@ -59,9 +59,12 @@ response packing live in query-server. Extension traits attach those operations
 to shared parameter descriptions without making one role depend on another.
 Shared contracts remain independently usable by the wallet backend.
 
-Receiver retains its existing packages and APIs. Its native helper imports use
-`zakura-pir-client` with only `native`; no other product is selected. The generic
-filter codec remains in `zakura-filters`. Node readers are owned by wallet-pir
+Receiver's formats, sessions and inventories live in `zakura-pir-protocol`; its
+`receiver-crypto` feature adds address, record and zero-OVK recovery validation, which
+the wallet and the publisher share. The publisher's `receiver-crypto` feature adds
+witness path construction. `receiver-wallet` in the client adds the recovery queue's
+network steps. See [Receiver PIR](receiver-pir.md). The generic filter codec remains
+in `zakura-filters`. Node readers are owned by wallet-pir
 and are selected explicitly by ingestion/publisher
 consumers. Operational services, HTTP routing, activation and cache policy remain
 in wallet-pir.

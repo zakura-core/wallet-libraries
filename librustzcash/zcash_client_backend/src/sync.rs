@@ -56,6 +56,14 @@ use {
 #[cfg(feature = "sync-decryptor")]
 pub mod decryptor;
 
+/// A wallet store [`run`] can scan into: any [`WalletWrite`] store. Earlier releases also
+/// required one-time IVK storage in builds with `orchard`; ordinary sync no longer uses it.
+#[cfg(feature = "sync")]
+pub trait SyncWallet: WalletWrite {}
+
+#[cfg(feature = "sync")]
+impl<T: WalletWrite> SyncWallet for T {}
+
 /// Scans the chain until the wallet is up-to-date.
 #[cfg(feature = "sync")]
 pub async fn run<P, ChT, CaT, DbT>(
@@ -729,5 +737,21 @@ mod tests {
         });
 
         assert_eq!(request_count.load(Ordering::Relaxed), 3);
+    }
+}
+
+#[cfg(all(test, feature = "sync", feature = "test-dependencies"))]
+mod sync_wallet_tests {
+    use super::SyncWallet;
+    use crate::data_api::testing::MockWalletDb;
+
+    /// Compiles only for a [`SyncWallet`].
+    fn syncs_into<T: SyncWallet>() {}
+
+    /// The `SyncWallet` bound published releases named still holds for every wallet store,
+    /// with `orchard` or without it.
+    #[test]
+    fn every_wallet_store_is_a_sync_wallet() {
+        syncs_into::<MockWalletDb>();
     }
 }

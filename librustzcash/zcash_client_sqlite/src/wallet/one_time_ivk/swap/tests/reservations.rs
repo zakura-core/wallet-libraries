@@ -1311,6 +1311,146 @@ fn a_started_reservation_needs_a_fresh_conclusive_status() {
     assert!(held(&st, 0), "the deposit evidence sticks");
 }
 
+/// How long past its deadline a started quote with no fresh conclusive status keeps its slot.
+const STARTED_GRACE: i64 = 24 * 60 * 60;
+
+/// Prepares a receive reservation at device time `now`, returning the index it issued.
+fn issue(st: &mut State, now: i64) -> Option<u64> {
+    let account = st.test_account().unwrap().id();
+    st.wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, now)
+        .unwrap()
+        .ok()
+        .map(|key| key.key_id().index())
+}
+
+/// A started quote that never gets a status holds its slot until a day past its deadline,
+/// then the slot is released and its unpaid address is reissued under a new floor.
+#[test]
+fn a_started_quote_without_a_status_releases_a_day_after_its_deadline() {
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    quote(&mut st, now, "silent", true);
+    let deadline = now + 60;
+    for held_at in [deadline + 23 * 3600, deadline + STARTED_GRACE - 1] {
+        chain_agrees(st.wallet().db(), held_at);
+        assert_ne!(issue(&mut st, held_at), Some(0));
+        assert!(
+            held(&st, 0),
+            "held at {}s past the deadline",
+            held_at - deadline
+        );
+    }
+    let later = deadline + 25 * 3600;
+    chain_agrees(st.wallet().db(), later);
+    let before = operations(&st);
+    assert_eq!(issue(&mut st, later), Some(0));
+    assert_eq!(reservation(&st, 0), (Some(later), Some(i64::from(before))));
+}
+
+/// The day's limit applies only to a quote with no status. One seen funded, or whose last
+/// status was active, keeps its slot past it.
+#[test]
+fn a_funded_or_active_quote_keeps_its_slot_past_the_started_limit() {
+    let inconclusive = Terminal(ReceiptExpectation::Unknown);
+    for (status, funded) in [(inconclusive, true), (Active, false)] {
+        let mut st = scanned_wallet();
+        let now = clock_now();
+        quote(&mut st, now, "kept", true);
+        assert!(report(&mut st, ("kept", None), status, funded, now + 1));
+        let later = now + 60 + 25 * 3600;
+        chain_agrees(st.wallet().db(), later);
+        assert_ne!(issue(&mut st, later), Some(0));
+        assert!(held(&st, 0), "{status:?}, funded {funded}");
+    }
+}
+
+/// Releasing a silent quote's slot keeps its address monitored, so a payment arriving
+/// afterwards is still recovered, and the paid address is not issued again.
+#[test]
+fn a_payment_after_a_silent_quote_is_released_is_still_recovered() {
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let (key, _) = quote(&mut st, now, "late", true);
+    let later = now + 60 + 25 * 3600;
+    chain_agrees(st.wallet().db(), later);
+    let account = st.test_account().unwrap().id();
+    // A status for an address this wallet never quoted only runs the release check.
+    assert!(!report(&mut st, ("unquoted", None), Active, false, later));
+    assert!(!held(&st, 0));
+    store::restore::tests::discovery::pay_candidate(&mut st, key);
+    assert!(catch_up(&mut st).contains(&0));
+    assert_eq!(
+        store::restore::tests::discovery::one_time_notes(&st),
+        [(100_000, false)]
+    );
+    let next = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, later)
+        .unwrap();
+    assert!(next.is_err() || next.unwrap().key_id().index() != 0);
+}
+
+/// A device clock days ahead cannot release a silent quote's slot while block time is
+/// within a day of its deadline. Once block time passes that, the slot is released.
+#[test]
+fn a_fast_clock_cannot_release_a_silent_quote_early() {
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    quote(&mut st, now, "silent", true);
+    let deadline = now + 60;
+    let fast = deadline + 5 * 86_400;
+    chain_agrees(st.wallet().db(), deadline + STARTED_GRACE - 1);
+    assert_ne!(issue(&mut st, fast), Some(0));
+    assert!(held(&st, 0));
+    chain_agrees(st.wallet().db(), deadline + STARTED_GRACE);
+    assert_eq!(issue(&mut st, fast), Some(0));
+}
+
+/// A funded quote whose latest status awaits a deposit is held by its funding evidence past
+/// the day's limit. A late payout recovered then must not let that limit release it: a reorg
+/// that drops the payout and an empty replacement history mark the key unpaid again, and
+/// reissuing it would hand the funded quote's receiver to a second quote.
+#[test]
+fn a_reorged_late_payout_keeps_a_funded_quote_past_the_started_limit() {
+    let awaiting = zakura_one_time_ivk::swap::OperationStatus::AwaitingDeposit;
+    let mut st = scanned_wallet();
+    let now = clock_now();
+    let (key, _) = quote(&mut st, now, "funded", true);
+    assert!(report(&mut st, ("funded", None), awaiting, false, now + 2));
+    assert!(report(&mut st, ("funded", None), Active, true, now + 1));
+    let later = now + 60 + 25 * 3600;
+    chain_agrees(st.wallet().db(), later);
+    assert_ne!(issue(&mut st, later), Some(0));
+    assert!(held(&st, 0), "the funding evidence holds it");
+
+    let floor = tip(&st).height;
+    store::restore::tests::discovery::pay_candidate(&mut st, key);
+    catch_up(&mut st);
+    assert_eq!(
+        store::restore::tests::discovery::one_time_notes(&st),
+        [(100_000, false)]
+    );
+    chain_agrees(st.wallet().db(), later);
+    assert_ne!(issue(&mut st, later), Some(0));
+    assert!(held(&st, 0), "a paid key keeps needing a fresh status");
+
+    st.truncate_to_height(floor);
+    st.generate_and_scan_empty_blocks(3);
+    check_window(&mut st);
+    let used: bool = value(
+        st.wallet().conn(),
+        "SELECT used FROM ironwood_one_time_keys WHERE purpose = 1 AND key_index = ?1",
+        [0u64.to_be_bytes()],
+    );
+    assert!(!used, "the empty replacement history clears the payment");
+    chain_agrees(st.wallet().db(), later);
+    assert_ne!(issue(&mut st, later), Some(0));
+    assert!(held(&st, 0));
+}
+
 /// Beginning a request needs a future deadline, and each request gets a fresh identity.
 #[test]
 fn begin_needs_a_future_deadline_and_returns_a_fresh_request() {

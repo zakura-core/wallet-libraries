@@ -126,7 +126,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
 
     // Replace the wallet with a seed restore. No reservations or sent-transaction
-    // records survive, so recovery must authenticate chain inputs and the memo.
+    // records survive, so recovery must authenticate the memo from chain data.
     let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
     let _old_wallet = st.reset();
     let (restored, _) = st
@@ -149,8 +149,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     assert!(pending(&st));
     decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
 
-    // Changing the authenticated scope, or losing own-send evidence, makes the memo
-    // ineligible. A marker still waiting for its evidence holds back refund issuance.
+    // Changing the authenticated scope makes the memo ineligible.
     let set_scope = |st: &State, scope: u8| {
         let sql = "UPDATE ironwood_received_notes SET recipient_key_scope = ?1 WHERE memo = ?2";
         exec(
@@ -163,14 +162,6 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     recover_memos(&mut st, restored);
     assert!(refund_keys(&st).is_empty());
     set_scope(&st, 1);
-    let sql = "SELECT ironwood_received_note_id, transaction_id FROM ironwood_received_note_spends";
-    let spends: Vec<(i64, i64)> = rows(st.wallet().conn(), sql, []);
-    exec(
-        st.wallet().conn(),
-        "DELETE FROM ironwood_received_note_spends",
-        [],
-    );
-    // Without an owned input this marker must not create any refund identity.
     let replace_memo = |st: &State, from: &[u8], to: &[u8]| {
         exec(
             st.wallet().conn(),
@@ -178,16 +169,6 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             rusqlite::params![from, to],
         );
     };
-    let unauthenticated = RefundMemo::new(0).encode();
-    replace_memo(&st, memo_bytes.as_slice(), unauthenticated.as_slice());
-    recover_memos(&mut st, restored);
-    assert!(refund_keys(&st).is_empty());
-    replace_memo(&st, unauthenticated.as_slice(), memo_bytes.as_slice());
-    exec(st.wallet().conn(), "DELETE FROM ironwood_one_time_keys", []);
-    let sql = "INSERT INTO ironwood_received_note_spends VALUES(?1,?2)";
-    for spend in spends {
-        exec(st.wallet().conn(), sql, spend);
-    }
 
     // A marked memo that does not decode is ignored.
     let mut invalid = memo.encode();
@@ -413,6 +394,257 @@ fn a_funding_memo_is_recovered_once_its_block_is_stored() {
     assert!(lookup_pending(db, account));
     let key = reserve_key(db, account, Purpose::Refund, mined + 1);
     assert_eq!(key.key_id().index(), 1);
+}
+
+/// Restores `st`'s seed into a fresh wallet born at `birthday`, scans from there through
+/// `mined`, stores each of `txids`' full transactions for their memos, and enables one-time
+/// recovery.
+/// Returns the restored account. No PIR recovery runs, so the restore holds no one-time
+/// note. Refund issuance waits while the memo is missing.
+fn restore_through_funding(
+    st: &mut State,
+    birthday: &zcash_client_backend::data_api::AccountBirthday,
+    txids: &[TxId],
+    mined: BlockHeight,
+) -> AccountUuid {
+    let network = *st.network();
+    let txs: Vec<_> = txids
+        .iter()
+        .map(|txid| st.wallet().get_transaction(*txid).unwrap().unwrap())
+        .collect();
+    let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
+    let _old_wallet = st.reset();
+    let (restored, _) = st
+        .wallet_mut()
+        .create_account("restored", &seed, birthday, None)
+        .unwrap();
+    st.wallet_mut().update_chain_tip(mined).unwrap();
+    let from = birthday.height();
+    st.scan_cached_blocks(from, (u32::from(mined) - u32::from(from) + 1) as usize);
+    let db = st.wallet_mut().db_mut();
+    db.set_one_time_recovery_enabled(restored, true).unwrap();
+    assert!(matches!(
+        reserve_refund(db, restored, mined),
+        Ok(Err(ReservationPolicy::FundingHistory))
+    ));
+    for tx in &txs {
+        let height = st.wallet().get_tx_height(tx.txid()).unwrap();
+        decrypt_and_store_transaction(&network, st.wallet_mut(), tx, height).unwrap();
+    }
+    restored
+}
+
+/// Whether `txid` spent a note this wallet holds, the evidence refund recovery no longer
+/// requires.
+fn spends_owned_note(st: &State, txid: TxId) -> bool {
+    value(
+        st.wallet().conn(),
+        "SELECT EXISTS(SELECT 1 FROM v_received_output_spends s
+         JOIN transactions t ON t.id_tx = s.transaction_id WHERE t.txid = ?1)",
+        [txid.as_ref()],
+    )
+}
+
+/// A second device on the same seed trusts the refund memo on its internal change although
+/// the swap spent only a one-time note it has not recovered yet. It registers the funded
+/// refund key and never issues that index for its own swap, which would link the two swaps.
+#[test]
+fn a_device_without_the_spent_one_time_notes_trusts_the_refund_memo() {
+    let mut st = ironwood_wallet();
+    let network = *st.network();
+    let account = st.test_account().cloned().unwrap();
+    // The first device's only funds are a payout to its first incoming one-time key.
+    let db = st.wallet_mut().db_mut();
+    let incoming = reserve_key(db, account.id(), Purpose::Receive, start());
+    pay(&mut st, incoming.full_viewing_key(), 1_000_000);
+    st.generate_and_scan_empty_blocks(5);
+
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    let deposit = p2pkh(7).encode(&network);
+    let now = clock_now();
+    let db = st.wallet_mut().db_mut();
+    let key = reserve_refund(db, account.id(), tip).unwrap().unwrap();
+    let index = key.key_id().index();
+    db.record_refund_operation(account.id(), index, &deposit, now + 3_600, now)
+        .unwrap();
+    let memo = db
+        .refund_funding_memo(account.id(), index, &deposit)
+        .unwrap();
+    let pays = vec![payment(&p2pkh(7), 500_000, None)];
+    let (proposal, txid, mined) = send(&mut st, pays, &memo);
+    verify_refund_funding_proposal(&proposal, &memo, &deposit).unwrap();
+    let one_time_inputs: i64 = value(
+        st.wallet().conn(),
+        "SELECT COUNT(*) FROM ironwood_received_note_spends s
+         JOIN ironwood_received_notes n ON n.id = s.ironwood_received_note_id
+         JOIN transactions t ON t.id_tx = s.transaction_id
+         WHERE t.txid = ?1 AND n.one_time_key_id IS NOT NULL",
+        [txid.as_ref()],
+    );
+    assert_eq!(one_time_inputs, 1);
+
+    // The second device scans the same chain from the same birthday, without PIR.
+    let second = restore_through_funding(&mut st, account.birthday(), &[txid], mined);
+    let one_time_notes: i64 = value(
+        st.wallet().conn(),
+        "SELECT COUNT(*) FROM ironwood_received_notes WHERE one_time_key_id IS NOT NULL",
+        [],
+    );
+    assert_eq!(one_time_notes, 0);
+    assert!(!spends_owned_note(&st, txid));
+
+    recover_memos(&mut st, second);
+    assert_eq!(refund_keys(&st), [(index, u32::from(mined), true)]);
+    let db = st.wallet_mut().db_mut();
+    let next = reserve_refund(db, second, mined).unwrap().unwrap();
+    assert_eq!(next.key_id().index(), index + 1);
+}
+
+/// A restore born after the note a swap spent, and before its funding transaction, never
+/// sees that spend. It still recovers the refund key from the memo on its internal change,
+/// so it neither loses the refund nor issues the index again.
+#[test]
+fn a_restore_born_after_the_spent_note_recovers_the_refund_key() {
+    let (mut st, _) = ironwood_funded_wallet();
+    let born = st.latest_cached_block().unwrap().chain_state().clone();
+    let birthday = zcash_client_backend::data_api::AccountBirthday::from_parts(born, None);
+    st.generate_and_scan_empty_blocks(1);
+    let pays = vec![payment(&p2pkh(7), 500_000, None)];
+    let (_, txid, mined) = send(&mut st, pays, &refund_memo(3));
+    assert!(spends_owned_note(&st, txid));
+    assert!(birthday.height() < mined);
+
+    let restored = restore_through_funding(&mut st, &birthday, &[txid], mined);
+    assert!(!spends_owned_note(&st, txid));
+    recover_memos(&mut st, restored);
+    assert_eq!(refund_keys(&st), [(3, u32::from(mined), true)]);
+    let db = st.wallet_mut().db_mut();
+    assert!(lookup_pending(db, restored));
+    let next = reserve_refund(db, restored, mined).unwrap().unwrap();
+    assert_eq!(next.key_id().index(), 4);
+}
+
+/// Mines and scans `memo` on a payment from a wallet this seed does not hold to the test
+/// account's internal address, as a viewing-key holder could send, and stores its full
+/// transaction. Returns the height that mined it.
+fn forge_internal_memo(st: &mut State, memo: &MemoBytes) -> BlockHeight {
+    let network = *st.network();
+    let internal = parent(st).address_at(0u32, Scope::Internal);
+    let tx = external_payment(internal, memo);
+    let (height, _) = st.generate_next_block_from_tx(1, &tx);
+    st.scan_cached_blocks(height, 1);
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(height)).unwrap();
+    let stored: Vec<u8> = value(
+        st.wallet().conn(),
+        "SELECT n.memo FROM ironwood_received_notes n JOIN transactions t
+         ON t.id_tx = n.transaction_id WHERE t.txid = ?1 AND n.recipient_key_scope = 1",
+        [tx.txid().as_ref()],
+    );
+    assert_eq!(stored, memo.as_slice());
+    height
+}
+
+/// A viewing-key holder can pay the wallet's internal address with a refund memo naming the
+/// last index. Registering it would exhaust the refund index space, so a memo further than
+/// the gap above the highest known refund index is ignored, and issuance continues.
+#[test]
+fn a_forged_refund_memo_far_above_known_indexes_is_ignored() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let height = forge_internal_memo(&mut st, &refund_memo(u64::MAX));
+    recover_memos(&mut st, account);
+    assert!(refund_keys(&st).is_empty());
+    let next = reserve_refund(st.wallet_mut().db_mut(), account, height);
+    assert_eq!(next.unwrap().unwrap().key_id().index(), 0);
+}
+
+/// A forged memo within the gap only marks its index used, and issuance continues above it.
+#[test]
+fn a_forged_refund_memo_within_the_gap_only_marks_its_index_used() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let height = forge_internal_memo(&mut st, &refund_memo(5));
+    recover_memos(&mut st, account);
+    assert_eq!(refund_keys(&st), [(5, u32::from(height), true)]);
+    let next = reserve_refund(st.wallet_mut().db_mut(), account, height);
+    assert_eq!(next.unwrap().unwrap().key_id().index(), 6);
+}
+
+/// A device reserves more refund keys than the gap without funding them, then funds the
+/// next index from a note a restore also sees. That spend proves the memo is the wallet's
+/// own, so the restore recovers the index although it is beyond the gap.
+#[test]
+fn an_own_spend_recovers_a_refund_memo_beyond_the_gap() {
+    let (mut st, _) = ironwood_funded_wallet();
+    let account = st.test_account().cloned().unwrap();
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    let deposit = p2pkh(7).encode(st.network());
+    let now = clock_now();
+    let db = st.wallet_mut().db_mut();
+    let key = (0..=101)
+        .map(|_| reserve_refund(db, account.id(), tip).unwrap().unwrap())
+        .last()
+        .unwrap();
+    let index = key.key_id().index();
+    assert_eq!(index, 101);
+    db.record_refund_operation(account.id(), index, &deposit, now + 3_600, now)
+        .unwrap();
+    let memo = db
+        .refund_funding_memo(account.id(), index, &deposit)
+        .unwrap();
+    let pays = vec![payment(&p2pkh(7), 100_000, None)];
+    let (_, txid, mined) = send(&mut st, pays, &memo);
+
+    let restored = restore_through_funding(&mut st, account.birthday(), &[txid], mined);
+    assert!(spends_owned_note(&st, txid));
+    recover_memos(&mut st, restored);
+    assert_eq!(refund_keys(&st), [(101, u32::from(mined), true)]);
+    let next = reserve_refund(st.wallet_mut().db_mut(), restored, mined);
+    assert_eq!(next.unwrap().unwrap().key_id().index(), 102);
+}
+
+/// Another device funded refund indexes 0, 90 and 180, each within the gap of the one
+/// before, but mined 180 first and 0 last. A restore recovers all three in one call, since
+/// accepting 90 brings 180 within the gap, and likewise when 90 and 180 share a block.
+#[test]
+fn spaced_refund_memos_from_another_device_are_recovered_in_any_order() {
+    let (mut st, _) = ironwood_funded_wallet();
+    let account = st.test_account().cloned().unwrap();
+    // One confirmed note for each funding transaction.
+    let fvk = parent(&st);
+    for _ in 0..2 {
+        pay(&mut st, &fvk, 1_000_000);
+    }
+    st.generate_and_scan_empty_blocks(5);
+    let funded: Vec<(TxId, BlockHeight)> = [180, 90, 0]
+        .into_iter()
+        .map(|index| {
+            let pays = vec![payment(&p2pkh(7), 100_000, None)];
+            let (_, txid, mined) = send(&mut st, pays, &refund_memo(index));
+            (txid, mined)
+        })
+        .collect();
+    let txids: Vec<TxId> = funded.iter().map(|(txid, _)| *txid).collect();
+    let mined = funded.last().unwrap().1;
+    let restored = restore_through_funding(&mut st, account.birthday(), &txids, mined);
+    recover_memos(&mut st, restored);
+    let at = |i: usize| u32::from(funded[i].1);
+    let expected = vec![(0, at(2), true), (90, at(1), true), (180, at(0), true)];
+    assert_eq!(refund_keys(&st), expected);
+
+    // 90 and 180 mined together are taken in index order within the block.
+    exec(st.wallet().conn(), "DELETE FROM ironwood_one_time_keys", []);
+    exec(
+        st.wallet().conn(),
+        "UPDATE transactions SET mined_height = ?1, block = ?1,
+             min_observed_height = MIN(min_observed_height, ?1) WHERE txid = ?2",
+        rusqlite::params![at(0), txids[1].as_ref()],
+    );
+    recover_memos(&mut st, restored);
+    let expected = vec![(0, at(2), true), (90, at(0), true), (180, at(0), true)];
+    assert_eq!(refund_keys(&st), expected);
+    let next = reserve_refund(st.wallet_mut().db_mut(), restored, mined);
+    assert_eq!(next.unwrap().unwrap().key_id().index(), 181);
 }
 
 #[test]
