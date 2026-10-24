@@ -205,10 +205,16 @@ Before a release, reserve the five new `zakura-pir-{protocol,client,publisher,qu
 names and configure their Trusted Publishers. The packaging POC itself does not
 publish crates or change publisher settings. No permanent API token or new Infisical secret is required.
 
-`zakura-service-config` is also selected for release. Before its first release,
-publish its reserved `0.0.0` placeholder and configure the same Trusted Publisher
-for that crate. A reservation merged into `zakura-core/reserved` does not register
-the name on crates.io until the placeholder is published.
+`zakura-service-config` and `zakura-pir-config` are also selected for release,
+in dependency order after any packages they use. Before their first release,
+publish each reserved `0.0.0` placeholder from `zakura-core/reserved` and configure
+the same Trusted Publisher for each crate: owner `zakura-core`, repository
+`wallet-libraries`, workflow `publish-crates.yml`, and environment `crates-io`.
+A reservation merged into `zakura-core/reserved` does not register the name on
+crates.io until the placeholder is published. Trusted Publishing can only be
+configured after that initial publication. The `verify` workflow's successful
+token exchange alone does not prove that either new crate grants permission to
+publish; confirm both crates' publisher settings before dispatching `publish`.
 
 Choose **publish** for an actual release. It repeats verification for the dispatch
 commit, requires environment approval, then acquires its temporary credential.
