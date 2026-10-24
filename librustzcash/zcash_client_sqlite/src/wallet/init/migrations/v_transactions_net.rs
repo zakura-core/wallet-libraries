@@ -15,7 +15,7 @@ use crate::wallet::{init::WalletMigrationError, pool_code};
 /// received value.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x2aa4d24f_51aa_4a4c_8d9b_e5b8a762865f);
 
-const DEPENDENCIES: &[Uuid] = &[add_transaction_views::MIGRATION_ID];
+pub(super) const DEPENDENCIES: &[Uuid] = &[add_transaction_views::MIGRATION_ID];
 
 pub(crate) struct Migration;
 
@@ -210,7 +210,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use zcash_keys::keys::UnifiedSpendingKey;
-    use zcash_protocol::consensus::Network;
+    use zcash_protocol::{consensus::Network};
     use zip32::AccountId;
 
     use crate::{
@@ -242,7 +242,7 @@ mod tests {
             .conn
             .execute(
                 "INSERT INTO accounts (account, ufvk) VALUES (0, ?)",
-                params![ufvk0.encode(&db_data.params)],
+                params![ufvk0.encode(&db_data.params).unwrap()],
             )
             .unwrap();
 
@@ -257,7 +257,7 @@ mod tests {
             .conn
             .execute(
                 "INSERT INTO accounts (account, ufvk) VALUES (1, ?)",
-                params![ufvk1.encode(&db_data.params)],
+                params![ufvk1.encode(&db_data.params).unwrap()],
             )
             .unwrap();
 

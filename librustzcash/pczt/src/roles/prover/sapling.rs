@@ -1,17 +1,26 @@
+<<<<<<< HEAD
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
+=======
+use rand_core::{CryptoRng, Rng};
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
 use sapling::prover::{OutputProver, SpendProver};
 
 use crate::{Pczt, common::AnchorRequirement};
 
 impl super::Prover {
-    pub fn create_sapling_proofs<S, O>(
+    /// Creates the Sapling proofs for this PCZT.
+    ///
+    /// `rng` provides the randomness for the proofs.
+    pub fn create_sapling_proofs<S, O, R>(
         self,
+        rng: R,
         spend_prover: &S,
         output_prover: &O,
     ) -> Result<Self, SaplingError>
     where
         S: SpendProver,
         O: OutputProver,
+        R: Rng + CryptoRng,
     {
         let Pczt {
             global,
@@ -30,7 +39,11 @@ impl super::Prover {
 
         parsed
             .bundle
+<<<<<<< HEAD
             .create_proofs(spend_prover, output_prover, UnwrapErr(SysRng))
+=======
+            .create_proofs(spend_prover, output_prover, rng)
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
             .map_err(SaplingError::Prover)?;
 
         Ok(Self {
@@ -57,6 +70,7 @@ pub enum SaplingError {
 #[cfg(all(test, feature = "proving-tests"))]
 mod tests {
     use alloc::collections::BTreeMap;
+    use rand::{rand_core::UnwrapErr, rngs::SysRng};
 
     use zcash_proofs::prover::LocalTxProver;
     use zcash_protocol::consensus::BranchId;
@@ -93,7 +107,7 @@ mod tests {
 
         let prover = LocalTxProver::bundled();
         assert!(matches!(
-            Prover::new(pczt).create_sapling_proofs(&prover, &prover),
+            Prover::new(pczt).create_sapling_proofs(UnwrapErr(SysRng), &prover, &prover),
             Err(SaplingError::Parser(
                 crate::sapling::ParseError::MissingAnchor
             ))
@@ -114,7 +128,7 @@ mod tests {
 
         let prover = LocalTxProver::bundled();
         let pczt = Prover::new(pczt)
-            .create_sapling_proofs(&prover, &prover)
+            .create_sapling_proofs(UnwrapErr(SysRng), &prover, &prover)
             .unwrap()
             .finish();
 

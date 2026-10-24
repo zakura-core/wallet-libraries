@@ -1,7 +1,11 @@
 [package]
 name = "zakura-client-sqlite"
 description = "An SQLite-based Zcash light client"
+<<<<<<< HEAD
 version = "0.1.0-rc9.4"
+=======
+version = "0.23.0-pre.2"
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
 authors = [
     "Jack Grigg <jack@z.cash>",
     "Kris Nuttycombe <kris@electriccoin.co>"
@@ -90,6 +94,7 @@ uuid = { workspace = true, features = ["v4"] }
 # (Breaking upgrades to these are usually backwards-compatible, but check MSRVs.)
 document-features.workspace = true
 maybe-rayon.workspace = true
+pastey = { workspace = true, optional = true }
 pczt.workspace = true
 zcash_proofs = { workspace = true, optional = true }
 rand_core.workspace = true
@@ -113,6 +118,7 @@ pczt = { workspace = true, features = ["orchard", "tx-extractor"] }
 shardtree = { workspace = true, features = ["legacy-api", "test-dependencies"] }
 orchard = { workspace = true, features = ["test-dependencies"] }
 proptest.workspace = true
+rand = { workspace = true, features = ["sys_rng"] }
 rand_chacha.workspace = true
 rand_core.workspace = true
 secp256k1 = { workspace = true, features = ["rand"] }
@@ -127,7 +133,12 @@ zcash_address = { workspace = true, features = ["test-dependencies"] }
 zip321 = { workspace = true }
 
 [features]
+<<<<<<< HEAD
 default = ["multicore"]
+=======
+default = ["multicore", "orchard"]
+zip-233 = ["zcash_primitives/zip-233", "zcash_client_backend/zip-233"]
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
 
 ## Enables multithreading support for creating proofs and building subtrees.
 multicore = ["maybe-rayon/threads", "zcash_primitives/multicore"]
@@ -214,7 +225,7 @@ serde = ["dep:serde", "uuid/serde"]
 #! ### Experimental features
 
 ## Exposes unstable APIs. Their behaviour may change at any time.
-unstable = ["zcash_client_backend/unstable"]
+unstable = ["dep:pastey", "zcash_client_backend/unstable"]
 
 ## Enables the real proving fixtures used by migration and PCZT tests.
 proving-tests = ["test-dependencies", "zcash_proofs/bundled-prover", "zcash_client_backend/proving-tests"]

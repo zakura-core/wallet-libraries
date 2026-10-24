@@ -95,7 +95,7 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
         .zip(scope_code)
         .map(|(ufvk_str, scope_code)| {
             let ufvk = UnifiedFullViewingKey::decode(params, &ufvk_str)
-                .map_err(SqliteClientError::CorruptedData)?;
+                .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?;
 
             let spending_key_scope = zip32::Scope::try_from(KeyScope::decode(scope_code)?)
                 .map_err(|_| {
@@ -471,6 +471,11 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn create_to_address_respects_recipient_expiry() {
+        testing::pool::create_to_address_respects_recipient_expiry::<SaplingPoolTester>()
+    }
+
+    #[test]
     fn scan_full_block_detects_outputs() {
         testing::pool::scan_full_block_detects_outputs::<SaplingPoolTester>()
     }
@@ -536,6 +541,12 @@ pub(crate) mod tests {
     #[test]
     fn send_max_proposal_fails_when_unconfirmed_funds_present() {
         testing::pool::send_max_proposal_fails_when_unconfirmed_funds_present::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-inputs")]
+    fn insufficient_funds_counts_transparent_inputs() {
+        testing::pool::insufficient_funds_counts_transparent_inputs::<SaplingPoolTester>()
     }
 
     #[test]
