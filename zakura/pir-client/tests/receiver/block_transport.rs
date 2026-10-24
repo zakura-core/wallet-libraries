@@ -66,7 +66,7 @@ fn head_is_bounded_and_network_checked() {
     assert_eq!(
         http.calls.borrow()[0],
         (
-            "https://receiver/v1/receiver/block-filters/head".to_owned(),
+            "https://receiver/receiver/v1/block-filters/head".to_owned(),
             16 * 1024
         )
     );
@@ -120,7 +120,7 @@ fn batch_checks_session_range_and_payload() {
     assert_eq!(
         http.calls.borrow()[0],
         (
-            "https://receiver/v1/receiver/block-filters/2/1/4".to_owned(),
+            "https://receiver/receiver/v1/block-filters/2/1/4".to_owned(),
             MAX_BATCH_BYTES
         )
     );
@@ -151,4 +151,45 @@ fn batch_checks_session_range_and_payload() {
         ))
         .is_err()
     );
+}
+
+/// A server base with a path keeps it for both block-filter routes, and a base that is not
+/// an HTTP endpoint fails before any request instead of reaching another route.
+#[test]
+fn block_routes_stay_below_the_configured_base_path() {
+    let head = Head {
+        genesis: [9; 32],
+        revision: 2,
+        first: 1,
+        tip: BlockId {
+            height: 1,
+            hash: [1; 32],
+        },
+    };
+    let http = Http {
+        body: serde_json::to_vec(&head).unwrap(),
+        calls: RefCell::default(),
+    };
+    let base = "http://127.0.0.1:8080/edge/";
+    ready(Inventories::block_head(base, &http, &[9; 32])).unwrap();
+    // The body is not a batch; only the requested URL matters here.
+    assert!(ready(Inventories::block_batch(base, &http, &head, 1, 4)).is_err());
+    let urls: Vec<_> = http
+        .calls
+        .borrow()
+        .iter()
+        .map(|(url, _)| url.clone())
+        .collect();
+    assert_eq!(
+        urls,
+        [
+            "http://127.0.0.1:8080/edge/receiver/v1/block-filters/head",
+            "http://127.0.0.1:8080/edge/receiver/v1/block-filters/2/1/4",
+        ]
+    );
+    assert!(matches!(
+        ready(Inventories::block_head("receiver.example", &http, &[9; 32])),
+        Err(Error::Endpoint(_))
+    ));
+    assert_eq!(http.calls.borrow().len(), 2);
 }

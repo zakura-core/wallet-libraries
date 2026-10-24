@@ -229,7 +229,7 @@ mod tests {
                 .found,
             Ok(TxidLookup::Unsupported)
         );
-        assert_eq!(*lock(&exchange.paths), ["/v2/txid/init"]);
+        assert_eq!(*lock(&exchange.paths), ["/transparent/v1/txid/init"]);
         // This service answers the map with its init, which no map is.
         assert!(
             service
@@ -237,7 +237,7 @@ mod tests {
                 .found
                 .is_err()
         );
-        assert_eq!(lock(&exchange.paths)[1], "/v2/txid/map");
+        assert_eq!(lock(&exchange.paths)[1], "/transparent/v1/txid/map");
     }
 
     /// Asking again keeps the chain the client pinned: after an unsupported
@@ -256,13 +256,13 @@ mod tests {
             answer: |request: &HttpRequest| {
                 let reply = publication.answer(request.method, &request.path, &request.body);
                 match (phase.load(Ordering::SeqCst), request.path.as_str()) {
-                    (0, "/v2/txid/init") => HttpReply {
+                    (0, "/transparent/v1/txid/init") => HttpReply {
                         status: 200,
                         body: unsupported_init(),
                         ..HttpReply::default()
                     },
                     // The same map for another genesis block.
-                    (1, "/v2/txid/map") => {
+                    (1, "/transparent/v1/txid/map") => {
                         let body = String::from_utf8(reply.body)
                             .unwrap()
                             .replace(&"ee".repeat(32), &"ab".repeat(32))

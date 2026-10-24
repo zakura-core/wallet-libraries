@@ -224,7 +224,7 @@ impl Directory {
         let route = url
             .strip_prefix(ORIGIN)
             .unwrap()
-            .strip_prefix("/v1/receiver/")
+            .strip_prefix("/receiver/v1/")
             .unwrap();
         let mut counts = self.counts.lock().unwrap();
         let bytes = if let Some(body) = body {

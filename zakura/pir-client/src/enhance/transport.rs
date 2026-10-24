@@ -10,6 +10,7 @@ use std::{
     future::Future,
     sync::Arc,
 };
+use zakura_pir_protocol::endpoint::{Endpoint, PirProduct};
 
 /// Default maximum number of input items, including duplicates, in one batch.
 pub const DEFAULT_MAX_BATCH_SIZE: usize = 4096;
@@ -115,7 +116,7 @@ impl PendingClient {
             transport,
             &base_url,
             Method::Get,
-            "/v1/enhance/init",
+            "/init",
             vec![],
             MAX_MANIFEST_BYTES,
         )
@@ -352,7 +353,7 @@ impl Client {
                             transport,
                             &round_state.client.base_url,
                             Method::Post,
-                            "/v1/enhance/query",
+                            "/query",
                             query.body().to_vec(),
                             MAX_RESPONSE_BYTES,
                         )
@@ -454,7 +455,7 @@ impl Client {
             return Ok(session);
         }
         let path = format!(
-            "/v1/enhance/session/{}",
+            "/session/{}",
             hex::encode(
                 self.manifest
                     .session_id(shard_id)
@@ -500,7 +501,7 @@ impl Client {
             transport,
             &self.base_url,
             Method::Post,
-            "/v1/enhance/query",
+            "/query",
             query.body().to_vec(),
             MAX_RESPONSE_BYTES,
         )
@@ -652,7 +653,7 @@ impl Client {
                         transport,
                         &client.base_url,
                         Method::Post,
-                        "/v1/enhance/query",
+                        "/query",
                         query.body().to_vec(),
                         MAX_RESPONSE_BYTES,
                     )
@@ -703,20 +704,21 @@ impl Client {
     }
 }
 
-/// Dispatches one request to `path` under `base`. A custom transport may use its
-/// own collector, so the protocol cap is enforced again on the returned body.
+/// Dispatches one request for the Enhance `operation` (such as `/init`) under
+/// `base`. A custom transport may use its own collector, so the protocol cap is
+/// enforced again on the returned body.
 async fn fetch(
     transport: &impl Transport,
     base: &str,
     method: Method,
-    path: &str,
+    operation: &str,
     body: Vec<u8>,
     response_limit: usize,
 ) -> Result<ResponseBody, ClientError> {
     let response = transport
         .execute(Request {
             method,
-            url: endpoint(base, path)?,
+            url: endpoint(base, operation)?,
             body,
             response_limit,
         })
@@ -727,9 +729,9 @@ async fn fetch(
     Ok(response)
 }
 
-fn endpoint(base: &str, path: &str) -> Result<String, ClientError> {
-    let endpoint = zakura_pir_protocol::endpoint::Endpoint::parse(base)
-        .map_err(|e| ClientError::Transport(e.to_string()))?;
+/// The canonical `/enhance/v1` URL of `operation` below the configured server base.
+fn endpoint(base: &str, operation: &str) -> Result<String, ClientError> {
+    let endpoint = Endpoint::parse(base).map_err(|e| ClientError::Transport(e.to_string()))?;
     if !endpoint.is_https() && !endpoint.is_loopback() {
         return Err(ClientError::Transport(
             "PIR endpoint must be HTTPS (or loopback HTTP) without credentials, query or fragment"
@@ -737,7 +739,7 @@ fn endpoint(base: &str, path: &str) -> Result<String, ClientError> {
         ));
     }
     endpoint
-        .join(path)
+        .product_url(PirProduct::Enhance, operation)
         .map_err(|e| ClientError::Transport(e.to_string()))
 }
 
@@ -766,31 +768,31 @@ mod tests {
             "http://0x7f000001",
             "https://bücher.example/",
         ] {
-            assert!(endpoint(url, "/v1/enhance/init").is_err());
+            assert!(endpoint(url, "/init").is_err());
         }
         assert_eq!(
-            endpoint("  HTTPS://EXAMPLE.ORG:443/a/../base/  ", "/v1/enhance/init").unwrap(),
-            "https://example.org/base/v1/enhance/init"
+            endpoint("  HTTPS://EXAMPLE.ORG:443/a/../base/  ", "/init").unwrap(),
+            "https://example.org/base/enhance/v1/init"
         );
         assert_eq!(
-            endpoint("https://example.org/a%2Fb", "/v1/enhance/init").unwrap(),
-            "https://example.org/a%2Fb/v1/enhance/init"
+            endpoint("https://example.org/a%2Fb", "/init").unwrap(),
+            "https://example.org/a%2Fb/enhance/v1/init"
         );
         assert_eq!(
-            endpoint("https://example.org/base/", "/v1/enhance/init").unwrap(),
-            "https://example.org/base/v1/enhance/init"
+            endpoint("https://example.org/base/", "/init").unwrap(),
+            "https://example.org/base/enhance/v1/init"
         );
         assert_eq!(
-            endpoint("http://127.0.0.1:8080", "/v1/enhance/init").unwrap(),
-            "http://127.0.0.1:8080/v1/enhance/init"
+            endpoint("http://127.0.0.1:8080", "/init").unwrap(),
+            "http://127.0.0.1:8080/enhance/v1/init"
         );
         assert_eq!(
-            endpoint("http://[::1]:8080/base/", "/v1/enhance/init").unwrap(),
-            "http://[::1]:8080/base/v1/enhance/init"
+            endpoint("http://[::1]:8080/base/", "/init").unwrap(),
+            "http://[::1]:8080/base/enhance/v1/init"
         );
         assert_eq!(
-            endpoint("https://xn--bcher-kva.example/", "/v1/enhance/init").unwrap(),
-            "https://xn--bcher-kva.example/v1/enhance/init"
+            endpoint("https://xn--bcher-kva.example/", "/init").unwrap(),
+            "https://xn--bcher-kva.example/enhance/v1/init"
         );
     }
 }
@@ -935,18 +937,18 @@ mod lifecycle_tests {
 
     impl Transport for FixtureTransport {
         async fn execute(&self, request: Request) -> Result<ResponseBody, ClientError> {
-            let bytes = if request.url.ends_with("/v1/enhance/init") {
+            let bytes = if request.url.ends_with("/enhance/v1/init") {
                 assert!(matches!(request.method, Method::Get));
                 self.init_requests.set(self.init_requests.get() + 1);
                 &self.manifest
-            } else if request.url.contains("/v1/enhance/session/") {
+            } else if request.url.contains("/enhance/v1/session/") {
                 assert!(matches!(request.method, Method::Get));
                 self.session_requests.set(self.session_requests.get() + 1);
                 if let Some(status) = self.session_status {
                     return Err(ClientError::HttpStatus(status));
                 }
                 &self.session
-            } else if request.url.ends_with("/v1/enhance/query") {
+            } else if request.url.ends_with("/enhance/v1/query") {
                 assert!(matches!(request.method, Method::Post));
                 self.query_requests.set(self.query_requests.get() + 1);
                 if let Some(status) = self.query_status {

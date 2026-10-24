@@ -5,11 +5,11 @@
 //! (the recent revision moves every block) pays for every archive each time.
 //! The split publishes the same entries as two kinds of document:
 //!
-//! - **The recent map** (`GET /v2/txid/map`): the seal parameters, the start,
+//! - **The recent map** (`GET /transparent/v1/txid/map`): the seal parameters, the start,
 //!   the archive count, the last height an archive holds, one reference
 //!   (start height and SHA-256) per index chunk, and the recent shard's entry.
 //!   It changes every block and is what a client refetches after a 409.
-//! - **Index chunks** (`GET /v2/txid/map/{base}/{sha256}`): the archive
+//! - **Index chunks** (`GET /transparent/v1/txid/map/{base}/{sha256}`): the archive
 //!   entries whose absolute shard ids lie in `[base, base + 32)`, where `base`
 //!   is a multiple of [`INDEX_CHUNK_SHARDS`]. A chunk is addressed by its
 //!   digest, so it is cacheable forever; only the newest chunk changes at a
@@ -58,7 +58,7 @@ pub struct DisplayChunkRef {
     pub sha256: String,
 }
 
-/// `GET /v2/txid/map`: everything a lookup needs that changes every block.
+/// `GET /transparent/v1/txid/map`: everything a lookup needs that changes every block.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DisplayRecentMap {
     pub schema: String,
@@ -83,7 +83,7 @@ pub struct DisplayRecentMap {
     pub recent: Option<DisplayMapEntry>,
 }
 
-/// `GET /v2/txid/map/{base}/{sha256}`: the listed archives of one chunk.
+/// `GET /transparent/v1/txid/map/{base}/{sha256}`: the listed archives of one chunk.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DisplayIndexChunk {
     pub schema: String,
@@ -228,12 +228,24 @@ impl DisplayRecentMap {
         base.max(self.first_shard_id)..base + (end - base).min(INDEX_CHUNK_SHARDS)
     }
 
-    /// The origin-relative path of chunk `index`.
-    pub fn chunk_path(&self, index: usize) -> String {
+    /// The Transparent product operation addressing chunk `index`,
+    /// `/txid/map/{base}/{sha256}`, without the product's route namespace.
+    pub fn chunk_operation(&self, index: usize) -> String {
         format!(
-            "/v2/txid/map/{}/{}",
+            "/txid/map/{}/{}",
             self.chunk_base_id(index),
             self.chunks[index].sha256
+        )
+    }
+
+    /// The origin-relative path of chunk `index`: [`Self::chunk_operation`]
+    /// below the Transparent route namespace (`/transparent/v1`).
+    #[cfg(feature = "http-endpoint")]
+    pub fn chunk_path(&self, index: usize) -> String {
+        format!(
+            "{}{}",
+            crate::endpoint::PirProduct::Transparent.route_prefix(),
+            self.chunk_operation(index)
         )
     }
 
@@ -554,8 +566,13 @@ mod tests {
                 assert_eq!(chunk.sha256, chunk.chunk.sha256());
                 assert!(chunk.chunk.shards.len() as u64 <= INDEX_CHUNK_SHARDS);
                 assert_eq!(
+                    recent.chunk_operation(index),
+                    format!("/txid/map/{}/{}", bases[index], chunk.sha256)
+                );
+                #[cfg(feature = "http-endpoint")]
+                assert_eq!(
                     recent.chunk_path(index),
-                    format!("/v2/txid/map/{}/{}", bases[index], chunk.sha256)
+                    format!("/transparent/v1/txid/map/{}/{}", bases[index], chunk.sha256)
                 );
                 ids.extend(chunk.chunk.shards.iter().map(|s| s.shard_id));
             }

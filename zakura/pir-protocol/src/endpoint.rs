@@ -111,6 +111,68 @@ impl Endpoint {
             self.authority
         ))
     }
+
+    /// The URL of one product operation below this server base.
+    ///
+    /// `operation` is the product-relative route, such as `/init` or
+    /// `/shards/7/filter`; it is appended after [`PirProduct::route_prefix`]
+    /// and the base path. This is the only place clients compose product
+    /// routes, so one configured base serves every product and nothing probes
+    /// or falls back to another route or server.
+    pub fn product_url(
+        &self,
+        product: PirProduct,
+        operation: &str,
+    ) -> Result<String, InvalidEndpoint> {
+        if !operation.starts_with('/') {
+            return Err(InvalidEndpoint);
+        }
+        let namespace = self.join(product.route_prefix())?;
+        let url = self.join(&format!("{}{operation}", product.route_prefix()))?;
+        // Dot segments, including encoded ones, must not climb out of the
+        // product namespace into another product or the base path.
+        match url.strip_prefix(&namespace) {
+            Some(rest) if rest.starts_with('/') => Ok(url),
+            _ => Err(InvalidEndpoint),
+        }
+    }
+}
+
+/// A PIR product served below a shared server base URL.
+///
+/// Each product owns one versioned route namespace, `/<product>/v1`. The
+/// namespace version is independent of the protocol versions carried inside
+/// request and response payloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PirProduct {
+    /// Private Enhance transaction retrieval.
+    Enhance,
+    /// Private transaction status lookup.
+    Status,
+    /// Transparent address filters, history shards and txid detail.
+    Transparent,
+    /// Receiver inventory, filters, payment lookup and witnesses.
+    Receiver,
+}
+
+impl PirProduct {
+    /// Every product, in route-table order.
+    pub const ALL: [Self; 4] = [
+        Self::Enhance,
+        Self::Status,
+        Self::Transparent,
+        Self::Receiver,
+    ];
+
+    /// The canonical route prefix, without a trailing slash.
+    pub const fn route_prefix(self) -> &'static str {
+        match self {
+            Self::Enhance => "/enhance/v1",
+            Self::Status => "/status/v1",
+            Self::Transparent => "/transparent/v1",
+            Self::Receiver => "/receiver/v1",
+        }
+    }
 }
 
 fn normalize_host(host: &str) -> Result<(String, bool), InvalidEndpoint> {
@@ -218,6 +280,52 @@ mod tests {
                     "{base}, {route}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn product_urls_keep_the_base_path_below_one_server() {
+        let base = Endpoint::parse("https://wallet-pir.example/edge/").unwrap();
+        let urls: Vec<_> = PirProduct::ALL
+            .into_iter()
+            .map(|product| base.product_url(product, "/init").unwrap())
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                "https://wallet-pir.example/edge/enhance/v1/init",
+                "https://wallet-pir.example/edge/status/v1/init",
+                "https://wallet-pir.example/edge/transparent/v1/init",
+                "https://wallet-pir.example/edge/receiver/v1/init",
+            ]
+        );
+        assert_eq!(
+            base.product_url(
+                PirProduct::Transparent,
+                "/shards/7/revisions/ab/query/pages-1"
+            )
+            .unwrap(),
+            "https://wallet-pir.example/edge/transparent/v1/shards/7/revisions/ab/query/pages-1"
+        );
+    }
+
+    #[test]
+    fn product_operations_cannot_leave_their_namespace() {
+        let base = Endpoint::parse("https://wallet-pir.example/edge").unwrap();
+        for operation in [
+            "",
+            "init",
+            "/../status/v1/init",
+            "/%2e%2E/status/v1/init",
+            "/..",
+            "?x",
+            "/init#x",
+        ] {
+            assert_eq!(
+                base.product_url(PirProduct::Receiver, operation),
+                Err(InvalidEndpoint),
+                "{operation}"
+            );
         }
     }
 

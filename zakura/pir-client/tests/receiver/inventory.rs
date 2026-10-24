@@ -178,7 +178,7 @@ impl zakura_pir_client::receiver::transport::Transport for Chunks {
     ) -> Result<Vec<u8>, zakura_pir_client::receiver::session::Error> {
         self.requests.set(self.requests.get() + 1);
         let prefix = format!(
-            "https://receiver/v1/receiver/inventory/{}/",
+            "https://receiver/receiver/v1/inventory/{}/",
             hex::encode(self.inventory)
         );
         let index: usize = url.strip_prefix(&prefix).unwrap().parse().unwrap();

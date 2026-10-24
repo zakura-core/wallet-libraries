@@ -48,7 +48,7 @@ pub const MAX_BUCKETS: u32 = 64;
 /// The native profile and setup seeds of every display table are derived
 /// under this name, display's own and independent of the history schema, so
 /// history schema changes never move display's native parameters.
-/// `/v2/txid/init` publishes it as its `native_schema`.
+/// `/transparent/v1/txid/init` publishes it as its `native_schema`.
 ///
 /// It names the 8-bit profile display tables are served with. The 16-bit
 /// one-query tables were derived under `transparent-shard-v11`; a client
@@ -192,7 +192,7 @@ pub fn setup_seed_in(schema: &str, geometry_name: &str, table: &str) -> u64 {
     u64::from_le_bytes(digest[..8].try_into().expect("eight bytes"))
 }
 
-/// The setup seed of a display table kind at `geometry`, as `/v2/txid/init`
+/// The setup seed of a display table kind at `geometry`, as `/transparent/v1/txid/init`
 /// publishes it: derived under [`NATIVE_SCHEMA`], whatever history's schema.
 pub fn setup_seed(geometry: &Geometry, kind: DisplayKind) -> u64 {
     setup_seed_in(NATIVE_SCHEMA, geometry.name, kind.as_str())

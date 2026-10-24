@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Transparent clients address only the canonical `/transparent/v1` routes:
+  `/v2/<route>` becomes `/transparent/v1/<route>` (shard map, filters, init,
+  manifests, setup, queries and txid display), and `/v1/filters/<route>` and
+  `/v1/health` move below `/transparent/v1`. Nothing falls back to a legacy
+  route. `HttpShardTransport`, `HttpFilterSource` and the filter
+  `HttpTransport` validate their base with `Endpoint::parse` and keep its path
+  prefix. `ShardRequest::route`, `HttpRequest::path` and `TxidRequest::path`
+  are origin-relative paths below the namespace.
+- Receiver requests use `{base}/receiver/v1/<operation>`, preserving the configured
+  base path. Invalid bases fail with `receiver::session::Error::Endpoint` before
+  any request; clients do not fall back to `/v1/receiver/...`.
+
 ### Added
 
 - `receiver::lookup_pages`, a one-time IVK lookup step that reads at most a caller-chosen

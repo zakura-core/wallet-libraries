@@ -4,6 +4,7 @@ use crate::status::{
     response_len, session_len,
 };
 use std::future::Future;
+use zakura_pir_protocol::endpoint::{Endpoint, PirProduct};
 
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 
@@ -25,14 +26,15 @@ pub trait Transport {
     ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send;
 }
 
-fn route(origin: &str, suffix: &str) -> Result<String, Error> {
-    if !origin.starts_with("https://") || origin.contains('?') || origin.contains('#') {
+/// The canonical `/status/v1` URL of `operation` below the HTTPS server base.
+fn route(origin: &str, operation: &str) -> Result<String, Error> {
+    let endpoint = Endpoint::parse(origin).map_err(|_| Error::Malformed)?;
+    if !endpoint.is_https() {
         return Err(Error::Malformed);
     }
-    Ok(format!(
-        "{}/v1/status/{suffix}",
-        origin.trim_end_matches('/')
-    ))
+    endpoint
+        .product_url(PirProduct::Status, operation)
+        .map_err(|_| Error::Malformed)
 }
 
 /// A validated manifest that the wallet has not yet bound to its chain anchor.
@@ -46,7 +48,7 @@ pub struct PendingClient<C> {
 
 impl<C: Fn() -> u64> PendingClient<C> {
     pub async fn fetch(transport: &impl Transport, origin: &str, now_ms: C) -> Result<Self, Error> {
-        let url = route(origin, "init")?;
+        let url = route(origin, "/init")?;
         let bytes = transport.get(&url, MAX_MANIFEST_BYTES).await?;
         if bytes.len() > MAX_MANIFEST_BYTES {
             return Err(Error::Malformed);
@@ -79,7 +81,7 @@ impl<C: Fn() -> u64> PendingClient<C> {
         }
         let url = route(
             &self.origin,
-            &format!("session/{}", hex::encode(self.manifest.id())),
+            &format!("/session/{}", hex::encode(self.manifest.id())),
         )?;
         let public = transport.get(&url, session_len()?).await?;
         self.manifest.fresh((self.now_ms)())?;
@@ -113,7 +115,7 @@ impl<C: Fn() -> u64> StatusPirClient<C> {
         coverage: LocalCoverageContext,
     ) -> Result<Observation, Error> {
         let mut query = self.client.prepare(txid, coverage, (self.now_ms)())?;
-        let url = route(&self.origin, "query")?;
+        let url = route(&self.origin, "/query")?;
         let response = transport
             .post(&url, std::mem::take(&mut query.body), response_len()?)
             .await?;
@@ -352,10 +354,10 @@ mod tests {
 
         impl Transport for Server {
             async fn get(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, Error> {
-                let bytes = if url.ends_with("/v1/status/init") {
+                let bytes = if url.ends_with("/status/v1/init") {
                     serde_json::to_vec(&self.manifest).unwrap()
                 } else if url.ends_with(&format!(
-                    "/v1/status/session/{}",
+                    "/status/v1/session/{}",
                     hex::encode(self.manifest.id())
                 )) {
                     self.db.public().to_vec()
@@ -372,7 +374,7 @@ mod tests {
                 body: Vec<u8>,
                 max_bytes: usize,
             ) -> Result<Vec<u8>, Error> {
-                assert!(url.ends_with("/v1/status/query"));
+                assert!(url.ends_with("/status/v1/query"));
                 assert_eq!(&body[..4], QUERY_MAGIC);
                 assert_eq!(body[4..36], self.manifest.id());
                 assert_eq!(body.len(), crate::status::request_len());
