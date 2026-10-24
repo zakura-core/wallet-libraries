@@ -789,6 +789,13 @@ pub(crate) fn scan_decrypted_blocks_scans_replaced_blocks<T: ShieldedPoolTester>
     )
 }
 
+pub(crate) fn scan_leaves_out_accounts_born_after_the_range<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::scan_leaves_out_accounts_born_after_the_range::<
+        T,
+        _,
+    >(TestDbFactory::default(), BlockCache::new())
+}
+
 // TODO: This test can probably be entirely removed, as the following test duplicates it entirely.
 pub(crate) fn scan_cached_blocks_finds_change_notes<T: ShieldedPoolTester>() {
     zcash_client_backend::data_api::testing::pool::scan_cached_blocks_finds_change_notes::<T, _>(

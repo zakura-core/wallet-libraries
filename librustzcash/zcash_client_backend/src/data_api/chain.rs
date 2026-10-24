@@ -605,6 +605,12 @@ impl ChainState {
 /// This function will return after scanning at most `limit` new blocks, to enable the caller to
 /// update their UI with scanning progress.
 ///
+/// The blocks are scanned for the accounts whose birthday is at or below the last of these
+/// `limit` heights. An account with a later birthday cannot have received notes in the range,
+/// so its viewing keys are not tried against the range's outputs. A range that reaches an
+/// account's birthday is scanned for that account in all of its blocks, so whether a note sent
+/// to the account below its birthday is found depends on where the ranges begin and end.
+///
 /// ## Errors
 ///
 /// - [`Error::BlockSource`] if the requested blocks cannot be read from `block_source`.
@@ -638,10 +644,8 @@ where
 {
     assert_eq!(from_height, from_state.block_height + 1);
 
-    // Fetch the UnifiedFullViewingKeys we are tracking
-    let account_ufvks = data_db
-        .get_unified_full_viewing_keys()
-        .map_err(Error::Wallet)?;
+    let account_ufvks =
+        account_ufvks_for_range(&*data_db, from_height, limit).map_err(Error::Wallet)?;
     let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
     let (scan_summary, scanned_blocks) = scan_blocks(
         params,
@@ -679,7 +683,8 @@ pub struct BlockDecryption<AccountId: Copy + Eq + std::hash::Hash + Send + Sync 
 }
 
 /// Starts trial decryption of at most `limit` cached blocks from `from_height` with the
-/// viewing keys `data_db` tracks, for a later [`scan_decrypted_blocks`] of the same blocks.
+/// viewing keys [`scan_cached_blocks`] would scan them with, for a later
+/// [`scan_decrypted_blocks`] of the same blocks.
 ///
 /// It reads the blocks once to queue their outputs, and returns while the decryption
 /// still runs on the current rayon thread pool. It reads `data_db` but does not write it.
@@ -706,9 +711,8 @@ where
     DbT: WalletRead,
     <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
 {
-    let account_ufvks = data_db
-        .get_unified_full_viewing_keys()
-        .map_err(Error::Wallet)?;
+    let account_ufvks =
+        account_ufvks_for_range(data_db, from_height, limit).map_err(Error::Wallet)?;
     let encoded_ufvks = encode_ufvks(params, &account_ufvks);
     let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
     let mut runners = BatchRunners::<_, (), (), ()>::for_keys(100, &scanning_keys);
@@ -738,7 +742,8 @@ where
 /// [`decrypt_cached_blocks`] started.
 ///
 /// `decryption` is used only if it covers the same `from_height` and `limit` and the
-/// viewing keys `data_db` tracks now, and only for the blocks it decrypted under the
+/// viewing keys [`scan_cached_blocks`] would scan the range with now, and only for the
+/// blocks it decrypted under the
 /// ZIP 212 enforcement that `params` gives them: the scan compares each block it reads,
 /// and that enforcement at its height, with the decrypted block at the same position. If
 /// either differs, or the scan reads a different number of blocks, the blocks scanned so
@@ -773,9 +778,8 @@ where
 {
     assert_eq!(from_height, from_state.block_height + 1);
 
-    let current_ufvks = data_db
-        .get_unified_full_viewing_keys()
-        .map_err(Error::Wallet)?;
+    let current_ufvks =
+        account_ufvks_for_range(&*data_db, from_height, limit).map_err(Error::Wallet)?;
     let scan_pass = if decryption.from_height == from_height
         && decryption.limit == limit
         && decryption.encoded_ufvks == encode_ufvks(params, &current_ufvks)
@@ -826,6 +830,27 @@ fn encode_ufvks<ParamsT: consensus::Parameters, AccountId: Copy + Eq + std::hash
         .iter()
         .map(|(account, ufvk)| (*account, ufvk.encode(params)))
         .collect()
+}
+
+/// The viewing keys of the accounts that the at most `limit` blocks from `from_height` are
+/// scanned for: those whose birthday is at or below the last of these heights.
+///
+/// An account's birthday is the first block that can hold its notes, and the wallet stores
+/// only blocks from `from_height` in sequence, so the scan stores no block above that last
+/// height.
+fn account_ufvks_for_range<DbT: WalletRead>(
+    data_db: &DbT,
+    from_height: BlockHeight,
+    limit: usize,
+) -> Result<HashMap<<DbT as WalletRead>::AccountId, UnifiedFullViewingKey>, DbT::Error> {
+    let end = u64::from(from_height).saturating_add(u64::try_from(limit).unwrap_or(u64::MAX));
+    let mut account_ufvks = HashMap::new();
+    for (account, ufvk) in data_db.get_unified_full_viewing_keys()? {
+        if u64::from(data_db.get_account_birthday(account)?) < end {
+            account_ufvks.insert(account, ufvk);
+        }
+    }
+    Ok(account_ufvks)
 }
 
 /// What the trial decryption of a block depends on besides the viewing keys.
