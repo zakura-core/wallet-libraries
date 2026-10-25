@@ -9,7 +9,7 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
-- `data_api::wallet::redact_pczt_for_batch_signer` takes the spending account's Orchard FVK. It keeps the FVK of a spend that shares the account's `ak` and `nk` but differs from it, such as a one-time receiving key, because a batch Signer can check that note's address only against its own FVK. It still removes every other spend FVK.
+- `data_api::wallet::redact_pczt_for_batch_signer` takes the spending account's Orchard FVK. It keeps the FVK of a spend that shares the account's `ak` and `nk` but differs from it, such as a one-time receiving key, because a batch Signer can check that note's address only against its own FVK. It does this only for a PCZT that `create_pczt_from_proposal` marked as spending a one-time note, so other batches cost what they did before. It still removes every other spend FVK.
 - `data_api::chain::{scan_cached_blocks, decrypt_cached_blocks, scan_decrypted_blocks}` scan a range only for the accounts whose birthday is at or below its last block, so a wallet whose accounts have different birthdays no longer tries a later account's viewing keys on the outputs of earlier blocks. A note sent to an account below its birthday was found when another account's earlier birthday put its block in a scanned range; it is now found only if that range also reaches the account's birthday.
 
 ## [0.1.0-rc9.4] - 2026-10-23

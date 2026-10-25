@@ -3335,7 +3335,8 @@ fn compact_signer_view(pczt: &pczt::Pczt) -> pczt::Pczt {
 /// FVK only when it differs from `account_fvk`, the spending account's Orchard FVK,
 /// but shares its `ak` and `nk`, as a one-time receiving key does. The Signer can check
 /// that note's address only against its own FVK. It checks other spends against the
-/// account's FVK, and dummy spends need none. It also removes the
+/// account's FVK, and dummy spends need none. Only a PCZT that
+/// [`create_pczt_from_proposal`] marked as spending a one-time note keeps any FVK. It also removes the
 /// randomizer from actions already authorized in `pczt`, while unsigned actions such as
 /// wallet controlled zero value spends retain theirs. Sapling signatures require a
 /// separate signing path.
@@ -3399,22 +3400,30 @@ pub fn redact_pczt_for_batch_signer(
     let orchard_preauthorized = preauthorized_action_indices(pczt.orchard());
     let ironwood_preauthorized = preauthorized_action_indices(pczt.ironwood());
 
-    // A bundle the verifier cannot parse keeps no FVKs, so a Signer rejects its
-    // one-time spends instead of signing them unchecked.
+    // Parsing every spend FVK derives two IVKs each, so only a PCZT that spends a
+    // one-time note pays for finding the FVKs to keep. Without the flag, or for a
+    // bundle the verifier cannot parse, no FVK is kept and a Signer rejects any
+    // one-time spend instead of signing it unchecked.
     let account = account_fvk.to_bytes();
     let mut orchard_kept = vec![];
     let mut ironwood_kept = vec![];
-    let _ = pczt::roles::verifier::Verifier::new(pczt.clone())
-        .with_orchard::<Infallible, _>(|bundle| {
-            orchard_kept = kept_fvk_indices(bundle, &account);
-            Ok(())
-        })
-        .and_then(|verifier| {
-            verifier.with_ironwood::<Infallible, _>(|bundle| {
-                ironwood_kept = kept_fvk_indices(bundle, &account);
+    if pczt
+        .global()
+        .proprietary()
+        .contains_key(PROPRIETARY_SPENDS_ONE_TIME)
+    {
+        let _ = pczt::roles::verifier::Verifier::new(pczt.clone())
+            .with_orchard::<Infallible, _>(|bundle| {
+                orchard_kept = kept_fvk_indices(bundle, &account);
                 Ok(())
             })
-        });
+            .and_then(|verifier| {
+                verifier.with_ironwood::<Infallible, _>(|bundle| {
+                    ironwood_kept = kept_fvk_indices(bundle, &account);
+                    Ok(())
+                })
+            });
+    }
 
     // Apply the policy shared by every external Signer first.
     Redactor::new(redact_pczt_for_signer(pczt, SignerView::Compact))

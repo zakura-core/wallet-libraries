@@ -110,21 +110,31 @@ fn pczt_signs_and_proves_a_one_time_spend() {
     assert_eq!(spends_with_key, 1);
 
     // A batch Signer can check the one-time note's address only against its own FVK,
-    // so the batch view keeps that FVK and no other.
-    let batch_view =
-        zcash_client_backend::data_api::wallet::redact_pczt_for_batch_signer(&pczt, &parent(&st));
-    let mut batch_fvks = vec![];
-    pczt::roles::verifier::Verifier::new(batch_view)
-        .with_ironwood::<Infallible, _>(|bundle| {
-            batch_fvks = bundle
-                .actions()
-                .iter()
-                .filter_map(|a| a.spend().fvk().as_ref().map(|f| f.to_bytes()))
-                .collect();
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(batch_fvks, vec![one_time_fvk]);
+    // so the batch view keeps that FVK and no other. Without the one-time flag it keeps
+    // none, and the Signer rejects the spend.
+    let batch_fvks = |pczt: &pczt::Pczt| {
+        let batch_view = zcash_client_backend::data_api::wallet::redact_pczt_for_batch_signer(
+            pczt,
+            &parent(&st),
+        );
+        let mut fvks = vec![];
+        pczt::roles::verifier::Verifier::new(batch_view)
+            .with_ironwood::<Infallible, _>(|bundle| {
+                fvks = bundle
+                    .actions()
+                    .iter()
+                    .filter_map(|a| a.spend().fvk().as_ref().map(|f| f.to_bytes()))
+                    .collect();
+                Ok(())
+            })
+            .unwrap();
+        fvks
+    };
+    assert_eq!(batch_fvks(&pczt), vec![one_time_fvk]);
+    let unflagged = pczt::roles::redactor::Redactor::new(pczt.clone())
+        .redact_global_with(|mut global| global.redact_proprietary(flag))
+        .finish();
+    assert!(batch_fvks(&unflagged).is_empty());
 
     let ask = orchard::keys::SpendAuthorizingKey::from(account.usk().orchard());
     let mut signer = pczt::roles::signer::Signer::new(pczt).unwrap();
