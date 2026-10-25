@@ -3331,7 +3331,11 @@ fn compact_signer_view(pczt: &pczt::Pczt) -> pczt::Pczt {
 /// independently and returns only new Orchard and Ironwood signatures.
 ///
 /// In addition to the [`SignerView::Compact`] policy of [`redact_pczt_for_signer`],
-/// this removes spend full viewing keys and existing signatures. It also removes the
+/// this removes existing signatures and spend full viewing keys. It keeps a spend's
+/// FVK only when it differs from `account_fvk`, the spending account's Orchard FVK,
+/// but shares its `ak` and `nk`, as a one-time receiving key does. The Signer can check
+/// that note's address only against its own FVK. It checks other spends against the
+/// account's FVK, and dummy spends need none. It also removes the
 /// randomizer from actions already authorized in `pczt`, while unsigned actions such as
 /// wallet controlled zero value spends retain theirs. Sapling signatures require a
 /// separate signing path.
@@ -3342,7 +3346,10 @@ fn compact_signer_view(pczt: &pczt::Pczt) -> pczt::Pczt {
 /// cannot be signed with the high level
 /// [`pczt::roles::signer::Signer`] because that role expects full viewing keys.
 #[cfg(feature = "pczt")]
-pub fn redact_pczt_for_batch_signer(pczt: &pczt::Pczt) -> pczt::Pczt {
+pub fn redact_pczt_for_batch_signer(
+    pczt: &pczt::Pczt,
+    account_fvk: &orchard::keys::FullViewingKey,
+) -> pczt::Pczt {
     // Snapshot existing signature positions before the batch view clears them.
     fn preauthorized_action_indices(bundle: &pczt::orchard::Bundle) -> Vec<usize> {
         bundle
@@ -3355,19 +3362,34 @@ pub fn redact_pczt_for_batch_signer(pczt: &pczt::Pczt) -> pczt::Pczt {
             .collect()
     }
 
+    // Positions of spends whose FVK the batch view keeps (see the function docs).
+    fn kept_fvk_indices(bundle: &orchard::pczt::Bundle, account: &[u8; 96]) -> Vec<usize> {
+        bundle
+            .actions()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, action)| {
+                let fvk = action.spend().fvk().as_ref()?.to_bytes();
+                (fvk[..64] == account[..64] && fvk != *account).then_some(index)
+            })
+            .collect()
+    }
+
     fn redact_orchard_bundle(
         mut redactor: pczt::roles::redactor::orchard::OrchardRedactor<'_>,
+        action_count: usize,
         preauthorized_action_indices: &[usize],
+        kept_fvk_indices: &[usize],
     ) {
         // The batch Signer derives its FVK and returns only new signatures. Existing
         // signatures MUST be omitted: deployed batch Signers reject requests that
         // already carry signatures. Omitting them strands nothing — this view is a
         // signing request, not the authoritative PCZT, and the caller's authoritative
         // copy retains them.
-        redactor.redact_actions(|mut action| {
-            action.clear_spend_fvk();
-            action.clear_spend_auth_sig();
-        });
+        redactor.redact_actions(|mut action| action.clear_spend_auth_sig());
+        for index in (0..action_count).filter(|index| !kept_fvk_indices.contains(index)) {
+            redactor.redact_action(index, |mut action| action.clear_spend_fvk());
+        }
         // Unsigned actions keep alpha, including wallet controlled zero value spends.
         for &index in preauthorized_action_indices {
             redactor.redact_action(index, |mut action| action.clear_spend_alpha());
@@ -3377,13 +3399,40 @@ pub fn redact_pczt_for_batch_signer(pczt: &pczt::Pczt) -> pczt::Pczt {
     let orchard_preauthorized = preauthorized_action_indices(pczt.orchard());
     let ironwood_preauthorized = preauthorized_action_indices(pczt.ironwood());
 
+    // A bundle the verifier cannot parse keeps no FVKs, so a Signer rejects its
+    // one-time spends instead of signing them unchecked.
+    let account = account_fvk.to_bytes();
+    let mut orchard_kept = vec![];
+    let mut ironwood_kept = vec![];
+    let _ = pczt::roles::verifier::Verifier::new(pczt.clone())
+        .with_orchard::<Infallible, _>(|bundle| {
+            orchard_kept = kept_fvk_indices(bundle, &account);
+            Ok(())
+        })
+        .and_then(|verifier| {
+            verifier.with_ironwood::<Infallible, _>(|bundle| {
+                ironwood_kept = kept_fvk_indices(bundle, &account);
+                Ok(())
+            })
+        });
+
     // Apply the policy shared by every external Signer first.
     Redactor::new(redact_pczt_for_signer(pczt, SignerView::Compact))
         .redact_orchard_with(|redactor| {
-            redact_orchard_bundle(redactor, &orchard_preauthorized);
+            redact_orchard_bundle(
+                redactor,
+                pczt.orchard().actions().len(),
+                &orchard_preauthorized,
+                &orchard_kept,
+            );
         })
         .redact_ironwood_with(|redactor| {
-            redact_orchard_bundle(redactor, &ironwood_preauthorized);
+            redact_orchard_bundle(
+                redactor,
+                pczt.ironwood().actions().len(),
+                &ironwood_preauthorized,
+                &ironwood_kept,
+            );
         })
         .finish()
 }

@@ -9486,7 +9486,10 @@ where
             .contains_key("zcash_client_backend:output_info")
     }));
 
-    let batch_view = redact_pczt_for_batch_signer(&pczt);
+    // Every spend here is the account's own or a dummy, so the batch view keeps no FVK.
+    let account_fvk =
+        orchard::keys::FullViewingKey::from(st.test_account().unwrap().usk().orchard());
+    let batch_view = redact_pczt_for_batch_signer(&pczt, &account_fvk);
     let batch_view_bytes = batch_view.serialize().unwrap();
     assert!(batch_view_bytes.len() < signer_view_bytes.len());
     let batch_view = pczt::Pczt::parse(&batch_view_bytes).unwrap();

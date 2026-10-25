@@ -109,6 +109,23 @@ fn pczt_signs_and_proves_a_one_time_spend() {
         .unwrap();
     assert_eq!(spends_with_key, 1);
 
+    // A batch Signer can check the one-time note's address only against its own FVK,
+    // so the batch view keeps that FVK and no other.
+    let batch_view =
+        zcash_client_backend::data_api::wallet::redact_pczt_for_batch_signer(&pczt, &parent(&st));
+    let mut batch_fvks = vec![];
+    pczt::roles::verifier::Verifier::new(batch_view)
+        .with_ironwood::<Infallible, _>(|bundle| {
+            batch_fvks = bundle
+                .actions()
+                .iter()
+                .filter_map(|a| a.spend().fvk().as_ref().map(|f| f.to_bytes()))
+                .collect();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(batch_fvks, vec![one_time_fvk]);
+
     let ask = orchard::keys::SpendAuthorizingKey::from(account.usk().orchard());
     let mut signer = pczt::roles::signer::Signer::new(pczt).unwrap();
     let mut signed = 0;
