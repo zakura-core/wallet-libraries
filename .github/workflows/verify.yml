@@ -119,10 +119,17 @@ jobs:
           key: protobuf
           workspaces: . -> target/dev-lanes
       - name: Install pinned protoc
+        env:
+          # sha256 of the release asset for the version in scripts/protoc-version.txt.
+          # GitHub release assets can be replaced under the same URL, so the version
+          # string pins the recipe but not the bytes we then execute. Bump this with
+          # the version: shasum -a 256 protoc-<version>-linux-x86_64.zip
+          PROTOC_SHA256: af27ea66cd26938fe48587804ca7d4817457a08350021a1c6e23a27ccc8c6904
         run: |
           version=$(cat scripts/protoc-version.txt)
-          curl --fail --location --retry 3 -o "$RUNNER_TEMP/protoc.zip" \
-            "https://github.com/protocolbuffers/protobuf/releases/download/v${version}/protoc-${version}-linux-x86_64.zip"
+          url="https://github.com/protocolbuffers/protobuf/releases/download/v${version}/protoc-${version}-linux-x86_64.zip"
+          curl --fail --location --retry 3 -o "$RUNNER_TEMP/protoc.zip" "$url"
+          echo "${PROTOC_SHA256}  $RUNNER_TEMP/protoc.zip" | sha256sum --check
           unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
           echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
       - run: python3 scripts/proto.py check
