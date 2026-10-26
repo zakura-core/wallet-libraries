@@ -7,6 +7,16 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Added
+
+- Migration `transparent_spend_map_prevout_index` indexes `transparent_spend_map`
+  by `(prevout_txid, prevout_output_index)`.
+
+### Changed
+
+- Storing a received transparent output no longer scans `transparent_spend_map`
+  to learn whether a wallet transaction already spends it.
+
 ## [0.1.0-rc9.6] - 2026-10-30
 
 ### Added
