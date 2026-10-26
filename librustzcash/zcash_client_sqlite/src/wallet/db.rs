@@ -795,6 +795,11 @@ CREATE TABLE "transparent_spend_map" (
     -- though only one will ever be mined.
     UNIQUE (spending_transaction_id, prevout_txid, prevout_output_index)
 )"#;
+pub(super) const INDEX_TRANSPARENT_SPEND_MAP_PREVOUT: &str = r#"
+CREATE INDEX idx_transparent_spend_map_prevout ON transparent_spend_map (
+    prevout_txid ASC,
+    prevout_output_index ASC
+)"#;
 pub(super) const INDEX_TRANSPARENT_SPEND_MAP_TX: &str = r#"
 CREATE INDEX idx_transparent_spend_map_transaction_id ON transparent_spend_map (
     spending_transaction_id ASC
