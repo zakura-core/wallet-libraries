@@ -7,6 +7,10 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- Gap-limit regeneration finds the start of the gap by probing the account's addresses of the requested scope through their indexes instead of materialising `v_address_first_use` over every received note in the wallet, and skips address derivation when the gap's addresses are already stored. The result is unchanged. The `transparent_gap_limit_handling` migration keeps the view-based search, which matches the schema at that point in the migration graph.
+
 ## [0.1.0-rc9.4] - 2026-10-23
 
 ### Changed
