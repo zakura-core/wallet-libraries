@@ -66,6 +66,7 @@ mod transparent_ledger_schema;
 mod transparent_policy_generation;
 mod transparent_recovery_schema;
 mod transparent_shared_derivations;
+mod transparent_spend_map_prevout_index;
 mod transparent_txid_enhancement;
 mod tree_retained_checkpoints;
 mod tx_observation_height;
@@ -188,6 +189,7 @@ pub mod ids {
         transparent_policy_generation::MIGRATION_ID as TRANSPARENT_POLICY_GENERATION,
         transparent_recovery_schema::MIGRATION_ID as TRANSPARENT_RECOVERY_SCHEMA,
         transparent_shared_derivations::MIGRATION_ID as TRANSPARENT_SHARED_DERIVATIONS,
+        transparent_spend_map_prevout_index::MIGRATION_ID as TRANSPARENT_SPEND_MAP_PREVOUT_INDEX,
         transparent_txid_enhancement::MIGRATION_ID as TRANSPARENT_TXID_ENHANCEMENT,
         tree_retained_checkpoints::MIGRATION_ID as TREE_RETAINED_CHECKPOINTS,
         tx_observation_height::MIGRATION_ID as TX_OBSERVATION_HEIGHT,
@@ -418,6 +420,7 @@ pub(super) fn all_migrations<
         Box::new(v_transactions_pool_crossing::Migration),
         Box::new(zip318_classification::Migration),
         Box::new(v_transactions_zip318_kind::Migration),
+        Box::new(transparent_spend_map_prevout_index::Migration),
         Box::new(orchard_ironwood_migration_tables::Migration),
         Box::new(tree_retained_checkpoints::Migration),
         Box::new(note_locking::Migration),
@@ -704,10 +707,7 @@ pub(crate) fn forget_txid_enhancement(conn: &rusqlite::Connection) {
 }
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
-    transparent_detail_content_failures::MIGRATION_ID,
-    one_time_reset::MIGRATION_ID,
-];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_spend_map_prevout_index::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
