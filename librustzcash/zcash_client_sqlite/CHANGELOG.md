@@ -7,6 +7,10 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Fixed
+
+- `WalletWrite::store_decrypted_tx` no longer re-reads and re-parses every fee-less transaction that spent any wallet transparent output on each call. The search for transactions spending the stored transaction's outputs correlated with that transaction only in the `ON` clause of a `LEFT OUTER JOIN`, which filtered nothing; it now returns only the transactions that spend an output of the stored transaction.
+
 ## [0.1.0-rc9.4] - 2026-10-23
 
 ### Changed

@@ -5289,18 +5289,25 @@ pub(crate) fn get_txs_spending_transparent_outputs_of<P: consensus::Parameters>(
 ) -> Result<Vec<(TxRef, Transaction)>, SqliteClientError> {
     // For each transaction that spends a transparent output of this transaction and does not
     // already have a known fee value.
+    //
+    // The correlation with `:transaction_id` has to be a WHERE predicate on the output row.
+    // Written as the ON clause of a LEFT OUTER JOIN it filtered nothing: an unmatched `tro`
+    // yields NULLs and the row survives, so every fee-less transaction spending any wallet
+    // transparent output was returned - and fully parsed - on every call, however unrelated
+    // to the transaction just stored. On a wallet with ~1,800 transparent outputs that was
+    // 2,375 rows (9 MB of raw transactions) per store, against one row for the same store
+    // with the predicate honoured.
     let mut spending_txs_stmt = conn.prepare(
         "SELECT DISTINCT t.id_tx, t.raw, t.mined_height, t.expiry_height
          FROM transactions t
          -- find transactions that spend transparent outputs of the decrypted tx
-         LEFT OUTER JOIN transparent_received_output_spends ts
+         JOIN transparent_received_output_spends ts
             ON ts.transaction_id = t.id_tx
-         LEFT OUTER JOIN transparent_received_outputs tro
-            ON tro.transaction_id = :transaction_id
-            AND tro.id = ts.transparent_received_output_id
-         WHERE t.fee IS NULL
-         AND t.raw IS NOT NULL
-         AND ts.transaction_id IS NOT NULL",
+         JOIN transparent_received_outputs tro
+            ON tro.id = ts.transparent_received_output_id
+         WHERE tro.transaction_id = :transaction_id
+         AND t.fee IS NULL
+         AND t.raw IS NOT NULL",
     )?;
 
     spending_txs_stmt
@@ -7121,6 +7128,100 @@ mod tests {
                 .set_enhancement_mode(EnhancementMode::Standard);
             assert!(public(&st).contains(&protected_txid));
         }
+    }
+
+    /// The search for fee-less transactions that spend a stored transaction's transparent
+    /// outputs must be scoped to that transaction. It once put its only correlating predicate in
+    /// the ON clause of a LEFT OUTER JOIN, which filters nothing, so every fee-less transaction
+    /// spending any wallet transparent output came back - and was fully parsed - on every store.
+    #[test]
+    fn spending_tx_fee_search_is_scoped_to_the_stored_transaction() {
+        use zcash_primitives::transaction::{Authorized, TransactionData, TxVersion};
+        use zcash_protocol::consensus::BranchId;
+
+        let st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let account = st.test_account().unwrap();
+        let conn = st.wallet().conn();
+        let account_id = super::get_account_ref(conn, account.id()).unwrap();
+
+        // One address row for the outputs to reference.
+        conn.execute(
+            "INSERT INTO addresses
+                 (account_id, key_scope, address, cached_transparent_receiver_address,
+                  imported_transparent_receiver_pubkey, receiver_flags, exposed_at_height)
+             VALUES (:account_id, :scope, 'addr', 'taddr',
+                  X'020000000000000000000000000000000000000000000000000000000000000001', 1, 1)",
+            named_params! {
+                ":account_id": account_id.0,
+                ":scope": super::encoding::KeyScope::Foreign.encode(),
+            },
+        )
+        .unwrap();
+        let address_id = conn.last_insert_rowid();
+
+        // A syntactically valid, empty v5 transaction: what the search parses for each row.
+        let raw = {
+            let tx = TransactionData::<Authorized>::from_parts(
+                TxVersion::V5,
+                BranchId::Nu5,
+                0,
+                BlockHeight::from(10),
+                None,
+                None,
+                None,
+                None,
+            )
+            .freeze()
+            .unwrap();
+            let mut buf = Vec::new();
+            tx.write(&mut buf).unwrap();
+            buf
+        };
+
+        // Two funding transactions (1, 2), each with one wallet transparent output, and two
+        // fee-less spenders (3 spends 1's output, 4 spends 2's).
+        for id in 1..=4u8 {
+            conn.execute(
+                "INSERT INTO transactions (id_tx, txid, expiry_height, raw, min_observed_height)
+                 VALUES (:id, :txid, 10, :raw, 1)",
+                named_params! { ":id": id, ":txid": &[id; 32][..], ":raw": &raw[..] },
+            )
+            .unwrap();
+        }
+        for (output_id, funding_tx, spender) in [(1, 1, 3), (2, 2, 4)] {
+            conn.execute(
+                "INSERT INTO transparent_received_outputs
+                     (id, transaction_id, output_index, account_id, address, script, value_zat, address_id)
+                 VALUES (:id, :tx, 0, :account_id, 'taddr', X'00', 1000, :address_id)",
+                named_params! {
+                    ":id": output_id, ":tx": funding_tx,
+                    ":account_id": account_id.0, ":address_id": address_id,
+                },
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO transparent_received_output_spends
+                     (transparent_received_output_id, transaction_id)
+                 VALUES (:output, :spender)",
+                named_params! { ":output": output_id, ":spender": spender },
+            )
+            .unwrap();
+        }
+
+        let spenders_of = |tx_ref: i64| -> Vec<i64> {
+            super::get_txs_spending_transparent_outputs_of(conn, st.network(), TxRef(tx_ref))
+                .unwrap()
+                .into_iter()
+                .map(|(r, _)| r.0)
+                .collect()
+        };
+        assert_eq!(spenders_of(1), vec![3]);
+        assert_eq!(spenders_of(2), vec![4]);
+        // A transaction with no wallet transparent outputs has no spenders to look at.
+        assert_eq!(spenders_of(3), Vec::<i64>::new());
     }
 
     #[test]
