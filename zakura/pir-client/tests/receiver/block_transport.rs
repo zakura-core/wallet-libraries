@@ -4,7 +4,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 use zakura_pir_client::receiver::{
-    blocks::{Batch, BlockFilter, BlockId, Head, MAX_BATCH_BYTES, MAX_RANGE_BLOCKS, Range},
+    blocks::{BlockId, Head, HeightSet, MAX_RANGE_BLOCKS, MAX_RANGE_BYTES, Range, RangeSize},
     session::Error,
     transport::{Inventories, Transport},
 };
@@ -38,20 +38,25 @@ fn ready<T>(future: impl Future<Output = T>) -> T {
     }
 }
 
-/// Binds public metadata to the configured network and rejects oversized transport bodies.
-#[test]
-fn head_is_bounded_and_network_checked() {
-    let head = Head {
+/// The served history at the root of these tests: heights 1 through 1 at revision 2.
+fn head() -> Head {
+    Head {
         genesis: [9; 32],
         revision: 2,
         first: 1,
+        sealed: 0,
         tip: BlockId {
             height: 1,
             hash: [1; 32],
         },
-    };
+    }
+}
+
+/// Binds the head to the configured network and rejects oversized transport bodies.
+#[test]
+fn head_is_bounded_and_network_checked() {
     let http = Http {
-        body: serde_json::to_vec(&head).unwrap(),
+        body: serde_json::to_vec(&head()).unwrap(),
         calls: RefCell::default(),
     };
     assert_eq!(
@@ -61,7 +66,7 @@ fn head_is_bounded_and_network_checked() {
             &[9; 32]
         ))
         .unwrap(),
-        head
+        head()
     );
     assert_eq!(
         http.calls.borrow()[0],
@@ -85,95 +90,105 @@ fn head_is_bounded_and_network_checked() {
     );
 }
 
-/// A real encoded filter travels through the public route without any receiver in the URL.
+/// One range request covers the gap, names no receiver, and decodes into matches.
 #[test]
-fn batch_checks_session_range_and_payload() {
+fn range_checks_session_and_matches() {
     let receiver = [7; 43];
-    let head = Head {
-        genesis: [9; 32],
-        revision: 2,
-        first: 1,
-        tip: BlockId {
-            height: 1,
-            hash: [1; 32],
-        },
-    };
-    let batch = Batch::new(
-        head.genesis,
-        2,
-        vec![BlockFilter::build(&head.genesis, head.tip, head.genesis, [&receiver]).unwrap()],
-    )
-    .unwrap();
+    let head = head();
+    let set = HeightSet::build(&head.genesis, 1, [&receiver])
+        .unwrap()
+        .unwrap();
     let http = Http {
-        body: batch.encode().unwrap(),
+        body: Range::new(2, 1, 1, head.genesis, head.tip.hash, vec![set])
+            .unwrap()
+            .encode()
+            .unwrap(),
         calls: RefCell::default(),
     };
-    let got = ready(Inventories::block_batch(
-        "https://receiver/",
+    let base = "https://receiver/";
+    let range = ready(Inventories::block_range(
+        base,
         &http,
         &head,
         1,
-        4,
+        MAX_RANGE_BLOCKS,
     ))
     .unwrap();
-    assert_eq!(got.matches(0, &[receiver]).unwrap(), [true]);
     assert_eq!(
         http.calls.borrow()[0],
         (
-            "https://receiver/receiver/v1/block-filters/2/1/4".to_owned(),
-            MAX_BATCH_BYTES
+            format!("https://receiver/receiver/v1/block-filters/2/1/{MAX_RANGE_BLOCKS}"),
+            MAX_RANGE_BYTES
         )
     );
-    assert!(
-        ready(Inventories::block_batch(
-            "https://receiver",
-            &http,
-            &head,
-            0,
-            4
-        ))
-        .is_err()
-    );
+    assert_eq!(range.matches(&head.genesis, &[receiver]), [(1, 0)]);
+    for (from, limit) in [(0, 4), (1, 0), (1, MAX_RANGE_BLOCKS + 1), (2, 1)] {
+        assert!(ready(Inventories::block_range(base, &http, &head, from, limit)).is_err());
+    }
     assert_eq!(
         http.calls.borrow().len(),
         1,
         "invalid request never reaches transport"
     );
-    let mut changed = head;
-    changed.revision = 3;
-    assert!(
-        ready(Inventories::block_batch(
-            "https://receiver",
-            &http,
-            &changed,
-            1,
-            4
-        ))
-        .is_err()
-    );
+    let changed = Head {
+        revision: 3,
+        ..head
+    };
+    assert!(ready(Inventories::block_range(base, &http, &changed, 1, 4)).is_err());
 }
 
-/// A server base with a path keeps it for both block-filter routes, and a base that is not
-/// an HTTP endpoint fails before any request instead of reaching another route.
+/// A size answer must belong to the captured revision and start no later than asked.
+#[test]
+fn range_size_is_bound_to_the_head() {
+    let head = head();
+    let answer = |size: RangeSize| Http {
+        body: serde_json::to_vec(&size).unwrap(),
+        calls: RefCell::default(),
+    };
+    let good = answer(RangeSize {
+        revision: 2,
+        from: 1,
+        bytes: 99,
+    });
+    let base = "https://receiver/";
+    assert_eq!(
+        ready(Inventories::range_size(base, &good, &head, 1))
+            .unwrap()
+            .bytes,
+        99
+    );
+    assert_eq!(
+        good.calls.borrow()[0].0,
+        "https://receiver/receiver/v1/block-filters/size/2/1"
+    );
+    for bad in [
+        RangeSize {
+            revision: 1,
+            from: 1,
+            bytes: 0,
+        },
+        RangeSize {
+            revision: 2,
+            from: 0,
+            bytes: 0,
+        },
+    ] {
+        assert!(ready(Inventories::range_size(base, &answer(bad), &head, 1)).is_err());
+    }
+}
+
+/// A server base with a path keeps it for every block-hint route, and a base that is not
+/// an HTTP endpoint fails before any request.
 #[test]
 fn block_routes_stay_below_the_configured_base_path() {
-    let head = Head {
-        genesis: [9; 32],
-        revision: 2,
-        first: 1,
-        tip: BlockId {
-            height: 1,
-            hash: [1; 32],
-        },
-    };
     let http = Http {
-        body: serde_json::to_vec(&head).unwrap(),
+        body: serde_json::to_vec(&head()).unwrap(),
         calls: RefCell::default(),
     };
     let base = "http://127.0.0.1:8080/edge/";
     ready(Inventories::block_head(base, &http, &[9; 32])).unwrap();
-    // The body is not a batch; only the requested URL matters here.
-    assert!(ready(Inventories::block_batch(base, &http, &head, 1, 4)).is_err());
+    // The body is not a range; only the requested URL matters here.
+    assert!(ready(Inventories::block_range(base, &http, &head(), 1, 4)).is_err());
     let urls: Vec<_> = http
         .calls
         .borrow()
@@ -192,57 +207,4 @@ fn block_routes_stay_below_the_configured_base_path() {
         Err(Error::Endpoint(_))
     ));
     assert_eq!(http.calls.borrow().len(), 2);
-}
-
-/// One range request covers the whole gap, carries no receiver in the URL, and matches only
-/// after the wallet binds it to its own block hashes.
-#[test]
-fn range_checks_session_and_binds_to_the_wallets_chain() {
-    let receiver = [7; 43];
-    let head = Head {
-        genesis: [9; 32],
-        revision: 2,
-        first: 1,
-        tip: BlockId {
-            height: 1,
-            hash: [1; 32],
-        },
-    };
-    let filter = BlockFilter::build(&head.genesis, head.tip, head.genesis, [&receiver]).unwrap();
-    let http = Http {
-        body: Range::encode(&head.genesis, 2, &[filter]).unwrap(),
-        calls: RefCell::default(),
-    };
-    let base = "https://receiver/";
-    let range = ready(Inventories::block_range(
-        base,
-        &http,
-        &head,
-        1,
-        MAX_RANGE_BLOCKS,
-    ))
-    .unwrap();
-    assert_eq!(
-        http.calls.borrow()[0],
-        (
-            format!("https://receiver/receiver/v1/block-filters/range/2/1/{MAX_RANGE_BLOCKS}"),
-            MAX_BATCH_BYTES
-        )
-    );
-    let batches = range
-        .bind(&head.genesis, head.genesis, &[head.tip.hash])
-        .unwrap();
-    assert_eq!(batches[0].matches(0, &[receiver]).unwrap(), [true]);
-    assert!(range.bind(&head.genesis, head.genesis, &[[2; 32]]).is_err());
-    for (from, limit) in [(0, 4), (1, 0), (1, MAX_RANGE_BLOCKS + 1)] {
-        assert!(ready(Inventories::block_range(base, &http, &head, from, limit)).is_err());
-    }
-    assert_eq!(
-        http.calls.borrow().len(),
-        1,
-        "invalid request never reaches transport"
-    );
-    let mut changed = head;
-    changed.revision = 3;
-    assert!(ready(Inventories::block_range(base, &http, &changed, 1, 4)).is_err());
 }

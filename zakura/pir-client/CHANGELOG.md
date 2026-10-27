@@ -2,10 +2,13 @@
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- `Inventories::block_range` fetches a Receiver catch-up gap, usually in one
-  request, from `/receiver/v1/block-filters/range/{revision}/{from}/{limit}`.
+- Breaking: `Inventories::block_range` replaces `Inventories::block_batch` and
+  reads sparse height-keyed ranges from
+  `/receiver/v1/block-filters/{revision}/{from}/{limit}`.
+  `Inventories::range_size` reads `/receiver/v1/block-filters/size/{revision}/{from}`
+  so a wallet can compare hints with PIR before downloading.
 
 ## [0.0.1-rc4] - 2026-10-26
 

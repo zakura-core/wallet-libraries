@@ -125,23 +125,22 @@ async fn hints(device: &mut Device, directory: &Directory) {
         .filter_frontier
         .map_or(ACTIVATION, |p| u32::from(p.height) + 1);
     let (token, receivers) = device.db.one_time_receivers(device.account).unwrap();
-    let batch = Inventories::block_batch(ORIGIN, &directory, &head, from, 256)
+    let range = Inventories::block_range(ORIGIN, &directory, &head, from, 256)
         .await
         .unwrap();
     let bytes: Vec<_> = receivers.iter().map(|r| r.receiver).collect();
     let mut hits = Vec::new();
-    let mut blocks = Vec::new();
-    for (index, filter) in batch.filters().iter().enumerate() {
-        for (work, matched) in receivers.iter().zip(batch.matches(index, &bytes).unwrap()) {
-            if matched && !hits.contains(&work.key) {
-                hits.push(work.key);
-            }
+    for (_, index) in range.matches(&GENESIS, &bytes) {
+        if !hits.contains(&receivers[index].key) {
+            hits.push(receivers[index].key);
         }
-        blocks.push(ChainPoint {
-            height: filter.block().height.into(),
-            hash: zcash_primitives::block::BlockHash(filter.block().hash),
-        });
     }
+    let blocks: Vec<_> = (from..=range.end().height)
+        .map(|height| ChainPoint {
+            height: height.into(),
+            hash: device.db.get_block_hash(height.into()).unwrap().unwrap(),
+        })
+        .collect();
     assert!(
         device
             .db

@@ -2,15 +2,17 @@
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- Receiver `blocks::Range`, a slim block-hint encoding for wallet catch-up. It
-  carries only each block's set and one digest of the chain it was coded on,
-  so an empty block costs one byte instead of 73. `Range::bind` recovers
-  `Batch`es from the wallet's own block hashes and fails closed on any other
-  chain. One range covers up to `MAX_RANGE_BLOCKS` (24,192), a whole rolling
-  window, within the same 4 MiB response cap as a batch, so a dense gap may
-  take more than one range.
+- Receiver block hints are sparse and keyed by height. `blocks::Range`
+  (`IWRANGE2`) carries the parent and end hashes and one `HeightSet` per block
+  that pays a receiver, so an empty block costs nothing. A set's key comes from
+  the network and height alone, so a wallet can match history below its
+  birthday. One range covers up to `MAX_RANGE_BLOCKS` heights within
+  `MAX_RANGE_BYTES`. `blocks::Head` now describes a sealed archive and a tail,
+  and `blocks::RangeSize` reports what serving from a height would cost.
+- Breaking: `blocks::BlockFilter`, `blocks::Batch` (`IWBATCH1`),
+  `MAX_BLOCKS`, `MAX_BATCH_BYTES` and `Head::check_request` are removed.
 
 ## [0.0.1-rc4] - 2026-10-26
 

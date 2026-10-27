@@ -8,7 +8,7 @@ use std::sync::{
 };
 use zakura_pir_client::receiver::{
     RawRecord,
-    blocks::{Batch, BlockFilter, BlockId, Head},
+    blocks::{BlockId, Head, HeightSet, Range},
     inventory::{FilterRef, Inventory, Shard},
     session::{Error as DirectoryError, MIN_ROWS, Publication},
     shards::{Coverage, ShardFilter},
@@ -33,7 +33,9 @@ pub struct Directory {
     witnesses: Vec<WitnessServer>,
     shard_filters: Vec<([u8; 32], Vec<u8>)>,
     head: Head,
-    filters: Vec<BlockFilter>,
+    /// Nonempty block sets, ascending, and every block hash from `head.first - 1`.
+    sets: Vec<HeightSet>,
+    hashes: Vec<[u8; 32]>,
     counts: Mutex<(usize, u64, u64)>,
     pub unavailable: AtomicBool,
 }
@@ -159,8 +161,8 @@ impl Directory {
         let first = (u32::from(tip) + 1)
             .saturating_sub(retained)
             .max(ACTIVATION);
-        let filters = (first..=u32::from(tip))
-            .map(|height| {
+        let sets = (first..=u32::from(tip))
+            .filter_map(|height| {
                 let receivers: Vec<_> = chain
                     .mined()
                     .iter()
@@ -168,21 +170,16 @@ impl Directory {
                     .filter(|r| r.payment.height == height)
                     .map(|r| *r.receiver.as_bytes())
                     .collect();
-                let parent = if height == ACTIVATION {
+                HeightSet::build(&GENESIS, height, &receivers).unwrap()
+            })
+            .collect();
+        let hashes = (first - 1..=u32::from(tip))
+            .map(|height| {
+                if height < ACTIVATION {
                     [0; 32]
                 } else {
-                    chain.hash_at((height - 1).into()).0
-                };
-                BlockFilter::build(
-                    &GENESIS,
-                    BlockId {
-                        height,
-                        hash: chain.hash_at(height.into()).0,
-                    },
-                    parent,
-                    &receivers,
-                )
-                .unwrap()
+                    chain.hash_at(height.into()).0
+                }
             })
             .collect();
         Self {
@@ -194,12 +191,14 @@ impl Directory {
                 genesis: GENESIS,
                 revision,
                 first,
+                sealed: first - 1,
                 tip: BlockId {
                     height: tip.into(),
                     hash: chain.hash_at(tip).0,
                 },
             },
-            filters,
+            sets,
+            hashes,
             counts: Mutex::new((0, 0, 0)),
             unavailable: AtomicBool::new(false),
         }
@@ -264,15 +263,24 @@ impl Directory {
             }
             let from = parts[1] as u32;
             let limit = parts[2] as u32;
-            self.head.check_request(from, limit)?;
-            let filters = self
-                .filters
+            self.head.check_range(from, limit)?;
+            let end = from.saturating_add(limit - 1).min(self.head.tip.height);
+            let hash = |height: u32| self.hashes[(height + 1 - self.head.first) as usize];
+            let sets = self
+                .sets
                 .iter()
-                .filter(|f| f.block().height >= from)
-                .take(limit as usize)
+                .filter(|s| (from..=end).contains(&s.height()))
                 .cloned()
                 .collect();
-            Batch::new(GENESIS, self.head.revision, filters)?.encode()?
+            Range::new(
+                self.head.revision,
+                from,
+                end - from + 1,
+                hash(from - 1),
+                hash(end),
+                sets,
+            )?
+            .encode()?
         } else {
             let (material, id) = route.split_once('/').unwrap();
             let public = self
