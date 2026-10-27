@@ -1,6 +1,6 @@
 [package]
 name = "zakura-pir-server-core"
-version = "0.0.1-rc3"
+version = "0.0.1-rc4"
 edition = "2024"
 description = "Native preparation shared by PIR server roles"
 rust-version.workspace = true
@@ -13,7 +13,7 @@ default = []
 transparent = []
 
 [dependencies]
-zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc3", features = ["native"] }
+zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc4", features = ["native"] }
 reinspiring = { version = "=0.1.3-rc.1", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
 rayon = { workspace = true }
 

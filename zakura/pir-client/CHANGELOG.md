@@ -2,7 +2,13 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc4] - 2026-10-26
+
 ### Changed
+
+- Enhance and Status requests use the canonical `/enhance/v1` and `/status/v1`
+  product routes under the configured server base.
+- Use PIR protocol and server crates `0.0.1-rc4` and SQLite `0.1.0-rc9.5`.
 
 - Transparent clients address only the canonical `/transparent/v1` routes:
   `/v2/<route>` becomes `/transparent/v1/<route>` (shard map, filters, init,

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc4] - 2026-10-26
+
+### Added
+
+- Shared product URL construction for Enhance, Status, Transparent and Receiver
+  requests, preserving the configured server base path and refusing operations
+  that leave their product namespace.
+
 ### Changed
 
 - `DisplayRecentMap::chunk_operation` names an index chunk's Transparent
