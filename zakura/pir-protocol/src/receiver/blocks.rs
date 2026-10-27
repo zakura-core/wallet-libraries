@@ -17,6 +17,10 @@ pub const MAX_RECEIVERS: u32 = 65_536;
 const P: u8 = 20;
 const M: u64 = 1_569_792;
 const MAGIC: &[u8; 8] = b"IWBATCH1";
+/// Magic, genesis, revision and block count of an encoded [`Batch`].
+const BATCH_HEADER: usize = 8 + 32 + 8 + 4;
+/// Height, hash, parent and set length that a [`Batch`] adds to each block's set.
+const BATCH_BLOCK: usize = 4 + 32 + 32 + 4;
 /// Maximum consecutive blocks in one [`Range`]: the longest rolling window, seven days at
 /// NU7's 25-second spacing, so any gap the window covers takes one request.
 pub const MAX_RANGE_BLOCKS: u32 = 24_192;
@@ -151,9 +155,9 @@ impl Batch {
         if self.filters.is_empty() || self.filters.len() > MAX_BLOCKS as usize {
             return Err(Error::Capacity);
         }
-        let mut size = MAGIC.len() + 32 + 8 + 4;
+        let mut size = BATCH_HEADER;
         for (i, filter) in self.filters.iter().enumerate() {
-            size += 4 + 32 + 32 + 4 + filter.filter.bytes().len();
+            size += BATCH_BLOCK + filter.filter.bytes().len();
             if size > MAX_BATCH_BYTES {
                 return Err(Error::Capacity);
             }
@@ -393,7 +397,8 @@ impl Range {
         self.from + (self.sets.len() as u32 - 1)
     }
 
-    /// Recovers [`Batch`]es of at most [`MAX_BLOCKS`] from the consumer's own chain:
+    /// Recovers [`Batch`]es of at most [`MAX_BLOCKS`] and [`MAX_BATCH_BYTES`] from the
+    /// consumer's own chain:
     /// `parent` is its hash at `from - 1` and `hashes` its hashes from `from` through
     /// [`Range::end`]. Fails with [`Error::Coverage`] unless they are exactly the chain the
     /// service coded the range on.
@@ -419,10 +424,29 @@ impl Range {
                 filter: filter.clone(),
             })
             .collect();
-        filters
-            .chunks(MAX_BLOCKS as usize)
-            .map(|chunk| Batch::new(*genesis, self.revision, chunk.to_vec()))
-            .collect()
+        // A batch adds block identities that the range left out, so a dense range is split
+        // by encoded size as well as block count. One block always fits: a set of at most
+        // MAX_RECEIVERS values is far below the byte cap.
+        let mut batches = Vec::new();
+        let mut chunk = Vec::new();
+        let mut size = BATCH_HEADER;
+        for filter in filters {
+            let block = BATCH_BLOCK + filter.filter.bytes().len();
+            if !chunk.is_empty()
+                && (chunk.len() == MAX_BLOCKS as usize || size + block > MAX_BATCH_BYTES)
+            {
+                batches.push(Batch::new(
+                    *genesis,
+                    self.revision,
+                    std::mem::take(&mut chunk),
+                )?);
+                size = BATCH_HEADER;
+            }
+            size += block;
+            chunk.push(filter);
+        }
+        batches.push(Batch::new(*genesis, self.revision, chunk)?);
+        Ok(batches)
     }
 }
 
