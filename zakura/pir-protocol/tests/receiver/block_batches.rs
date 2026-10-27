@@ -469,3 +469,72 @@ fn one_range_spans_many_batches() {
         .collect();
     assert_eq!(rebuilt, filters);
 }
+
+/// A range just under the byte cap stays usable: restoring each block's identity would
+/// push one batch past `MAX_BATCH_BYTES`, so binding splits by size as well as count.
+#[test]
+fn a_dense_range_binds_into_batches_within_the_byte_cap() {
+    let hash = |height: u32| -> [u8; 32] { Sha256::digest(height.to_le_bytes()).into() };
+    let block = |height: u32, members: &[ReceiverBytes]| {
+        BlockFilter::build(
+            &GENESIS,
+            BlockId {
+                height,
+                hash: hash(height),
+            },
+            hash(height - 1),
+            members,
+        )
+        .unwrap()
+    };
+    let dense = receivers(MAX_RECEIVERS);
+    let range_bytes = |filters: &[BlockFilter]| {
+        Range::decode(&Range::encode(&GENESIS, 1, filters).unwrap())
+            .map(|range| (range.end() - range.from() + 1) as usize == filters.len())
+            .unwrap()
+            .then(|| Range::encode(&GENESIS, 1, filters).unwrap().len())
+    };
+    // Fill with full blocks while the whole range still fits one response.
+    let mut filters = Vec::new();
+    loop {
+        filters.push(block(100 + filters.len() as u32, &dense));
+        if range_bytes(&filters).is_none() {
+            filters.pop();
+            break;
+        }
+    }
+    // Then size one last block so the range fits but a single batch of it would not.
+    let blocks = filters.len() + 1;
+    let (mut low, mut high) = (0u32, MAX_RECEIVERS);
+    let mut tail = None;
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        let mut candidate = filters.clone();
+        candidate.push(block(100 + filters.len() as u32, &dense[..mid as usize]));
+        match range_bytes(&candidate) {
+            Some(bytes) if bytes - 4 + 72 * blocks > MAX_BATCH_BYTES => {
+                tail = Some(candidate);
+                break;
+            }
+            Some(_) => low = mid + 1,
+            None => high = mid - 1,
+        }
+    }
+    let filters = tail.expect("a tail size puts the range within 72 bytes per block of the cap");
+    assert!(matches!(
+        Batch::new(GENESIS, 1, filters.clone()),
+        Err(Error::Capacity)
+    ));
+    let range = Range::decode(&Range::encode(&GENESIS, 1, &filters).unwrap()).unwrap();
+    let hashes: Vec<_> = (100..100 + filters.len() as u32).map(hash).collect();
+    let bound = range.bind(&GENESIS, hash(99), &hashes).unwrap();
+    assert!(bound.len() > 1);
+    for batch in &bound {
+        assert!(batch.encode().unwrap().len() <= MAX_BATCH_BYTES);
+    }
+    let rebuilt: Vec<_> = bound
+        .iter()
+        .flat_map(|b| b.filters().iter().cloned())
+        .collect();
+    assert_eq!(rebuilt, filters);
+}
