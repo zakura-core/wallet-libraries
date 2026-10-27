@@ -1,7 +1,10 @@
 use sha2::{Digest, Sha256};
 use zakura_pir_protocol::receiver::{
     Error, ReceiverBytes,
-    blocks::{Batch, BlockFilter, BlockId, Head, MAX_BATCH_BYTES, MAX_BLOCKS, MAX_RECEIVERS},
+    blocks::{
+        Batch, BlockFilter, BlockId, Head, MAX_BATCH_BYTES, MAX_BLOCKS, MAX_RANGE_BLOCKS,
+        MAX_RECEIVERS, Range,
+    },
 };
 
 const GENESIS: [u8; 32] = [9; 32];
@@ -313,4 +316,156 @@ fn non_members_rarely_match() {
         .filter(|m| *m)
         .count();
     assert!(matched <= 1, "{matched} false matches");
+}
+
+/// The consumer-side hashes for `sample`: the parent of height 10, then heights 10 to 12.
+fn sample_chain() -> ([u8; 32], Vec<[u8; 32]>) {
+    ([9; 32], vec![[10; 32], [11; 32], [12; 32]])
+}
+
+/// A range carries only the sets, so an empty block costs one byte, and binding it to the
+/// consumer's own hashes recovers the exact batch the service holds.
+#[test]
+fn range_round_trip_binds_to_the_consumers_chain() {
+    let (head, batch, members) = sample();
+    let bytes = Range::encode(&GENESIS, 3, batch.filters()).unwrap();
+    let sets: usize = batch
+        .filters()
+        .iter()
+        .map(|f| {
+            let one = Batch::new(GENESIS, 3, vec![f.clone()]).unwrap();
+            // A batch of one adds its header and the block's height, hash, parent and length.
+            one.encode().unwrap().len() - (8 + 32 + 8 + 4) - (4 + 32 + 32 + 4)
+        })
+        .sum();
+    assert_eq!(bytes.len(), 8 + 8 + 4 + 4 + 32 + sets);
+    let range = Range::decode(&bytes).unwrap();
+    range.check(&head, 10, 3).unwrap();
+    assert_eq!((range.from(), range.end()), (10, 12));
+    let (parent, hashes) = sample_chain();
+    let bound = range.bind(&GENESIS, parent, &hashes).unwrap();
+    assert_eq!(bound, vec![batch]);
+    assert_eq!(
+        bound[0].matches(1, &members).unwrap(),
+        vec![false; members.len()]
+    );
+    assert_eq!(
+        bound[0].matches(2, &members).unwrap(),
+        vec![true; members.len()]
+    );
+}
+
+/// Any difference from the chain the service coded on fails closed instead of matching
+/// under the wrong keys.
+#[test]
+fn range_bind_rejects_another_chain() {
+    let (_, batch, _) = sample();
+    let range = Range::decode(&Range::encode(&GENESIS, 3, batch.filters()).unwrap()).unwrap();
+    let (parent, hashes) = sample_chain();
+    let mut middle = hashes.clone();
+    middle[1] = [99; 32];
+    for (genesis, parent, hashes) in [
+        (GENESIS, [8; 32], hashes.clone()),
+        (GENESIS, parent, middle),
+        (GENESIS, parent, hashes[..2].to_vec()),
+        ([7; 32], parent, hashes.clone()),
+    ] {
+        assert!(matches!(
+            range.bind(&genesis, parent, &hashes),
+            Err(Error::Coverage)
+        ));
+    }
+}
+
+/// Truncation, trailing bytes, foreign magic and impossible counts never decode.
+#[test]
+fn malformed_ranges_are_rejected() {
+    let (_, batch, _) = sample();
+    let bytes = Range::encode(&GENESIS, 3, batch.filters()).unwrap();
+    for cut in 0..bytes.len() {
+        assert!(Range::decode(&bytes[..cut]).is_err(), "cut at {cut}");
+    }
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(Range::decode(&trailing).is_err());
+    assert!(Range::decode(&batch.encode().unwrap()).is_err());
+    for count in [0, MAX_RANGE_BLOCKS + 1] {
+        let mut wrong = bytes.clone();
+        wrong[20..24].copy_from_slice(&count.to_le_bytes());
+        assert!(Range::decode(&wrong).is_err());
+    }
+}
+
+/// A response is bound to the captured head's revision, the requested start and limit,
+/// and the advertised tip.
+#[test]
+fn range_check_binds_head_and_request() {
+    let (head, batch, _) = sample();
+    let range = Range::decode(&Range::encode(&GENESIS, 3, batch.filters()).unwrap()).unwrap();
+    range.check(&head, 10, MAX_RANGE_BLOCKS).unwrap();
+    let stale = Head {
+        revision: 4,
+        ..head.clone()
+    };
+    let behind = Head {
+        tip: BlockId {
+            height: 11,
+            hash: [11; 32],
+        },
+        ..head.clone()
+    };
+    assert!(range.check(&stale, 10, 3).is_err());
+    assert!(range.check(&behind, 10, 3).is_err());
+    assert!(range.check(&head, 11, 3).is_err());
+    assert!(range.check(&head, 10, 2).is_err());
+    assert!(range.check(&head, 10, MAX_RANGE_BLOCKS + 1).is_err());
+}
+
+/// One response covers more than a batch's worth of blocks and binds back into batches of
+/// at most `MAX_BLOCKS`.
+#[test]
+fn one_range_spans_many_batches() {
+    let members = receivers(3);
+    let count = 2 * MAX_BLOCKS + 88;
+    let hash = |height: u32| -> [u8; 32] { Sha256::digest(height.to_le_bytes()).into() };
+    let filters: Vec<_> = (100..100 + count)
+        .map(|height| {
+            BlockFilter::build(
+                &GENESIS,
+                BlockId {
+                    height,
+                    hash: hash(height),
+                },
+                hash(height - 1),
+                if height % 97 == 0 {
+                    &members[..]
+                } else {
+                    &members[..0]
+                },
+            )
+            .unwrap()
+        })
+        .collect();
+    let bytes = Range::encode(&GENESIS, 1, &filters).unwrap();
+    // Empty blocks dominate, at one byte each.
+    assert!(bytes.len() < 2 * count as usize, "{} bytes", bytes.len());
+    let range = Range::decode(&bytes).unwrap();
+    let head = Head {
+        genesis: GENESIS,
+        revision: 1,
+        first: 100,
+        tip: filters.last().unwrap().block(),
+    };
+    range.check(&head, 100, MAX_RANGE_BLOCKS).unwrap();
+    let hashes: Vec<_> = (100..100 + count).map(hash).collect();
+    let bound = range.bind(&GENESIS, hash(99), &hashes).unwrap();
+    assert_eq!(
+        bound.iter().map(|b| b.filters().len()).collect::<Vec<_>>(),
+        vec![256, 256, 88]
+    );
+    let rebuilt: Vec<_> = bound
+        .iter()
+        .flat_map(|b| b.filters().iter().cloned())
+        .collect();
+    assert_eq!(rebuilt, filters);
 }

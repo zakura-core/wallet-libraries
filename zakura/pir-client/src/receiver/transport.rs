@@ -293,6 +293,33 @@ impl Inventories {
         batch.check(head, from, limit)?;
         Ok(batch)
     }
+
+    /// Fetches a bounded prefix for one captured head in one response of at most
+    /// [`super::blocks::MAX_RANGE_BLOCKS`], so a wallet catches up on any gap the window
+    /// covers with one request. Errors never mean an empty range. The range carries no
+    /// block hashes: the wallet binds it to its own chain with [`super::blocks::Range::bind`]
+    /// before matching.
+    pub async fn block_range<T: Transport>(
+        origin: &str,
+        http: &T,
+        head: &super::blocks::Head,
+        from: u32,
+        limit: u32,
+    ) -> Result<super::blocks::Range, Error> {
+        head.check_range(from, limit)?;
+        let bytes = http
+            .get(
+                &receiver_url(
+                    origin,
+                    &format!("/block-filters/range/{}/{from}/{limit}", head.revision),
+                )?,
+                super::blocks::MAX_BATCH_BYTES,
+            )
+            .await?;
+        let range = super::blocks::Range::decode(&bytes)?;
+        range.check(head, from, limit)?;
+        Ok(range)
+    }
 }
 
 /// Lookups against one captured inventory. Segment sessions open lazily and shard filters

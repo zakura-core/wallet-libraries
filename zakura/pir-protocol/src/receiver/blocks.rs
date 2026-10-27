@@ -17,6 +17,12 @@ pub const MAX_RECEIVERS: u32 = 65_536;
 const P: u8 = 20;
 const M: u64 = 1_569_792;
 const MAGIC: &[u8; 8] = b"IWBATCH1";
+/// Maximum consecutive blocks in one [`Range`]: the longest rolling window, seven days at
+/// NU7's 25-second spacing, so any gap the window covers takes one request.
+pub const MAX_RANGE_BLOCKS: u32 = 24_192;
+const RANGE_MAGIC: &[u8; 8] = b"IWRANGE1";
+/// Magic, revision, first height, block count and chain digest.
+const RANGE_HEADER: usize = 8 + 8 + 4 + 4 + 32;
 
 /// An exact block identity, in protocol byte order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +57,15 @@ impl Head {
     pub fn check_request(&self, from: u32, limit: u32) -> Result<(), Error> {
         self.validate(&self.genesis)?;
         if limit == 0 || limit > MAX_BLOCKS || from < self.first || from > self.tip.height {
+            return Err(Error::Coverage);
+        }
+        Ok(())
+    }
+
+    /// Checks a bounded [`Range`] request that begins inside the available history.
+    pub fn check_range(&self, from: u32, limit: u32) -> Result<(), Error> {
+        self.validate(&self.genesis)?;
+        if limit == 0 || limit > MAX_RANGE_BLOCKS || from < self.first || from > self.tip.height {
             return Err(Error::Coverage);
         }
         Ok(())
@@ -243,6 +258,171 @@ impl Batch {
             return Err(Error::Malformed);
         }
         Self::new(genesis, revision, filters)
+    }
+}
+
+/// Commits to the chain a [`Range`] was coded on: the parent of its first block, then every
+/// block hash in height order.
+fn chain_digest(genesis: &Hash, from: u32, parent: &Hash, hashes: &[Hash]) -> Hash {
+    let mut digest = Sha256::new()
+        .chain_update(b"ironwood-receiver/v1/block-range\0")
+        .chain_update(genesis)
+        .chain_update(from.to_le_bytes())
+        .chain_update(parent);
+    for hash in hashes {
+        digest.update(hash);
+    }
+    digest.finalize().into()
+}
+
+/// Consecutive block hints without per-block identities, so an empty block costs one byte.
+/// A consumer recomputes the chain digest from its own blocks in [`Range::bind`], which
+/// replaces the per-block hash and parent checks of a [`Batch`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Range {
+    revision: u64,
+    from: u32,
+    digest: Hash,
+    sets: Vec<Filter>,
+}
+
+impl Range {
+    /// Encodes the longest prefix of consecutive `filters` that fits [`MAX_BATCH_BYTES`],
+    /// up to [`MAX_RANGE_BLOCKS`]. Rejects filters for another network or broken linkage.
+    pub fn encode(
+        genesis: &Hash,
+        revision: u64,
+        filters: &[BlockFilter],
+    ) -> Result<Vec<u8>, Error> {
+        if filters.is_empty() {
+            return Err(Error::Capacity);
+        }
+        let mut size = RANGE_HEADER;
+        let count = filters
+            .iter()
+            .take(MAX_RANGE_BLOCKS as usize)
+            .take_while(|filter| {
+                size += filter.filter.bytes().len();
+                size <= MAX_BATCH_BYTES
+            })
+            .count();
+        let filters = &filters[..count];
+        let first = filters.first().ok_or(Error::Capacity)?;
+        let mut hashes = Vec::with_capacity(count);
+        for (i, filter) in filters.iter().enumerate() {
+            if filter.genesis != *genesis || filter.block.height == 0 {
+                return Err(Error::Coverage);
+            }
+            if i > 0 {
+                let previous = filters[i - 1].block;
+                if previous.height.checked_add(1) != Some(filter.block.height)
+                    || previous.hash != filter.parent
+                {
+                    return Err(Error::Coverage);
+                }
+            }
+            hashes.push(filter.block.hash);
+        }
+        let from = first.block.height;
+        let mut out = RANGE_MAGIC.to_vec();
+        out.extend(revision.to_le_bytes());
+        out.extend(from.to_le_bytes());
+        // At most MAX_RANGE_BLOCKS, so the count fits a u32.
+        out.extend((count as u32).to_le_bytes());
+        out.extend(chain_digest(genesis, from, &first.parent, &hashes));
+        for filter in filters {
+            out.extend(filter.filter.bytes());
+        }
+        Ok(out)
+    }
+
+    /// Parses the entire bounded response, rejecting truncation and invalid GCS tails.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() > MAX_BATCH_BYTES {
+            return Err(Error::Capacity);
+        }
+        let mut rest = bytes.strip_prefix(RANGE_MAGIC).ok_or(Error::Malformed)?;
+        let revision = u64::from_le_bytes(take(&mut rest)?);
+        let from = u32::from_le_bytes(take(&mut rest)?);
+        let count = u32::from_le_bytes(take(&mut rest)?);
+        let digest = take::<32>(&mut rest)?;
+        // Every set takes at least one byte, so the count is bounded before allocating.
+        if from == 0 || count == 0 || count > MAX_RANGE_BLOCKS || count as usize > rest.len() {
+            return Err(Error::Capacity);
+        }
+        from.checked_add(count - 1).ok_or(Error::Malformed)?;
+        let mut sets = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let (set, tail) = super::gcs::split(rest, P, M, u64::from(MAX_RECEIVERS))?;
+            rest = tail;
+            sets.push(Filter::decode_with(set, P, M)?);
+        }
+        if !rest.is_empty() {
+            return Err(Error::Malformed);
+        }
+        Ok(Self {
+            revision,
+            from,
+            digest,
+            sets,
+        })
+    }
+
+    /// Binds a response to the captured head and request; shorter nonempty prefixes are
+    /// allowed. Chain identity is checked later, by [`Range::bind`].
+    pub fn check(&self, head: &Head, from: u32, limit: u32) -> Result<(), Error> {
+        head.check_range(from, limit)?;
+        if self.revision != head.revision
+            || self.from != from
+            || self.sets.len() > limit as usize
+            || self.end() > head.tip.height
+        {
+            return Err(Error::Coverage);
+        }
+        Ok(())
+    }
+
+    /// The first block's height.
+    pub fn from(&self) -> u32 {
+        self.from
+    }
+
+    /// The last block's height.
+    pub fn end(&self) -> u32 {
+        // Decoding checked that the range's heights fit a u32.
+        self.from + (self.sets.len() as u32 - 1)
+    }
+
+    /// Recovers [`Batch`]es of at most [`MAX_BLOCKS`] from the consumer's own chain:
+    /// `parent` is its hash at `from - 1` and `hashes` its hashes from `from` through
+    /// [`Range::end`]. Fails with [`Error::Coverage`] unless they are exactly the chain the
+    /// service coded the range on.
+    pub fn bind(&self, genesis: &Hash, parent: Hash, hashes: &[Hash]) -> Result<Vec<Batch>, Error> {
+        if hashes.len() != self.sets.len()
+            || chain_digest(genesis, self.from, &parent, hashes) != self.digest
+        {
+            return Err(Error::Coverage);
+        }
+        let filters: Vec<_> = self
+            .sets
+            .iter()
+            .zip(hashes)
+            .enumerate()
+            .map(|(i, (filter, hash))| BlockFilter {
+                genesis: *genesis,
+                // Decoding checked that the range's heights fit a u32.
+                block: BlockId {
+                    height: self.from + i as u32,
+                    hash: *hash,
+                },
+                parent: if i == 0 { parent } else { hashes[i - 1] },
+                filter: filter.clone(),
+            })
+            .collect();
+        filters
+            .chunks(MAX_BLOCKS as usize)
+            .map(|chunk| Batch::new(*genesis, self.revision, chunk.to_vec()))
+            .collect()
     }
 }
 
