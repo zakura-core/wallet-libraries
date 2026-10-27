@@ -309,10 +309,11 @@ impl Inventories {
         head.check_range(from, limit)?;
         let bytes = http
             .get(
-                &receiver_url(
-                    origin,
-                    &format!("/block-filters/range/{}/{from}/{limit}", head.revision),
-                )?,
+                &format!(
+                    "{}/v1/receiver/block-filters/range/{}/{from}/{limit}",
+                    origin.trim_end_matches('/'),
+                    head.revision,
+                ),
                 super::blocks::MAX_BATCH_BYTES,
             )
             .await?;
