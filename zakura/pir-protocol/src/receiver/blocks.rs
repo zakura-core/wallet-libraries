@@ -22,7 +22,8 @@ const BATCH_HEADER: usize = 8 + 32 + 8 + 4;
 /// Height, hash, parent and set length that a [`Batch`] adds to each block's set.
 const BATCH_BLOCK: usize = 4 + 32 + 32 + 4;
 /// Maximum consecutive blocks in one [`Range`]: the longest rolling window, seven days at
-/// NU7's 25-second spacing, so any gap the window covers takes one request.
+/// NU7's 25-second spacing. A response is also capped at [`MAX_BATCH_BYTES`], so a gap
+/// dense enough to pass it returns a prefix and continues from [`Range::end`] + 1.
 pub const MAX_RANGE_BLOCKS: u32 = 24_192;
 const RANGE_MAGIC: &[u8; 8] = b"IWRANGE1";
 /// Magic, revision, first height, block count and chain digest.

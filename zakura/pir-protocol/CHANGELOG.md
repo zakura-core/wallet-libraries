@@ -9,7 +9,8 @@
   so an empty block costs one byte instead of 73. `Range::bind` recovers
   `Batch`es from the wallet's own block hashes and fails closed on any other
   chain. One range covers up to `MAX_RANGE_BLOCKS` (24,192), a whole rolling
-  window.
+  window, within the same 4 MiB response cap as a batch, so a dense gap may
+  take more than one range.
 
 ## [0.0.1-rc4] - 2026-10-26
 

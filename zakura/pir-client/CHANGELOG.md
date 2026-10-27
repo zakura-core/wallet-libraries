@@ -4,8 +4,8 @@
 
 ### Added
 
-- `Inventories::block_range` fetches a whole Receiver catch-up gap in one
-  request from `/receiver/v1/block-filters/range/{revision}/{from}/{limit}`.
+- `Inventories::block_range` fetches a Receiver catch-up gap, usually in one
+  request, from `/receiver/v1/block-filters/range/{revision}/{from}/{limit}`.
 
 ## [0.0.1-rc4] - 2026-10-26
 

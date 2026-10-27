@@ -290,8 +290,9 @@ impl Inventories {
     }
 
     /// Fetches a bounded prefix for one captured head in one response of at most
-    /// [`super::blocks::MAX_RANGE_BLOCKS`], so a wallet catches up on any gap the window
-    /// covers with one request. Errors never mean an empty range. The range carries no
+    /// [`super::blocks::MAX_RANGE_BLOCKS`], so a typical gap takes one request. A dense gap
+    /// past the byte cap returns a shorter prefix; continue from its end. Errors never mean
+    /// an empty range. The range carries no
     /// block hashes: the wallet binds it to its own chain with [`super::blocks::Range::bind`]
     /// before matching.
     pub async fn block_range<T: Transport>(
