@@ -7,7 +7,11 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9.5] - 2026-10-26
+
 ### Changed
+
+- Use PIR protocol `0.0.1-rc4`.
 
 - `data_api::chain::{scan_cached_blocks, decrypt_cached_blocks, scan_decrypted_blocks}` scan a range only for the accounts whose birthday is at or below its last block, so a wallet whose accounts have different birthdays no longer tries a later account's viewing keys on the outputs of earlier blocks. A note sent to an account below its birthday was found when another account's earlier birthday put its block in a scanned range; it is now found only if that range also reaches the account's birthday.
 
