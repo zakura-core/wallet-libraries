@@ -60,6 +60,11 @@ impl Filter {
             .collect()
     }
 
+    /// Whether the set holds no values.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
     /// Returns the canonical encoded set.
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes

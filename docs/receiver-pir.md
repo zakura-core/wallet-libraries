@@ -83,11 +83,11 @@ here depends on wallet-pir.
 
 ### Rolling block hints
 
-`blocks::Head` advertises a network, correction revision and inclusive available range. `blocks::Batch` contains at most 256 consecutive filters and 4 MiB. A server may return a shorter nonempty prefix to honor the byte limit. Empty blocks have explicit empty GCS sets; missing/pruned ranges are errors and require the wallet's direct PIR path.
+`blocks::Head` advertises a network, correction revision, the first served height, the end of the sealed archive and the tip. `blocks::Range` covers up to `MAX_RANGE_BLOCKS` consecutive heights within 4 MiB, and a server may return a shorter prefix to honor the byte limit, or start at the boundary of the sealed chunk holding the requested height. Only blocks that pay a receiver carry a set; missing ranges are errors, never empty sets. `blocks::RangeSize` reports the encoded bytes from a height to the tip.
 
 The batch binds the captured revision and requested range, and checks parent linkage. Consumers must still compare block identities with their independently synced chain before using negative hints or advancing progress. The service is trusted for complete indexing. Matches only schedule PIR queries; payment authentication, inclusion and spend checks happen separately. Newly exposed receive indexes need historical PIR checks even if their blocks were already processed.
 
-`IWBATCH1` encodes the genesis hash, little-endian correction revision (`u64`), block count (`u32`), then each height (`u32`), block hash, parent hash, payload length (`u32`) and GCS payload. Hashes use protocol byte order. GCS uses P=20 and M=1,569,792 with a salt derived from network, height and hash. No archive index, permanent seen set or scan/cache state is part of this format.
+`IWRANGE2` encodes the little-endian correction revision (`u64`), first height (`u32`), height count (`u32`), the hash before the first height, the hash at the last height, the entry count (`u32`), then for each block that pays a receiver a CompactSize height gap and its self-delimiting GCS set. Hashes use protocol byte order. GCS uses P=20 and M=1,569,792 with a salt derived from network and height only, so a wallet can match history below its birthday without block hashes. The publisher is trusted for which chain the sets were built on, as for their completeness; a wallet compares the end hash with its own block where it holds one. No permanent seen set or scan/cache state is part of this format.
 
 PIR manifests require `history_revision`, the operator correction generation also advertised by rolling hints. It is bound into the immutable publication/session identity. Clients must retain the required generation with unfinished work and reject answers from an older generation, even when block heights and hashes match. Reorgs still use chain hashes.
 
@@ -166,7 +166,7 @@ honest publisher, in addition to trusting it for complete indexing.
 
 ### Rolling filter transport
 
-`Inventories::block_head` reads `/v1/receiver/block-filters/head` with a 16 KiB limit and checks the configured network. `Inventories::block_batch` reads `/v1/receiver/block-filters/{revision}/{from}/{limit}` with the shared batch bound. Transport errors, unavailable ranges and changed revisions never mean negative membership. Refresh metadata or use direct PIR according to the wallet policy. These public requests contain no receiver and open no PIR session. The wallet owns scheduling and chain checks; ordinary sync must not wait for these requests.
+`Inventories::block_head` reads `/v1/receiver/block-filters/head` with a 16 KiB limit and checks the configured network. `Inventories::range_size` reads `/v1/receiver/block-filters/size/{revision}/{from}`, and `Inventories::block_range` reads `/v1/receiver/block-filters/{revision}/{from}/{limit}` within 4 MiB. Transport errors, unavailable ranges and changed revisions never mean negative membership. Refresh metadata or use direct PIR according to the wallet policy. These public requests contain no receiver and open no PIR session. The wallet owns scheduling and chain checks; ordinary sync must not wait for these requests.
 
 ## Wallet recovery
 

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Receiver block hints are sparse and keyed by height. `blocks::Range`
+  (`IWRANGE2`) carries the parent and end hashes and one `HeightSet` per block
+  that pays a receiver, so an empty block costs nothing. A set's key comes from
+  the network and height alone, so a wallet can match history below its
+  birthday. One range covers up to `MAX_RANGE_BLOCKS` heights within
+  `MAX_RANGE_BYTES`. `blocks::Head` now describes a sealed archive and a tail,
+  and `blocks::RangeSize` reports what serving from a height would cost.
+- Breaking: `blocks::BlockFilter`, `blocks::Batch` (`IWBATCH1`),
+  `MAX_BLOCKS`, `MAX_BATCH_BYTES` and `Head::check_request` are removed.
+
 ### Added
 
 - The `receiver` product: the receiver wire codec, payment and companion witness table

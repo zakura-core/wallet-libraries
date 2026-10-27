@@ -244,7 +244,7 @@ impl Inventories {
         })
     }
 
-    /// Downloads rolling-hint availability without opening or waiting for a PIR session.
+    /// Downloads which block hints the server holds, without opening a PIR session.
     pub async fn block_head<T: Transport>(
         origin: &str,
         http: &T,
@@ -267,38 +267,39 @@ impl Inventories {
         Ok(head)
     }
 
-    /// Fetches a bounded prefix for one captured head. Errors never mean an empty range.
-    /// The wallet must verify returned block hashes against its own chain before advancing.
-    pub async fn block_batch<T: Transport>(
+    /// Asks what serving from `from` to the captured head's tip would cost, and where the
+    /// server would start, so the wallet can compare hints with PIR before downloading.
+    pub async fn range_size<T: Transport>(
         origin: &str,
         http: &T,
         head: &super::blocks::Head,
         from: u32,
-        limit: u32,
-    ) -> Result<super::blocks::Batch, Error> {
-        head.check_request(from, limit)?;
+    ) -> Result<super::blocks::RangeSize, Error> {
+        head.check_range(from, 1)?;
         let bytes = http
             .get(
                 &format!(
-                    "{}/v1/receiver/block-filters/{}/{}/{}",
+                    "{}/v1/receiver/block-filters/size/{}/{from}",
                     origin.trim_end_matches('/'),
                     head.revision,
-                    from,
-                    limit
                 ),
-                super::blocks::MAX_BATCH_BYTES,
+                1024,
             )
             .await?;
-        let batch = super::blocks::Batch::decode(&bytes)?;
-        batch.check(head, from, limit)?;
-        Ok(batch)
+        if bytes.len() > 1024 {
+            return Err(Error::Malformed);
+        }
+        let size: super::blocks::RangeSize = serde_json::from_slice(&bytes)?;
+        if size.revision != head.revision || size.from > from || size.from < head.first {
+            return Err(zakura_pir_protocol::receiver::Error::Coverage.into());
+        }
+        Ok(size)
     }
 
-    /// Fetches a bounded prefix for one captured head in one response of at most
-    /// [`super::blocks::MAX_RANGE_BLOCKS`], so a wallet catches up on any gap the window
-    /// covers with one request. Errors never mean an empty range. The range carries no
-    /// block hashes: the wallet binds it to its own chain with [`super::blocks::Range::bind`]
-    /// before matching.
+    /// Fetches up to `limit` heights of hints from `from` for one captured head. The server
+    /// may start at the earlier boundary of the sealed chunk holding `from`, and stops at
+    /// [`super::blocks::MAX_RANGE_BYTES`], so a dense gap takes more than one request:
+    /// continue after the returned range's end. Errors never mean an empty range.
     pub async fn block_range<T: Transport>(
         origin: &str,
         http: &T,
@@ -310,11 +311,11 @@ impl Inventories {
         let bytes = http
             .get(
                 &format!(
-                    "{}/v1/receiver/block-filters/range/{}/{from}/{limit}",
+                    "{}/v1/receiver/block-filters/{}/{from}/{limit}",
                     origin.trim_end_matches('/'),
                     head.revision,
                 ),
-                super::blocks::MAX_BATCH_BYTES,
+                super::blocks::MAX_RANGE_BYTES,
             )
             .await?;
         let range = super::blocks::Range::decode(&bytes)?;

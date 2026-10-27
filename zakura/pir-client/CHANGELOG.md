@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Breaking: `Inventories::block_range` replaces `Inventories::block_batch` and
+  reads sparse height-keyed ranges from
+  `/v1/receiver/block-filters/{revision}/{from}/{limit}`.
+  `Inventories::range_size` reads `/v1/receiver/block-filters/size/{revision}/{from}`
+  so a wallet can compare hints with PIR before downloading.
+
 ### Added
 
 - The `receiver` product: `receiver::{Client, WitnessClient}` and `receiver::transport`,

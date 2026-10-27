@@ -662,7 +662,7 @@ async fn seed_recovery_pages_history_and_stops_at_four_empty_indexes() {
 /// A positive hint without a payment needs one empty PIR answer and cannot advance issuance.
 #[tokio::test]
 async fn a_positive_hint_without_payment_settles_with_one_empty_query() {
-    use zakura_pir_client::receiver::blocks::{Batch, BlockFilter, BlockId};
+    use zakura_pir_client::receiver::blocks::{HeightSet, Range};
     let mut r = restored(&[]);
     let initial = serve(&r.st, &[], r.through);
     let client = connect(&initial, r.through).await;
@@ -674,22 +674,16 @@ async fn a_positive_hint_without_payment_settles_with_one_empty_query() {
     let (token, receivers) = r.st.wallet().db().one_time_receivers(r.account).unwrap();
     let receiver = &receivers[0];
     // A deliberately overinclusive hint exercises the same path as a GCS false positive.
-    let filter = BlockFilter::build(
-        &GENESIS,
-        BlockId {
-            height: end.height.into(),
-            hash: end.hash.0,
-        },
-        r.through.hash.0,
-        [&receiver.receiver],
-    )
-    .unwrap();
-    let bytes = Batch::new(GENESIS, 0, vec![filter])
+    let height: u32 = end.height.into();
+    let set = HeightSet::build(&GENESIS, height, [&receiver.receiver])
+        .unwrap()
+        .unwrap();
+    let bytes = Range::new(0, height, 1, r.through.hash.0, end.hash.0, vec![set])
         .unwrap()
         .encode()
         .unwrap();
-    let batch = Batch::decode(&bytes).unwrap();
-    assert_eq!(batch.matches(0, &[receiver.receiver]).unwrap(), [true]);
+    let range = Range::decode(&bytes).unwrap();
+    assert_eq!(range.matches(&GENESIS, &[receiver.receiver]), [(height, 0)]);
     assert!(
         r.st.wallet_mut()
             .db_mut()
