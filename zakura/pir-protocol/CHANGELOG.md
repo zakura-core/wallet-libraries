@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Receiver `blocks::Range`, a slim block-hint encoding for wallet catch-up. It
+  carries only each block's set and one digest of the chain it was coded on,
+  so an empty block costs one byte instead of 73. `Range::bind` recovers
+  `Batch`es from the wallet's own block hashes and fails closed on any other
+  chain. One range covers up to `MAX_RANGE_BLOCKS` (24,192), a whole rolling
+  window.
+
 ## [0.0.1-rc4] - 2026-10-26
 
 ### Added

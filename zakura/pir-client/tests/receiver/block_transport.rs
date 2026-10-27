@@ -4,7 +4,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 use zakura_pir_client::receiver::{
-    blocks::{Batch, BlockFilter, BlockId, Head, MAX_BATCH_BYTES},
+    blocks::{Batch, BlockFilter, BlockId, Head, MAX_BATCH_BYTES, MAX_RANGE_BLOCKS, Range},
     session::Error,
     transport::{Inventories, Transport},
 };
@@ -192,4 +192,57 @@ fn block_routes_stay_below_the_configured_base_path() {
         Err(Error::Endpoint(_))
     ));
     assert_eq!(http.calls.borrow().len(), 2);
+}
+
+/// One range request covers the whole gap, carries no receiver in the URL, and matches only
+/// after the wallet binds it to its own block hashes.
+#[test]
+fn range_checks_session_and_binds_to_the_wallets_chain() {
+    let receiver = [7; 43];
+    let head = Head {
+        genesis: [9; 32],
+        revision: 2,
+        first: 1,
+        tip: BlockId {
+            height: 1,
+            hash: [1; 32],
+        },
+    };
+    let filter = BlockFilter::build(&head.genesis, head.tip, head.genesis, [&receiver]).unwrap();
+    let http = Http {
+        body: Range::encode(&head.genesis, 2, &[filter]).unwrap(),
+        calls: RefCell::default(),
+    };
+    let base = "https://receiver/";
+    let range = ready(Inventories::block_range(
+        base,
+        &http,
+        &head,
+        1,
+        MAX_RANGE_BLOCKS,
+    ))
+    .unwrap();
+    assert_eq!(
+        http.calls.borrow()[0],
+        (
+            format!("https://receiver/receiver/v1/block-filters/range/2/1/{MAX_RANGE_BLOCKS}"),
+            MAX_BATCH_BYTES
+        )
+    );
+    let batches = range
+        .bind(&head.genesis, head.genesis, &[head.tip.hash])
+        .unwrap();
+    assert_eq!(batches[0].matches(0, &[receiver]).unwrap(), [true]);
+    assert!(range.bind(&head.genesis, head.genesis, &[[2; 32]]).is_err());
+    for (from, limit) in [(0, 4), (1, 0), (1, MAX_RANGE_BLOCKS + 1)] {
+        assert!(ready(Inventories::block_range(base, &http, &head, from, limit)).is_err());
+    }
+    assert_eq!(
+        http.calls.borrow().len(),
+        1,
+        "invalid request never reaches transport"
+    );
+    let mut changed = head;
+    changed.revision = 3;
+    assert!(ready(Inventories::block_range(base, &http, &changed, 1, 4)).is_err());
 }
