@@ -139,6 +139,17 @@ fn malformed_ranges_are_rejected() {
     let mut far = bytes.clone();
     far[RANGE_HEADER] = 9;
     assert!(Range::decode(&far).is_err());
+    // A canonical gap so large that adding it to the height overflows.
+    let mut overflow = Range::new(3, 10, 5, [9; 32], [14; 32], vec![])
+        .unwrap()
+        .encode()
+        .unwrap();
+    let entries = RANGE_HEADER - 4;
+    overflow[entries..RANGE_HEADER].copy_from_slice(&1u32.to_le_bytes());
+    overflow.push(0xff);
+    overflow.extend(u64::MAX.to_le_bytes());
+    overflow.extend([1, 0]);
+    assert!(Range::decode(&overflow).is_err());
     // An entry whose set is empty.
     let mut empty = Range::new(3, 10, 5, [9; 32], [14; 32], vec![])
         .unwrap()
