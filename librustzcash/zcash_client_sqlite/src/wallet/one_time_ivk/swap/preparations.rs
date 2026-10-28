@@ -7,10 +7,13 @@ use crate::error::SqliteClientError;
 use crate::wallet::one_time_ivk::{Purpose, purpose_code, restore::queue};
 
 /// Makes `key` the preparation of `owner` for `purpose` and reports whether it is ready to
-/// hand out: its own history was read to completion, through the wallet's scanned tip when
-/// the key was prepared and through the account's latest filter coverage, with no payment
-/// candidate waiting. A new key, or one whose read fell behind filter coverage, gets a
-/// lookup through the wallet's scanned tip. Repeated calls keep the same row and lookup.
+/// hand out: its own history was read to completion through the target, the wallet's
+/// scanned tip when the key was prepared, with no lookup or payment candidate waiting. The
+/// target stays fixed across calls, so a publication lagging the scan reaches it once and
+/// the read never chases a moving tip. After the target, filters watch a monitored key, and
+/// a hit there queues a lookup that holds the key back; an unwatched refund index is fresh
+/// only as of its target. A new key, or one whose read a rewind or correction voided, gets
+/// a lookup through the target. Repeated calls keep the same row and lookup.
 pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -44,7 +47,7 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
             tip
         }
     };
-    if checked(conn, params, owner, key, target)? {
+    if checked(conn, params, key, target)? {
         return Ok(true);
     }
     let pending: bool = conn.query_row(
@@ -54,34 +57,32 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
         |r| r.get(0),
     )?;
     if !pending {
-        // Never read, or read before filters moved on: read it through the current tip.
-        conn.execute(
-            "UPDATE ironwood_one_time_preparations SET target_height = MAX(target_height, ?3)
-             WHERE account_id = ?1 AND purpose = ?2",
-            params![owner, code, tip],
+        queue::enqueue(
+            conn,
+            key,
+            queue::activation(params),
+            target,
+            queue::AUTOMATIC,
         )?;
-        queue::enqueue(conn, key, queue::activation(params), tip, queue::AUTOMATIC)?;
     }
-    checked(conn, params, owner, key, target.max(tip))
+    checked(conn, params, key, target)
 }
 
-/// Whether `key`'s own history was read to completion from activation through `target` and
-/// through `owner`'s filter frontier, with no payment candidate left.
+/// Whether `key`'s own history was read to completion from activation through `target`,
+/// with no lookup or payment candidate left.
 fn checked<P: Parameters>(
     conn: &Connection,
     params: &P,
-    owner: i64,
     key: i64,
     target: u32,
 ) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
              WHERE l.one_time_key_id = ?1 AND l.target_height IS NULL AND l.read_complete = 1
-               AND l.done_from <= ?2 AND l.done_height >= MAX(?3, COALESCE((SELECT filter_height
-                   FROM ironwood_one_time_recovery WHERE account_id = ?4), 0)))
+               AND l.done_from <= ?2 AND l.done_height >= ?3)
          AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
              WHERE p.one_time_key_id = ?1)",
-        params![key, queue::activation(params), target, owner],
+        params![key, queue::activation(params), target],
         |r| r.get(0),
     )?)
 }

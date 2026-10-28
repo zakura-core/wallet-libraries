@@ -146,39 +146,72 @@ fn a_refund_candidate_funded_or_paid_mid_wait_moves_on() {
     assert_eq!(prepare(&mut st).1, Ok(refund(2)));
 }
 
-/// A prepared address checked against a publication older than the account's latest filter
-/// coverage is read again through the newer tip before it is handed out.
+/// Filters run two blocks ahead of every PIR publication. The preparation's target stays
+/// where it was prepared, so the next round's publication reaches it, and one lookup makes
+/// the address ready instead of chasing the moving filter frontier.
 #[test]
-fn a_candidate_behind_filter_coverage_is_read_again() {
+fn a_lagging_publication_readies_the_preparation_after_one_lookup() {
     use crate::wallet::one_time_ivk::restore::tests::discovery::{blocks_above, record_span};
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let filter_to_tip = |st: &mut State| {
+        let state = status(st.wallet().db(), account);
+        let from = state
+            .filter_frontier
+            .map_or(activation_height(st), |f| f.height + 1);
+        let blocks = blocks_above(st, from - 1);
+        assert!(record_span(
+            st.wallet_mut().db_mut(),
+            account,
+            state.token,
+            &blocks,
+            &[]
+        ));
+    };
+    st.generate_and_scan_empty_blocks(2);
+    filter_to_tip(&mut st);
+    assert_eq!(prepare(&mut st).0, Err(ReservationPolicy::ReceiveHistory));
+    let prepared = tip(&st).height;
+    st.generate_and_scan_empty_blocks(2);
+    filter_to_tip(&mut st);
+    assert_eq!(due(&st), [receive(0), refund(0)]);
+    // This round's publication ends where the previous round's scan did.
+    let lagging = publication_at(&st, prepared);
+    drain(&mut st, account, lagging);
+    assert_eq!(prepare(&mut st).0, Ok(receive(0)));
+    assert!(due(&st).is_empty());
+}
+
+/// Another device pays the ready receive address after its target. The filter hit queues a
+/// lookup that holds the address back, and once that lookup finds the payment the
+/// preparation moves to the next hole.
+#[test]
+fn a_watched_candidate_paid_after_its_target_moves_on() {
+    use crate::wallet::one_time_ivk::restore::tests::discovery::{blocks_above, span_over};
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let _ = prepare(&mut st);
     run(&mut st);
     assert_eq!(prepare(&mut st).0, Ok(receive(0)));
-    st.generate_and_scan_empty_blocks(1);
+    let paid = pay_candidate(&mut st, receive(0));
     let token = status(st.wallet().db(), account).token;
-    let blocks = blocks_above(&st, activation_height(&st) - 1);
-    assert!(record_span(
-        st.wallet_mut().db_mut(),
-        account,
-        token,
-        &blocks,
-        &[]
-    ));
-    let handed = st
-        .wallet_mut()
-        .db_mut()
-        .prepare_receive_reservation(account, clock_now())
-        .unwrap();
-    assert!(matches!(handed, Err(ReservationPolicy::ReceiveHistory)));
-    assert!(due(&st).contains(&receive(0)));
+    let span = span_over(
+        st.wallet().db(),
+        0,
+        &blocks_above(&st, activation_height(&st) - 1),
+    );
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_filter_span(account, token, &span, &[(paid.height, receive(0))])
+            .unwrap(),
+        zcash_client_backend::data_api::one_time_ivk::restore::FilterOutcome::Committed
+    );
+    assert_eq!(prepare(&mut st).0, Err(ReservationPolicy::ReceiveHistory));
     run(&mut st);
-    let handed = st
-        .wallet_mut()
-        .db_mut()
-        .prepare_receive_reservation(account, clock_now());
-    assert_eq!(handed.unwrap().unwrap().key_id(), receive(0));
+    assert_eq!(prepare(&mut st).0, Err(ReservationPolicy::ReceiveHistory));
+    run(&mut st);
+    assert_eq!(prepare(&mut st).0, Ok(receive(1)));
 }
 
 /// Ironwood activation on the test network.
