@@ -251,6 +251,8 @@ mod tests {
             "ironwood_one_time_operation_receipts",
             "ironwood_one_time_recovery",
             "ironwood_one_time_payment_recovery",
+            "ironwood_one_time_pending_memos",
+            "ironwood_one_time_preparations",
             "ironwood_one_time_spend_retention",
             "ironwood_one_time_sweeps",
             "ironwood_one_time_unchecked_raw",

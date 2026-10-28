@@ -99,7 +99,7 @@ fn preparations_survive_duplicate_calls_and_restart() {
 fn a_cancelled_preparation_starts_again() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
-    prepare(&mut st);
+    let _ = prepare(&mut st);
     st.wallet_mut()
         .db_mut()
         .cancel_one_time_preparations(account)
@@ -153,7 +153,7 @@ fn a_candidate_behind_filter_coverage_is_read_again() {
     use crate::wallet::one_time_ivk::restore::tests::discovery::{blocks_above, record_span};
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
-    prepare(&mut st);
+    let _ = prepare(&mut st);
     run(&mut st);
     assert_eq!(prepare(&mut st).0, Ok(receive(0)));
     st.generate_and_scan_empty_blocks(1);
