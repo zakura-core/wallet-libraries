@@ -708,3 +708,50 @@ fn a_complete_check_over_a_held_hit_lookup_keeps_both() {
     assert!(behind(&st, account).is_empty());
     assert!(status(st.wallet().db(), account).lookups.is_empty());
 }
+
+/// I0's payment, matched by filters, is found by an extended manual check, which brings I4
+/// into monitoring and then queues I4 with only a manual reason. Cancelling the check
+/// leaves that target with no reason. A negative re-check still counts I4 as checked, so
+/// the seed walk finishes without the paused lookup.
+#[test]
+fn a_cancelled_manual_target_does_not_block_a_filter_checked_key() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let paid0 = pay_candidate(&mut st, receive(0));
+    assert_eq!(
+        advance(&mut st, account, &[(paid0.height, receive(0))]),
+        FilterOutcome::Committed
+    );
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, publication, Some(5))
+            .unwrap()
+    );
+    while due(&st, account) != [receive(4)] {
+        if answer_lookup(&mut st, account, publication) {
+            continue;
+        }
+        let state = status(st.wallet().db(), account);
+        let request = state.witnesses[0];
+        let answer = witness_answer(&st, &request, tip(&st).height);
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .record_one_time_witness(account, state.token, request, &answer, clock_now())
+                .unwrap()
+        );
+    }
+    st.wallet_mut()
+        .db_mut()
+        .cancel_one_time_history(account)
+        .unwrap();
+    assert!(due(&st, account).is_empty());
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    assert_eq!(behind(&st, account), [receive(4)]);
+    recheck(&mut st, account, &[]);
+    let state = status(st.wallet().db(), account);
+    assert!(state.lookups.is_empty());
+    assert_eq!((state.restore_next, state.restore_complete), (5, true));
+}

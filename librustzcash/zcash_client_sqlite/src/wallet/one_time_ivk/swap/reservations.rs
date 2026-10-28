@@ -411,7 +411,8 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     let (id, key) = register(conn, params, account, KeyId::new(Purpose::Receive, next))?;
     // A restored seed may have paid this address before the wallet knew it, so it is
     // handed out only after its own history was read to completion with nothing pending,
-    // by a lookup or by filters through the account's frontier.
+    // by a lookup or by filters through the account's frontier. A cancelled manual
+    // search's target, with no reason left, does not hold it.
     let checked: bool = conn.query_row(
         "SELECT (EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
              WHERE l.one_time_key_id = ?1 AND l.target_height IS NULL AND l.read_complete = 1
@@ -420,7 +421,8 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
                  JOIN ironwood_one_time_recovery r ON r.account_id = k.account_id
                  WHERE k.id = ?1 AND k.covered_height >= r.filter_height
                    AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
-                       WHERE l.one_time_key_id = k.id AND l.target_height IS NOT NULL)))
+                       WHERE l.one_time_key_id = k.id AND l.target_height IS NOT NULL
+                         AND l.reasons != 0)))
          AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
              WHERE p.one_time_key_id = ?1)",
         [id],

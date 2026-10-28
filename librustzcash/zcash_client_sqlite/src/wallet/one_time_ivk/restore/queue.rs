@@ -1278,7 +1278,8 @@ fn progress<P: Parameters>(
         enroll(conn, params, owner.0, index_after(next, 1)?)?;
         // An empty counts only with complete history from activation through the frontier,
         // so the four empties share compatible captured coverage. That is a completed
-        // lookup, or filter coverage with no lookup left to run.
+        // lookup, or filter coverage with no lookup left to run. A target with no reason
+        // left, from a cancelled manual search, waits for the user, not for discovery.
         let checked: Option<bool> = conn.query_row(&format!("SELECT k.used FROM ironwood_one_time_keys k
             WHERE k.id = ?1
             AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = k.id)
@@ -1286,7 +1287,8 @@ fn progress<P: Parameters>(
                     AND l.done_height >= ?2 AND l.done_from <= ?3 AND l.target_height IS NULL
                     AND l.read_complete = 1)
                 OR ({} >= ?2 AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
-                    WHERE l.one_time_key_id = k.id AND l.target_height IS NOT NULL)))",
+                    WHERE l.one_time_key_id = k.id AND l.target_height IS NOT NULL
+                      AND l.reasons != 0)))",
             covered_sql(activation(params))),
             params![id, height, activation(params)], |r| r.get(0)).optional()?;
         let Some(paid) = checked else {
