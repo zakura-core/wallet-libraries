@@ -11,6 +11,8 @@
   birthday. One range covers up to `MAX_RANGE_BLOCKS` heights within
   `MAX_RANGE_BYTES`. `blocks::Head` now describes a sealed archive and a tail,
   and `blocks::RangeSize` reports what serving from a height would cost.
+  `Range::raw_sets` and `Range::write` let a server join stored ranges from
+  their encoded sets, which `HeightSet::bytes` also gives, without decoding them.
 - Breaking: `blocks::BlockFilter`, `blocks::Batch` (`IWBATCH1`),
   `MAX_BLOCKS`, `MAX_BATCH_BYTES` and `Head::check_request` are removed.
 

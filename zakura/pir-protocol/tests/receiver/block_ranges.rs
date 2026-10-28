@@ -66,6 +66,27 @@ fn round_trip_carries_only_paying_blocks() {
     let hits = decoded.matches(&GENESIS, &members);
     assert_eq!(hits.len(), 2 * members.len());
     assert!(hits.iter().all(|(h, _)| *h == 11 || *h == 14));
+    // A server re-issues stored sets under another revision without decoding them.
+    let raw = Range::raw_sets(&bytes).unwrap();
+    assert_eq!(raw.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [11, 14]);
+    let end = decoded.end();
+    let reissued = Range::write(9, 10, 5, decoded.parent(), end.hash, raw.clone()).unwrap();
+    assert_eq!(reissued.len(), bytes.len());
+    let built: Vec<_> = sample().0.encode().unwrap();
+    assert_eq!(built, bytes);
+    assert_eq!(
+        Range::decode(&reissued)
+            .unwrap()
+            .matches(&GENESIS, &members),
+        hits
+    );
+    for wrong in [
+        vec![raw[1], raw[0]],
+        vec![(9, raw[0].1)],
+        vec![(15, raw[0].1)],
+    ] {
+        assert!(Range::write(9, 10, 5, [0; 32], [0; 32], wrong).is_err());
+    }
 }
 
 /// A range of only empty blocks is a header and nothing else.
