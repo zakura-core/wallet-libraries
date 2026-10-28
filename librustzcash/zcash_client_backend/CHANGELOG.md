@@ -7,6 +7,14 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Added
+
+- `data_api::one_time_ivk::restore::{FilterSpan, FilterOutcome, FilterReceiver}` for span-based filter coverage.
+
+### Changed
+
+- `one_time_ivk::restore::RecoveryStatus::fresh` replaces `skipped_through`, since no catch-up skips history any more.
+
 ## [0.1.0-rc9.5] - 2026-10-26
 
 ### Changed
