@@ -317,6 +317,12 @@ impl Range {
         self.sets.iter().map(|s| s.height)
     }
 
+    /// The nonempty blocks' sets, ascending, so a server can assemble a longer range
+    /// from stored ones.
+    pub fn sets(&self) -> &[HeightSet] {
+        &self.sets
+    }
+
     /// Tests every receiver against every nonempty block, returning `(height, index)` for
     /// each match, where `index` is the receiver's position in `receivers`. A match may be
     /// false; an absent match is not, given complete indexing by the service.

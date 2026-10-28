@@ -66,6 +66,18 @@ fn round_trip_carries_only_paying_blocks() {
     let hits = decoded.matches(&GENESIS, &members);
     assert_eq!(hits.len(), 2 * members.len());
     assert!(hits.iter().all(|(h, _)| *h == 11 || *h == 14));
+    // A server can re-issue stored sets under another revision.
+    let end = decoded.end();
+    let reissued = Range::new(
+        9,
+        10,
+        5,
+        decoded.parent(),
+        end.hash,
+        decoded.sets().to_vec(),
+    )
+    .unwrap();
+    assert_eq!(reissued.matches(&GENESIS, &members), hits);
 }
 
 /// A range of only empty blocks is a header and nothing else.
