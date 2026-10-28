@@ -2723,7 +2723,7 @@ fn manual_only_receive_keys_stay_out_of_automatic_monitoring() {
 
 /// How a faulty directory mislabels a genuine payment.
 #[derive(Clone, Copy, Debug)]
-enum Mislabel {
+pub(in crate::wallet::one_time_ivk) enum Mislabel {
     /// Under an unrelated transaction's ID.
     OtherTransaction,
     /// Under a transaction whose claimed action differs only in its note commitment.
@@ -2749,15 +2749,15 @@ fn with_other_commitment(
 /// A wallet holding a genuine payment to I8 that a faulty directory labeled with another
 /// transaction's ID, admitted under that label, with that wrong transaction and the true
 /// payment.
-struct Mislabeled {
-    st: State,
-    candidate: PendingPayment,
-    forged: PendingPayment,
-    wrong: zcash_primitives::transaction::Transaction,
+pub(in crate::wallet::one_time_ivk) struct Mislabeled {
+    pub(in crate::wallet::one_time_ivk) st: State,
+    pub(in crate::wallet::one_time_ivk) candidate: PendingPayment,
+    pub(in crate::wallet::one_time_ivk) forged: PendingPayment,
+    pub(in crate::wallet::one_time_ivk) wrong: zcash_primitives::transaction::Transaction,
 }
 
 /// Admits a genuine payment to I8 under the wrong label `mislabel` describes.
-fn mislabeled(mislabel: Mislabel) -> Mislabeled {
+pub(in crate::wallet::one_time_ivk) fn mislabeled(mislabel: Mislabel) -> Mislabeled {
     let mut st = scanned_wallet();
     let receiver = derive(&st, key8()).address_at(0u32, Scope::External);
     let paying = external_payment(receiver, &zcash_protocol::memo::MemoBytes::empty());

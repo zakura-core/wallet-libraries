@@ -3,6 +3,17 @@ use crate::{AccountUuid, error::SqliteClientError};
 use rusqlite::params;
 use zcash_protocol::consensus::BlockHeight;
 
+/// Advances the wallet-wide one-time work sequence in the same transaction as a new
+/// recovery obligation, so an app comparing `WalletDb::one_time_new_work` with the value
+/// its last round saw knows a round has work. It never goes back.
+pub(crate) fn new_work(conn: &rusqlite::Connection) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE ironwood_one_time_work SET sequence = sequence + 1",
+        [],
+    )?;
+    Ok(())
+}
+
 /// SQL assignments that drop a lookup's position inside a captured inventory.
 pub(crate) const CURSOR_RESET: &str =
     "inventory = NULL, shard = NULL, segment = NULL, last_record = NULL";
@@ -18,15 +29,25 @@ pub(crate) fn truncate(
     height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
     let floor = u32::from(height);
-    // Repairs below are new work for each account they touch.
-    conn.execute(
-        "UPDATE ironwood_one_time_recovery SET new_work = new_work + 1 WHERE account_id IN
-         (SELECT k.account_id FROM ironwood_one_time_keys k WHERE k.prebirthday_height > ?1
-              OR k.funding_height > ?1 OR EXISTS(SELECT 1 FROM ironwood_received_notes n
-                  JOIN transactions t ON t.id_tx = n.transaction_id
-                  WHERE n.one_time_key_id = k.id AND t.mined_height > ?1))",
+    // Anything rolled back below becomes work again: displaced funding or receipts,
+    // lookup progress, filter coverage, or restore and manual progress above the floor.
+    let rolled_back: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys k WHERE k.prebirthday_height > ?1
+                OR k.funding_height > ?1 OR k.covered_height > ?1
+                OR EXISTS(SELECT 1 FROM ironwood_received_notes n
+                    JOIN transactions t ON t.id_tx = n.transaction_id
+                    WHERE n.one_time_key_id = k.id AND t.mined_height > ?1))
+            OR EXISTS(SELECT 1 FROM ironwood_one_time_lookups
+                WHERE done_height > ?1 OR checked_height > ?1)
+            OR EXISTS(SELECT 1 FROM ironwood_one_time_recovery WHERE filter_height > ?1
+                OR (restore_done = 0 AND restore_height > ?1)
+                OR (manual_end IS NOT NULL AND manual_height > ?1))",
         [floor],
+        |r| r.get(0),
     )?;
+    if rolled_back {
+        new_work(conn)?;
+    }
     // A refund memo above the fork is accepted again where the replacement chain mines it.
     conn.execute(
         "INSERT OR IGNORE INTO ironwood_one_time_pending_memos (note_id)
@@ -166,10 +187,11 @@ pub(crate) fn reopen_discovery(
     conn.execute(
         "UPDATE ironwood_one_time_recovery SET generation = generation + 1,
         restore_next = X'0000000000000000', restore_gap = 0, restore_done = 0,
-        restore_height = NULL, filter_height = NULL, filter_hash = NULL, fresh = 0,
-        new_work = new_work + 1 WHERE account_id = ?1",
+        restore_height = NULL, filter_height = NULL, filter_hash = NULL, fresh = 0
+        WHERE account_id = ?1",
         [owner],
     )?;
+    new_work(conn)?;
     conn.execute(
         "UPDATE ironwood_one_time_keys SET covered_height = NULL WHERE account_id = ?1",
         [owner],

@@ -2219,6 +2219,14 @@ CREATE TABLE transparent_tx_display_outputs (
     PRIMARY KEY (transaction_id, output_index)
 )"#;
 
+/// The wallet-wide one-time recovery work sequence, one row that goes up with each new
+/// recovery obligation and never goes back, even when an account is deleted, so an app can
+/// tell cheaply that a round has work.
+pub(super) const TABLE_IRONWOOD_ONE_TIME_WORK: &str = "CREATE TABLE ironwood_one_time_work (
+                id INTEGER PRIMARY KEY CHECK (id = 0),
+                sequence INTEGER NOT NULL CHECK (sequence >= 0)
+            )";
+
 /// Refund memos on internal notes not accepted yet: unmined, more than the memo gap above
 /// the highest known refund index, or without proof that the wallet funded them.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_PENDING_MEMOS: &str =
@@ -2243,8 +2251,7 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_PREPARATIONS: &str = "CREATE TABLE iron
 /// unset). `fresh` holds until a key is paid or registered beyond the initial window, or a
 /// correction or birthday change clears coverage. `pir_coverage` is set while a complete
 /// check last advanced coverage, so newly watched keys get lookups rather than filter
-/// re-checks. `new_work` goes up with each new recovery obligation, so an app can tell
-/// cheaply that a round has work.
+/// re-checks.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str = "CREATE TABLE ironwood_one_time_recovery (
                 account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
                 enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
@@ -2266,6 +2273,5 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str = "CREATE TABLE ironwood
                 upgrade_required INTEGER NOT NULL DEFAULT 0 CHECK (upgrade_required IN (0, 1)),
                 fresh INTEGER NOT NULL DEFAULT 1 CHECK (fresh IN (0, 1)),
                 pir_coverage INTEGER NOT NULL DEFAULT 0 CHECK (pir_coverage IN (0, 1)),
-                new_work INTEGER NOT NULL DEFAULT 0 CHECK (new_work >= 0),
                 CHECK ((filter_height IS NULL) = (filter_hash IS NULL))
             )";

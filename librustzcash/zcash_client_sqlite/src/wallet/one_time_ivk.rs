@@ -217,7 +217,7 @@ fn register<P: Parameters>(
         {
             end_fresh(conn, id)?;
         }
-        restore::queue::new_work(conn, owner.0)?;
+        crate::wallet::one_time_rewind::new_work(conn)?;
         if key_id.purpose() == Purpose::Receive {
             restore::queue::register_history(
                 conn,

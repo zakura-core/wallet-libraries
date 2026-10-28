@@ -10,6 +10,7 @@ and this library adheres to Rust's notion of
 ### Added
 
 - `data_api::one_time_ivk::restore::{FilterSpan, FilterOutcome, FilterReceiver}` for span-based filter coverage.
+- `one_time_ivk::restore::RecoveryStatus::awaiting_admission` counts recovered payments waiting for ordinary sync to admit them.
 
 ### Changed
 

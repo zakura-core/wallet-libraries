@@ -1047,3 +1047,83 @@ fn a_candidate_that_returns_a_retired_key_to_monitoring_fences_held_filters() {
     // Filters watched R0 until it retired at the frontier, so nothing is behind.
     assert!(behind(&st, account).is_empty());
 }
+
+/// A rewind that reopens an empty completed history is new work, and one that rolls back
+/// nothing is not.
+#[test]
+fn a_rewind_counts_as_new_work_only_when_it_rolls_something_back() {
+    let mut st = scanned_wallet();
+    st.generate_and_scan_empty_blocks(3);
+    let account = st.test_account().unwrap().id();
+    assert_eq!(complete(&mut st, account), 4);
+    let work = |st: &State| st.wallet().db().one_time_new_work().unwrap();
+    let before = work(&st);
+    let height = tip(&st).height;
+    tx(st.wallet_mut().db_mut(), |c, _| {
+        crate::wallet::one_time_rewind::truncate(c, height)
+    })
+    .unwrap();
+    assert_eq!(work(&st), before, "nothing above the tip");
+    st.truncate_to_height(height - 1);
+    assert!(work(&st) > before, "the empty histories are read again");
+    assert!(!status(st.wallet().db(), account).lookups.is_empty());
+}
+
+/// The work sequence never goes back, so deleting an account with work cannot make it
+/// repeat a value an app already saw.
+#[test]
+fn the_work_sequence_survives_account_deletion() {
+    let mut st = scanned_wallet();
+    let work = |st: &State| st.wallet().db().one_time_new_work().unwrap();
+    let birthday = st.test_account().unwrap().birthday().clone();
+    let (other, _) = st
+        .wallet_mut()
+        .db_mut()
+        .create_account("other", &SecretVec::new(vec![9; 32]), &birthday, None)
+        .unwrap();
+    let seen = work(&st);
+    st.wallet_mut()
+        .db_mut()
+        .set_one_time_recovery_enabled(other, true)
+        .unwrap();
+    let grown = work(&st);
+    assert!(grown > seen);
+    st.wallet_mut().db_mut().delete_account(other).unwrap();
+    assert_eq!(work(&st), grown);
+    let account = st.test_account().unwrap().id();
+    let start = activation(&st);
+    recover(st.wallet_mut().db_mut(), account, receive(9), start);
+    assert!(work(&st) > grown);
+}
+
+/// Storing the same disputing transaction again before the repair settles keeps the
+/// repair's progress and adds no work.
+#[test]
+fn a_repeated_dispute_keeps_its_repair() {
+    use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
+    let Mislabeled { mut st, wrong, .. } = mislabeled(Mislabel::OtherTransaction);
+    let account = st.test_account().unwrap().id();
+    let network = *st.network();
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &wrong, None).unwrap();
+    let work = status(st.wallet().db(), account).lookups[0].clone();
+    st.wallet_mut()
+        .db_mut()
+        .defer_one_time_lookup(account, &work, clock_now())
+        .unwrap();
+    let attempts = |st: &State| -> u32 {
+        value(
+            st.wallet().conn(),
+            "SELECT MAX(attempts) FROM ironwood_one_time_lookups",
+            [],
+        )
+    };
+    let counted = st.wallet().db().one_time_new_work().unwrap();
+    assert_eq!(attempts(&st), 1);
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &wrong, None).unwrap();
+    assert_eq!(
+        attempts(&st),
+        1,
+        "the repair keeps its backoff and progress"
+    );
+    assert_eq!(st.wallet().db().one_time_new_work().unwrap(), counted);
+}

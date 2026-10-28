@@ -265,6 +265,9 @@ mod tests {
             assert!(before.remove(table).unwrap_or_default().is_empty());
             assert!(after.remove(table).unwrap_or_default().is_empty());
         }
+        // The one-time work sequence starts with its single row.
+        before.remove("ironwood_one_time_work");
+        after.remove("ironwood_one_time_work");
         let queued_before = before.remove("tx_retrieval_queue").unwrap_or_default();
         let queued_after = after.remove("tx_retrieval_queue").unwrap_or_default();
         assert!(queued_before.iter().all(|row| queued_after.contains(row)));

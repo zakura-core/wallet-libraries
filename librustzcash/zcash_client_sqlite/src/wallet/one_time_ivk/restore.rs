@@ -35,7 +35,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// its last round saw and run a round only when it changed.
     pub fn one_time_new_work(&self) -> Result<u64, SqliteClientError> {
         Ok(self.conn.borrow().query_row(
-            "SELECT COALESCE(SUM(new_work), 0) FROM ironwood_one_time_recovery",
+            "SELECT sequence FROM ironwood_one_time_work",
             [],
             |r| r.get(0),
         )?)

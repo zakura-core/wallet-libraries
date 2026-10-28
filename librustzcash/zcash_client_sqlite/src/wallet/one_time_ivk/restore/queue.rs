@@ -553,16 +553,6 @@ pub(super) fn automatic_end(conn: &Connection, owner: i64) -> Result<u64, Sqlite
     Ok(super::super::swap::reservations::recovery_end(conn, owner)?.max(enrolled))
 }
 
-/// Records that `owner` has a new recovery obligation, in the same transaction as the
-/// obligation, so an app comparing `WalletDb::one_time_new_work` knows a round has work.
-pub(crate) fn new_work(conn: &Connection, owner: i64) -> Result<(), SqliteClientError> {
-    conn.execute(
-        "UPDATE ironwood_one_time_recovery SET new_work = new_work + 1 WHERE account_id = ?1",
-        [owner],
-    )?;
-    Ok(())
-}
-
 /// Records funded refund evidence. New or earlier funding queues the key's history from
 /// that height even if ordinary sync passed it. A key whose funding is already older than
 /// [`MEMO_REFUND_WINDOW`] is still monitored until its own coverage passes the window.
@@ -586,7 +576,12 @@ pub(crate) fn funded<P: Parameters>(
         )?;
         if changed {
             register_history(conn, owner, key, u32::from(height))?;
-            new_work(conn, owner)?;
+            crate::wallet::one_time_rewind::new_work(conn)?;
+            // A funded index is never handed out, even if a reorg later clears the funding.
+            conn.execute(
+                "DELETE FROM ironwood_one_time_preparations WHERE one_time_key_id = ?1",
+                [key],
+            )?;
         }
         Ok(())
     })
@@ -2177,10 +2172,10 @@ fn dispute_raw_receipts(
         }
         // Inclusion authenticates the note's value and nullifier, so its row, spends, witness
         // and position stay; only its label is disputed until its history yields the true one.
-        conn.execute(
+        let new = conn.execute(
             "INSERT OR IGNORE INTO ironwood_one_time_disputed_receipts (note_id) VALUES (?1)",
             [note],
-        )?;
+        )? == 1;
         // Private enhancement bound to this output trusts the disputed label.
         conn.execute(
             "UPDATE ironwood_enhance_metadata_queue SET commitment_tree_position = NULL,
@@ -2191,12 +2186,16 @@ fn dispute_raw_receipts(
         )?;
         // Where the true record lies is unknown: the label's mined height is a mutable
         // claim about the disputed transaction, not the note's placement. So the key's
-        // whole history is read again from activation, through the current frontier.
-        rewind_lookup(conn, key, activation, 0)?;
-        invalidate(conn, key)?;
-        queue_history(conn, owner, key, activation)?;
-        new_work(conn, owner)?;
-        crate::wallet::one_time_rewind::queue_invalidated(conn, None)?;
+        // whole history is read again from activation, through the current frontier. The
+        // same raw bytes stored again carry no new evidence, so a repair already under way
+        // keeps its progress.
+        if new {
+            rewind_lookup(conn, key, activation, 0)?;
+            invalidate(conn, key)?;
+            queue_history(conn, owner, key, activation)?;
+            crate::wallet::one_time_rewind::new_work(conn)?;
+            crate::wallet::one_time_rewind::queue_invalidated(conn, None)?;
+        }
         disputed = true;
     }
     if disputed && !kept {
@@ -2333,7 +2332,7 @@ fn admit_waiting<P: Parameters>(
                 rewind_lookup(conn, id, activation(params), now.saturating_add(60))?;
                 invalidate(conn, id)?;
                 crate::wallet::one_time_rewind::queue_invalidated(conn, None)?;
-                new_work(conn, owner)?;
+                crate::wallet::one_time_rewind::new_work(conn)?;
             }
         }
     }
@@ -2404,7 +2403,7 @@ fn rescan_uncovered(
                 conn,
                 BlockHeight::from(gap.start)..BlockHeight::from(gap.end),
             )?;
-            new_work(conn, owner)?;
+            crate::wallet::one_time_rewind::new_work(conn)?;
         }
     }
     Ok(())

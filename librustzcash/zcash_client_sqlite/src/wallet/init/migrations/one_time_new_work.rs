@@ -8,7 +8,7 @@ use uuid::Uuid;
 use super::one_time_preparations;
 use crate::wallet::init::WalletMigrationError;
 
-/// Adds `ironwood_one_time_recovery.new_work` and `ironwood_one_time_pending_memos`.
+/// Adds `ironwood_one_time_work` and `ironwood_one_time_pending_memos`.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x39c5795c_fd41_41fb_8c39_be4fa277c96b);
 
 const DEPENDENCIES: &[Uuid] = &[one_time_preparations::MIGRATION_ID];
@@ -39,8 +39,11 @@ impl RusqliteMigration for Migration {
     /// none is missed when batches stop re-reading them.
     fn up(&self, conn: &rusqlite::Transaction) -> Result<(), Self::Error> {
         conn.execute_batch(
-            "ALTER TABLE ironwood_one_time_recovery ADD COLUMN new_work INTEGER NOT NULL
-                DEFAULT 0 CHECK (new_work >= 0);
+            "CREATE TABLE ironwood_one_time_work (
+                id INTEGER PRIMARY KEY CHECK (id = 0),
+                sequence INTEGER NOT NULL CHECK (sequence >= 0)
+            );
+             INSERT INTO ironwood_one_time_work (id, sequence) VALUES (0, 0);
              CREATE TABLE ironwood_one_time_pending_memos (
                 note_id INTEGER PRIMARY KEY REFERENCES ironwood_received_notes(id) ON DELETE CASCADE
             );

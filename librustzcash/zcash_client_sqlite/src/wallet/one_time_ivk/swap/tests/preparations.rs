@@ -187,3 +187,20 @@ fn activation_height(st: &State) -> BlockHeight {
         st.network(),
     ))
 }
+
+/// A memo funds the prepared refund index, and a reorg then removes that funding before
+/// the next call. The index stays allocated, so the preparation moves to the next one.
+#[test]
+fn a_funded_candidate_stays_retired_after_a_reorg_clears_its_funding() {
+    let mut st = scanned_wallet();
+    st.generate_and_scan_empty_blocks(3);
+    let account = st.test_account().unwrap().id();
+    assert_eq!(prepare(&mut st).1, Err(ReservationPolicy::RefundHistory));
+    let funded = tip(&st).height;
+    recover(st.wallet_mut().db_mut(), account, refund(0), funded);
+    st.truncate_to_height(funded - 1);
+    st.generate_and_scan_empty_blocks(2);
+    assert_eq!(prepare(&mut st).1, Err(ReservationPolicy::RefundHistory));
+    run(&mut st);
+    assert_eq!(prepare(&mut st).1, Ok(refund(1)));
+}
