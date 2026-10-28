@@ -36,6 +36,7 @@ mod ironwood_unsupported_memo_retry;
 mod ivk_item_cache;
 mod note_locking;
 mod nullifier_map;
+mod one_time_filter_coverage;
 mod one_time_ivk;
 mod one_time_ivk_discovery;
 mod one_time_pir;
@@ -158,7 +159,9 @@ pub mod ids {
         ironwood_transparent_output_shape::MIGRATION_ID as IRONWOOD_TRANSPARENT_OUTPUT_SHAPE,
         ironwood_unsupported_memo_retry::MIGRATION_ID as IRONWOOD_UNSUPPORTED_MEMO_RETRY,
         ivk_item_cache::MIGRATION_ID as IVK_ITEM_CACHE, note_locking::MIGRATION_ID as NOTE_LOCKING,
-        nullifier_map::MIGRATION_ID as NULLIFIER_MAP, one_time_ivk::MIGRATION_ID as ONE_TIME_IVK,
+        nullifier_map::MIGRATION_ID as NULLIFIER_MAP,
+        one_time_filter_coverage::MIGRATION_ID as ONE_TIME_FILTER_COVERAGE,
+        one_time_ivk::MIGRATION_ID as ONE_TIME_IVK,
         one_time_ivk_discovery::MIGRATION_ID as ONE_TIME_IVK_DISCOVERY,
         one_time_pir::MIGRATION_ID as ONE_TIME_PIR,
         orchard_ironwood_migration_anchor_interval::MIGRATION_ID as ORCHARD_IRONWOOD_MIGRATION_ANCHOR_INTERVAL,
@@ -443,6 +446,7 @@ pub(super) fn all_migrations<
         Box::new(transparent_detail_content_failures::Migration),
         Box::new(one_time_ivk_discovery::Migration),
         Box::new(one_time_pir::Migration),
+        Box::new(one_time_filter_coverage::Migration),
     ]
 }
 
@@ -704,7 +708,7 @@ pub(crate) fn forget_txid_enhancement(conn: &rusqlite::Connection) {
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     transparent_detail_content_failures::MIGRATION_ID,
-    one_time_pir::MIGRATION_ID,
+    one_time_filter_coverage::MIGRATION_ID,
 ];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
@@ -833,6 +837,7 @@ pub(crate) mod tests {
             ids::NOTE_LOCKING,
             ids::NULLIFIER_MAP,
             ids::ONE_TIME_IVK,
+            ids::ONE_TIME_FILTER_COVERAGE,
             ids::ONE_TIME_IVK_DISCOVERY,
             ids::ONE_TIME_PIR,
             ids::ORCHARD_IRONWOOD_MIGRATION_ANCHOR_INTERVAL,
