@@ -29,8 +29,10 @@ pub(crate) fn truncate(
     height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
     let floor = u32::from(height);
-    // Anything rolled back below becomes work again: displaced funding or receipts,
-    // lookup progress, filter coverage, or restore and manual progress above the floor.
+    // Anything rolled back below becomes work again: displaced funding or receipts, lookup
+    // progress, filter coverage, payment candidates or their witnesses, or restore and
+    // manual cursors above the floor. A cursor an earlier rewind already reset keeps its
+    // captured height, so only one still past its start counts.
     let rolled_back: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys k WHERE k.prebirthday_height > ?1
                 OR k.funding_height > ?1 OR k.covered_height > ?1
@@ -39,9 +41,13 @@ pub(crate) fn truncate(
                     WHERE n.one_time_key_id = k.id AND t.mined_height > ?1))
             OR EXISTS(SELECT 1 FROM ironwood_one_time_lookups
                 WHERE done_height > ?1 OR checked_height > ?1)
+            OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery
+                WHERE height > ?1 OR witness_height > ?1)
             OR EXISTS(SELECT 1 FROM ironwood_one_time_recovery WHERE filter_height > ?1
-                OR (restore_done = 0 AND restore_height > ?1)
-                OR (manual_end IS NOT NULL AND manual_height > ?1))",
+                OR (restore_done = 0 AND restore_height > ?1
+                    AND (restore_next != X'0000000000000000' OR restore_gap != 0))
+                OR (manual_end IS NOT NULL AND manual_height > ?1
+                    AND (manual_purpose != 0 OR manual_next != X'0000000000000000')))",
         [floor],
         |r| r.get(0),
     )?;

@@ -1127,3 +1127,113 @@ fn a_repeated_dispute_keeps_its_repair() {
     );
     assert_eq!(st.wallet().db().one_time_new_work().unwrap(), counted);
 }
+
+/// Rewinds `floor` directly, as the wallet's own rewind does first.
+fn rewind(st: &mut State, floor: BlockHeight) {
+    tx(st.wallet_mut().db_mut(), |c, _| {
+        crate::wallet::one_time_rewind::truncate(c, floor)
+    })
+    .unwrap();
+}
+
+/// A payment to I8 whose history was read through `read`, with its witness built two blocks
+/// later and waiting for admission because the scan left the tip uncovered.
+fn waiting_witness() -> (State, BlockHeight) {
+    waiting_witness_in(scanned_wallet())
+}
+
+/// [`waiting_witness`] in the scanned wallet `st`.
+fn waiting_witness_in(mut st: State) -> (State, BlockHeight) {
+    let candidate = pay_candidate(&mut st, key8());
+    queue_late(&mut st, key8(), &candidate);
+    let read = tip(&st).height;
+    st.generate_and_scan_empty_blocks(2);
+    exec(
+        st.wallet().conn(),
+        "UPDATE ironwood_journal_coverage SET end_height = ?1 WHERE end_height > ?1",
+        [u32::from(tip(&st).height)],
+    );
+    send_witness(&mut st, key8(), &candidate);
+    assert!(one_time_notes(&st).is_empty(), "admission waits");
+    (st, read)
+}
+
+/// A rewind that only voids a waiting payment's witness counts as new work once; repeating
+/// it rolls nothing back and counts nothing.
+#[test]
+fn a_witness_only_rewind_counts_once() {
+    let (mut st, read) = waiting_witness();
+    let work = |st: &State| st.wallet().db().one_time_new_work().unwrap();
+    let before = work(&st);
+    rewind(&mut st, read + 1);
+    assert_eq!(work(&st), before + 1);
+    rewind(&mut st, read + 1);
+    assert_eq!(work(&st), before + 1);
+}
+
+/// A rewind that resets an unfinished seed walk counts once; repeating it before the walk
+/// moves again counts nothing.
+#[test]
+fn a_repeated_rewind_does_not_recount_a_reset_walk() {
+    let mut st = scanned_wallet();
+    st.generate_and_scan_empty_blocks(3);
+    let account = st.test_account().unwrap().id();
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    while status(st.wallet().db(), account).restore_next == 0 {
+        assert!(answer_lookup(&mut st, account, publication));
+    }
+    assert!(!status(st.wallet().db(), account).restore_complete);
+    let work = |st: &State| st.wallet().db().one_time_new_work().unwrap();
+    let floor = publication.end.height - 1;
+    let before = work(&st);
+    rewind(&mut st, floor);
+    assert_eq!(work(&st), before + 1);
+    assert_eq!(status(st.wallet().db(), account).restore_next, 0);
+    rewind(&mut st, floor);
+    assert_eq!(work(&st), before + 1);
+}
+
+/// `awaiting_admission` counts a witnessed payment while admission waits for the rescan,
+/// only for its own account, and returns to zero once the payment is admitted.
+#[test]
+fn awaiting_admission_counts_a_witnessed_payment_until_it_is_admitted() {
+    let waiting = |st: &State, account| {
+        st.wallet()
+            .db()
+            .one_time_recovery(account, clock_now())
+            .unwrap()
+            .awaiting_admission
+    };
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    // Another account born at the tip, so it adds no history to scan.
+    let born = st.latest_cached_block().unwrap().chain_state().clone();
+    let birthday = zcash_client_backend::data_api::AccountBirthday::from_parts(born, None);
+    let (other, _) = st
+        .wallet_mut()
+        .db_mut()
+        .create_account("other", &SecretVec::new(vec![9; 32]), &birthday, None)
+        .unwrap();
+    st.wallet_mut()
+        .db_mut()
+        .set_one_time_recovery_enabled(other, true)
+        .unwrap();
+    assert_eq!(waiting(&st, account), 0);
+    let (mut st, _) = waiting_witness_in(st);
+    // The rescan admission queued for the uncovered tip.
+    let (uncovered, end): (u32, u32) = row(
+        st.wallet().conn(),
+        "SELECT block_range_start, block_range_end FROM scan_queue WHERE priority != 10",
+        [],
+    );
+    assert_eq!((waiting(&st, account), waiting(&st, other)), (1, 0));
+    st.scan_cached_blocks(uncovered.into(), (end - uncovered) as usize);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    assert_eq!(waiting(&st, account), 0);
+}
