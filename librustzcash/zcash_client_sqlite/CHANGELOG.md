@@ -11,7 +11,7 @@ and this library adheres to Rust's notion of
 
 - One-time IVK filter coverage is tracked per span and per key. `WalletDb::record_one_time_filter_span` commits a sparse filter range from Ironwood activation on: it needs no wallet hash below the birthday, commits only when its end matches a fully scanned block or lies 1,000 blocks below the scanned tip, must continue the committed frontier or replay from inside it, and returns a `FilterOutcome`. `WalletDb::recheck_one_time_filters` re-checks newly watched keys over history already covered, and `WalletDb::one_time_receivers` reports each key's coverage. Seed discovery completes on filter coverage without PIR, and newly registered keys wait for a re-check instead of a lookup.
 - `WalletDb::begin_one_time_recovery` takes `complete` instead of `direct`: a complete check reads every monitored key, paid ones included, over the gap from its coverage, so it finds repeat payments. Direct catch-up, which skipped completed paid keys, is gone.
-- Corrections, reorgs and earlier birthdays also roll back filter coverage. A schema change discards existing one-time filter progress.
+- Corrections, reorgs and earlier birthdays also roll back filter coverage. A correction no longer reads every monitored key by PIR: filters or a complete check cover settled history again, and only pending lookups and open reservations are read again directly. A new migration discards existing one-time filter frontiers.
 
 ### Removed
 

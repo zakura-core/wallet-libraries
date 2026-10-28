@@ -168,7 +168,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
 }
 
 /// SQL condition on `ironwood_one_time_keys k`: local receive reservation ownership.
-const RESERVED: &str = "(k.reserved_at IS NOT NULL AND k.released_at IS NULL)";
+pub(in crate::wallet::one_time_ivk) const RESERVED: &str =
+    "(k.reserved_at IS NOT NULL AND k.released_at IS NULL)";
 
 /// Reads the durable toggle inside the same transaction as the issuance mutation. An
 /// account that never enabled recovery has no progress row and is disabled. One without an

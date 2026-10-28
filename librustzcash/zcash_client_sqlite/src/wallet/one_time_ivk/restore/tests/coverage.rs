@@ -52,7 +52,10 @@ fn advance(st: &mut State, account: AccountUuid, hits: &[(BlockHeight, KeyId)]) 
 /// Answers every due lookup and witness at a publication ending at the tip, returning how
 /// many lookups ran.
 fn run_pir(st: &mut State, account: AccountUuid) -> usize {
-    let publication = publication_at(st, tip(st).height);
+    let publication = RecoveryPublication {
+        history_revision: status(st.wallet().db(), account).token.history_revision,
+        ..publication_at(st, tip(st).height)
+    };
     let mut lookups = 0;
     for _ in 0..256 {
         if answer_lookup(st, account, publication) {
@@ -363,6 +366,75 @@ fn a_correction_restarts_coverage_from_activation() {
         status(st.wallet().db(), account).filter_frontier,
         Some(tip(&st))
     );
+}
+
+/// The keys whose lookups are due.
+fn due(st: &State, account: AccountUuid) -> Vec<KeyId> {
+    status(st.wallet().db(), account)
+        .lookups
+        .iter()
+        .map(|w| w.work.key)
+        .collect()
+}
+
+/// Commits a span over the cached chain from activation under revision 1 after filters
+/// covered the chain under revision 0, so the store applies the correction.
+fn correct_by_filters(st: &mut State, account: AccountUuid) {
+    st.generate_and_scan_empty_blocks(1);
+    let mut corrected = next_span(st, account);
+    corrected.revision = 1;
+    assert_eq!(record(st, account, &corrected, &[]), FilterOutcome::Restart);
+}
+
+/// A correction after a complete check reads no settled history by PIR: negative
+/// replacement filters leave no lookup, except the one holding an open reservation.
+#[test]
+fn a_correction_with_negative_filters_queues_no_sweep() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    assert_eq!(complete(&mut st, account), 4);
+    st.generate_and_scan_empty_blocks(1);
+    assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
+    let reserved = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, clock_now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(reserved.key_id(), receive(0));
+    correct_by_filters(&mut st, account);
+    assert_eq!(
+        due(&st, account),
+        [receive(0)],
+        "only the reservation is held"
+    );
+    assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
+    assert_eq!(run_pir(&mut st, account), 1);
+    let state = status(st.wallet().db(), account);
+    assert!(state.lookups.is_empty() && state.restore_complete);
+    assert!(behind(&st, account).is_empty());
+}
+
+/// After a correction, a replacement filter hit still queues a lookup for its key alone.
+#[test]
+fn a_correction_with_a_replacement_hit_queues_that_key() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let paid = pay_candidate(&mut st, receive(0));
+    complete(&mut st, account);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    st.generate_and_scan_empty_blocks(1);
+    assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
+    correct_by_filters(&mut st, account);
+    assert!(due(&st, account).is_empty());
+    assert_eq!(
+        advance(&mut st, account, &[(paid.height, receive(0))]),
+        FilterOutcome::Committed
+    );
+    assert_eq!(due(&st, account), [receive(0)]);
+    assert_eq!(run_pir(&mut st, account), 1);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    assert!(status(st.wallet().db(), account).lookups.is_empty());
 }
 
 /// A reorg rolls the frontier and every key's coverage back to the fork, and the next span

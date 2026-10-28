@@ -733,10 +733,13 @@ pub(crate) fn begin<P: Parameters>(
     Ok(true)
 }
 
-/// Applies an indexing correction to `revision`: coverage restarts from activation, for the
-/// account's frontier and every key, and every monitored key's history is read again by
-/// lookups through `height`. A correction can replace payments without changing any block
-/// hash, so nothing checked under the old revision is trusted.
+/// Applies an indexing correction to `revision`. A correction can replace payments without
+/// changing any block hash, so nothing checked under the old revision is trusted: filter
+/// coverage restarts from activation, for the account's frontier and every key, and lookup
+/// results are voided. Filters, or a complete check if the caller starts one, then cover
+/// discovery again, and a hit queues its key. Pending lookups keep their obligation and read their whole history
+/// again. A key with an open reservation is held and read again through `height`, since it
+/// may have been paid in the corrected history.
 fn correct<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -746,7 +749,7 @@ fn correct<P: Parameters>(
 ) -> Result<(), SqliteClientError> {
     conn.execute(
         "UPDATE ironwood_one_time_recovery SET history_revision = ?2, generation = generation + 1,
-        filter_height = NULL, filter_hash = NULL, fresh = 0,
+        filter_height = NULL, filter_hash = NULL, fresh = 0, pir_coverage = 0,
         restore_next = CASE WHEN restore_done = 0 THEN X'0000000000000000' ELSE restore_next END,
         restore_gap = CASE WHEN restore_done = 0 THEN 0 ELSE restore_gap END,
         manual_purpose = CASE WHEN manual_end IS NOT NULL THEN 0 ELSE manual_purpose END,
@@ -756,14 +759,16 @@ fn correct<P: Parameters>(
     )?;
     // Corrections void negatives, cursors and completions captured under the old
     // generation, including progress between shards. An active request may have been
-    // started after such a completion, so it needs its whole history again.
+    // started after such a completion, so it needs its whole history again. Settled history
+    // needs no lookup: filters check it again.
     conn.execute(
         &format!(
             "UPDATE ironwood_one_time_lookups SET {CURSOR_RESET}, checked_height = NULL,
         start_height = CASE WHEN target_height IS NOT NULL THEN MIN(start_height, ?2)
             ELSE start_height END,
         done_height = NULL, done_from = NULL, read_complete = 0,
-        reasons = CASE WHEN done_height IS NOT NULL OR checked_height IS NOT NULL
+        reasons = CASE WHEN target_height IS NOT NULL
+            AND (done_height IS NOT NULL OR checked_height IS NOT NULL)
             THEN reasons | 4 ELSE reasons END
         WHERE one_time_key_id IN (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)"
         ),
@@ -774,12 +779,14 @@ fn correct<P: Parameters>(
         (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
         [owner],
     )?;
-    // A correction can add a payment the old history left out, even to a used key, so
-    // every monitored key is read again once.
+    // An open reservation's receiver may be paid in the corrected history, so it is held
+    // until a lookup reads it again.
     let keys = conn
         .prepare(&format!(
-            "SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {}",
-            monitored(conn, params, owner)?
+            "SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {}
+             AND k.purpose = 1 AND k.used = 0 AND {}",
+            monitored(conn, params, owner)?,
+            super::super::swap::RESERVED
         ))?
         .query_map([owner], |r| r.get::<_, i64>(0))?
         .collect::<Result<Vec<_>, _>>()?;
