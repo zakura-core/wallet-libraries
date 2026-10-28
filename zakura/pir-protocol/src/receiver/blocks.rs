@@ -210,29 +210,29 @@ impl Range {
 
     /// Encodes the range, refusing one past [`MAX_RANGE_BYTES`].
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        let sets: Vec<_> = self.sets.iter().map(|s| (s.height, s.bytes())).collect();
         Self::write(
             self.revision,
             self.from,
             self.count,
             self.parent,
             self.end,
-            &sets,
+            self.sets.iter().map(|s| (s.height, s.bytes())),
         )
     }
 
     /// Encodes a range of `count` heights from `from`, as [`Range::new`] describes, from
     /// already encoded sets, `(height, set)` in increasing height order, refusing one past
-    /// [`MAX_RANGE_BYTES`]. A server joins stored ranges this way without decoding them.
+    /// [`MAX_RANGE_BYTES`]. A server joins stored ranges this way without decoding them,
+    /// reading each only as it is written.
     /// The sets are trusted: each must come from [`HeightSet::bytes`] or from
     /// [`Range::raw_sets`] of a range [`Range::decode`] accepted.
-    pub fn write(
+    pub fn write<'a>(
         revision: u64,
         from: u32,
         count: u32,
         parent: Hash,
         end: Hash,
-        sets: &[(u32, &[u8])],
+        sets: impl IntoIterator<Item = (u32, &'a [u8])>,
     ) -> Result<Vec<u8>, Error> {
         if from == 0 || count == 0 || count > MAX_RANGE_BLOCKS {
             return Err(Error::Capacity);
@@ -244,13 +244,15 @@ impl Range {
         out.extend(count.to_le_bytes());
         out.extend(parent);
         out.extend(end);
-        // The heights below are distinct and within a u32 range of `count` heights.
-        out.extend((sets.len() as u32).to_le_bytes());
-        let mut next = from;
+        // The entry count, written once the sets are.
+        out.extend(0u32.to_le_bytes());
+        let (mut next, mut entries) = (from, 0u32);
         for (height, set) in sets {
-            if *height < next || *height > last {
+            if height < next || height > last {
                 return Err(Error::Malformed);
             }
+            // Heights are distinct within `count`, a u32, so this cannot overflow.
+            entries += 1;
             zakura_filters::write_compact_size(&mut out, u64::from(height - next))
                 .expect("in-memory write");
             out.extend_from_slice(set);
@@ -259,6 +261,7 @@ impl Range {
                 return Err(Error::Capacity);
             }
         }
+        out[RANGE_HEADER - 4..RANGE_HEADER].copy_from_slice(&entries.to_le_bytes());
         Ok(out)
     }
 
