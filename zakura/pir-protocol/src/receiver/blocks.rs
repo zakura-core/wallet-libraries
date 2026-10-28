@@ -247,7 +247,10 @@ impl Range {
         let mut next = u64::from(from);
         for _ in 0..entries {
             let gap = zakura_filters::read_compact_size(&mut rest).map_err(|_| Error::Malformed)?;
-            let height = u32::try_from(next + gap).map_err(|_| Error::Malformed)?;
+            let height = next
+                .checked_add(gap)
+                .and_then(|h| u32::try_from(h).ok())
+                .ok_or(Error::Malformed)?;
             let (set, tail) = super::gcs::split(rest, P, M, u64::from(MAX_RECEIVERS))?;
             rest = tail;
             let filter = Filter::decode_with(set, P, M)?;
