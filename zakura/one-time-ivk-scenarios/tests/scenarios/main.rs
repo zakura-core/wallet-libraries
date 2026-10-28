@@ -7,11 +7,17 @@ use harness::{
 };
 use orchard::keys::Scope;
 use zakura_one_time_ivk::{KeyId, Purpose};
-use zakura_pir_client::receiver::transport::Inventories;
+use zakura_pir_client::receiver::{blocks::Head, transport::Inventories};
 use zcash_client_backend::{
-    data_api::{WalletRead as _, WalletWrite as _, transparent_ledger::ChainPoint},
+    data_api::{
+        WalletRead as _, WalletWrite as _,
+        one_time_ivk::restore::{FilterOutcome, FilterSpan},
+        transparent_ledger::ChainPoint,
+    },
     wallet::OvkPolicy,
 };
+use zcash_primitives::block::BlockHash;
+use zcash_protocol::consensus::BlockHeight;
 
 /// Runs deterministic async network steps without giving the future a database lock.
 fn run(future: impl std::future::Future<Output = ()>) {
@@ -115,7 +121,9 @@ fn live_filters_and_late_publication() {
     });
 }
 
-/// Downloads real GCS bodies and atomically records only locally matched receiver obligations.
+/// Downloads real GCS bodies from the account's frontier and commits the span with its
+/// locally matched receivers, then re-checks any receiver left behind the frontier over the
+/// same served history.
 async fn hints(device: &mut Device, directory: &Directory) {
     let head = Inventories::block_head(ORIGIN, &directory, &GENESIS)
         .await
@@ -128,31 +136,96 @@ async fn hints(device: &mut Device, directory: &Directory) {
     let range = Inventories::block_range(ORIGIN, &directory, &head, from, 256)
         .await
         .unwrap();
-    let bytes: Vec<_> = receivers.iter().map(|r| r.receiver).collect();
-    let mut hits = Vec::new();
-    for (_, index) in range.matches(&GENESIS, &bytes) {
-        if !hits.contains(&receivers[index].key) {
-            hits.push(receivers[index].key);
-        }
-    }
-    let blocks: Vec<_> = (from..=range.end().height)
-        .map(|height| ChainPoint {
-            height: height.into(),
-            hash: device.db.get_block_hash(height.into()).unwrap().unwrap(),
-        })
+    let bytes: Vec<_> = receivers.iter().map(|r| r.work.receiver).collect();
+    let hits: Vec<_> = range
+        .matches(&GENESIS, &bytes)
+        .into_iter()
+        .map(|(height, index)| (height.into(), receivers[index].work.key))
         .collect();
-    assert!(
+    let end = range.end();
+    let span = FilterSpan {
+        revision: head.revision,
+        from: range.from().into(),
+        parent: BlockHash(range.parent()),
+        end: ChainPoint {
+            height: end.height.into(),
+            hash: BlockHash(end.hash),
+        },
+    };
+    assert_eq!(
         device
             .db
-            .record_one_time_filters(device.account, token, head.revision, &blocks, &hits)
-            .unwrap()
+            .record_one_time_filter_span(device.account, token, &span, &hits)
+            .unwrap(),
+        FilterOutcome::Committed
     );
+    recheck(device, directory, &head).await;
     device.assert_no_stall();
 }
 
-/// Catch-up omits completed old keys, while the explicit settings action can recover a repeat.
+/// Commits filters from the frontier, then alternates lookups with re-checks of newly
+/// watched receivers until neither has work, as a wallet round would.
+async fn filter_round(device: &mut Device, chain: &Chain, directory: &Directory) {
+    hints(device, directory).await;
+    let head = Inventories::block_head(ORIGIN, &directory, &GENESIS)
+        .await
+        .unwrap();
+    let client = device.connect(directory).await;
+    for _ in 0..64 {
+        device.drain(chain, &client).await;
+        let state = device.db.one_time_recovery(device.account, 0).unwrap();
+        let (_, receivers) = device.db.one_time_receivers(device.account).unwrap();
+        let frontier = state.filter_frontier.map(|f| f.height);
+        if !receivers
+            .iter()
+            .any(|r| frontier.is_some_and(|f| r.covered < f))
+        {
+            return;
+        }
+        recheck(device, directory, &head).await;
+    }
+    panic!("filter round did not settle");
+}
+
+/// Re-checks each receiver whose coverage is behind the account's frontier over the
+/// history it missed, as a wallet would from its cached ranges.
+async fn recheck(device: &mut Device, directory: &Directory, head: &Head) {
+    let state = device.db.one_time_recovery(device.account, 0).unwrap();
+    let Some(frontier) = state.filter_frontier else {
+        return;
+    };
+    let (token, receivers) = device.db.one_time_receivers(device.account).unwrap();
+    for receiver in receivers.iter().filter(|r| r.covered < frontier.height) {
+        let from = u32::from(receiver.covered) + 1;
+        let limit = u32::from(frontier.height) - from + 1;
+        let range = Inventories::block_range(ORIGIN, &directory, head, from, limit)
+            .await
+            .unwrap();
+        let hits: Vec<_> = range
+            .matches(&GENESIS, &[receiver.work.receiver])
+            .into_iter()
+            .map(|(height, _)| (height.into(), receiver.work.key))
+            .collect();
+        assert!(
+            device
+                .db
+                .recheck_one_time_filters(
+                    device.account,
+                    token,
+                    head.revision,
+                    BlockHeight::from(range.from())..=BlockHeight::from(range.end().height),
+                    &[receiver.work.key],
+                    &hits,
+                )
+                .unwrap()
+        );
+    }
+}
+
+/// A complete check after time offline reads paid keys too, so it finds a repeat payment to
+/// a paid address without the explicit settings action.
 #[test]
-fn offline_repeat_requires_manual_history() {
+fn offline_repeat_found_by_complete_check() {
     run(async {
         let mut chain = Chain::new();
         let mut phone = Device::new(&mut chain, [3; 32], ACTIVATION.into());
@@ -174,7 +247,7 @@ fn offline_repeat_requires_manual_history() {
         phone.reopen();
         let directory = Directory::publish(&chain, 0, 0, 4, 0);
         phone.recover(&chain, &directory).await;
-        assert_eq!(phone.unspent_one_time_value(), 400_000);
+        assert_eq!(phone.unspent_one_time_value(), 600_000);
         let client = phone.connect(&directory).await;
         phone
             .db
@@ -556,11 +629,11 @@ fn assert_receipts(device: &Device, expected: &[harness::chain::Mined]) {
     );
 }
 
-/// Random payment identities, amounts, holes and repeats retain the accepted live/offline scope.
+/// Random payment identities, amounts, holes and repeats: filters find each round's
+/// payments live, and complete checks find repeats offline.
 #[test]
 fn randomized_cross_device_payment_oracle() {
     use rand_core::TryRng as _;
-    use std::collections::BTreeSet;
     use zcash_client_backend::data_api::testing::TestRng;
     run(async {
         for scenario in 0..3u8 {
@@ -576,7 +649,6 @@ fn randomized_cross_device_payment_oracle() {
             desktop.recover(&chain, &initial).await;
             let mut payments = Vec::new();
             let mut desktop_receipts = Vec::new();
-            let mut completed = BTreeSet::new();
             let mut highest = None::<u64>;
             for round in 0..12 {
                 // Issuance is bounded by independently paid and confirmed prior rounds.
@@ -597,9 +669,7 @@ fn randomized_cross_device_payment_oracle() {
                 chain.mine(12 + (rng.try_next_u64().unwrap() % 4) as u32);
                 phone.scan(&chain);
                 let directory = Directory::publish(&chain, 0, 0, 256, 0);
-                hints(&mut phone, &directory).await;
-                let client = phone.connect(&directory).await;
-                phone.drain(&chain, &client).await;
+                filter_round(&mut phone, &chain, &directory).await;
                 assert_receipts(
                     &phone,
                     &payments.iter().map(|(_, p)| p.clone()).collect::<Vec<_>>(),
@@ -610,15 +680,9 @@ fn randomized_cross_device_payment_oracle() {
                     phone.assert_no_stall();
                 }
                 if round % 3 == 2 {
-                    // This model records completion only from prior expected payments,
-                    // never from wallet cursors or its selected query list.
-                    desktop_receipts.extend(
-                        payments
-                            .iter()
-                            .filter(|(index, _)| !completed.contains(index))
-                            .map(|(_, payment)| payment.clone()),
-                    );
-                    completed.extend(payments.iter().map(|(index, _)| *index));
+                    // A complete check reads every watched key, paid or not, so the
+                    // offline desktop finds every payment so far, repeats included.
+                    desktop_receipts = payments.iter().map(|(_, p)| p.clone()).collect();
                     desktop.reopen();
                     desktop.scan(&chain);
                     desktop.recover(&chain, &directory).await;
@@ -627,9 +691,10 @@ fn randomized_cross_device_payment_oracle() {
                 }
             }
             let all: Vec<_> = payments.iter().map(|(_, p)| p.clone()).collect();
-            assert!(
-                desktop_receipts.len() < all.len(),
-                "old repeats must need manual recovery"
+            assert_eq!(
+                desktop_receipts.len(),
+                all.len(),
+                "the last round was a complete check"
             );
             let directory = Directory::publish(&chain, 0, 0, 256, 0);
             let client = desktop.connect(&directory).await;

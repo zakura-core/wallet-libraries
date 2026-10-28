@@ -58,6 +58,11 @@ pub(crate) fn truncate(
         "UPDATE ironwood_one_time_keys SET prebirthday_height = NULL WHERE prebirthday_height > ?1",
         [floor],
     )?;
+    // Filter coverage above the fork read another chain's blocks.
+    conn.execute(
+        "UPDATE ironwood_one_time_keys SET covered_height = ?1 WHERE covered_height > ?1",
+        [floor],
+    )?;
     // A private receipt's position came from the directory, not a rescan that would replace
     // it, so each one loses its placement until its own repair restores it (see
     // `restore::queue::UNPLACED`).
@@ -122,7 +127,8 @@ pub(crate) fn queue_invalidated(
     Ok(())
 }
 
-/// Lowering a birthday rechecks known histories, including excluded payments, even while disabled.
+/// Lowering a birthday rechecks known histories, including excluded payments, even while
+/// disabled. Filter coverage restarts from activation, and the account is no longer fresh.
 pub(crate) fn reopen_discovery(
     conn: &rusqlite::Transaction<'_>,
     account: AccountUuid,
@@ -135,7 +141,12 @@ pub(crate) fn reopen_discovery(
     conn.execute(
         "UPDATE ironwood_one_time_recovery SET generation = generation + 1,
         restore_next = X'0000000000000000', restore_gap = 0, restore_done = 0,
-        restore_height = NULL, filter_height = NULL, filter_hash = NULL WHERE account_id = ?1",
+        restore_height = NULL, filter_height = NULL, filter_hash = NULL, fresh = 0
+        WHERE account_id = ?1",
+        [owner],
+    )?;
+    conn.execute(
+        "UPDATE ironwood_one_time_keys SET covered_height = NULL WHERE account_id = ?1",
         [owner],
     )?;
     conn.execute("INSERT INTO ironwood_one_time_lookups(one_time_key_id, target_height, reasons)

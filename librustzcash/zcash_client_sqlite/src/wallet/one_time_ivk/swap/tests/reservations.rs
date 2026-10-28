@@ -321,24 +321,26 @@ fn promise_payout(st: &mut State, deposit: &str, receipts: &[TxId], at: i64) {
         .unwrap();
 }
 
-/// Runs direct catch-up through a new block and returns the receive indexes it queued.
+/// Runs a complete check through a new block and returns the receive indexes that still
+/// owed a promised payout when it started (see `restore::queue::UNSETTLED`).
 fn catch_up(st: &mut State) -> Vec<u64> {
     let account = st.test_account().unwrap().id();
     st.generate_and_scan_empty_blocks(1);
     let publication = store::restore::tests::discovery::publication_at(st, tip(st).height);
+    let queued: Vec<Vec<u8>> = column(
+        st.wallet().conn(),
+        &format!(
+            "SELECT k.key_index FROM ironwood_one_time_keys k
+             WHERE k.purpose = 1 AND {} ORDER BY k.key_index",
+            store::restore::queue::UNSETTLED
+        ),
+        [],
+    );
     assert!(
         st.wallet_mut()
             .db_mut()
             .begin_one_time_recovery(account, publication, true)
             .unwrap()
-    );
-    let queued: Vec<Vec<u8>> = column(
-        st.wallet().conn(),
-        "SELECT k.key_index FROM ironwood_one_time_lookups l
-         JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
-         WHERE k.purpose = 1 AND l.target_height = ?1 AND l.read_complete = 0
-         ORDER BY k.key_index",
-        [u32::from(publication.end.height)],
     );
     store::restore::tests::discovery::drain(st, account, publication);
     queued
@@ -632,12 +634,13 @@ fn filter(st: &mut State, hits: &[KeyId]) {
     st.generate_and_scan_empty_blocks(1);
     let (token, _) = st.wallet().db().one_time_receivers(account).unwrap();
     let blocks = store::restore::tests::discovery::blocks_above(st, frontier);
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_filters(account, token, token.history_revision, &blocks, hits)
-            .unwrap()
-    );
+    assert!(store::restore::tests::discovery::record_span(
+        st.wallet_mut().db_mut(),
+        account,
+        token,
+        &blocks,
+        hits
+    ));
 }
 /// Runs recovery at the tip under the account's current correction generation until every
 /// due lookup and witness is answered, so invalidated histories settle again.
@@ -824,8 +827,9 @@ fn a_rewound_reservation_is_released_by_its_queued_recheck() {
 }
 
 /// Every key that entered automatic monitoring since `before` was read, with the filter
-/// frontier then at `frontier`, has history settled through that frontier or a runnable
-/// lookup reaching it, since filters never watched it there. Returns the monitored keys
+/// frontier then at `frontier`, has history settled through that frontier, a runnable
+/// lookup reaching it, coverage behind it for a filter re-check, or a funding height past
+/// it, since filters never watched it there. Returns the monitored keys
 /// and frontier for the next check.
 fn assert_entered_with_history(
     st: &State,
@@ -834,7 +838,7 @@ fn assert_entered_with_history(
 ) -> (Vec<KeyId>, Option<BlockHeight>) {
     let account = st.test_account().unwrap().id();
     let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    let after: Vec<KeyId> = receivers.iter().map(|w| w.key).collect();
+    let after: Vec<KeyId> = receivers.iter().map(|w| w.work.key).collect();
     for key in after.iter().filter(|k| !before.contains(k)) {
         let Some(frontier) = frontier else { break };
         let covered: bool = value(
@@ -843,7 +847,7 @@ fn assert_entered_with_history(
                  JOIN accounts a ON a.id = k.account_id
                  LEFT JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id
                  WHERE a.uuid = ?1 AND k.purpose = ?2 AND k.key_index = ?3
-                   AND (l.done_height >= ?4
+                   AND (l.done_height >= ?4 OR k.covered_height < ?4 OR k.funding_height > ?4
                      OR (l.target_height >= ?4 AND l.reasons & 3 != 0 AND l.read_complete = 0)
                      OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
                          WHERE p.one_time_key_id = k.id)))",
@@ -1380,7 +1384,12 @@ fn a_payment_after_a_silent_quote_is_released_is_still_recovered() {
     assert!(!report(&mut st, ("unquoted", None), Active, false, later));
     assert!(!held(&st, 0));
     store::restore::tests::discovery::pay_candidate(&mut st, key);
-    assert!(catch_up(&mut st).contains(&0));
+    let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert!(
+        receivers.iter().any(|r| r.work.key == key),
+        "still monitored"
+    );
+    catch_up(&mut st);
     assert_eq!(
         store::restore::tests::discovery::one_time_notes(&st),
         [(100_000, false)]

@@ -10,15 +10,13 @@ use payments::PendingPayment;
 use rand_core::Rng;
 use rusqlite::Connection;
 use std::borrow::{Borrow, BorrowMut};
+use std::ops::RangeInclusive;
 use zakura_one_time_ivk::KeyId;
-use zcash_client_backend::data_api::{
-    one_time_ivk::restore::{
-        DiscoveryWork, LookupPage, LookupWork, RecoveryPublication, RecoveryStatus, RecoveryToken,
-        WitnessAnswer, WitnessRequest,
-    },
-    transparent_ledger::ChainPoint,
+use zcash_client_backend::data_api::one_time_ivk::restore::{
+    FilterOutcome, FilterReceiver, FilterSpan, LookupPage, LookupWork, RecoveryPublication,
+    RecoveryStatus, RecoveryToken, WitnessAnswer, WitnessRequest,
 };
-use zcash_protocol::consensus::Parameters;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// Returns bounded due network work without retaining a database lock across requests.
@@ -31,23 +29,14 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         queue::status(self.conn.borrow(), &self.params, account, now)
     }
 
-    /// Counts the actual direct catch-up set without queuing requests or including completed old keys.
-    pub fn one_time_direct_query_count(
-        &self,
-        account: AccountUuid,
-    ) -> Result<usize, SqliteClientError> {
-        let Some(owner) = super::one_time_account(self.conn.borrow(), &self.params, account)?
-        else {
-            return Ok(0);
-        };
-        Ok(queue::direct_keys(self.conn.borrow(), &self.params, owner.0)?.len())
-    }
-
-    /// Captures eligible receiver identities for local filter matching and its cancellation fence.
+    /// Captures the monitored receivers for local filter matching, each with how far its
+    /// filter coverage reaches, and the cancellation fence the match commits under. A
+    /// receiver covered below the account's frontier needs
+    /// [`Self::recheck_one_time_filters`] from just past its coverage.
     pub fn one_time_receivers(
         &self,
         account: AccountUuid,
-    ) -> Result<(RecoveryToken, Vec<DiscoveryWork>), SqliteClientError> {
+    ) -> Result<(RecoveryToken, Vec<FilterReceiver>), SqliteClientError> {
         queue::receivers(self.conn.borrow(), &self.params, account)
     }
 }
@@ -62,31 +51,63 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
         self.transactionally(|db| queue::set_enabled(db.conn.0, db.params, account, enabled))
     }
 
-    /// Accepts a chain-compatible publication and optionally queues unfinished direct catch-up.
-    /// Direct catch-up skips paid keys whose history is complete: a repeat payment to one is
-    /// found automatically only inside the rolling filter window (see
-    /// `record_one_time_filters`), and otherwise only by [`Self::check_one_time_history`].
+    /// Accepts a chain-compatible publication for queued work. With `complete`, it also runs
+    /// a complete check, the alternative to filters over a gap: every monitored key, paid
+    /// receive keys and refund keys still monitored included, gets a lookup from just past
+    /// its filter coverage through the publication's end, and the account's frontier moves
+    /// there. A repeat payment to a paid key is found either way. For a fresh account
+    /// without a frontier (see `RecoveryStatus::fresh`), this is the four-lookup seed window.
+    /// Until a filter span commits, keys that become watched get lookups too.
     pub fn begin_one_time_recovery(
         &mut self,
         account: AccountUuid,
         publication: RecoveryPublication,
-        direct: bool,
+        complete: bool,
     ) -> Result<bool, SqliteClientError> {
-        self.transactionally(|db| queue::begin(db.conn.0, db.params, account, publication, direct))
+        self.transactionally(|db| {
+            queue::begin(db.conn.0, db.params, account, publication, complete)
+        })
     }
 
-    /// Commits filter progress together with its matching receiver obligations.
-    pub fn record_one_time_filters(
+    /// Commits a filter span matched against the receivers [`Self::one_time_receivers`]
+    /// captured with `captured`, with each hit's height. The store decides whether the span
+    /// is final for the wallet and continues committed coverage; see [`FilterOutcome`] for
+    /// what to do otherwise. Each hit past its key's coverage queues a lookup from there.
+    pub fn record_one_time_filter_span(
+        &mut self,
+        account: AccountUuid,
+        captured: RecoveryToken,
+        span: &FilterSpan,
+        hits: &[(BlockHeight, KeyId)],
+    ) -> Result<FilterOutcome, SqliteClientError> {
+        self.transactionally(|db| {
+            queue::record_filter_span(db.conn.0, db.params, account, captured, span, hits)
+        })
+    }
+
+    /// Commits a re-check of `keys` over `heights`, history the account's coverage already
+    /// passed, matched against ranges the caller kept from committed spans under `revision`.
+    /// Each key's coverage must reach the range's start minus one; it then reaches its end,
+    /// and each hit past it queues a lookup. False if `captured` or `revision` is stale.
+    pub fn recheck_one_time_filters(
         &mut self,
         account: AccountUuid,
         captured: RecoveryToken,
         revision: u64,
-        blocks: &[ChainPoint],
-        hits: &[KeyId],
+        heights: RangeInclusive<BlockHeight>,
+        keys: &[KeyId],
+        hits: &[(BlockHeight, KeyId)],
     ) -> Result<bool, SqliteClientError> {
         self.transactionally(|db| {
-            queue::record_filters(
-                db.conn.0, db.params, account, captured, revision, blocks, hits,
+            queue::recheck_filters(
+                db.conn.0,
+                db.params,
+                account,
+                captured,
+                revision,
+                (u32::from(*heights.start()), u32::from(*heights.end())),
+                keys,
+                hits,
             )
         })
     }

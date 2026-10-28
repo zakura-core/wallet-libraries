@@ -279,6 +279,7 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
              SET used = 1, prebirthday_height = MIN(COALESCE(prebirthday_height, ?2), ?2) WHERE id = ?1",
             params![key_ref, birthday],
         )?;
+        crate::wallet::one_time_ivk::end_fresh(conn, key_ref)?;
         dequeue()?;
         return Ok(Admission::Admitted);
     }

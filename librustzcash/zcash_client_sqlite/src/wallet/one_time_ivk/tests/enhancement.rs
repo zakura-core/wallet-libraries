@@ -56,12 +56,14 @@ fn recover_memos(st: &mut State, account: AccountUuid) {
     .unwrap()
 }
 
-/// `(index, funding height, registered for a lookup)` of each registered refund key.
+/// `(index, funding height, history due)` of each registered refund key: its history is
+/// registered for a lookup, or its coverage is below its funding height for a filter re-check.
 fn refund_keys(st: &State) -> Vec<(u64, u32, bool)> {
     let keys: Vec<(Vec<u8>, u32, bool)> = rows(
         st.wallet().conn(),
         "SELECT k.key_index, k.funding_height,
             EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id)
+            OR k.covered_height < k.funding_height
          FROM ironwood_one_time_keys k WHERE k.purpose = 0 ORDER BY k.key_index",
         [],
     );
@@ -812,14 +814,17 @@ fn refund_quote_needs_a_reserved_refund_key_and_a_canonical_transparent_deposit(
     assert!(db.refund_funding_memo(account, 0, &deposit).is_ok());
 }
 
-/// Whether one of `account`'s keys is registered for a lookup not done yet.
+/// Whether one of `account`'s keys is registered for a lookup not done yet, or a refund key
+/// waits for a filter re-check from its funding height.
 fn lookup_pending(db: &Db, account: AccountUuid) -> bool {
     value(
         &db.conn,
         "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
              JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
              JOIN accounts a ON a.id = k.account_id
-             WHERE a.uuid = ?1 AND l.target_height IS NOT NULL)",
+             WHERE a.uuid = ?1 AND l.target_height IS NOT NULL)
+         OR EXISTS(SELECT 1 FROM ironwood_one_time_keys k JOIN accounts a ON a.id = k.account_id
+             WHERE a.uuid = ?1 AND k.covered_height < k.funding_height)",
         [account.0],
     )
 }

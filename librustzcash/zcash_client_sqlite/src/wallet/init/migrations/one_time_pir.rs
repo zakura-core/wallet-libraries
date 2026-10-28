@@ -308,6 +308,16 @@ impl RusqliteMigration for Migration {
                 DEFAULT X'0000000000000000' CHECK (length(receive_end) = 8);
              ALTER TABLE ironwood_one_time_recovery ADD COLUMN upgrade_required INTEGER NOT NULL
                 DEFAULT 0 CHECK (upgrade_required IN (0, 1));
+             ALTER TABLE ironwood_one_time_recovery DROP COLUMN skipped_height;
+             ALTER TABLE ironwood_one_time_recovery ADD COLUMN fresh INTEGER NOT NULL
+                DEFAULT 1 CHECK (fresh IN (0, 1));
+             ALTER TABLE ironwood_one_time_recovery ADD COLUMN pir_coverage INTEGER NOT NULL
+                DEFAULT 0 CHECK (pir_coverage IN (0, 1));
+             -- Coverage under the old frontier model is dropped: it has no per-key record.
+             UPDATE ironwood_one_time_recovery SET filter_height = NULL, filter_hash = NULL,
+                fresh = 0;
+             ALTER TABLE ironwood_one_time_keys ADD COLUMN covered_height INTEGER
+                CHECK (covered_height BETWEEN 0 AND 4294967295);
              DROP INDEX IF EXISTS idx_ironwood_one_time_keys_account_receiver;
              ALTER TABLE ironwood_one_time_keys DROP COLUMN registered_at;
              CREATE TABLE ironwood_one_time_operation_receipts (

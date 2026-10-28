@@ -212,6 +212,11 @@ fn register<P: Parameters>(
     check_receiver(stored, &fvk)?;
     if inserted != 0 {
         conn.execute("UPDATE ironwood_one_time_recovery SET generation = generation + 1 WHERE account_id = ?1", [owner.0])?;
+        if key_id.purpose() != Purpose::Receive
+            || key_id.index() >= zcash_client_backend::data_api::one_time_ivk::restore::RECEIVE_GAP
+        {
+            end_fresh(conn, id)?;
+        }
         if key_id.purpose() == Purpose::Receive {
             restore::queue::register_history(
                 conn,
@@ -357,6 +362,17 @@ pub(super) fn bind_received_note(
     )?;
     conn.execute(
         "UPDATE ironwood_one_time_keys SET used = 1 WHERE id = ?1",
+        [key],
+    )?;
+    end_fresh(conn, key)
+}
+
+/// Records that key `key`'s account is no longer fresh (see `RecoveryStatus::fresh`): the
+/// key was paid or registered beyond the initial receive window.
+pub(super) fn end_fresh(conn: &Connection, key: i64) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE ironwood_one_time_recovery SET fresh = 0 WHERE fresh = 1
+         AND account_id = (SELECT account_id FROM ironwood_one_time_keys WHERE id = ?1)",
         [key],
     )?;
     Ok(())

@@ -528,7 +528,9 @@ CREATE INDEX idx_orchard_received_note_spends_transaction_id ON orchard_received
     transaction_id ASC
 )"#;
 
-/// Durable private receiver keys.
+/// Durable private receiver keys. `covered_height` is how far filter coverage, or a lookup a
+/// filter hit or complete check queued, reaches for the key's history; unset, it is one
+/// below the history start (activation, or a refund key's funding height).
 pub(super) const TABLE_IRONWOOD_ONE_TIME_KEYS: &str = "CREATE TABLE ironwood_one_time_keys (
                 id INTEGER PRIMARY KEY,
                 account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -541,6 +543,7 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_KEYS: &str = "CREATE TABLE ironwood_one
                 reserved_at INTEGER,
                 released_at INTEGER,
                 reservation_floor INTEGER,
+                covered_height INTEGER CHECK (covered_height BETWEEN 0 AND 4294967295),
                 UNIQUE (account_id, purpose, key_index)
             )";
 
@@ -2217,7 +2220,12 @@ CREATE TABLE transparent_tx_display_outputs (
 )"#;
 
 /// Account cancellation, restore and manual progress. `receive_end` is the exclusive end of
-/// receive indexes enrolled for automatic discovery. It never shrinks.
+/// receive indexes enrolled for automatic discovery. It never shrinks. `filter_height` and
+/// `filter_hash` end the last committed filter span or complete check (activation - 1 when
+/// unset). `fresh` holds until a key is paid or registered beyond the initial window, or a
+/// correction or birthday change clears coverage. `pir_coverage` is set while a complete
+/// check last advanced coverage, so newly watched keys get lookups rather than filter
+/// re-checks.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str = "CREATE TABLE ironwood_one_time_recovery (
                 account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
                 enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
@@ -2226,7 +2234,6 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str = "CREATE TABLE ironwood
                     CHECK (length(history_revision) = 8),
                 filter_height INTEGER CHECK (filter_height BETWEEN 0 AND 4294967295),
                 filter_hash BLOB CHECK (length(filter_hash) = 32),
-                skipped_height INTEGER CHECK (skipped_height BETWEEN 0 AND 4294967295),
                 restore_height INTEGER CHECK (restore_height BETWEEN 0 AND 4294967295),
                 restore_next BLOB NOT NULL DEFAULT X'0000000000000000' CHECK (length(restore_next) = 8),
                 restore_gap INTEGER NOT NULL DEFAULT 0 CHECK (restore_gap BETWEEN 0 AND 4),
@@ -2238,5 +2245,7 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str = "CREATE TABLE ironwood
                 manual_height INTEGER CHECK (manual_height BETWEEN 0 AND 4294967295),
                 receive_end BLOB NOT NULL DEFAULT X'0000000000000000' CHECK (length(receive_end) = 8),
                 upgrade_required INTEGER NOT NULL DEFAULT 0 CHECK (upgrade_required IN (0, 1)),
+                fresh INTEGER NOT NULL DEFAULT 1 CHECK (fresh IN (0, 1)),
+                pir_coverage INTEGER NOT NULL DEFAULT 0 CHECK (pir_coverage IN (0, 1)),
                 CHECK ((filter_height IS NULL) = (filter_hash IS NULL))
             )";

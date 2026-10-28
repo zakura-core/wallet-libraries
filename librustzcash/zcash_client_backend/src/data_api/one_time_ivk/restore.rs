@@ -7,6 +7,7 @@ use zakura_one_time_ivk::KeyId;
 use zcash_protocol::consensus::BlockHeight;
 
 use crate::data_api::transparent_ledger::ChainPoint;
+use zcash_primitives::block::BlockHash;
 
 pub mod recovery;
 
@@ -275,6 +276,47 @@ pub struct ManualProgress {
     pub receive_end: u64,
 }
 
+/// A filter range as the wallet received it: the heights it covers, the hash of the block
+/// before them and its end block. The wallet trusts the publisher for which chain the sets
+/// were built on and checks the end against its own chain where it can.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FilterSpan {
+    /// The history revision the range was served under.
+    pub revision: u64,
+    pub from: BlockHeight,
+    /// The hash of the block at `from - 1`.
+    pub parent: BlockHash,
+    pub end: ChainPoint,
+}
+
+/// What a store did with a [`FilterSpan`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilterOutcome {
+    /// Coverage now reaches the span's end, and every hit has queued a lookup.
+    Committed,
+    /// The captured token or receiver set is no longer current. Recapture, match again and
+    /// retry.
+    Stale,
+    /// The span ends above the wallet's fully scanned block and within the reorg limit of
+    /// its scanned tip, so it cannot be checked yet. Retry after more scanning.
+    Wait,
+    /// The span's end or parent hash disagrees with the wallet's own block or its committed
+    /// coverage. Nothing changed.
+    Mismatch,
+    /// Coverage restarted from activation, after a history correction or a replay whose
+    /// parent the wallet cannot check. Read the frontier again.
+    Restart,
+}
+
+/// A monitored receiver and how far filter coverage reaches for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilterReceiver {
+    pub work: DiscoveryWork,
+    /// Filters, or a lookup they queued, cover this receiver's history through this height.
+    /// Below the account's frontier, the receiver needs a re-check from the next height.
+    pub covered: BlockHeight,
+}
+
 /// One account's durable progress and a bounded batch of due work.
 /// With discovery disabled, work is restricted to repairing already-owned receipts.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -284,9 +326,13 @@ pub struct RecoveryStatus {
     /// client supports begins recovery again; every pending request is kept.
     pub upgrade_required: bool,
     pub token: RecoveryToken,
+    /// The end of the last committed filter span or complete check. `None` means coverage
+    /// starts at Ironwood activation, so the next span starts there.
     pub filter_frontier: Option<ChainPoint>,
-    /// Direct catch-up deliberately skipped completed old addresses through this height.
-    pub skipped_through: Option<BlockHeight>,
+    /// No key was ever paid or registered beyond the initial receive window, and no
+    /// correction or birthday change cleared coverage. A complete check from activation is
+    /// then the four-lookup seed window.
+    pub fresh: bool,
     pub restore_next: u64,
     pub restore_gap: u8,
     pub restore_complete: bool,

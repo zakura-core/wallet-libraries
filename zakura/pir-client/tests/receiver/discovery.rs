@@ -24,7 +24,7 @@ use zakura_pir_query_server::receiver::server::{Server, WitnessServer};
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _,
     chain::BlockSource as _,
-    one_time_ivk::restore::RECOVERY_PAGE_LIMIT,
+    one_time_ivk::restore::{FilterOutcome, FilterSpan, RECOVERY_PAGE_LIMIT},
     testing::{AddressType, IronwoodFvk, TestBuilder, TestRng, TestState},
     transparent_ledger::ChainPoint,
 };
@@ -687,7 +687,7 @@ async fn a_positive_hint_without_payment_settles_with_one_empty_query() {
     r.st.generate_and_scan_empty_blocks(1);
     let end = tip(&r.st);
     let (token, receivers) = r.st.wallet().db().one_time_receivers(r.account).unwrap();
-    let receiver = &receivers[0];
+    let receiver = &receivers[0].work;
     // A deliberately overinclusive hint exercises the same path as a GCS false positive.
     let height: u32 = end.height.into();
     let set = HeightSet::build(&GENESIS, height, [&receiver.receiver])
@@ -699,11 +699,23 @@ async fn a_positive_hint_without_payment_settles_with_one_empty_query() {
         .unwrap();
     let range = Range::decode(&bytes).unwrap();
     assert_eq!(range.matches(&GENESIS, &[receiver.receiver]), [(height, 0)]);
-    assert!(
+    let span = FilterSpan {
+        revision: 0,
+        from: range.from().into(),
+        parent: BlockHash(range.parent()),
+        end,
+    };
+    let hits: Vec<_> = range
+        .matches(&GENESIS, &[receiver.receiver])
+        .into_iter()
+        .map(|(height, _)| (height.into(), receiver.key))
+        .collect();
+    assert_eq!(
         r.st.wallet_mut()
             .db_mut()
-            .record_one_time_filters(r.account, token, 0, &[end], &[receiver.key])
-            .unwrap()
+            .record_one_time_filter_span(r.account, token, &span, &hits)
+            .unwrap(),
+        FilterOutcome::Committed
     );
     let directory = serve(&r.st, &[], end);
     let client = connect(&directory, end).await;

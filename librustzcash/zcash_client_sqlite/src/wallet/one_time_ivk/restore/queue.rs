@@ -4,9 +4,10 @@ use rusqlite::{Connection, OptionalExtension, named_params, params};
 use zcash_client_backend::data_api::scanning::ScanPriority;
 use zcash_client_backend::data_api::{
     one_time_ivk::restore::{
-        DirectoryRecord, DiscoveryWork, LookupCursor, LookupPage, LookupWork, ManualProgress,
-        RECEIVE_GAP, RECOVERY_PAGE_LIMIT, RecoveryPublication, RecoveryStatus, RecoveryToken,
-        WitnessAnswer, WitnessRequest, decode_witness_payload,
+        DirectoryRecord, DiscoveryWork, FilterOutcome, FilterReceiver, FilterSpan, LookupCursor,
+        LookupPage, LookupWork, ManualProgress, RECEIVE_GAP, RECOVERY_PAGE_LIMIT,
+        RecoveryPublication, RecoveryStatus, RecoveryToken, WitnessAnswer, WitnessRequest,
+        decode_witness_payload,
     },
     transparent_ledger::ChainPoint,
 };
@@ -96,7 +97,8 @@ const REPAIR_KEY: &str = "(EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN t
 /// Only a mined note in a transaction the provider reported for that operation counts.
 /// Chain timing and the absence of other local quotes cannot attribute a payment, since
 /// another device's quote may share the address.
-const UNSETTLED: &str = "EXISTS(SELECT 1 FROM ironwood_one_time_operations o
+pub(in crate::wallet::one_time_ivk) const UNSETTLED: &str =
+    "EXISTS(SELECT 1 FROM ironwood_one_time_operations o
     WHERE o.one_time_key_id = k.id AND (o.expectation = 2 OR (o.expectation = 3 AND o.funded = 1))
     AND COALESCE(o.expected_value, 1) > COALESCE((SELECT SUM(n.value)
         FROM ironwood_received_notes n JOIN transactions t ON t.id_tx = n.transaction_id
@@ -393,19 +395,91 @@ fn candidates(conn: &Connection, key: i64) -> Result<bool, SqliteClientError> {
     )?)
 }
 
-/// Newly learned receivers must cover history from `from`, including history already
-/// passed by live filters.
+/// Newly learned receivers must cover history from `from`, including history filters
+/// already passed. The key's coverage (see [`covered`]) drops below `from`, so filters
+/// re-check that history. While a complete check last advanced the account's coverage
+/// (`pir_coverage`), a lookup through the processed frontier covers it instead.
 pub(crate) fn register_history(
     conn: &Connection,
     owner: i64,
     key: i64,
     from: u32,
 ) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE ironwood_one_time_keys SET covered_height = MIN(COALESCE(covered_height, ?2), ?2)
+         WHERE id = ?1",
+        params![key, from.saturating_sub(1)],
+    )?;
+    if recovery_flag(conn, owner, "pir_coverage")? == Some(true) {
+        let through = queue_history(conn, owner, key, from)?;
+        conn.execute(
+            "UPDATE ironwood_one_time_keys SET covered_height = MAX(covered_height, ?2)
+             WHERE id = ?1",
+            params![key, through],
+        )?;
+    }
+    Ok(())
+}
+
+/// Queues a lookup of `key`'s history from `from` through the processed frontier, the
+/// higher of the account's filter frontier and the wallet's highest block, and returns that
+/// height.
+pub(crate) fn queue_history(
+    conn: &Connection,
+    owner: i64,
+    key: i64,
+    from: u32,
+) -> Result<u32, SqliteClientError> {
     let through: u32 = conn.query_row("SELECT MAX(COALESCE(filter_height, 0),
         COALESCE((SELECT MAX(height) FROM blocks), 0)) FROM ironwood_one_time_recovery WHERE account_id = ?1",
         [owner], |r| r.get(0))?;
     enqueue(conn, key, from, through, AUTOMATIC)?;
-    Ok(())
+    Ok(through)
+}
+
+/// SQL over key alias `k`: the last height filter coverage reaches for the key, either
+/// checked by filters or handed to a lookup a hit or complete check queued. Unset, it is one
+/// below the key's history start: a refund key's funding height, otherwise `activation`.
+fn covered_sql(activation: u32) -> String {
+    format!("COALESCE(k.covered_height, MAX(COALESCE(k.funding_height, {activation}), 1) - 1)")
+}
+
+/// The last height `key`'s coverage reaches (see [`covered_sql`]).
+fn covered<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    key: i64,
+) -> Result<u32, SqliteClientError> {
+    Ok(conn.query_row(
+        &format!(
+            "SELECT {} FROM ironwood_one_time_keys k WHERE k.id = ?1",
+            covered_sql(activation(params))
+        ),
+        [key],
+        |r| r.get(0),
+    )?)
+}
+
+/// Covers `key`'s history through `through` with a lookup from just past its coverage
+/// (see [`covered`]) for `reason`, unless coverage already reaches it. Returns whether
+/// completed history already settled the request (see [`enqueue`]).
+fn cover<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    key: i64,
+    through: u32,
+    reason: u8,
+) -> Result<bool, SqliteClientError> {
+    let last = covered(conn, params, key)?;
+    if last >= through {
+        return Ok(false);
+    }
+    let settled = enqueue(conn, key, last + 1, through, reason)?;
+    conn.execute(
+        "UPDATE ironwood_one_time_keys SET covered_height = ?2 WHERE id = ?1",
+        params![key, through],
+    )?;
+    Ok(settled)
 }
 
 /// Registers only the four lookahead indexes justified by mined payment evidence and
@@ -578,14 +652,15 @@ fn accepts<P: Parameters>(
     )?)
 }
 
-/// Captures a usable frontier. Direct catch-up selects unfinished addresses, never every old
-/// paid key, except that a newer correction generation reads every monitored key once.
+/// Captures a usable publication. A complete check reads every monitored key, paid or not,
+/// over the gap from its own coverage through the publication's end, and advances the
+/// account's frontier there. A newer correction generation reads every monitored key once.
 pub(crate) fn begin<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     publication: RecoveryPublication,
-    direct: bool,
+    complete: bool,
 ) -> Result<bool, SqliteClientError> {
     // An account without an Orchard key holds no one-time keys, so it has nothing to do.
     let Some(owner) = one_time_account(conn, params, account)? else {
@@ -616,53 +691,7 @@ pub(crate) fn begin<P: Parameters>(
     )?;
     let height = u32::from(publication.end.height);
     if publication.history_revision > current.history_revision {
-        conn.execute("UPDATE ironwood_one_time_recovery SET history_revision = ?2, generation = generation + 1,
-            filter_height = NULL, filter_hash = NULL,
-            restore_next = CASE WHEN restore_done = 0 THEN X'0000000000000000' ELSE restore_next END,
-            restore_gap = CASE WHEN restore_done = 0 THEN 0 ELSE restore_gap END,
-            manual_purpose = CASE WHEN manual_end IS NOT NULL THEN 0 ELSE manual_purpose END,
-            manual_next = CASE WHEN manual_end IS NOT NULL THEN X'0000000000000000' ELSE manual_next END
-            WHERE account_id = ?1",
-            params![owner.0, publication.history_revision.to_be_bytes()])?;
-        // Corrections void negatives, cursors and completions captured under the old
-        // generation, including progress between shards. An active request may have been
-        // started after such a completion, so it needs its whole history again.
-        conn.execute(
-            &format!(
-                "UPDATE ironwood_one_time_lookups SET {CURSOR_RESET}, checked_height = NULL,
-            start_height = CASE WHEN target_height IS NOT NULL THEN MIN(start_height, ?2)
-                ELSE start_height END,
-            done_height = NULL, done_from = NULL, read_complete = 0,
-            reasons = CASE WHEN done_height IS NOT NULL OR checked_height IS NOT NULL
-                THEN reasons | 4 ELSE reasons END
-            WHERE one_time_key_id IN (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)"
-            ),
-            params![owner.0, activation(params)],
-        )?;
-        conn.execute(
-            "DELETE FROM ironwood_one_time_payment_recovery WHERE one_time_key_id IN
-            (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
-            [owner.0],
-        )?;
-        // A correction can add a payment the old history left out, even to a used key that
-        // direct catch-up would skip, so every monitored key is read again once.
-        let keys = conn
-            .prepare(&format!(
-                "SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {}",
-                monitored(conn, params, owner.0)?
-            ))?
-            .query_map([owner.0], |r| r.get::<_, i64>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        for key in keys {
-            enqueue(
-                conn,
-                key,
-                activation(params),
-                height,
-                AUTOMATIC | INVALIDATED,
-            )?;
-        }
-        crate::wallet::one_time_rewind::queue_invalidated(conn, Some(height))?;
+        correct(conn, params, owner.0, publication.history_revision, height)?;
     }
     if !enabled {
         let keys = conn
@@ -684,16 +713,19 @@ pub(crate) fn begin<P: Parameters>(
         WHERE account_id = ?1",
         params![owner.0, height],
     )?;
-    if direct {
-        let keys = direct_keys(conn, params, owner.0)?;
-        for key in keys {
-            enqueue(conn, key, activation(params), height, AUTOMATIC)?;
-        }
+    if complete {
         // Advancing the frontier can age refund keys out of monitoring.
         fencing_monitoring(conn, params, &[owner.0], || {
-            conn.execute("UPDATE ironwood_one_time_recovery SET skipped_height = MAX(COALESCE(skipped_height, 0), ?2),
-                filter_height = ?2, filter_hash = ?3 WHERE account_id = ?1 AND COALESCE(filter_height, 0) <= ?2",
-                params![owner.0, height, publication.end.hash])?;
+            for key in monitored_keys(conn, params, owner.0)? {
+                cover(conn, params, key, height, AUTOMATIC)?;
+            }
+            conn.execute(
+                "UPDATE ironwood_one_time_recovery SET pir_coverage = 1,
+                 filter_height = CASE WHEN COALESCE(filter_height, 0) <= ?2 THEN ?2 ELSE filter_height END,
+                 filter_hash = CASE WHEN COALESCE(filter_height, 0) <= ?2 THEN ?3 ELSE filter_hash END
+                 WHERE account_id = ?1",
+                params![owner.0, height, publication.end.hash],
+            )?;
             Ok(())
         })?;
     }
@@ -701,20 +733,71 @@ pub(crate) fn begin<P: Parameters>(
     Ok(true)
 }
 
-/// Selects the unfinished/lookahead set used by both catch-up and its bandwidth estimate.
-pub(super) fn direct_keys<P: Parameters>(
+/// Applies an indexing correction to `revision`: coverage restarts from activation, for the
+/// account's frontier and every key, and every monitored key's history is read again by
+/// lookups through `height`. A correction can replace payments without changing any block
+/// hash, so nothing checked under the old revision is trusted.
+fn correct<P: Parameters>(
     conn: &Connection,
     params: &P,
     owner: i64,
-) -> Result<Vec<i64>, SqliteClientError> {
-    let end = automatic_end(conn, owner)?;
-    let retired = refund_retired(memo_refund_cutoff(conn, params, owner)?);
-    let keys: Vec<i64> = conn.prepare(&format!("SELECT k.id FROM ironwood_one_time_keys k
-            WHERE k.account_id = ?1 AND ((k.purpose = 1 AND (k.key_index < ?2 OR k.reserved_at IS NOT NULL))
-                OR (k.purpose = 0 AND k.funding_height IS NOT NULL AND NOT {retired}))
-            AND (k.used = 0 OR {REPAIR_KEY} OR {UNSETTLED})"))?
-            .query_map(params![owner, end.to_be_bytes()], |r| r.get(0))?.collect::<Result<_, _>>()?;
-    Ok(keys)
+    revision: u64,
+    height: u32,
+) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE ironwood_one_time_recovery SET history_revision = ?2, generation = generation + 1,
+        filter_height = NULL, filter_hash = NULL, fresh = 0,
+        restore_next = CASE WHEN restore_done = 0 THEN X'0000000000000000' ELSE restore_next END,
+        restore_gap = CASE WHEN restore_done = 0 THEN 0 ELSE restore_gap END,
+        manual_purpose = CASE WHEN manual_end IS NOT NULL THEN 0 ELSE manual_purpose END,
+        manual_next = CASE WHEN manual_end IS NOT NULL THEN X'0000000000000000' ELSE manual_next END
+        WHERE account_id = ?1",
+        params![owner, revision.to_be_bytes()],
+    )?;
+    // Corrections void negatives, cursors and completions captured under the old
+    // generation, including progress between shards. An active request may have been
+    // started after such a completion, so it needs its whole history again.
+    conn.execute(
+        &format!(
+            "UPDATE ironwood_one_time_lookups SET {CURSOR_RESET}, checked_height = NULL,
+        start_height = CASE WHEN target_height IS NOT NULL THEN MIN(start_height, ?2)
+            ELSE start_height END,
+        done_height = NULL, done_from = NULL, read_complete = 0,
+        reasons = CASE WHEN done_height IS NOT NULL OR checked_height IS NOT NULL
+            THEN reasons | 4 ELSE reasons END
+        WHERE one_time_key_id IN (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)"
+        ),
+        params![owner, activation(params)],
+    )?;
+    conn.execute(
+        "DELETE FROM ironwood_one_time_payment_recovery WHERE one_time_key_id IN
+        (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
+        [owner],
+    )?;
+    // A correction can add a payment the old history left out, even to a used key, so
+    // every monitored key is read again once.
+    let keys = conn
+        .prepare(&format!(
+            "SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {}",
+            monitored(conn, params, owner)?
+        ))?
+        .query_map([owner], |r| r.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for key in keys {
+        enqueue(
+            conn,
+            key,
+            activation(params),
+            height,
+            AUTOMATIC | INVALIDATED,
+        )?;
+    }
+    crate::wallet::one_time_rewind::queue_invalidated(conn, Some(height))?;
+    conn.execute(
+        "UPDATE ironwood_one_time_keys SET covered_height = NULL WHERE account_id = ?1",
+        [owner],
+    )?;
+    Ok(())
 }
 
 /// How long after its funding block a refund key with no local operation on this device,
@@ -839,7 +922,7 @@ pub(in crate::wallet::one_time_ivk) fn fencing_monitoring<P: Parameters, T>(
     for (owner, before) in owners.iter().zip(before) {
         let after = monitored_keys(conn, params, *owner)?;
         for key in after.iter().filter(|k| before.binary_search(k).is_err()) {
-            register_history(conn, *owner, *key, history_start(conn, *key)?)?;
+            register_history(conn, *owner, *key, history_start(conn, params, *key)?)?;
         }
         if after != before {
             conn.execute(
@@ -852,44 +935,50 @@ pub(in crate::wallet::one_time_ivk) fn fencing_monitoring<P: Parameters, T>(
     Ok(result)
 }
 
-/// Where a key's automatic history starts: a refund key's funding height, or the start of
-/// the history a receive key was registered with (see `one_time_ivk::register`), kept by
-/// its lookup's request or completed coverage.
-fn history_start(conn: &Connection, key: i64) -> Result<u32, SqliteClientError> {
+/// Where a key's automatic history starts: a refund key's funding height, or activation for
+/// a receive key (see `one_time_ivk::register`).
+fn history_start<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    key: i64,
+) -> Result<u32, SqliteClientError> {
     let start: Option<u32> = conn.query_row(
-        "SELECT COALESCE(k.funding_height, (SELECT MIN(l.start_height,
-            COALESCE(l.done_from, l.start_height)) FROM ironwood_one_time_lookups l
-            WHERE l.one_time_key_id = k.id))
+        "SELECT CASE WHEN k.purpose = 1 THEN ?2 ELSE k.funding_height END
          FROM ironwood_one_time_keys k WHERE k.id = ?1",
-        [key],
+        params![key, activation(params)],
         |r| r.get(0),
     )?;
     start.ok_or_else(|| invalid("monitored key has no history start"))
 }
 
-/// Returns all known eligible receivers with the generation that makes the set current.
+/// Returns all monitored receivers, each with its filter coverage, and the generation that
+/// makes the set current.
 pub(crate) fn receivers<P: Parameters>(
     conn: &Connection,
     params: &P,
     account: AccountUuid,
-) -> Result<(RecoveryToken, Vec<DiscoveryWork>), SqliteClientError> {
+) -> Result<(RecoveryToken, Vec<FilterReceiver>), SqliteClientError> {
     let Some(owner) = one_time_account(conn, params, account)? else {
         return Ok((NO_RECOVERY, vec![]));
     };
     let (enabled, token) = token(conn, owner.0)?;
     let work = if enabled {
         conn.prepare(&format!(
-            "SELECT k.purpose, k.key_index, k.receiver FROM ironwood_one_time_keys k
+            "SELECT k.purpose, k.key_index, k.receiver, {} FROM ironwood_one_time_keys k
         WHERE k.account_id = ?1 AND {} ORDER BY k.purpose, k.key_index",
+            covered_sql(activation(params)),
             monitored(conn, params, owner.0)?
         ))?
         .query_and_then([owner.0], |r| {
-            Ok::<_, SqliteClientError>(DiscoveryWork {
-                key: stored_key_id(r)?,
-                receiver: r
-                    .get::<_, Vec<u8>>(2)?
-                    .try_into()
-                    .map_err(|_| corrupt("invalid receiver"))?,
+            Ok::<_, SqliteClientError>(FilterReceiver {
+                work: DiscoveryWork {
+                    key: stored_key_id(r)?,
+                    receiver: r
+                        .get::<_, Vec<u8>>(2)?
+                        .try_into()
+                        .map_err(|_| corrupt("invalid receiver"))?,
+                },
+                covered: BlockHeight::from(r.get::<_, u32>(3)?),
             })
         })?
         .collect::<Result<_, _>>()?
@@ -899,67 +988,244 @@ pub(crate) fn receivers<P: Parameters>(
     Ok((token, work))
 }
 
-/// Commits locally matched hints only if every block and the captured receiver set remain current.
-pub(crate) fn record_filters<P: Parameters>(
+/// How far below the wallet's scanned tip a block can no longer be reorganized: Zakura's
+/// `MAX_BLOCK_REORG_HEIGHT`, the same before and after NU7. A filter span ending at least
+/// this deep commits without a wallet block to compare (see [`record_filter_span`]).
+const REORG_LIMIT: u32 = 1000;
+
+/// Checks that `hits` name monitored keys of `owner` at heights in `[from, through]`, and
+/// returns each hit's key ID.
+fn hit_keys<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    account: AccountUuid,
+    owner: i64,
+    (from, through): (u32, u32),
+    hits: &[(BlockHeight, KeyId)],
+) -> Result<Vec<(u32, i64)>, SqliteClientError> {
+    let monitored = monitored(conn, params, owner)?;
+    hits.iter()
+        .map(|(height, key)| {
+            let id = key_ref(conn, account, *key)?;
+            let eligible: bool = conn.query_row(
+                &format!(
+                    "SELECT {monitored} FROM ironwood_one_time_keys k
+                     WHERE k.account_id = ?1 AND k.id = ?2"
+                ),
+                params![owner, id],
+                |r| r.get(0),
+            )?;
+            if !eligible {
+                return Err(invalid("filter hit for a key outside automatic monitoring"));
+            }
+            let height = u32::from(*height);
+            if height < from || height > through {
+                return Err(invalid("filter hit outside its span"));
+            }
+            Ok((height, id))
+        })
+        .collect()
+}
+
+/// Queues a lookup for each hit at a height past its key's coverage, from just past that
+/// coverage through `through` (see [`cover`]). A hit inside coverage that a pending lookup
+/// still has to read marks that lookup invalidated, so the receiver is not reused before
+/// it settles; one inside history already checked was handled when that history was.
+fn apply_hits<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    hits: &[(u32, i64)],
+    through: u32,
+) -> Result<(), SqliteClientError> {
+    for (height, id) in hits {
+        if *height > covered(conn, params, *id)? {
+            cover(conn, params, *id, through, AUTOMATIC | INVALIDATED)?;
+        } else {
+            conn.execute(
+                "UPDATE ironwood_one_time_lookups SET reasons = reasons | ?3
+                 WHERE one_time_key_id = ?1 AND target_height >= ?2 AND reasons & 3 != 0",
+                params![id, height, INVALIDATED],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Restarts `owner`'s filter coverage from activation, for its frontier and every key.
+fn restart_coverage(conn: &Connection, owner: i64) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE ironwood_one_time_recovery SET filter_height = NULL, filter_hash = NULL,
+         generation = generation + 1 WHERE account_id = ?1",
+        [owner],
+    )?;
+    conn.execute(
+        "UPDATE ironwood_one_time_keys SET covered_height = NULL WHERE account_id = ?1",
+        [owner],
+    )?;
+    Ok(())
+}
+
+/// Commits a filter span matched against the receivers captured with `captured`.
+///
+/// The span must be final for the wallet: its end is a block the wallet scanned (at or
+/// below its fully scanned height) with the same hash, or at least [`REORG_LIMIT`] blocks
+/// below the wallet's scanned tip. A wallet block at the end with another hash refuses it.
+/// The span must also continue committed coverage: it starts just past the account's
+/// frontier with that frontier's hash as its parent (any parent at activation, where an
+/// account without a frontier starts), or replays from inside committed coverage, as a
+/// chunk sealed since does, with the wallet's own block before it as its parent. A replay
+/// whose parent the wallet cannot check restarts coverage from activation.
+///
+/// A newer revision applies the correction (see [`correct`]). Committing advances every
+/// monitored key whose coverage reaches the span's start to its end, and a hit past a key's
+/// coverage queues a lookup from there (see [`apply_hits`]). Keys behind the span keep
+/// their coverage and need a re-check (see [`recheck_filters`]).
+pub(crate) fn record_filter_span<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    account: AccountUuid,
+    captured: RecoveryToken,
+    span: &FilterSpan,
+    hits: &[(BlockHeight, KeyId)],
+) -> Result<FilterOutcome, SqliteClientError> {
+    let (owner, _) = account_key(conn, params, account)?;
+    let (enabled, current) = token(conn, owner.0)?;
+    if enabled && span.revision > current.history_revision {
+        let tip: Option<u32> =
+            conn.query_row("SELECT MAX(height) FROM blocks", [], |r| r.get(0))?;
+        correct(conn, params, owner.0, span.revision, tip.unwrap_or(0))?;
+        return Ok(FilterOutcome::Restart);
+    }
+    if !enabled || current != captured || span.revision != current.history_revision {
+        return Ok(FilterOutcome::Stale);
+    }
+    let start = activation(params);
+    let (from, end) = (u32::from(span.from), u32::from(span.end.height));
+    if from < start || end < from {
+        return Err(invalid("filter span outside receiver history"));
+    }
+    let hits = hit_keys(conn, params, account, owner.0, (from, end), hits)?;
+    let own = wallet::get_block_hash(conn, span.end.height)?;
+    if own.is_some_and(|own| own != span.end.hash) {
+        return Ok(FilterOutcome::Mismatch);
+    }
+    let held =
+        own.is_some() && wallet::fully_scanned_height(conn)?.is_some_and(|h| span.end.height <= h);
+    let stable = scanned_tip(conn)?
+        .is_some_and(|tip| u32::from(tip.height) >= end.saturating_add(REORG_LIMIT));
+    if !held && !stable {
+        return Ok(FilterOutcome::Wait);
+    }
+    let frontier: Option<(u32, [u8; 32])> = conn.query_row(
+        "SELECT filter_height, filter_hash FROM ironwood_one_time_recovery WHERE account_id = ?1",
+        [owner.0],
+        |r| {
+            Ok(r.get::<_, Option<u32>>(0)?
+                .zip(r.get::<_, Option<[u8; 32]>>(1)?))
+        },
+    )?;
+    let last = frontier.map_or(start.saturating_sub(1), |(height, _)| height);
+    if from > last.saturating_add(1) {
+        return Err(invalid("filter span leaves a gap after committed coverage"));
+    }
+    if end <= last {
+        // Another commit already passed this span.
+        return Ok(FilterOutcome::Stale);
+    }
+    if from == last + 1 {
+        if frontier.is_some_and(|(_, hash)| hash != span.parent.0) {
+            return Ok(FilterOutcome::Mismatch);
+        }
+    } else if from > start {
+        match wallet::get_block_hash(conn, BlockHeight::from(from - 1))? {
+            Some(own) if own == span.parent => {}
+            Some(_) => return Ok(FilterOutcome::Mismatch),
+            None => {
+                restart_coverage(conn, owner.0)?;
+                return Ok(FilterOutcome::Restart);
+            }
+        }
+    }
+    // Advancing the frontier can age refund keys out of monitoring.
+    fencing_monitoring(conn, params, &[owner.0], || {
+        apply_hits(conn, params, &hits, end)?;
+        conn.execute(
+            &format!(
+                "UPDATE ironwood_one_time_keys SET covered_height = ?2 WHERE id IN
+                 (SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {}
+                  AND {covered} >= ?3 AND {covered} < ?2)",
+                monitored(conn, params, owner.0)?,
+                covered = covered_sql(start)
+            ),
+            params![owner.0, end, from - 1],
+        )?;
+        conn.execute(
+            "UPDATE ironwood_one_time_recovery SET filter_height = ?2, filter_hash = ?3,
+             pir_coverage = 0, restore_height = COALESCE(restore_height, ?2)
+             WHERE account_id = ?1",
+            params![owner.0, end, span.end.hash.0],
+        )?;
+        Ok(())
+    })?;
+    progress(conn, params, account)?;
+    Ok(FilterOutcome::Committed)
+}
+
+/// Commits a re-check of `keys` over `[from, through]` of committed coverage, matched
+/// against ranges the caller kept, so a key that became watched after filters passed that
+/// history needs no new download. Each key's coverage must reach `from - 1`, and `through`
+/// must not pass the account's frontier. The ranges were fenced when their span committed,
+/// so no chain check applies. Each key's coverage then reaches `through`, and a hit past it
+/// queues a lookup (see [`apply_hits`]). False if `captured` or `revision` is stale.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn recheck_filters<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     captured: RecoveryToken,
     revision: u64,
-    blocks: &[ChainPoint],
-    hits: &[KeyId],
+    (from, through): (u32, u32),
+    keys: &[KeyId],
+    hits: &[(BlockHeight, KeyId)],
 ) -> Result<bool, SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
-    if token(conn, owner.0)? != (true, captured)
-        || revision != captured.history_revision
-        || blocks.is_empty()
-        || blocks.len() > 256
-    {
+    if token(conn, owner.0)? != (true, captured) || revision != captured.history_revision {
         return Ok(false);
     }
-    let previous: Option<u32> = conn.query_row(
+    let frontier: Option<u32> = conn.query_row(
         "SELECT filter_height FROM ironwood_one_time_recovery WHERE account_id = ?1",
         [owner.0],
         |r| r.get(0),
     )?;
-    let Some(previous) = previous else {
-        return Ok(false);
-    };
-    for (i, block) in blocks.iter().enumerate() {
-        if u64::from(u32::from(block.height)) != u64::from(previous) + 1 + i as u64
-            || wallet::get_block_hash(conn, block.height)? != Some(block.hash)
-        {
-            return Ok(false);
+    if from < activation(params) || through < from || frontier.is_none_or(|f| through > f) {
+        return Err(invalid("filter re-check outside committed coverage"));
+    }
+    let checked: Vec<_> = keys
+        .iter()
+        .map(|key| (BlockHeight::from(from), *key))
+        .collect();
+    let ids: Vec<i64> = hit_keys(conn, params, account, owner.0, (from, through), &checked)?
+        .into_iter()
+        .map(|(_, id)| id)
+        .collect();
+    for id in &ids {
+        if covered(conn, params, *id)?.saturating_add(1) < from {
+            return Err(invalid("filter re-check leaves a gap in a key's coverage"));
         }
     }
-    let end = blocks.last().expect("nonempty");
-    let monitored = monitored(conn, params, owner.0)?;
-    for key in hits {
-        let id = key_ref(conn, account, *key)?;
-        let eligible: bool = conn.query_row(
-            &format!(
-                "SELECT {monitored} FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND k.id = ?2"
-            ),
-            params![owner.0, id],
-            |r| r.get(0),
-        )?;
-        if !eligible {
-            return Err(invalid("filter hit for a key outside automatic monitoring"));
-        }
-        enqueue(
-            conn,
-            id,
-            previous + 1,
-            u32::from(end.height),
-            AUTOMATIC | INVALIDATED,
+    let hits = hit_keys(conn, params, account, owner.0, (from, through), hits)?;
+    if hits.iter().any(|(_, hit)| !ids.contains(hit)) {
+        return Err(invalid("filter re-check hit for a key it did not check"));
+    }
+    apply_hits(conn, params, &hits, through)?;
+    for id in ids {
+        conn.execute(
+            "UPDATE ironwood_one_time_keys SET covered_height = MAX(COALESCE(covered_height, 0), ?2)
+             WHERE id = ?1",
+            params![id, through],
         )?;
     }
-    // Advancing the frontier can age refund keys out of monitoring.
-    fencing_monitoring(conn, params, &[owner.0], || {
-        conn.execute("UPDATE ironwood_one_time_recovery SET filter_height = ?2, filter_hash = ?3 WHERE account_id = ?1",
-            params![owner.0, u32::from(end.height), end.hash.0])?;
-        Ok(())
-    })?;
+    progress(conn, params, account)?;
     Ok(true)
 }
 
@@ -989,6 +1255,7 @@ fn progress<P: Parameters>(
         return Ok(());
     }
     let mut handed = None;
+    let pir = recovery_flag(conn, owner.0, "pir_coverage")? == Some(true);
     for _ in 0..STEP_BUDGET {
         let (height, next, gap, done): (Option<u32>, Vec<u8>, u8, bool) = conn.query_row(
             "SELECT restore_height, restore_next, restore_gap, restore_done FROM ironwood_one_time_recovery WHERE account_id = ?1",
@@ -1003,14 +1270,21 @@ fn progress<P: Parameters>(
         // outlast a reorg that removes that use.
         enroll(conn, params, owner.0, index_after(next, 1)?)?;
         // An empty counts only with complete history from activation through the frontier,
-        // so the four empties share compatible captured coverage.
-        let checked: Option<bool> = conn.query_row("SELECT k.used FROM ironwood_one_time_keys k
-            JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id WHERE k.id = ?1
-            AND l.done_height >= ?2 AND l.done_from <= ?3 AND l.target_height IS NULL AND l.read_complete = 1
-            AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = k.id)",
+        // so the four empties share compatible captured coverage. That is a completed
+        // lookup, or filter coverage with no lookup left to run.
+        let checked: Option<bool> = conn.query_row(&format!("SELECT k.used FROM ironwood_one_time_keys k
+            WHERE k.id = ?1
+            AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = k.id)
+            AND (EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id
+                    AND l.done_height >= ?2 AND l.done_from <= ?3 AND l.target_height IS NULL
+                    AND l.read_complete = 1)
+                OR ({} >= ?2 AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
+                    WHERE l.one_time_key_id = k.id AND l.target_height IS NOT NULL)))",
+            covered_sql(activation(params))),
             params![id, height, activation(params)], |r| r.get(0)).optional()?;
         let Some(paid) = checked else {
-            if enqueue(conn, id, activation(params), height, AUTOMATIC)? {
+            // Without a complete check behind the frontier, filters re-check the key.
+            if pir && cover(conn, params, id, height, AUTOMATIC)? {
                 // A settled key can carry the continuation if the budget runs out.
                 handed = Some((id, height));
                 continue;
@@ -1304,7 +1578,7 @@ fn disabled() -> RecoveryStatus {
         upgrade_required: false,
         token: NO_RECOVERY,
         filter_frontier: None,
-        skipped_through: None,
+        fresh: true,
         restore_next: 0,
         restore_gap: 0,
         restore_complete: false,
@@ -1326,7 +1600,7 @@ pub(crate) fn status<P: Parameters>(
         return Ok(disabled());
     };
     let (enabled, token) = token(conn, owner.0)?;
-    let Some(mut status) = conn.query_row("SELECT filter_height, filter_hash, skipped_height,
+    let Some(mut status) = conn.query_row("SELECT filter_height, filter_hash, fresh,
         restore_next, restore_gap, restore_done, manual_active, manual_purpose, manual_next, manual_end,
         upgrade_required
         FROM ironwood_one_time_recovery WHERE account_id = ?1", [owner.0], |r| {
@@ -1337,7 +1611,7 @@ pub(crate) fn status<P: Parameters>(
         Ok(RecoveryStatus { enabled, upgrade_required: r.get(10)?, token,
             filter_frontier: height.map(|height| Ok::<_, rusqlite::Error>(ChainPoint {
                 height: height.into(), hash: BlockHash(r.get(1)?) })).transpose()?,
-            skipped_through: r.get::<_, Option<u32>>(2)?.map(Into::into),
+            fresh: r.get(2)?,
             restore_next: u64::from_be_bytes(next), restore_gap: r.get(4)?, restore_complete: r.get(5)?,
             manual: manual_end.map(|end| Ok::<_, rusqlite::Error>(ManualProgress { active: r.get(6)?,
                 refunds_done: r.get::<_, u8>(7)? == 1, next: u64::from_be_bytes(manual_next),
@@ -1914,7 +2188,7 @@ fn dispute_raw_receipts(
         // whole history is read again from activation, through the current frontier.
         rewind_lookup(conn, key, activation, 0)?;
         invalidate(conn, key)?;
-        register_history(conn, owner, key, activation)?;
+        queue_history(conn, owner, key, activation)?;
         crate::wallet::one_time_rewind::queue_invalidated(conn, None)?;
         disputed = true;
     }

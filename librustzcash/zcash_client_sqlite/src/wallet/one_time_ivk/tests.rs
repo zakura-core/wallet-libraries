@@ -165,7 +165,8 @@ pub(crate) fn reserve_key(
 }
 
 /// Registers `key` as a restore discovers it, from `from`, with its history due for a
-/// lookup unless this wallet scanned it.
+/// lookup unless this wallet scanned it. A receive key's history from activation is queued
+/// as a complete check would queue it.
 pub(super) fn recover(
     db: &mut Db,
     account: AccountUuid,
@@ -176,6 +177,10 @@ pub(super) fn recover(
         let (id, key) = register(c, p, account, key)?;
         if key.key_id().purpose() == Purpose::Refund {
             store::restore::queue::funded(c, p, id, from)?;
+        } else {
+            let owner = crate::wallet::get_account_ref(c, account)?;
+            let start = store::restore::queue::activation(p);
+            store::restore::queue::queue_history(c, owner.0, id, start)?;
         }
         Ok(key)
     })
