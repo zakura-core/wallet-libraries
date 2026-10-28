@@ -3616,7 +3616,10 @@ fn conclusive_refund_keys_leave_automatic_monitoring() {
 }
 
 /// The refund indexes `account` monitors automatically, in its filter receiver set.
-fn refunds_watched(st: &State, account: AccountUuid) -> Vec<u64> {
+pub(in crate::wallet::one_time_ivk) fn refunds_watched(
+    st: &State,
+    account: AccountUuid,
+) -> Vec<u64> {
     let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
     receivers
         .iter()
@@ -3639,146 +3642,6 @@ fn catch_up(st: &mut State, account: AccountUuid) -> BlockHeight {
         .filter_frontier
         .unwrap()
         .height
-}
-
-/// Mines and scans one empty block and passes filters over it with no hit.
-fn filter_one_block(st: &mut State, account: AccountUuid, frontier: BlockHeight) {
-    st.generate_and_scan_empty_blocks(1);
-    let (token, _) = st.wallet().db().one_time_receivers(account).unwrap();
-    let passed = blocks_above(st, frontier);
-    assert!(record_span(
-        st.wallet_mut().db_mut(),
-        account,
-        token,
-        &passed,
-        &[]
-    ));
-}
-
-/// The memo-only window in blocks is the chain time it spans, so after NU7's 25-second
-/// blocks it covers three times as many blocks, and a window across activation counts each
-/// side at its own spacing.
-#[test]
-fn the_memo_refund_window_is_measured_in_chain_time() {
-    use crate::wallet::one_time_ivk::restore::queue::{MEMO_REFUND_WINDOW, aged_cutoff};
-    use zcash_protocol::zip318::BlockSpacing;
-    let window = MEMO_REFUND_WINDOW;
-    assert_eq!(window, 8_064, "7 days of 75-second blocks");
-    let uniform = BlockSpacing::UNIFORM;
-    assert_eq!(aged_cutoff(uniform, window), None);
-    assert_eq!(aged_cutoff(uniform, window + 1), Some(0));
-    assert_eq!(aged_cutoff(uniform, 100_000), Some(100_000 - window - 1));
-    let nu7 = 1_000_000;
-    let spacing = BlockSpacing::with_nu7_activation(BlockHeight::from(nu7));
-    assert_eq!(aged_cutoff(spacing, nu7 - 1), Some(nu7 - 1 - window - 1));
-    assert_eq!(aged_cutoff(spacing, nu7 + 3 * window), Some(nu7 - 1));
-    assert_eq!(aged_cutoff(spacing, nu7 + 3 * window + 6), Some(nu7 + 5));
-    // A third of the window after activation leaves two thirds before it.
-    assert_eq!(
-        aged_cutoff(spacing, nu7 + window),
-        Some(nu7 - 2 * window / 3 - 1)
-    );
-}
-
-/// A refund key known only from its funding memo has no local operation, so no provider
-/// status can retire it. It leaves automatic monitoring once filters have checked more than
-/// the memo-only window past its funding block, which fences held filter requests, and a key
-/// already past the window when recovered still has its history read once. A key with a
-/// local operation keeps the conclusive-operation rule, and retirement never makes an index
-/// issuable again.
-#[test]
-fn a_memo_only_refund_key_retires_after_its_window() {
-    use crate::wallet::one_time_ivk::restore::queue::MEMO_REFUND_WINDOW;
-    use zakura_one_time_ivk::swap::{Observation, OperationStatus::Active};
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let frontier = catch_up(&mut st, account);
-    let refund = |i| KeyId::new(Purpose::Refund, i);
-    let edge = frontier - MEMO_REFUND_WINDOW;
-    let db = st.wallet_mut().db_mut();
-    recover(db, account, refund(0), edge);
-    recover(db, account, refund(1), edge - 1);
-    recover(db, account, refund(2), edge - 1);
-    let active = Observation {
-        status: Active,
-        funded: true,
-        receipts: vec![],
-    };
-    let now = clock_now();
-    observe_with(
-        db,
-        account,
-        refund(2),
-        ("deposit-2", now + 3_600),
-        active,
-        now,
-    )
-    .unwrap();
-    assert_eq!(refunds_watched(&st, account), vec![0, 2]);
-    // R1 was already past the window, so it was never watched, but its history is read.
-    let r1 = key_ref(&st.wallet().db().conn, account, refund(1)).unwrap();
-    let queued: bool = value(
-        st.wallet().conn(),
-        "SELECT target_height IS NOT NULL FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
-        [r1],
-    );
-    assert!(queued);
-
-    let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
-    filter_one_block(&mut st, account, frontier);
-    assert_eq!(refunds_watched(&st, account), vec![2]);
-    let (current, _) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert_ne!(current, held, "retiring R0 fences held filter requests");
-
-    let tip = tip(&st).height;
-    let next = reserve_refund(st.wallet_mut().db_mut(), account, tip);
-    assert_eq!(next.unwrap().unwrap().key_id().index(), 3);
-}
-
-/// A refund to a memo-only key after it retired is missed by automatic recovery, as the
-/// filters no longer watch it, but an explicit history check still finds it.
-#[test]
-fn a_refund_to_a_retired_memo_only_key_is_found_by_a_history_check() {
-    use crate::wallet::one_time_ivk::restore::queue::MEMO_REFUND_WINDOW;
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let frontier = catch_up(&mut st, account);
-    let r0 = KeyId::new(Purpose::Refund, 0);
-    recover(
-        st.wallet_mut().db_mut(),
-        account,
-        r0,
-        frontier - MEMO_REFUND_WINDOW,
-    );
-    let frontier = catch_up(&mut st, account);
-    filter_one_block(&mut st, account, frontier);
-    assert_eq!(refunds_watched(&st, account), Vec::<u64>::new());
-
-    let frontier = status(st.wallet().db(), account)
-        .filter_frontier
-        .unwrap()
-        .height;
-    pay_candidate(&mut st, r0);
-    filter_one_block(&mut st, account, frontier);
-    let publication = publication_at(&st, tip(&st).height);
-    let db = st.wallet_mut().db_mut();
-    assert!(
-        db.begin_one_time_recovery(account, publication, true)
-            .unwrap()
-    );
-    drain(&mut st, account, publication);
-    assert!(
-        one_time_notes(&st).is_empty(),
-        "automatic recovery skips R0"
-    );
-
-    let db = st.wallet_mut().db_mut();
-    assert!(
-        db.check_one_time_history(account, publication, None)
-            .unwrap()
-    );
-    drain(&mut st, account, publication);
-    assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
 /// R0's refund is recovered, then a reorg replaces it with another transaction paying R0,
@@ -3855,79 +3718,6 @@ fn a_refund_replaced_by_a_reorg_still_retires() {
     let frontier = catch_up(&mut st, account);
     assert_eq!(u32::from(frontier), expiry + crate::PRUNING_DEPTH);
     assert_eq!(refunds_watched(&st, account), Vec::<u64>::new());
-}
-
-/// A manual check finds a payment to a retired memo-only key, and its candidate waits for
-/// a witness, which returns the key to monitoring. That advances the generation, so a
-/// filter request captured without the key cannot commit past blocks that may pay it again,
-/// and the key's history since its earlier completed read is queued automatically.
-#[test]
-fn a_candidate_that_returns_a_retired_key_to_monitoring_fences_held_filters() {
-    use crate::wallet::one_time_ivk::restore::queue::MEMO_REFUND_WINDOW;
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let frontier = catch_up(&mut st, account);
-    let r0 = KeyId::new(Purpose::Refund, 0);
-    let db = st.wallet_mut().db_mut();
-    recover(db, account, r0, frontier - MEMO_REFUND_WINDOW);
-    let frontier = catch_up(&mut st, account);
-    filter_one_block(&mut st, account, frontier);
-    assert_eq!(refunds_watched(&st, account), Vec::<u64>::new());
-
-    let frontier = status(st.wallet().db(), account)
-        .filter_frontier
-        .unwrap()
-        .height;
-    pay_candidate(&mut st, r0);
-    let publication = publication_at(&st, tip(&st).height);
-    let db = st.wallet_mut().db_mut();
-    assert!(
-        db.check_one_time_history(account, publication, None)
-            .unwrap()
-    );
-    let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert!(answer_lookup(&mut st, account, publication));
-    assert_eq!(candidates(&st), 1, "the payment waits for its witness");
-    assert_eq!(refunds_watched(&st, account), vec![0]);
-
-    let passed = blocks_above(&st, frontier);
-    let db = st.wallet_mut().db_mut();
-    assert!(
-        !record_span(db, account, held, &passed, &[]),
-        "a request captured without R0 cannot commit"
-    );
-    let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    let r0_covered = receivers.iter().find(|r| r.work.key == r0).unwrap().covered;
-    assert!(
-        r0_covered < frontier,
-        "R0's history is due for a filter re-check"
-    );
-}
-
-/// Recording a first local operation on a retired memo-only key replaces the memo-only
-/// rule with the operation rule, which returns it to monitoring and fences held filters.
-#[test]
-fn a_first_operation_on_a_retired_memo_only_key_fences_held_filters() {
-    use crate::wallet::one_time_ivk::restore::queue::MEMO_REFUND_WINDOW;
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let frontier = catch_up(&mut st, account);
-    let r0 = KeyId::new(Purpose::Refund, 0);
-    let db = st.wallet_mut().db_mut();
-    recover(db, account, r0, frontier - MEMO_REFUND_WINDOW);
-    let frontier = catch_up(&mut st, account);
-    filter_one_block(&mut st, account, frontier);
-    assert_eq!(refunds_watched(&st, account), Vec::<u64>::new());
-
-    let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
-    let deposit = p2pkh(7).encode(st.network());
-    let now = clock_now();
-    let db = st.wallet_mut().db_mut();
-    db.record_refund_operation(account, 0, &deposit, now + 3_600, now)
-        .unwrap();
-    assert_eq!(refunds_watched(&st, account), vec![0]);
-    let (current, _) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert_ne!(current, held);
 }
 
 /// As in [`a_refund_replaced_by_a_reorg_still_retires`], but the displaced receipt's expiry
@@ -4125,7 +3915,7 @@ fn answer_with(
 }
 
 /// The number of queued payment candidates.
-fn candidates(st: &State) -> u32 {
+pub(in crate::wallet::one_time_ivk) fn candidates(st: &State) -> u32 {
     value(
         st.wallet().conn(),
         "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery",

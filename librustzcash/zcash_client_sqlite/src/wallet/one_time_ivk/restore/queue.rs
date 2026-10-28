@@ -439,9 +439,12 @@ pub(crate) fn queue_history(
 
 /// SQL over key alias `k`: the last height filter coverage reaches for the key, either
 /// checked by filters or handed to a lookup a hit or complete check queued. Unset, it is one
-/// below the key's history start: a refund key's funding height, otherwise `activation`.
+/// below the key's history start: a refund key's funding height, otherwise `activation`, and
+/// never below activation.
 fn covered_sql(activation: u32) -> String {
-    format!("COALESCE(k.covered_height, MAX(COALESCE(k.funding_height, {activation}), 1) - 1)")
+    format!(
+        "COALESCE(k.covered_height, MAX(COALESCE(k.funding_height, {activation}), {activation}, 1) - 1)"
+    )
 }
 
 /// The last height `key`'s coverage reaches (see [`covered_sql`]).
@@ -550,8 +553,8 @@ pub(super) fn automatic_end(conn: &Connection, owner: i64) -> Result<u64, Sqlite
 }
 
 /// Records funded refund evidence. New or earlier funding queues the key's history from
-/// that height even if ordinary sync passed it, including for a key already past
-/// [`MEMO_REFUND_WINDOW`], which never enters monitoring (see [`fencing_monitoring`]).
+/// that height even if ordinary sync passed it. A key whose funding is already older than
+/// [`MEMO_REFUND_WINDOW`] is still monitored until its own coverage passes the window.
 pub(crate) fn funded<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -785,7 +788,7 @@ fn correct<P: Parameters>(
         .prepare(&format!(
             "SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {}
              AND k.purpose = 1 AND k.used = 0 AND {}",
-            monitored(conn, params, owner)?,
+            monitored(params),
             super::super::swap::RESERVED
         ))?
         .query_map([owner], |r| r.get::<_, i64>(0))?
@@ -809,60 +812,51 @@ fn correct<P: Parameters>(
 
 /// How long after its funding block a refund key with no local operation on this device,
 /// such as one recovered from a funding memo, stays in automatic monitoring, in 75-second
-/// reference blocks. 1Click documents no bound from funding to refund, so this is 7 days.
+/// reference blocks, so NU7's 25-second blocks still span 90 days.
+//
+// NEAR explorer data for refunded ZEC-origin swaps, deposits July 25 to October 27, 2026:
+// 491 refunds could be timed from chain heights; median about 2 hours (82 blocks); 7 took
+// more than 7 days; two swaps from August 17 took about 45 days (refunded at heights
+// 3,501,634 and 3,501,635); a batch from October 3 and 4 took about 12 days. 90 days doubles
+// the longest delay seen. Overhead: about 0.011 false PIR lookups per refund address over 90
+// days (about 1 KB), from M = 1,569,792 and about 71,000 blocks with payments a year.
+// Refunds after 90 days are found by check_one_time_history, whose first phase walks every
+// refund key with a known funding height.
 pub(in crate::wallet::one_time_ivk) const MEMO_REFUND_WINDOW: u32 =
-    7 * 24 * 60 * 60 / SECONDS_PER_BLOCK;
+    90 * 24 * 60 * 60 / SECONDS_PER_BLOCK;
 
-/// The highest funding height of a refund key with no local operation that has left
-/// automatic monitoring, as of `owner`'s filter frontier (see [`aged_cutoff`]). `None`
-/// while the account has no frontier.
-fn memo_refund_cutoff<P: Parameters>(
-    conn: &Connection,
-    params: &P,
-    owner: i64,
-) -> Result<Option<u32>, SqliteClientError> {
-    let frontier: Option<u32> = conn
-        .query_row(
-            "SELECT filter_height FROM ironwood_one_time_recovery WHERE account_id = ?1",
-            [owner],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    Ok(frontier.and_then(|frontier| aged_cutoff(BlockSpacing::for_network(params), frontier)))
-}
-
-/// The highest height more than [`MEMO_REFUND_WINDOW`] of chain time before `frontier` on a
-/// chain with `spacing`, if any. Filters have checked that whole window after it.
-pub(in crate::wallet::one_time_ivk) fn aged_cutoff(
-    spacing: BlockSpacing,
-    frontier: u32,
-) -> Option<u32> {
-    let aged = |height: u32| spacing.exceeds(height.into(), frontier.into(), MEMO_REFUND_WINDOW);
-    if !aged(0) {
-        return None;
-    }
-    // `aged` holds up to the cutoff and fails above it, at `frontier` itself at the latest.
-    let (mut held, mut failed) = (0, frontier);
-    while failed - held > 1 {
-        let middle = held + (failed - held) / 2;
-        if aged(middle) {
-            held = middle;
-        } else {
-            failed = middle;
+/// SQL over key alias `k`: the height [`MEMO_REFUND_WINDOW`] of chain time after the key's
+/// funding height on a chain with `spacing`, counting each height at its own target
+/// spacing, as `BlockSpacing::advance` does.
+pub(in crate::wallet::one_time_ivk) fn watch_end_sql(spacing: BlockSpacing) -> String {
+    let window = MEMO_REFUND_WINDOW;
+    match spacing.nu7_activation().map(u32::from) {
+        None => format!("(k.funding_height + {window})"),
+        Some(nu7) => {
+            let ratio = spacing.blocks_per_reference_block(nu7.into());
+            format!(
+                "(CASE WHEN k.funding_height >= {nu7} THEN k.funding_height + {window} * {ratio}
+                  WHEN k.funding_height + {window} <= {nu7} THEN k.funding_height + {window}
+                  ELSE {nu7} + ({window} - ({nu7} - k.funding_height)) * {ratio} END)"
+            )
         }
     }
-    Some(held)
 }
 
-/// SQL over key alias `k`: a refund key out of automatic monitoring, given its account's
-/// [`memo_refund_cutoff`]. Either every local operation on it is conclusive, the provider
-/// having reported that no refund is coming or the expected refund being received and
-/// settled, or it has no local operation and was funded at or below `cutoff`. Neither holds
-/// while a dispute, repair work or payment candidate is left. Refund keys are never reused,
-/// so it only leaves automatic monitoring; a manual history check still covers it.
-fn refund_retired(cutoff: Option<u32>) -> String {
-    let aged = cutoff.map_or_else(|| "0".to_owned(), |c| format!("k.funding_height <= {c}"));
+/// SQL over key alias `k`: a refund key out of automatic monitoring. Either every local
+/// operation on it is conclusive, the provider having reported that no refund is coming or
+/// the expected refund being received and settled, or it has no local operation and its own
+/// coverage reaches [`MEMO_REFUND_WINDOW`] past its funding height (see [`watch_end_sql`]),
+/// so a memo learned late is checked over that window first. Neither holds while a dispute,
+/// repair work or payment candidate is left; a hit's pending lookup still runs, and a
+/// payment it finds returns the key to monitoring. Refund keys are never reused, so it only
+/// leaves automatic monitoring; a manual history check still covers it.
+fn refund_retired<P: Parameters>(params: &P) -> String {
+    let aged = format!(
+        "{} >= {}",
+        covered_sql(activation(params)),
+        watch_end_sql(BlockSpacing::for_network(params))
+    );
     format!(
         "(k.purpose = 0
     AND CASE WHEN EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id = k.id)
@@ -879,17 +873,13 @@ fn refund_retired(cutoff: Option<u32>) -> String {
 /// index below the enrolled automatic end or a funded refund key not yet retired (see
 /// [`refund_retired`]). Receive keys a manual check derived beyond that end are checked
 /// only by that search.
-fn monitored<P: Parameters>(
-    conn: &Connection,
-    params: &P,
-    owner: i64,
-) -> Result<String, SqliteClientError> {
-    Ok(format!(
+fn monitored<P: Parameters>(params: &P) -> String {
+    format!(
         "(k.purpose = 1 AND k.key_index < (SELECT receive_end
         FROM ironwood_one_time_recovery WHERE account_id = ?1)
     OR (k.funding_height IS NOT NULL AND NOT {}))",
-        refund_retired(memo_refund_cutoff(conn, params, owner)?)
-    ))
+        refund_retired(params)
+    )
 }
 
 /// The account's automatically monitored keys, ordered (see [`monitored`]).
@@ -902,7 +892,7 @@ fn monitored_keys<P: Parameters>(
         .prepare(&format!(
             "SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {}
              ORDER BY k.id",
-            monitored(conn, params, owner)?
+            monitored(params)
         ))?
         .query_map([owner], |r| r.get(0))?
         .collect::<Result<_, _>>()?)
@@ -912,9 +902,10 @@ fn monitored_keys<P: Parameters>(
 /// changed, so a filter request captured with the old receiver set cannot commit.
 ///
 /// Every key `change` adds to monitoring, by enrollment, funding evidence, a newer status,
-/// a dispute or any other path, gets its history queued through the processed frontier
-/// (see [`register_history`]) in the same transaction. Filters already passed blocks where
-/// it was not watched, such as a payment to a refund key while it was retired.
+/// a dispute or any other path, needs its history from just past its own coverage (see
+/// [`register_history`]) in the same transaction. Spans advance only monitored keys, so
+/// that coverage stopped where it was last watched, and filters already passed blocks
+/// after it, such as a payment to a refund key while it was retired.
 pub(in crate::wallet::one_time_ivk) fn fencing_monitoring<P: Parameters, T>(
     conn: &Connection,
     params: &P,
@@ -929,7 +920,8 @@ pub(in crate::wallet::one_time_ivk) fn fencing_monitoring<P: Parameters, T>(
     for (owner, before) in owners.iter().zip(before) {
         let after = monitored_keys(conn, params, *owner)?;
         for key in after.iter().filter(|k| before.binary_search(k).is_err()) {
-            register_history(conn, *owner, *key, history_start(conn, params, *key)?)?;
+            let from = covered(conn, params, *key)?.saturating_add(1);
+            register_history(conn, *owner, *key, from)?;
         }
         if after != before {
             conn.execute(
@@ -940,22 +932,6 @@ pub(in crate::wallet::one_time_ivk) fn fencing_monitoring<P: Parameters, T>(
         }
     }
     Ok(result)
-}
-
-/// Where a key's automatic history starts: a refund key's funding height, or activation for
-/// a receive key (see `one_time_ivk::register`).
-fn history_start<P: Parameters>(
-    conn: &Connection,
-    params: &P,
-    key: i64,
-) -> Result<u32, SqliteClientError> {
-    let start: Option<u32> = conn.query_row(
-        "SELECT CASE WHEN k.purpose = 1 THEN ?2 ELSE k.funding_height END
-         FROM ironwood_one_time_keys k WHERE k.id = ?1",
-        params![key, activation(params)],
-        |r| r.get(0),
-    )?;
-    start.ok_or_else(|| invalid("monitored key has no history start"))
 }
 
 /// Returns all monitored receivers, each with its filter coverage, and the generation that
@@ -974,7 +950,7 @@ pub(crate) fn receivers<P: Parameters>(
             "SELECT k.purpose, k.key_index, k.receiver, {} FROM ironwood_one_time_keys k
         WHERE k.account_id = ?1 AND {} ORDER BY k.purpose, k.key_index",
             covered_sql(activation(params)),
-            monitored(conn, params, owner.0)?
+            monitored(params)
         ))?
         .query_and_then([owner.0], |r| {
             Ok::<_, SqliteClientError>(FilterReceiver {
@@ -1010,7 +986,7 @@ fn hit_keys<P: Parameters>(
     (from, through): (u32, u32),
     hits: &[(BlockHeight, KeyId)],
 ) -> Result<Vec<(u32, i64)>, SqliteClientError> {
-    let monitored = monitored(conn, params, owner)?;
+    let monitored = monitored(params);
     hits.iter()
         .map(|(height, key)| {
             let id = key_ref(conn, account, *key)?;
@@ -1161,7 +1137,7 @@ pub(crate) fn record_filter_span<P: Parameters>(
                 "UPDATE ironwood_one_time_keys SET covered_height = ?2 WHERE id IN
                  (SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {}
                   AND {covered} >= ?3 AND {covered} < ?2)",
-                monitored(conn, params, owner.0)?,
+                monitored(params),
                 covered = covered_sql(start)
             ),
             params![owner.0, end, from - 1],
@@ -1224,14 +1200,18 @@ pub(crate) fn recheck_filters<P: Parameters>(
     if hits.iter().any(|(_, hit)| !ids.contains(hit)) {
         return Err(invalid("filter re-check hit for a key it did not check"));
     }
-    apply_hits(conn, params, &hits, through)?;
-    for id in ids {
-        conn.execute(
-            "UPDATE ironwood_one_time_keys SET covered_height = MAX(COALESCE(covered_height, 0), ?2)
-             WHERE id = ?1",
-            params![id, through],
-        )?;
-    }
+    // Coverage can carry a memo-only refund key past its window (see `refund_retired`).
+    fencing_monitoring(conn, params, &[owner.0], || {
+        apply_hits(conn, params, &hits, through)?;
+        for id in ids {
+            conn.execute(
+                "UPDATE ironwood_one_time_keys
+                 SET covered_height = MAX(COALESCE(covered_height, 0), ?2) WHERE id = ?1",
+                params![id, through],
+            )?;
+        }
+        Ok(())
+    })?;
     progress(conn, params, account)?;
     Ok(true)
 }

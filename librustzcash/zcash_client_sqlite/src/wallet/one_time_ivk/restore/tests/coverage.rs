@@ -755,3 +755,288 @@ fn a_cancelled_manual_target_does_not_block_a_filter_checked_key() {
     assert!(state.lookups.is_empty());
     assert_eq!((state.restore_next, state.restore_complete), (5, true));
 }
+
+/// Blocks between Ironwood activation and [`late_wallet`]'s birthday, more than the memo
+/// refund window.
+const LATE: u32 = 200_000;
+
+/// A wallet born [`LATE`] blocks after Ironwood activation and scanned through one block,
+/// so stable spans can cover more than the memo refund window below its birthday.
+fn late_wallet() -> State {
+    use zcash_client_backend::data_api::{chain::ChainState, testing::InitialChainState};
+    let mut st = TestBuilder::new()
+        .with_network(ironwood_network())
+        .with_data_store_factory(TestDbFactory::file_backed())
+        .with_block_cache(crate::testing::BlockCache::new())
+        .with_initial_chain_state(|_, network| InitialChainState {
+            chain_state: ChainState::empty(
+                network
+                    .activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+                    .unwrap()
+                    + LATE
+                    - 1,
+                BlockHash([0; 32]),
+            ),
+            prior_sapling_roots: vec![],
+            prior_orchard_roots: vec![],
+        })
+        .with_account_having_current_birthday()
+        .build();
+    st.generate_and_scan_empty_blocks(1);
+    let account = st.test_account().unwrap().id();
+    st.wallet_mut()
+        .db_mut()
+        .set_one_time_recovery_enabled(account, true)
+        .unwrap();
+    st
+}
+
+/// A stand-in hash for a block below the late wallet's birthday, which it never stored.
+fn unheld(height: BlockHeight) -> BlockHash {
+    let mut hash = [0xee; 32];
+    hash[..4].copy_from_slice(&u32::from(height).to_le_bytes());
+    BlockHash(hash)
+}
+
+/// Commits a span from just past the account's frontier, or activation, through `end`.
+fn commit_to(
+    st: &mut State,
+    account: AccountUuid,
+    end: ChainPoint,
+    hits: &[(BlockHeight, KeyId)],
+) -> FilterOutcome {
+    let state = status(st.wallet().db(), account);
+    let span = FilterSpan {
+        revision: 0,
+        from: state
+            .filter_frontier
+            .map_or(activation(st), |f| f.height + 1),
+        parent: state.filter_frontier.map_or(BlockHash([0; 32]), |f| f.hash),
+        end,
+    };
+    record(st, account, &span, hits)
+}
+
+/// Commits the late wallet's history below its birthday as far as the reorg limit makes
+/// final, with no hit.
+fn cover_below_birthday(st: &mut State, account: AccountUuid) -> BlockHeight {
+    let end = tip(st).height - 1_000;
+    let point = ChainPoint {
+        height: end,
+        hash: unheld(end),
+    };
+    assert_eq!(commit_to(st, account, point, &[]), FilterOutcome::Committed);
+    end
+}
+
+/// Commits a span through the cached tip with `hits`.
+fn commit_to_tip(
+    st: &mut State,
+    account: AccountUuid,
+    hits: &[(BlockHeight, KeyId)],
+) -> FilterOutcome {
+    let end = *blocks_above(st, tip(st).height - 1).last().unwrap();
+    commit_to(st, account, end, hits)
+}
+
+/// The window's blocks, as the memo refund window spans them at 75-second spacing.
+fn days(days: u32) -> u32 {
+    days * 24 * 60 * 60 / 75
+}
+
+/// Refund key `index`.
+fn refund(index: u64) -> KeyId {
+    KeyId::new(Purpose::Refund, index)
+}
+
+/// The window is 90 days of chain time, counting each height at its own target spacing.
+#[test]
+fn the_memo_refund_window_spans_90_days_of_chain_time() {
+    use crate::wallet::one_time_ivk::restore::queue::{MEMO_REFUND_WINDOW, watch_end_sql};
+    use zcash_protocol::zip318::BlockSpacing;
+    assert_eq!(MEMO_REFUND_WINDOW, days(90));
+    let conn = Connection::open_in_memory().unwrap();
+    let end = |spacing: BlockSpacing, funding: u32| -> u32 {
+        value(
+            &conn,
+            &format!(
+                "SELECT {} FROM (SELECT ?1 AS funding_height) k",
+                watch_end_sql(spacing)
+            ),
+            [funding],
+        )
+    };
+    let nu7 = 1_000_000;
+    let spacings = [
+        BlockSpacing::UNIFORM,
+        BlockSpacing::with_nu7_activation(BlockHeight::from(nu7)),
+    ];
+    for spacing in spacings {
+        for funding in [0, nu7 - days(90) - 1, nu7 - days(45), nu7, nu7 + 7] {
+            let advanced = spacing.advance(funding.into(), MEMO_REFUND_WINDOW);
+            assert_eq!(end(spacing, funding), u32::from(advanced), "{funding}");
+        }
+    }
+    // After NU7, 90 days spans three times as many 25-second blocks.
+    assert_eq!(end(spacings[1], nu7) - nu7, 3 * days(90));
+}
+
+/// A memo-only refund key funded 45 days before the frontier is still watched, so its
+/// refund is found automatically.
+#[test]
+fn a_refund_on_day_45_is_found_automatically() {
+    let mut st = late_wallet();
+    let account = st.test_account().unwrap().id();
+    let funded = tip(&st).height - days(45);
+    recover(st.wallet_mut().db_mut(), account, refund(0), funded);
+    cover_below_birthday(&mut st, account);
+    assert_eq!(refunds_watched(&st, account), [0]);
+    let paid = pay_candidate(&mut st, refund(0));
+    assert_eq!(
+        commit_to_tip(&mut st, account, &[(paid.height, refund(0))]),
+        FilterOutcome::Committed
+    );
+    assert_eq!(run_pir(&mut st, account), 1);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// Once a memo-only refund key's own coverage passes 90 days after its funding, filters
+/// stop watching it, and a later refund is found only by the manual history check.
+#[test]
+fn a_refund_after_90_days_is_found_only_by_the_manual_check() {
+    let mut st = late_wallet();
+    let account = st.test_account().unwrap().id();
+    let funded = tip(&st).height - days(100);
+    recover(st.wallet_mut().db_mut(), account, refund(0), funded);
+    cover_below_birthday(&mut st, account);
+    assert_eq!(refunds_watched(&st, account), Vec::<u64>::new());
+    pay_candidate(&mut st, refund(0));
+    assert_eq!(
+        commit_to_tip(&mut st, account, &[]),
+        FilterOutcome::Committed
+    );
+    complete(&mut st, account);
+    assert!(one_time_notes(&st).is_empty());
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, publication, None)
+            .unwrap()
+    );
+    run_pir(&mut st, account);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// A funding memo learned after its window has passed is still checked over that window
+/// first, so a refund already paid is found, and only then does the key retire.
+#[test]
+fn a_memo_learned_after_its_window_gets_the_backfill() {
+    let mut st = late_wallet();
+    let account = st.test_account().unwrap().id();
+    cover_below_birthday(&mut st, account);
+    let paid = pay_candidate(&mut st, refund(0));
+    assert_eq!(
+        commit_to_tip(&mut st, account, &[]),
+        FilterOutcome::Committed
+    );
+    let funded = tip(&st).height - days(100);
+    recover(st.wallet_mut().db_mut(), account, refund(0), funded);
+    assert_eq!(refunds_watched(&st, account), [0]);
+    assert_eq!(behind(&st, account), [refund(0)]);
+    recheck(&mut st, account, &[(paid.height, refund(0))]);
+    assert_eq!(run_pir(&mut st, account), 1);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    assert_eq!(refunds_watched(&st, account), Vec::<u64>::new());
+}
+
+/// A reorg above a refund key's funding height clears it, so the funding the replacement
+/// chain mines later moves the window with it rather than keeping the earlier height.
+#[test]
+fn a_reorg_moving_funding_shifts_the_bound() {
+    let mut st = scanned_wallet();
+    st.generate_and_scan_empty_blocks(4);
+    let account = st.test_account().unwrap().id();
+    let funded = tip(&st).height;
+    recover(st.wallet_mut().db_mut(), account, refund(0), funded);
+    let funding = |st: &State| -> Option<u32> {
+        value(
+            st.wallet().conn(),
+            "SELECT funding_height FROM ironwood_one_time_keys WHERE purpose = 0",
+            [],
+        )
+    };
+    assert_eq!(funding(&st), Some(u32::from(funded)));
+    st.truncate_to_height(funded - 1);
+    assert_eq!(funding(&st), None);
+    assert_eq!(refunds_watched(&st, account), Vec::<u64>::new());
+    st.generate_and_scan_empty_blocks(6);
+    recover(st.wallet_mut().db_mut(), account, refund(0), funded + 5);
+    assert_eq!(funding(&st), Some(u32::from(funded) + 5));
+    assert_eq!(refunds_watched(&st, account), [0]);
+}
+
+/// Recording a first local operation on a retired memo-only key replaces the memo-only
+/// rule with the operation rule, which returns it to monitoring and fences held filters.
+#[test]
+fn a_first_operation_on_a_retired_memo_only_key_fences_held_filters() {
+    let mut st = late_wallet();
+    let account = st.test_account().unwrap().id();
+    let funded = tip(&st).height - days(100);
+    recover(st.wallet_mut().db_mut(), account, refund(0), funded);
+    cover_below_birthday(&mut st, account);
+    assert_eq!(refunds_watched(&st, account), Vec::<u64>::new());
+    let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    let deposit = p2pkh(7).encode(st.network());
+    let now = clock_now();
+    st.wallet_mut()
+        .db_mut()
+        .record_refund_operation(account, 0, &deposit, now + 3_600, now)
+        .unwrap();
+    assert_eq!(refunds_watched(&st, account), [0]);
+    let (current, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert_ne!(current, held);
+}
+
+/// A manual check finds a payment to a retired memo-only key, and its candidate waits for
+/// a witness, which returns the key to monitoring. That advances the generation, so a
+/// filter request captured without the key cannot commit. The key keeps the coverage it
+/// had when it retired.
+#[test]
+fn a_candidate_that_returns_a_retired_key_to_monitoring_fences_held_filters() {
+    let mut st = late_wallet();
+    let account = st.test_account().unwrap().id();
+    let funded = tip(&st).height - days(100);
+    recover(st.wallet_mut().db_mut(), account, refund(0), funded);
+    let frontier = cover_below_birthday(&mut st, account);
+    assert_eq!(refunds_watched(&st, account), Vec::<u64>::new());
+    pay_candidate(&mut st, refund(0));
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, publication, None)
+            .unwrap()
+    );
+    let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert!(answer_lookup(&mut st, account, publication));
+    assert_eq!(candidates(&st), 1, "the payment waits for its witness");
+    assert_eq!(refunds_watched(&st, account), [0]);
+    let end = *blocks_above(&st, tip(&st).height - 1).last().unwrap();
+    let span = FilterSpan {
+        revision: 0,
+        from: frontier + 1,
+        parent: unheld(frontier),
+        end,
+    };
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_filter_span(account, held, &span, &[])
+            .unwrap(),
+        FilterOutcome::Stale,
+        "a request captured without R0 cannot commit"
+    );
+    // Filters watched R0 until it retired at the frontier, so nothing is behind.
+    assert!(behind(&st, account).is_empty());
+}

@@ -58,9 +58,16 @@ pub(crate) fn truncate(
         "UPDATE ironwood_one_time_keys SET prebirthday_height = NULL WHERE prebirthday_height > ?1",
         [floor],
     )?;
-    // Filter coverage above the fork read another chain's blocks.
+    // Filter coverage above the fork read another chain's blocks. Funding above it is no
+    // longer canonical: its memo registers the funding height again where the replacement
+    // chain mines it, so the refund window follows the moved funding. The key stays
+    // registered, so its index is never allocated again.
     conn.execute(
         "UPDATE ironwood_one_time_keys SET covered_height = ?1 WHERE covered_height > ?1",
+        [floor],
+    )?;
+    conn.execute(
+        "UPDATE ironwood_one_time_keys SET funding_height = NULL WHERE funding_height > ?1",
         [floor],
     )?;
     // A private receipt's position came from the directory, not a rescan that would replace
