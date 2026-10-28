@@ -70,7 +70,7 @@ fn round_trip_carries_only_paying_blocks() {
     let raw = Range::raw_sets(&bytes).unwrap();
     assert_eq!(raw.iter().map(|(h, _)| *h).collect::<Vec<_>>(), [11, 14]);
     let end = decoded.end();
-    let reissued = Range::write(9, 10, 5, decoded.parent(), end.hash, &raw).unwrap();
+    let reissued = Range::write(9, 10, 5, decoded.parent(), end.hash, raw.clone()).unwrap();
     assert_eq!(reissued.len(), bytes.len());
     let built: Vec<_> = sample().0.encode().unwrap();
     assert_eq!(built, bytes);
@@ -85,7 +85,7 @@ fn round_trip_carries_only_paying_blocks() {
         vec![(9, raw[0].1)],
         vec![(15, raw[0].1)],
     ] {
-        assert!(Range::write(9, 10, 5, [0; 32], [0; 32], &wrong).is_err());
+        assert!(Range::write(9, 10, 5, [0; 32], [0; 32], wrong).is_err());
     }
 }
 
