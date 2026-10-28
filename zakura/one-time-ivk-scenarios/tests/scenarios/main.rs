@@ -272,7 +272,7 @@ fn funded_refund_cross_device_and_spend() {
         chain.pay(&[(phone.fvk.clone(), 100_000_000)], Payer::Wallet);
         chain.mine(12);
         phone.scan(&chain);
-        let swap = phone.quote_refund(&chain);
+        let swap = phone.quote_refund(&chain).await;
         let funding = phone.fund_refund(&swap, 20_000_000);
         assert!(chain.accepts(&funding).is_ok());
         chain.mine_tx(&funding);
@@ -318,7 +318,7 @@ fn refund_after_birthday_requires_earlier_funding_memo() {
         chain.pay(&[(phone.fvk.clone(), 100_000_000)], Payer::Wallet);
         chain.mine(12);
         phone.scan(&chain);
-        let swap = phone.quote_refund(&chain);
+        let swap = phone.quote_refund(&chain).await;
         let funding = phone.fund_refund(&swap, 20_000_000);
         chain.accepts(&funding).unwrap();
         chain.mine_tx(&funding);

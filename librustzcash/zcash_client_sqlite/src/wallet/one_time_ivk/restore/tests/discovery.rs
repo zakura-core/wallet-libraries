@@ -994,6 +994,14 @@ fn orphaned_receipts_do_not_permanently_exhaust_the_receive_window() {
         .begin_one_time_recovery(account, publication, true)
         .unwrap();
     drain(&mut st, account, publication);
+    // Issuance reads the address through the scanned tip first.
+    let db = st.wallet_mut().db_mut();
+    let waiting = db
+        .prepare_receive_reservation(account, clock_now())
+        .unwrap();
+    assert!(matches!(waiting, Err(ReservationPolicy::ReceiveHistory)));
+    let current = publication_at(&st, tip(&st).height);
+    drain(&mut st, account, current);
     let next = st
         .wallet_mut()
         .db_mut()

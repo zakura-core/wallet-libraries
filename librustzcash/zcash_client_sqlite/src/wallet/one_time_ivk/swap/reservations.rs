@@ -364,12 +364,15 @@ pub(in crate::wallet::one_time_ivk) fn record_status<P: Parameters>(
     Ok(!operations.is_empty())
 }
 
-/// Resumes a live draft or reserves the lowest unpaid hole inside the mined window.
+/// Resumes a live draft, or prepares the lowest unpaid hole inside the mined window (see
+/// `preparations::prepare`) and, with `reserve`, reserves it once it is ready. A prepared
+/// hole that was paid meanwhile is passed over, so the preparation moves to the next one.
 pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     now: i64,
+    reserve: bool,
 ) -> Result<Result<OneTimeKey, ReservationPolicy>, SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
     let end = recovery_end(conn, owner.0)?;
@@ -409,28 +412,15 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
         return Ok(Err(ReservationPolicy::Limit));
     }
     let (id, key) = register(conn, params, account, KeyId::new(Purpose::Receive, next))?;
-    // A restored seed may have paid this address before the wallet knew it, so it is
-    // handed out only after its own history was read to completion with nothing pending,
-    // by a lookup or by filters through the account's frontier. A cancelled manual
-    // search's target, with no reason left, does not hold it.
-    let checked: bool = conn.query_row(
-        "SELECT (EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
-             WHERE l.one_time_key_id = ?1 AND l.target_height IS NULL AND l.read_complete = 1
-               AND l.done_height IS NOT NULL)
-             OR EXISTS(SELECT 1 FROM ironwood_one_time_keys k
-                 JOIN ironwood_one_time_recovery r ON r.account_id = k.account_id
-                 WHERE k.id = ?1 AND k.covered_height >= r.filter_height
-                   AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
-                       WHERE l.one_time_key_id = k.id AND l.target_height IS NOT NULL
-                         AND l.reasons != 0)))
-         AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
-             WHERE p.one_time_key_id = ?1)",
-        [id],
-        |r| r.get(0),
-    )?;
-    if !checked {
+    // A restored seed or another device may have paid this address before the wallet
+    // knew it, so it is handed out only after its own lookup.
+    if !super::preparations::prepare(conn, params, owner.0, Purpose::Receive, id)? {
         return Ok(Err(ReservationPolicy::ReceiveHistory));
     }
+    if !reserve {
+        return Ok(Ok(key));
+    }
+    super::preparations::consume(conn, owner.0, Purpose::Receive)?;
     conn.execute(
         "UPDATE ironwood_one_time_keys SET reserved_at = ?2, released_at = NULL,
             reservation_floor = IFNULL((SELECT MAX(id) FROM ironwood_one_time_operations

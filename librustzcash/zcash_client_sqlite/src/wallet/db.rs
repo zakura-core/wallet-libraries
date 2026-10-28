@@ -2219,6 +2219,17 @@ CREATE TABLE transparent_tx_display_outputs (
     PRIMARY KEY (transaction_id, output_index)
 )"#;
 
+/// Durable issuance preparations, one per account and purpose (0 refund, 1 receive): the
+/// candidate key handed out next and the wallet's scanned tip when it was prepared, which
+/// the candidate's own lookup must reach.
+pub(super) const TABLE_IRONWOOD_ONE_TIME_PREPARATIONS: &str = "CREATE TABLE ironwood_one_time_preparations (
+                account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                purpose INTEGER NOT NULL CHECK (purpose IN (0, 1)),
+                one_time_key_id INTEGER NOT NULL REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
+                target_height INTEGER NOT NULL CHECK (target_height BETWEEN 0 AND 4294967295),
+                PRIMARY KEY (account_id, purpose)
+            )";
+
 /// Account cancellation, restore and manual progress. `receive_end` is the exclusive end of
 /// receive indexes enrolled for automatic discovery. It never shrinks. `filter_height` and
 /// `filter_hash` end the last committed filter span or complete check (activation - 1 when

@@ -116,8 +116,27 @@ fn complete(st: &mut State, account: AccountUuid) -> usize {
     run_pir(st, account)
 }
 
+/// Reserves the lowest eligible receive address, running its issuance lookup first when it
+/// is due, and returns the key with how many lookups ran.
+fn reserve_receive(st: &mut State, account: AccountUuid) -> (KeyId, usize) {
+    let mut lookups = 0;
+    for _ in 0..4 {
+        match st
+            .wallet_mut()
+            .db_mut()
+            .prepare_receive_reservation(account, clock_now())
+            .unwrap()
+        {
+            Ok(key) => return (key.key_id(), lookups),
+            Err(ReservationPolicy::ReceiveHistory) => lookups += run_pir(st, account),
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+    panic!("issuance did not settle");
+}
+
 /// An account that never swapped finishes its seed walk from one span with no PIR query,
-/// stays fresh, and can hand out its first address.
+/// stays fresh, and hands out its first address after that address's own lookup.
 #[test]
 fn an_account_that_never_swapped_walks_with_no_pir() {
     let mut st = scanned_wallet();
@@ -137,13 +156,7 @@ fn an_account_that_never_swapped_walks_with_no_pir() {
     );
     assert_eq!(state.filter_frontier, Some(tip(&st)));
     assert!(state.fresh);
-    let next = st
-        .wallet_mut()
-        .db_mut()
-        .prepare_receive_reservation(account, clock_now())
-        .unwrap()
-        .unwrap();
-    assert_eq!(next.key_id().index(), 0);
+    assert_eq!(reserve_receive(&mut st, account), (receive(0), 1));
 }
 
 /// I0 and I4 are both paid in history. Filters match only I0, whose lookup slides the
@@ -395,13 +408,7 @@ fn a_correction_with_negative_filters_queues_no_sweep() {
     assert_eq!(complete(&mut st, account), 4);
     st.generate_and_scan_empty_blocks(1);
     assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
-    let reserved = st
-        .wallet_mut()
-        .db_mut()
-        .prepare_receive_reservation(account, clock_now())
-        .unwrap()
-        .unwrap();
-    assert_eq!(reserved.key_id(), receive(0));
+    assert_eq!(reserve_receive(&mut st, account).0, receive(0));
     correct_by_filters(&mut st, account);
     assert_eq!(
         due(&st, account),

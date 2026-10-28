@@ -321,13 +321,23 @@ impl Device {
         self.drain(chain, &client).await;
     }
 
-    /// Records a canonical transparent refund operation with no global provider feed.
-    pub fn quote_refund(&mut self, chain: &Chain) -> RefundSwap {
-        let key = self
+    /// Records a canonical transparent refund operation with no global provider feed, first
+    /// running the prepared refund index's own lookup when issuance waits for it.
+    pub async fn quote_refund(&mut self, chain: &Chain) -> RefundSwap {
+        let mut key = self
             .db
             .reserve_refund_key(self.account, chain.tip())
-            .unwrap()
             .unwrap();
+        if key.is_err() {
+            let directory = Directory::publish(chain, 0, 0, 256, 0);
+            let client = self.connect(&directory).await;
+            self.drain(chain, &client).await;
+            key = self
+                .db
+                .reserve_refund_key(self.account, chain.tip())
+                .unwrap();
+        }
+        let key = key.unwrap();
         let deposit = Address::Transparent(
             transparent::address::TransparentAddress::PublicKeyHash([23; 20]),
         )

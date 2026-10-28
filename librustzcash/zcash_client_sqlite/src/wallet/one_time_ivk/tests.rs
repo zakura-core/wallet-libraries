@@ -187,13 +187,55 @@ pub(super) fn recover(
     .unwrap()
 }
 
-/// Reserves the next refund identity using ordinary funding history.
+/// Reserves the next refund identity using ordinary funding history, answering the
+/// prepared index's own lookup as an empty history when issuance waits for it.
 pub(super) fn reserve_refund(
     db: &mut Db,
     account: AccountUuid,
     tip: BlockHeight,
 ) -> Policy<OneTimeKey> {
-    db.reserve_refund_key(account, tip)
+    match db.reserve_refund_key(account, tip)? {
+        Err(ReservationPolicy::RefundHistory) => {
+            answer_prepared_empty(db, account, Purpose::Refund);
+            db.reserve_refund_key(account, tip)
+        }
+        issued => Ok(issued),
+    }
+}
+
+/// Answers the lookup of `account`'s prepared key for `purpose` with an empty history at a
+/// publication ending at the wallet's highest block.
+pub(super) fn answer_prepared_empty(db: &mut Db, account: AccountUuid, purpose: Purpose) {
+    use zcash_client_backend::data_api::one_time_ivk::restore::RecoveryPublication;
+    let (height, hash, tree_size): (u32, [u8; 32], u64) = row(
+        &db.conn,
+        "SELECT height, hash, ironwood_commitment_tree_size FROM blocks
+         ORDER BY height DESC LIMIT 1",
+        [],
+    );
+    let publication = RecoveryPublication {
+        id: [1; 32],
+        history_revision: db
+            .one_time_recovery(account, 0)
+            .unwrap()
+            .token
+            .history_revision,
+        start_height: BlockHeight::from(store::restore::queue::activation(&db.params)),
+        end: PublicationEnd {
+            height: height.into(),
+            hash,
+            tree_size,
+        },
+    };
+    let state = db.one_time_recovery(account, 0).unwrap();
+    for work in state
+        .lookups
+        .iter()
+        .filter(|w| w.work.key.purpose() == purpose)
+    {
+        let page = store::restore::tests::discovery::whole_for(work, publication, vec![]);
+        assert!(db.record_one_time_lookup(account, work, &page, 0).unwrap());
+    }
 }
 
 /// Records `observation` for `key`'s operation `reference` at `now`, adding the

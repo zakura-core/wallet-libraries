@@ -31,7 +31,8 @@ use crate::wallet::one_time_ivk::{
 };
 use crate::{AccountUuid, PRUNING_DEPTH, error::SqliteClientError, wallet};
 
-const AUTOMATIC: u8 = 1;
+/// Lookup reason bit: automatic discovery or issuance needs the history.
+pub(in crate::wallet::one_time_ivk) const AUTOMATIC: u8 = 1;
 /// Lookup reason bit marking history an event invalidated: a positive filter hint, a
 /// correction, a rewind below the settled height, a disputed receipt label, a rejected
 /// payment claim or a lowered birthday. The key may have been paid in what was read before,

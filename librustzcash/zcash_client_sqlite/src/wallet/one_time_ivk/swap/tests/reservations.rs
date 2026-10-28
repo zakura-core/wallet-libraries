@@ -395,18 +395,17 @@ fn another_devices_later_payment_does_not_settle_a_reused_address() {
     assert!(catch_up(&mut st).contains(&0));
 }
 
-/// An earlier payment whose block timestamp runs ahead of the device clock looks newer than
-/// the quote, but cannot settle it. The quote's own reported payout does.
+/// A payment the provider never named, whose block timestamp runs ahead of the device clock,
+/// looks newer than the quote, but cannot settle it. The quote's own reported payout does.
 #[test]
 fn a_block_timestamp_ahead_of_the_device_clock_does_not_settle_a_quote() {
     let mut st = scanned_wallet();
     let now = clock_now();
-    // The payment lands after index 0's history was read, so issuance cannot know it.
-    check_window(&mut st);
-    let earlier =
-        store::restore::tests::discovery::pay_candidate(&mut st, KeyId::new(Purpose::Receive, 0));
+    // The payment lands after index 0 was handed out, so issuance cannot know it.
     let (key, _) = quote(&mut st, now, "quote", true);
     assert_eq!(key.index(), 0);
+    let earlier =
+        store::restore::tests::discovery::pay_candidate(&mut st, KeyId::new(Purpose::Receive, 0));
     mined_at(&st, earlier.height, now + 600);
     promise_payout(&mut st, "quote", &[], now + 120);
     assert!(catch_up(&mut st).contains(&0));

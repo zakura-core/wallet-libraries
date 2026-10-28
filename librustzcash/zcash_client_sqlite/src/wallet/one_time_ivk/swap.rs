@@ -2,6 +2,7 @@
 
 pub(super) mod funding;
 pub(super) mod lifecycle;
+pub(super) mod preparations;
 pub(super) mod reservations;
 
 pub(crate) use funding::record_funded_refund_keys;
@@ -35,6 +36,9 @@ pub enum ReservationPolicy {
     /// Automatic discovery has not finished checking the next receive address's history,
     /// which a restored seed may already have paid. Run recovery, then ask again.
     ReceiveHistory,
+    /// The next refund index's own lookup has not finished, and another device may have
+    /// used it. Run recovery, then ask again.
+    RefundHistory,
 }
 
 impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
@@ -50,7 +54,9 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, CL, R> {
-    /// Allocates above locally known refund indexes after ordinary funding history catches up.
+    /// Hands out the prepared refund key after ordinary funding history catches up, once
+    /// its own lookup finished and it is still unused and unfunded (see
+    /// [`Self::prepare_one_time_keys`]).
     pub fn reserve_refund_key(
         &mut self,
         account: AccountUuid,
@@ -60,7 +66,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
             if !enabled(db.conn.0, db.params, account)? {
                 return Ok(Err(ReservationPolicy::Disabled));
             }
-            funding::reserve(db.conn.0, db.params, account, tip)
+            funding::reserve(db.conn.0, db.params, account, tip, true)
         })
     }
 
@@ -95,7 +101,54 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
             }
             reservations::reap(db.conn.0, db.params, account, now)?;
             queue::ensure_window(db.conn.0, db.params, account)?;
-            reservations::prepare(db.conn.0, db.params, account, now)
+            reservations::prepare(db.conn.0, db.params, account, now, true)
+        })
+    }
+
+    /// Prepares the next receive address and the next refund key ahead of a swap, each
+    /// checked by its own lookup through the wallet's scanned tip, without handing either
+    /// out. Calls are idempotent: each keeps its candidate until it is handed out by
+    /// [`Self::prepare_receive_reservation`] or [`Self::reserve_refund_key`], which re-check
+    /// it then, or a payment or funding memo makes it ineligible and it moves to the next
+    /// index. Returns the receive and refund outcomes; `ReceiveHistory` and `RefundHistory`
+    /// mean the lookup is still due.
+    #[allow(clippy::type_complexity)]
+    pub fn prepare_one_time_keys(
+        &mut self,
+        account: AccountUuid,
+        tip: BlockHeight,
+        now: i64,
+    ) -> Result<
+        (
+            Result<OneTimeKey, ReservationPolicy>,
+            Result<OneTimeKey, ReservationPolicy>,
+        ),
+        SqliteClientError,
+    > {
+        self.transactionally(|db| {
+            if !enabled(db.conn.0, db.params, account)? {
+                let off = ReservationPolicy::Disabled;
+                return Ok((Err(off), Err(off)));
+            }
+            reservations::reap(db.conn.0, db.params, account, now)?;
+            queue::ensure_window(db.conn.0, db.params, account)?;
+            let receive = reservations::prepare(db.conn.0, db.params, account, now, false)?;
+            let refund = funding::reserve(db.conn.0, db.params, account, tip, false)?;
+            Ok((receive, refund))
+        })
+    }
+
+    /// Drops the account's preparations. Their candidate keys stay registered.
+    pub fn cancel_one_time_preparations(
+        &mut self,
+        account: AccountUuid,
+    ) -> Result<(), SqliteClientError> {
+        self.transactionally(|db| {
+            let Some(owner) = super::one_time_account(db.conn.0, db.params, account)? else {
+                return Ok(());
+            };
+            preparations::consume(db.conn.0, owner.0, super::Purpose::Receive)?;
+            preparations::consume(db.conn.0, owner.0, super::Purpose::Refund)
         })
     }
 

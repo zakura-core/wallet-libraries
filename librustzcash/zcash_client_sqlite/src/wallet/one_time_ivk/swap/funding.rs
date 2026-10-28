@@ -10,19 +10,22 @@ use zcash_protocol::{
     memo::MemoBytes,
 };
 
-use super::{ReservationPolicy, lifecycle::record};
+use super::{ReservationPolicy, lifecycle::record, preparations};
 use crate::wallet::one_time_ivk::{
     KeyId, OneTimeKey, Purpose, account_key, decode_index, index_after, invalid, register,
     restore::{queue, recovery},
 };
 use crate::{AccountUuid, error::SqliteClientError};
 
-/// See `WalletDb::reserve_refund_key`.
+/// See `WalletDb::reserve_refund_key`, and `WalletDb::prepare_one_time_keys` without
+/// `hand_out`. The prepared index stays until handed out; one that was paid, funded or
+/// quoted meanwhile moves the preparation to the next index.
 pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     tip: BlockHeight,
+    hand_out: bool,
 ) -> Result<Result<OneTimeKey, ReservationPolicy>, SqliteClientError> {
     let scanned = crate::wallet::fully_scanned_height(conn)?;
     let tip = tip.max(crate::wallet::chain_tip_height(conn)?.unwrap_or(tip));
@@ -33,14 +36,41 @@ pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
     if recovery::refund_memos_pending(conn, account)? {
         return Ok(Err(ReservationPolicy::FundingHistory));
     }
-    let index = next_refund_index(conn, params, account)?;
-    let key = KeyId::new(Purpose::Refund, index);
-    let (_, key) = register(conn, params, account, key)?;
+    let (owner, _) = account_key(conn, params, account)?;
+    let kept = preparations::prepared(conn, owner.0, Purpose::Refund)?;
+    let eligible: bool = match kept {
+        Some(id) => conn.query_row(
+            "SELECT used = 0 AND funding_height IS NULL
+                 AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o
+                     WHERE o.one_time_key_id = k.id)
+             FROM ironwood_one_time_keys k WHERE k.id = ?1",
+            [id],
+            |r| r.get(0),
+        )?,
+        None => false,
+    };
+    let (id, key) = match kept.filter(|_| eligible) {
+        Some(id) => (
+            id,
+            crate::wallet::one_time_ivk::key_by_id(conn, params, account, id)?,
+        ),
+        None => {
+            let index = next_refund_index(conn, params, account)?;
+            register(conn, params, account, KeyId::new(Purpose::Refund, index))?
+        }
+    };
+    if !preparations::prepare(conn, params, owner.0, Purpose::Refund, id)? {
+        return Ok(Err(ReservationPolicy::RefundHistory));
+    }
+    if hand_out {
+        preparations::consume(conn, owner.0, Purpose::Refund)?;
+    }
     Ok(Ok(key))
 }
 
-/// Allocates above locally known refund keys. Funding memos recover prior funded
-/// indexes on another device. Unfunded quotes do not require a global address feed.
+/// Allocates above locally known refund keys, for a new preparation only. Funding memos
+/// recover prior funded indexes on another device. Unfunded quotes do not require a global
+/// address feed.
 pub(in crate::wallet::one_time_ivk) fn next_refund_index<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,

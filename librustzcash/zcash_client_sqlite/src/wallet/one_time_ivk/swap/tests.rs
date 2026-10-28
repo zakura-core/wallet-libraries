@@ -5,4 +5,5 @@ use super::*;
 use crate::wallet::one_time_ivk::tests::*;
 
 mod lifecycle;
+mod preparations;
 mod reservations;
