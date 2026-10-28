@@ -106,12 +106,18 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     }
 
     /// Prepares the next receive address and the next refund key ahead of a swap, each
-    /// checked by its own lookup through the wallet's scanned tip, without handing either
-    /// out. Calls are idempotent: each keeps its candidate until it is handed out by
-    /// [`Self::prepare_receive_reservation`] or [`Self::reserve_refund_key`], which re-check
-    /// it then, or a payment or funding memo makes it ineligible and it moves to the next
-    /// index. Returns the receive and refund outcomes; `ReceiveHistory` and `RefundHistory`
-    /// mean the lookup is still due.
+    /// checked by its own lookup through the wallet's scanned tip when it was prepared,
+    /// without handing either out. Filters watch both candidates after that, so a payment
+    /// to one produces a hit whose lookup holds it back. Calls are idempotent: each keeps
+    /// its candidate until it is handed out by [`Self::prepare_receive_reservation`] or
+    /// [`Self::reserve_refund_key`], which re-check it then, or a payment or funding memo
+    /// makes it ineligible and it moves to the next index. Returns the receive and refund
+    /// outcomes; `ReceiveHistory` and `RefundHistory` mean the lookup is still due.
+    ///
+    /// Hand-out does not wait for new blocks, so a candidate can still be handed out when
+    /// another device's payment to it was mined after the account's latest filter coverage,
+    /// a window of a few blocks, as it can when another device reserves the same address
+    /// at the same moment.
     #[allow(clippy::type_complexity)]
     pub fn prepare_one_time_keys(
         &mut self,
@@ -147,8 +153,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
             let Some(owner) = super::one_time_account(db.conn.0, db.params, account)? else {
                 return Ok(());
             };
-            preparations::consume(db.conn.0, owner.0, super::Purpose::Receive)?;
-            preparations::consume(db.conn.0, owner.0, super::Purpose::Refund)
+            preparations::consume(db.conn.0, db.params, owner.0, super::Purpose::Receive)?;
+            preparations::consume(db.conn.0, db.params, owner.0, super::Purpose::Refund)
         })
     }
 

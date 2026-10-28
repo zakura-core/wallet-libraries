@@ -36,14 +36,20 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     let target = match kept {
         Some(target) => target,
         None => {
-            conn.execute(
-                "INSERT INTO ironwood_one_time_preparations
-                    (account_id, purpose, one_time_key_id, target_height) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(account_id, purpose) DO UPDATE SET
-                    one_time_key_id = excluded.one_time_key_id,
-                    target_height = excluded.target_height",
-                params![owner, code, key, tip],
-            )?;
+            // A prepared refund index is watched by filters until it is handed out, and one
+            // the preparation moves away from no longer is.
+            queue::fencing_monitoring(conn, params, &[owner], || {
+                conn.execute(
+                    "INSERT INTO ironwood_one_time_preparations
+                        (account_id, purpose, one_time_key_id, target_height)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(account_id, purpose) DO UPDATE SET
+                        one_time_key_id = excluded.one_time_key_id,
+                        target_height = excluded.target_height",
+                    params![owner, code, key, tip],
+                )?;
+                Ok(())
+            })?;
             tip
         }
     };
@@ -104,15 +110,19 @@ pub(in crate::wallet::one_time_ivk) fn prepared(
 }
 
 /// Removes `owner`'s preparation for `purpose`, once handed out or when cancelled. Its key
-/// stays registered.
-pub(in crate::wallet::one_time_ivk) fn consume(
+/// stays registered, and a refund index stops being watched unless funding or an
+/// operation keeps it monitored.
+pub(in crate::wallet::one_time_ivk) fn consume<P: Parameters>(
     conn: &Connection,
+    params: &P,
     owner: i64,
     purpose: Purpose,
 ) -> Result<(), SqliteClientError> {
-    conn.execute(
-        "DELETE FROM ironwood_one_time_preparations WHERE account_id = ?1 AND purpose = ?2",
-        params![owner, purpose_code(purpose)?],
-    )?;
-    Ok(())
+    queue::fencing_monitoring(conn, params, &[owner], || {
+        conn.execute(
+            "DELETE FROM ironwood_one_time_preparations WHERE account_id = ?1 AND purpose = ?2",
+            params![owner, purpose_code(purpose)?],
+        )?;
+        Ok(())
+    })
 }

@@ -63,7 +63,7 @@ pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
         return Ok(Err(ReservationPolicy::RefundHistory));
     }
     if hand_out {
-        preparations::consume(conn, owner.0, Purpose::Refund)?;
+        preparations::consume(conn, params, owner.0, Purpose::Refund)?;
     }
     Ok(Ok(key))
 }

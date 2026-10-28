@@ -878,14 +878,17 @@ fn refund_retired<P: Parameters>(params: &P) -> String {
 }
 
 /// SQL over key alias `k` and owner `?1`: the key is monitored automatically, a receive
-/// index below the enrolled automatic end or a funded refund key not yet retired (see
-/// [`refund_retired`]). Receive keys a manual check derived beyond that end are checked
-/// only by that search.
+/// index below the enrolled automatic end, a funded refund key not yet retired (see
+/// [`refund_retired`]), or a refund index prepared but not handed out yet, so a payment
+/// to it after its preparation's lookup holds it back. Receive keys a manual check derived
+/// beyond that end are checked only by that search.
 fn monitored<P: Parameters>(params: &P) -> String {
     format!(
         "(k.purpose = 1 AND k.key_index < (SELECT receive_end
         FROM ironwood_one_time_recovery WHERE account_id = ?1)
-    OR (k.funding_height IS NOT NULL AND NOT {}))",
+    OR (k.funding_height IS NOT NULL AND NOT {})
+    OR EXISTS(SELECT 1 FROM ironwood_one_time_preparations pr
+        WHERE pr.one_time_key_id = k.id AND pr.purpose = 0))",
         refund_retired(params)
     )
 }

@@ -420,7 +420,7 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     if !reserve {
         return Ok(Ok(key));
     }
-    super::preparations::consume(conn, owner.0, Purpose::Receive)?;
+    super::preparations::consume(conn, params, owner.0, Purpose::Receive)?;
     conn.execute(
         "UPDATE ironwood_one_time_keys SET reserved_at = ?2, released_at = NULL,
             reservation_floor = IFNULL((SELECT MAX(id) FROM ironwood_one_time_operations

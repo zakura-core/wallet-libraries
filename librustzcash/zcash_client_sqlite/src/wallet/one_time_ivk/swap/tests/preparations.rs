@@ -237,3 +237,86 @@ fn a_funded_candidate_stays_retired_after_a_reorg_clears_its_funding() {
     run(&mut st);
     assert_eq!(prepare(&mut st).1, Ok(refund(1)));
 }
+
+/// Commits one filter span from activation through the tip with `hits`.
+fn filter_from_activation(st: &mut State, hits: &[(BlockHeight, KeyId)]) {
+    use crate::wallet::one_time_ivk::restore::tests::discovery::{blocks_above, span_over};
+    use zcash_client_backend::data_api::one_time_ivk::restore::FilterOutcome;
+    let account = st.test_account().unwrap().id();
+    let token = status(st.wallet().db(), account).token;
+    let span = span_over(
+        st.wallet().db(),
+        0,
+        &blocks_above(st, activation_height(st) - 1),
+    );
+    let outcome = st
+        .wallet_mut()
+        .db_mut()
+        .record_one_time_filter_span(account, token, &span, hits)
+        .unwrap();
+    assert_eq!(outcome, FilterOutcome::Committed);
+}
+
+/// A ready receive address that another device pays after its target. Returns the wallet
+/// and the payment's height.
+fn receive_paid_after_target() -> (State, BlockHeight) {
+    let mut st = scanned_wallet();
+    let _ = prepare(&mut st);
+    run(&mut st);
+    assert_eq!(prepare(&mut st).0, Ok(receive(0)));
+    let paid = pay_candidate(&mut st, receive(0));
+    (st, paid.height)
+}
+
+/// Until filters cover the paying block, nothing shows the payment, so the address is
+/// still handed out: the documented window between the latest filter coverage and
+/// hand-out.
+#[test]
+fn a_receive_address_paid_after_its_target_is_handed_out_before_filters_see_it() {
+    let (mut st, _) = receive_paid_after_target();
+    let account = st.test_account().unwrap().id();
+    let handed = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, clock_now());
+    assert_eq!(handed.unwrap().unwrap().key_id(), receive(0));
+}
+
+/// Once filters commit the hit on the paying block, hand-out waits for its lookup.
+#[test]
+fn a_receive_address_paid_after_its_target_is_refused_after_the_filter_hit() {
+    let (mut st, height) = receive_paid_after_target();
+    let account = st.test_account().unwrap().id();
+    filter_from_activation(&mut st, &[(height, receive(0))]);
+    let handed = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, clock_now());
+    assert!(matches!(handed, Ok(Err(ReservationPolicy::ReceiveHistory))));
+}
+
+/// Filters watch a prepared refund index, so a payment to it after its target produces a
+/// hit and hand-out waits for the lookup. Cancelling the preparation stops watching it.
+#[test]
+fn a_prepared_refund_index_paid_after_its_target_is_refused_once_filters_see_it() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let _ = prepare(&mut st);
+    run(&mut st);
+    assert_eq!(prepare(&mut st).1, Ok(refund(0)));
+    let watched = |st: &State| {
+        let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
+        receivers.iter().any(|r| r.work.key == refund(0))
+    };
+    assert!(watched(&st));
+    let paid = pay_candidate(&mut st, refund(0));
+    filter_from_activation(&mut st, &[(paid.height, refund(0))]);
+    let tip = tip(&st).height;
+    let handed = st.wallet_mut().db_mut().reserve_refund_key(account, tip);
+    assert!(matches!(handed, Ok(Err(ReservationPolicy::RefundHistory))));
+    st.wallet_mut()
+        .db_mut()
+        .cancel_one_time_preparations(account)
+        .unwrap();
+    assert!(!watched(&st));
+}
