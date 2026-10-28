@@ -553,6 +553,16 @@ pub(super) fn automatic_end(conn: &Connection, owner: i64) -> Result<u64, Sqlite
     Ok(super::super::swap::reservations::recovery_end(conn, owner)?.max(enrolled))
 }
 
+/// Records that `owner` has a new recovery obligation, in the same transaction as the
+/// obligation, so an app comparing `WalletDb::one_time_new_work` knows a round has work.
+pub(crate) fn new_work(conn: &Connection, owner: i64) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE ironwood_one_time_recovery SET new_work = new_work + 1 WHERE account_id = ?1",
+        [owner],
+    )?;
+    Ok(())
+}
+
 /// Records funded refund evidence. New or earlier funding queues the key's history from
 /// that height even if ordinary sync passed it. A key whose funding is already older than
 /// [`MEMO_REFUND_WINDOW`] is still monitored until its own coverage passes the window.
@@ -576,6 +586,7 @@ pub(crate) fn funded<P: Parameters>(
         )?;
         if changed {
             register_history(conn, owner, key, u32::from(height))?;
+            new_work(conn, owner)?;
         }
         Ok(())
     })
@@ -627,6 +638,7 @@ pub(crate) fn set_enabled<P: Parameters>(
     }
     if enabled {
         ensure_window(conn, params, account)?;
+        super::recovery::queue_all_refund_memos(conn, owner.0)?;
         recover_refund_memos(conn, params, account)?;
     }
     Ok(())
@@ -2179,6 +2191,7 @@ fn dispute_raw_receipts(
         rewind_lookup(conn, key, activation, 0)?;
         invalidate(conn, key)?;
         queue_history(conn, owner, key, activation)?;
+        new_work(conn, owner)?;
         crate::wallet::one_time_rewind::queue_invalidated(conn, None)?;
         disputed = true;
     }
@@ -2316,6 +2329,7 @@ fn admit_waiting<P: Parameters>(
                 rewind_lookup(conn, id, activation(params), now.saturating_add(60))?;
                 invalidate(conn, id)?;
                 crate::wallet::one_time_rewind::queue_invalidated(conn, None)?;
+                new_work(conn, owner)?;
             }
         }
     }
@@ -2386,6 +2400,7 @@ fn rescan_uncovered(
                 conn,
                 BlockHeight::from(gap.start)..BlockHeight::from(gap.end),
             )?;
+            new_work(conn, owner)?;
         }
     }
     Ok(())

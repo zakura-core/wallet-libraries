@@ -48,9 +48,12 @@ fn refund_memo(index: u64) -> MemoBytes {
     MemoBytes::from_bytes(&RefundMemo::new(index).encode()).unwrap()
 }
 
-/// Runs refund memo recovery for `account` in its own transaction.
+/// Queues every refund memo of `account` again, as tests that rewrite stored memos need,
+/// and runs refund memo recovery in its own transaction.
 fn recover_memos(st: &mut State, account: AccountUuid) {
     tx(st.wallet_mut().db_mut(), |c, p| {
+        let owner = crate::wallet::get_account_ref(c, account)?;
+        store::restore::recovery::queue_all_refund_memos(c, owner.0)?;
         store::restore::recovery::recover_refund_memos(c, p, account)
     })
     .unwrap()
@@ -150,6 +153,13 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     assert!(refund_keys(&st).is_empty());
     assert!(pending(&st));
     decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
+    // Storing the retrieved memo registers its key at once. Forget it to check the rules.
+    assert_eq!(refund_keys(&st), [(7, u32::from(mined), true)]);
+    exec(
+        st.wallet().conn(),
+        "DELETE FROM ironwood_one_time_keys WHERE purpose = 0",
+        [],
+    );
 
     // Changing the authenticated scope makes the memo ineligible.
     let set_scope = |st: &State, scope: u8| {
@@ -880,4 +890,75 @@ fn outgoing_one_time_payment_details_survive_disabled_discovery() {
         );
         assert_eq!(received, 0);
     }
+}
+
+/// Refund memos naming 150 and then 100, funded after a restore's birthday: 150 spends a
+/// note from before the birthday, so the restore cannot prove it funded it, while 100
+/// spends notes received after the birthday, which it owns. Returns the wallet restored with only 150's
+/// transaction stored and scanned through its block, the restored account, and 100's
+/// transaction and block.
+fn memo_150_then_100() -> (
+    State,
+    AccountUuid,
+    zcash_primitives::transaction::Transaction,
+    BlockHeight,
+) {
+    let (mut st, _) = ironwood_funded_wallet();
+    let born = st.latest_cached_block().unwrap().chain_state().clone();
+    let birthday = zcash_client_backend::data_api::AccountBirthday::from_parts(born, None);
+    st.generate_and_scan_empty_blocks(1);
+    let pays = || vec![payment(&p2pkh(7), 100_000, None)];
+    let (_, first, first_mined) = send(&mut st, pays(), &refund_memo(150));
+    let fvk = parent(&st);
+    pay(&mut st, &fvk, 1_000_000);
+    st.generate_and_scan_empty_blocks(5);
+    let (_, second, second_mined) = send(&mut st, pays(), &refund_memo(100));
+    let later = st.wallet().get_transaction(second).unwrap().unwrap();
+    let restored = restore_through_funding(&mut st, &birthday, &[first], first_mined);
+    (st, restored, later, second_mined)
+}
+
+/// The rows waiting in the pending memo queue.
+fn pending_memos(st: &State) -> u32 {
+    value(
+        st.wallet().conn(),
+        "SELECT COUNT(*) FROM ironwood_one_time_pending_memos",
+        [],
+    )
+}
+
+/// R150 is far past every known refund index and unproven, so it waits in the queue, and
+/// processing that unchanged queue again adds no work. Learning R100 brings R150 within
+/// the gap, so both are accepted and the queue empties.
+#[test]
+fn a_memo_past_the_gap_waits_until_a_lower_index_is_learned() {
+    let (mut st, restored, later, mined) = memo_150_then_100();
+    assert!(refund_keys(&st).is_empty());
+    assert_eq!(pending_memos(&st), 1);
+    let work = st.wallet().db().one_time_new_work().unwrap();
+    tx(st.wallet_mut().db_mut(), |c, p| {
+        store::restore::recovery::recover_refund_memos(c, p, restored)
+    })
+    .unwrap();
+    st.scan_cached_blocks(mined, 1);
+    assert_eq!(st.wallet().db().one_time_new_work().unwrap(), work);
+    assert_eq!(pending_memos(&st), 1);
+    let network = *st.network();
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &later, Some(mined)).unwrap();
+    let indexes: Vec<u64> = refund_keys(&st).iter().map(|(i, _, _)| *i).collect();
+    assert_eq!(indexes, [100, 150]);
+    assert_eq!(pending_memos(&st), 0);
+}
+
+/// A funding memo enhancement stores after the last block batch registers its refund key
+/// at once, and the new-work counter goes up in the same transaction.
+#[test]
+fn a_memo_stored_after_the_last_batch_bumps_the_new_work_counter() {
+    let (mut st, _, later, mined) = memo_150_then_100();
+    st.scan_cached_blocks(mined, 1);
+    let work = st.wallet().db().one_time_new_work().unwrap();
+    let network = *st.network();
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &later, Some(mined)).unwrap();
+    assert!(refund_keys(&st).iter().any(|(index, _, _)| *index == 100));
+    assert!(st.wallet().db().one_time_new_work().unwrap() > work);
 }

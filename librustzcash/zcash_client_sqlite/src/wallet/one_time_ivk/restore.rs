@@ -3,7 +3,7 @@
 pub(crate) mod apply;
 pub(super) mod payments;
 pub(crate) mod queue;
-pub(super) mod recovery;
+pub(crate) mod recovery;
 
 use crate::{AccountUuid, WalletDb, error::SqliteClientError, util::Clock};
 use payments::PendingPayment;
@@ -27,6 +27,18 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         now: i64,
     ) -> Result<RecoveryStatus, SqliteClientError> {
         queue::status(self.conn.borrow(), &self.params, account, now)
+    }
+
+    /// A counter that goes up in the same transaction as every new recovery obligation of
+    /// any account: a key registered, refund funding learned from a memo, a repair queued
+    /// or a rescan requested. It is cheap to read, so an app can compare it with the value
+    /// its last round saw and run a round only when it changed.
+    pub fn one_time_new_work(&self) -> Result<u64, SqliteClientError> {
+        Ok(self.conn.borrow().query_row(
+            "SELECT COALESCE(SUM(new_work), 0) FROM ironwood_one_time_recovery",
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     /// Captures the monitored receivers for local filter matching, each with how far its

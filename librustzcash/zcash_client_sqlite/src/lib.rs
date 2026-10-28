@@ -3677,6 +3677,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
                 )?;
             }
         }
+        #[cfg(feature = "orchard")]
+        let txid = d_tx.tx().txid();
         store_decrypted_tx(
             self,
             &self.params.clone(),
@@ -3684,7 +3686,16 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             self.gap_limits,
             chain_tip,
             d_tx,
-        )
+        )?;
+        // A memo enhancement retrieved may name a refund key; it is processed now rather
+        // than by re-reading every memo on each block batch.
+        #[cfg(feature = "orchard")]
+        wallet::one_time_ivk::restore::recovery::memos_stored(
+            self.conn.0,
+            &self.params,
+            txid.as_ref(),
+        )?;
+        Ok(())
     }
 
     fn set_tx_trust(
@@ -3731,6 +3742,12 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
                 self.conn.0,
                 &self.params,
                 sent_tx.tx(),
+            )?;
+            #[cfg(feature = "orchard")]
+            wallet::one_time_ivk::restore::recovery::memos_stored(
+                self.conn.0,
+                &self.params,
+                sent_tx.tx().txid().as_ref(),
             )?;
         }
         Ok(())

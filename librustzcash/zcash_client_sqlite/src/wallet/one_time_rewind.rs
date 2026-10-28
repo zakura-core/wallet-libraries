@@ -18,6 +18,24 @@ pub(crate) fn truncate(
     height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
     let floor = u32::from(height);
+    // Repairs below are new work for each account they touch.
+    conn.execute(
+        "UPDATE ironwood_one_time_recovery SET new_work = new_work + 1 WHERE account_id IN
+         (SELECT k.account_id FROM ironwood_one_time_keys k WHERE k.prebirthday_height > ?1
+              OR k.funding_height > ?1 OR EXISTS(SELECT 1 FROM ironwood_received_notes n
+                  JOIN transactions t ON t.id_tx = n.transaction_id
+                  WHERE n.one_time_key_id = k.id AND t.mined_height > ?1))",
+        [floor],
+    )?;
+    // A refund memo above the fork is accepted again where the replacement chain mines it.
+    conn.execute(
+        "INSERT OR IGNORE INTO ironwood_one_time_pending_memos (note_id)
+         SELECT n.id FROM ironwood_received_notes n
+         JOIN transactions t ON t.id_tx = n.transaction_id
+         WHERE t.mined_height > ?1 AND n.recipient_key_scope = 1
+           AND n.one_time_key_id IS NULL AND substr(n.memo, 1, 5) = X'FF5A535750'",
+        [floor],
+    )?;
     conn.execute("INSERT INTO ironwood_one_time_lookups(one_time_key_id, target_height, reasons, start_height)
         SELECT k.id, COALESCE((SELECT MAX(height) FROM blocks), ?1), 5, ?1 + 1 FROM ironwood_one_time_keys k
         WHERE k.prebirthday_height > ?1 OR EXISTS(SELECT 1 FROM ironwood_received_notes n
@@ -148,8 +166,8 @@ pub(crate) fn reopen_discovery(
     conn.execute(
         "UPDATE ironwood_one_time_recovery SET generation = generation + 1,
         restore_next = X'0000000000000000', restore_gap = 0, restore_done = 0,
-        restore_height = NULL, filter_height = NULL, filter_hash = NULL, fresh = 0
-        WHERE account_id = ?1",
+        restore_height = NULL, filter_height = NULL, filter_hash = NULL, fresh = 0,
+        new_work = new_work + 1 WHERE account_id = ?1",
         [owner],
     )?;
     conn.execute(

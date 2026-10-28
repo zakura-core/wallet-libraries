@@ -2219,6 +2219,13 @@ CREATE TABLE transparent_tx_display_outputs (
     PRIMARY KEY (transaction_id, output_index)
 )"#;
 
+/// Refund memos on internal notes not accepted yet: unmined, more than the memo gap above
+/// the highest known refund index, or without proof that the wallet funded them.
+pub(super) const TABLE_IRONWOOD_ONE_TIME_PENDING_MEMOS: &str =
+    "CREATE TABLE ironwood_one_time_pending_memos (
+                note_id INTEGER PRIMARY KEY REFERENCES ironwood_received_notes(id) ON DELETE CASCADE
+            )";
+
 /// Durable issuance preparations, one per account and purpose (0 refund, 1 receive): the
 /// candidate key handed out next and the wallet's scanned tip when it was prepared, which
 /// the candidate's own lookup must reach.
@@ -2236,7 +2243,8 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_PREPARATIONS: &str = "CREATE TABLE iron
 /// unset). `fresh` holds until a key is paid or registered beyond the initial window, or a
 /// correction or birthday change clears coverage. `pir_coverage` is set while a complete
 /// check last advanced coverage, so newly watched keys get lookups rather than filter
-/// re-checks.
+/// re-checks. `new_work` goes up with each new recovery obligation, so an app can tell
+/// cheaply that a round has work.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str = "CREATE TABLE ironwood_one_time_recovery (
                 account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
                 enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
@@ -2258,5 +2266,6 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str = "CREATE TABLE ironwood
                 upgrade_required INTEGER NOT NULL DEFAULT 0 CHECK (upgrade_required IN (0, 1)),
                 fresh INTEGER NOT NULL DEFAULT 1 CHECK (fresh IN (0, 1)),
                 pir_coverage INTEGER NOT NULL DEFAULT 0 CHECK (pir_coverage IN (0, 1)),
+                new_work INTEGER NOT NULL DEFAULT 0 CHECK (new_work >= 0),
                 CHECK ((filter_height IS NULL) = (filter_hash IS NULL))
             )";
