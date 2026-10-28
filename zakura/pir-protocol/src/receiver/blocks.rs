@@ -140,6 +140,12 @@ impl HeightSet {
     pub fn encoded_len(&self) -> usize {
         self.filter.bytes().len()
     }
+
+    /// The set's encoding, which [`Range::write`] can splice into a range without the
+    /// decoded set.
+    pub fn bytes(&self) -> &[u8] {
+        self.filter.bytes()
+    }
 }
 
 /// Consecutive block hints from `from` through [`Range::end`], carrying only the blocks
@@ -204,21 +210,51 @@ impl Range {
 
     /// Encodes the range, refusing one past [`MAX_RANGE_BYTES`].
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        let sets: Vec<_> = self.sets.iter().map(|s| (s.height, s.bytes())).collect();
+        Self::write(
+            self.revision,
+            self.from,
+            self.count,
+            self.parent,
+            self.end,
+            &sets,
+        )
+    }
+
+    /// Encodes a range of `count` heights from `from`, as [`Range::new`] describes, from
+    /// already encoded sets, `(height, set)` in increasing height order, refusing one past
+    /// [`MAX_RANGE_BYTES`]. A server joins stored ranges this way without decoding them.
+    /// The sets are trusted: each must come from [`HeightSet::bytes`] or from
+    /// [`Range::raw_sets`] of a range [`Range::decode`] accepted.
+    pub fn write(
+        revision: u64,
+        from: u32,
+        count: u32,
+        parent: Hash,
+        end: Hash,
+        sets: &[(u32, &[u8])],
+    ) -> Result<Vec<u8>, Error> {
+        if from == 0 || count == 0 || count > MAX_RANGE_BLOCKS {
+            return Err(Error::Capacity);
+        }
+        let last = from.checked_add(count - 1).ok_or(Error::Malformed)?;
         let mut out = RANGE_MAGIC.to_vec();
-        out.extend(self.revision.to_le_bytes());
-        out.extend(self.from.to_le_bytes());
-        out.extend(self.count.to_le_bytes());
-        out.extend(self.parent);
-        out.extend(self.end);
-        // Validation bounds the entries by the heights a range covers, a u32.
-        out.extend((self.sets.len() as u32).to_le_bytes());
-        let mut next = self.from;
-        for set in &self.sets {
-            zakura_filters::write_compact_size(&mut out, u64::from(set.height - next))
+        out.extend(revision.to_le_bytes());
+        out.extend(from.to_le_bytes());
+        out.extend(count.to_le_bytes());
+        out.extend(parent);
+        out.extend(end);
+        // The heights below are distinct and within a u32 range of `count` heights.
+        out.extend((sets.len() as u32).to_le_bytes());
+        let mut next = from;
+        for (height, set) in sets {
+            if *height < next || *height > last {
+                return Err(Error::Malformed);
+            }
+            zakura_filters::write_compact_size(&mut out, u64::from(height - next))
                 .expect("in-memory write");
-            out.extend(set.filter.bytes());
-            next = set.height + 1;
+            out.extend_from_slice(set);
+            next = height.saturating_add(1);
             if out.len() > MAX_RANGE_BYTES {
                 return Err(Error::Capacity);
             }
@@ -229,6 +265,38 @@ impl Range {
     /// Parses an entire bounded response, rejecting truncation, trailing bytes, sets
     /// outside the range and invalid or empty GCS.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let (mut range, raw) = Self::parse(bytes)?;
+        for (height, set) in raw {
+            let filter = Filter::decode_with(set, P, M)?;
+            if filter.is_empty() {
+                return Err(Error::Malformed);
+            }
+            range.sets.push(HeightSet { height, filter });
+        }
+        range.validate()?;
+        Ok(range)
+    }
+
+    /// The nonempty blocks of an encoded range as `(height, set)`, borrowed from `bytes`
+    /// without decoding any set, for [`Range::write`]. Checks the framing as
+    /// [`Range::decode`] does, but not the sets' contents, so use it only on a range
+    /// that [`Range::decode`] accepted.
+    pub fn raw_sets(bytes: &[u8]) -> Result<Vec<(u32, &[u8])>, Error> {
+        let (range, sets) = Self::parse(bytes)?;
+        range.validate()?;
+        if sets
+            .last()
+            .is_some_and(|(height, _)| *height > range.end().height)
+        {
+            return Err(Error::Malformed);
+        }
+        Ok(sets)
+    }
+
+    /// Splits an encoding into its header, as a range without sets, and its sets'
+    /// encodings, bounding the entry count before allocating and rejecting truncation and
+    /// trailing bytes.
+    fn parse(bytes: &[u8]) -> Result<(Self, RawSets<'_>), Error> {
         if bytes.len() > MAX_RANGE_BYTES {
             return Err(Error::Capacity);
         }
@@ -253,17 +321,21 @@ impl Range {
                 .ok_or(Error::Malformed)?;
             let (set, tail) = super::gcs::split(rest, P, M, u64::from(MAX_RECEIVERS))?;
             rest = tail;
-            let filter = Filter::decode_with(set, P, M)?;
-            if filter.is_empty() {
-                return Err(Error::Malformed);
-            }
-            sets.push(HeightSet { height, filter });
+            sets.push((height, set));
             next = u64::from(height) + 1;
         }
         if !rest.is_empty() {
             return Err(Error::Malformed);
         }
-        Self::new(revision, from, count, parent, end, sets)
+        let range = Self {
+            revision,
+            from,
+            count,
+            parent,
+            end,
+            sets: Vec::new(),
+        };
+        Ok((range, sets))
     }
 
     /// Binds a response to the captured head and a request for `limit` heights from
@@ -317,12 +389,6 @@ impl Range {
         self.sets.iter().map(|s| s.height)
     }
 
-    /// The nonempty blocks' sets, ascending, so a server can assemble a longer range
-    /// from stored ones.
-    pub fn sets(&self) -> &[HeightSet] {
-        &self.sets
-    }
-
     /// Tests every receiver against every nonempty block, returning `(height, index)` for
     /// each match, where `index` is the receiver's position in `receivers`. A match may be
     /// false; an absent match is not, given complete indexing by the service.
@@ -343,6 +409,9 @@ impl Range {
         hits
     }
 }
+
+/// Nonempty blocks as `(height, encoded set)`, borrowed from a range's encoding.
+type RawSets<'a> = Vec<(u32, &'a [u8])>;
 
 /// Reads a fixed-size field without allocating or accepting a short input.
 fn take<const N: usize>(bytes: &mut &[u8]) -> Result<[u8; N], Error> {
