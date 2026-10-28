@@ -1,5 +1,5 @@
 //! Refund identities recovered from authenticated ordinary wallet history.
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use zakura_one_time_ivk::swap::{REFUND_MEMO_MAGIC, RefundMemo};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
@@ -29,39 +29,53 @@ pub(in crate::wallet::one_time_ivk) fn refund_memos_pending(
 /// unused in a row is the gap seed discovery already assumes.
 const REFUND_MEMO_GAP: u64 = 100;
 
-/// Queues the refund memos on internal notes of `tx_ref` that no key holds yet, as storing a
-/// decrypted or sent transaction does, and accepts those it can for each enabled account
-/// (see [`recover_refund_memos`]).
+/// Queues the refund memos on internal notes of transaction `tx_ref` that no key holds
+/// yet, as storing a decrypted, sent or privately enhanced transaction does, then retries
+/// every memo of that transaction still queued for each enabled account, including one
+/// queued earlier, since storing it may have just established its block or its spends (see
+/// [`recover_refund_memos`]).
 pub(crate) fn memos_stored<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
-    txid: &[u8],
+    tx_ref: i64,
 ) -> Result<(), SqliteClientError> {
-    let queued = conn.execute(
+    conn.execute(
         "INSERT OR IGNORE INTO ironwood_one_time_pending_memos (note_id)
-         SELECT n.id FROM ironwood_received_notes n
-         JOIN transactions t ON t.id_tx = n.transaction_id
-         WHERE t.txid = ?1 AND n.recipient_key_scope = 1 AND n.one_time_key_id IS NULL
-           AND substr(n.memo, 1, 5) = ?2",
-        params![txid, REFUND_MEMO_MAGIC],
+         SELECT id FROM ironwood_received_notes
+         WHERE transaction_id = ?1 AND recipient_key_scope = 1 AND one_time_key_id IS NULL
+           AND substr(memo, 1, 5) = ?2",
+        params![tx_ref, REFUND_MEMO_MAGIC],
     )?;
-    if queued == 0 {
-        return Ok(());
-    }
     let accounts: Vec<AccountUuid> = conn
         .prepare(
             "SELECT DISTINCT a.uuid FROM ironwood_received_notes n
-             JOIN transactions t ON t.id_tx = n.transaction_id
+             JOIN ironwood_one_time_pending_memos q ON q.note_id = n.id
              JOIN accounts a ON a.id = n.account_id
              JOIN ironwood_one_time_recovery r ON r.account_id = a.id
-             WHERE t.txid = ?1 AND r.enabled = 1",
+             WHERE n.transaction_id = ?1 AND r.enabled = 1",
         )?
-        .query_map([txid], |r| Ok(AccountUuid(r.get(0)?)))?
+        .query_map([tx_ref], |r| Ok(AccountUuid(r.get(0)?)))?
         .collect::<Result<_, _>>()?;
     for account in accounts {
         recover_refund_memos(conn, params, account)?;
     }
     Ok(())
+}
+
+/// [`memos_stored`] for the transaction with ID `txid`, if the wallet stored it.
+pub(crate) fn memos_stored_by_txid<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    txid: &[u8],
+) -> Result<(), SqliteClientError> {
+    let tx_ref: Option<i64> = conn
+        .query_row(
+            "SELECT id_tx FROM transactions WHERE txid = ?1",
+            [txid],
+            |r| r.get(0),
+        )
+        .optional()?;
+    tx_ref.map_or(Ok(()), |tx_ref| memos_stored(conn, params, tx_ref))
 }
 
 /// Queues every refund memo on `account`'s internal notes that no key holds yet, as
@@ -103,15 +117,7 @@ pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
 ) -> Result<(), SqliteClientError> {
     let owner = wallet::get_account_ref(conn, account)?;
     let records = conn
-        .prepare_cached(
-            "SELECT q.note_id, n.memo, t.mined_height,
-             EXISTS(SELECT 1 FROM v_received_output_spends s
-                 WHERE s.transaction_id = n.transaction_id AND s.account_id = n.account_id)
-         FROM ironwood_one_time_pending_memos q
-         JOIN ironwood_received_notes n ON n.id = q.note_id
-         JOIN transactions t ON t.id_tx = n.transaction_id
-         WHERE n.account_id = ?1",
-        )?
+        .prepare_cached(PENDING_MEMOS)?
         .query_map([owner.0], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -161,6 +167,17 @@ pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
         memos = deferred;
     }
 }
+
+/// `?1`'s queued memos with their note, block and own-spend evidence. Every block batch
+/// runs this, so the queue, almost always nearly empty, drives the joins rather than the
+/// account's whole note history.
+pub(in crate::wallet::one_time_ivk) const PENDING_MEMOS: &str = "SELECT q.note_id, n.memo,
+     t.mined_height, EXISTS(SELECT 1 FROM v_received_output_spends s
+         WHERE s.transaction_id = n.transaction_id AND s.account_id = n.account_id)
+     FROM ironwood_one_time_pending_memos q
+     CROSS JOIN ironwood_received_notes n ON n.id = q.note_id
+     CROSS JOIN transactions t ON t.id_tx = n.transaction_id
+     WHERE n.account_id = ?1";
 
 /// Removes note `note`'s memo from the queue, once accepted or when it is not a refund memo.
 fn drop_memo(conn: &Connection, note: i64) -> Result<(), SqliteClientError> {

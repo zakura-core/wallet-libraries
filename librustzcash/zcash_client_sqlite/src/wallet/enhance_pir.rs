@@ -1331,6 +1331,7 @@ pub(crate) fn apply<P: Parameters>(
         return store_unsupported_details(
             tx,
             tpir_session,
+            params,
             tx_ref,
             route,
             has_transparent_outputs,
@@ -1402,6 +1403,8 @@ pub(crate) fn apply<P: Parameters>(
             "DELETE FROM ironwood_memo_retrieval_queue WHERE received_note_id = :id",
             named_params![":id": note_id],
         )?;
+        // A refund memo names a key that recovery must watch.
+        super::one_time_ivk::restore::recovery::memos_stored(tx, params, tx_ref.0)?;
     }
     let result = match outgoing {
         IronwoodOutgoingResult::NotRequested => EnhancePirStoreResult::Stored,
@@ -1471,9 +1474,10 @@ pub(crate) fn apply<P: Parameters>(
 /// response for it lands in this function again. The marker stays when every memo is known:
 /// its transparent details remain unsupported, and history keeps reporting them as pending.
 #[allow(clippy::too_many_arguments)]
-fn store_unsupported_details(
+fn store_unsupported_details<P: Parameters>(
     tx: &Transaction<'_>,
     tpir_session: &TransparentSession,
+    params: &P,
     tx_ref: crate::TxRef,
     route: i64,
     has_transparent_outputs: bool,
@@ -1550,6 +1554,8 @@ fn store_unsupported_details(
             "DELETE FROM ironwood_memo_retrieval_queue WHERE received_note_id = :id",
             named_params![":id": note_id],
         )?;
+        // A refund memo names a key that recovery must watch.
+        super::one_time_ivk::restore::recovery::memos_stored(tx, params, tx_ref.0)?;
     }
     tx.execute(
         "DELETE FROM ironwood_enhance_metadata_queue WHERE transaction_id = ?",

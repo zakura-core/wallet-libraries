@@ -719,6 +719,10 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
         st.wallet_mut().update_chain_tip(mined).unwrap();
         let blocks = u32::from(mined) - u32::from(first) + 1;
         st.scan_cached_blocks(first, blocks as usize);
+        st.wallet_mut()
+            .db_mut()
+            .set_one_time_recovery_enabled(restored, true)
+            .unwrap();
 
         let work = st.wallet().db().transaction_enhancement_work().unwrap();
         let requests: Vec<_> = work
@@ -776,7 +780,7 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
         if public {
             decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
         }
-        recover_memos(&mut st, restored);
+        // Storing the memo registers its key, by private enhancement or full retrieval.
         assert_eq!(refund_keys(&st), [(7, u32::from(mined), true)]);
     }
 }
@@ -961,4 +965,48 @@ fn a_memo_stored_after_the_last_batch_bumps_the_new_work_counter() {
     decrypt_and_store_transaction(&network, st.wallet_mut(), &later, Some(mined)).unwrap();
     assert!(refund_keys(&st).iter().any(|(index, _, _)| *index == 100));
     assert!(st.wallet().db().one_time_new_work().unwrap() > work);
+}
+
+/// A memo queued while its transaction was unmined is retried as soon as storing the
+/// transaction again records its block, without waiting for a block batch.
+#[test]
+fn storing_a_queued_memos_transaction_again_retries_it() {
+    let (mut st, first) = ironwood_funded_wallet();
+    let account = st.test_account().cloned().unwrap();
+    let network = *st.network();
+    let pays = vec![payment(&p2pkh(7), 100_000, None)];
+    let (_, txid, mined) = send(&mut st, pays, &refund_memo(7));
+    let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
+    let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
+    let _old_wallet = st.reset();
+    let (restored, _) = st
+        .wallet_mut()
+        .create_account("restored", &seed, account.birthday(), None)
+        .unwrap();
+    st.wallet_mut().update_chain_tip(mined).unwrap();
+    let blocks = u32::from(mined) - u32::from(first);
+    st.scan_cached_blocks(first, blocks as usize);
+    st.wallet_mut()
+        .db_mut()
+        .set_one_time_recovery_enabled(restored, true)
+        .unwrap();
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, None).unwrap();
+    assert!(refund_keys(&st).is_empty(), "an unmined memo waits");
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
+    assert_eq!(refund_keys(&st), [(7, u32::from(mined), true)]);
+}
+
+/// The pending memo query starts from the queue, not from the account's note history.
+#[test]
+fn the_pending_memo_query_is_driven_by_the_queue() {
+    let (st, _) = ironwood_funded_wallet();
+    let plan: Vec<(i64, i64, i64, String)> = rows(
+        st.wallet().conn(),
+        &format!(
+            "EXPLAIN QUERY PLAN {}",
+            store::restore::recovery::PENDING_MEMOS
+        ),
+        [1],
+    );
+    assert_eq!(plan[0].3, "SCAN q", "{plan:?}");
 }

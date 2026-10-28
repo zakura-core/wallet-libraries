@@ -3690,7 +3690,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         // A memo enhancement retrieved may name a refund key; it is processed now rather
         // than by re-reading every memo on each block batch.
         #[cfg(feature = "orchard")]
-        wallet::one_time_ivk::restore::recovery::memos_stored(
+        wallet::one_time_ivk::restore::recovery::memos_stored_by_txid(
             self.conn.0,
             &self.params,
             txid.as_ref(),
@@ -3744,7 +3744,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
                 sent_tx.tx(),
             )?;
             #[cfg(feature = "orchard")]
-            wallet::one_time_ivk::restore::recovery::memos_stored(
+            wallet::one_time_ivk::restore::recovery::memos_stored_by_txid(
                 self.conn.0,
                 &self.params,
                 sent_tx.tx().txid().as_ref(),
