@@ -11,6 +11,7 @@
   birthday. One range covers up to `MAX_RANGE_BLOCKS` heights within
   `MAX_RANGE_BYTES`. `blocks::Head` now describes a sealed archive and a tail,
   and `blocks::RangeSize` reports what serving from a height would cost.
+  `Range::sets` lets a server assemble a longer range from stored ones.
 - Breaking: `blocks::BlockFilter`, `blocks::Batch` (`IWBATCH1`),
   `MAX_BLOCKS`, `MAX_BATCH_BYTES` and `Head::check_request` are removed.
 
