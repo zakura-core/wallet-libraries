@@ -1585,6 +1585,7 @@ fn disabled() -> RecoveryStatus {
         restore_gap: 0,
         restore_complete: false,
         manual: None,
+        awaiting_admission: 0,
         lookups: vec![],
         witnesses: vec![],
     }
@@ -1604,7 +1605,9 @@ pub(crate) fn status<P: Parameters>(
     let (enabled, token) = token(conn, owner.0)?;
     let Some(mut status) = conn.query_row("SELECT filter_height, filter_hash, fresh,
         restore_next, restore_gap, restore_done, manual_active, manual_purpose, manual_next, manual_end,
-        upgrade_required
+        upgrade_required, (SELECT COUNT(*) FROM ironwood_one_time_payment_recovery p
+            JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
+            WHERE k.account_id = ?1 AND p.witness IS NOT NULL)
         FROM ironwood_one_time_recovery WHERE account_id = ?1", [owner.0], |r| {
         let height: Option<u32> = r.get(0)?;
         let next: [u8; 8] = r.get(3)?;
@@ -1617,7 +1620,8 @@ pub(crate) fn status<P: Parameters>(
             restore_next: u64::from_be_bytes(next), restore_gap: r.get(4)?, restore_complete: r.get(5)?,
             manual: manual_end.map(|end| Ok::<_, rusqlite::Error>(ManualProgress { active: r.get(6)?,
                 refunds_done: r.get::<_, u8>(7)? == 1, next: u64::from_be_bytes(manual_next),
-                receive_end: u64::from_be_bytes(end) })).transpose()?, lookups: vec![], witnesses: vec![] })
+                receive_end: u64::from_be_bytes(end) })).transpose()?, awaiting_admission: r.get(11)?,
+            lookups: vec![], witnesses: vec![] })
     }).optional()? else {
         return Ok(disabled());
     };

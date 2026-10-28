@@ -337,6 +337,9 @@ pub struct RecoveryStatus {
     pub restore_gap: u8,
     pub restore_complete: bool,
     pub manual: Option<ManualProgress>,
+    /// Recovered payments with their witness, waiting for ordinary sync, or the rescan it
+    /// queued, to admit them. The account is not settled while this is nonzero.
+    pub awaiting_admission: u32,
     pub lookups: Vec<LookupWork>,
     pub witnesses: Vec<WitnessRequest>,
 }
