@@ -509,3 +509,202 @@ fn a_complete_check_finds_a_repeat_payment_to_a_paid_key() {
     run_pir(&mut st, account);
     assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
 }
+
+/// The birthday just past the last cached block.
+fn birthday_after_cache(st: &State) -> zcash_client_backend::data_api::AccountBirthday {
+    let born = st.latest_cached_block().unwrap().chain_state().clone();
+    zcash_client_backend::data_api::AccountBirthday::from_parts(born, None)
+}
+
+/// Restores `st`'s seed into a fresh wallet born at `birthday`, scanned from there through
+/// the cached tip, so it holds no block below its birthday, and enables recovery.
+fn restore_at(
+    st: &mut State,
+    birthday: &zcash_client_backend::data_api::AccountBirthday,
+) -> AccountUuid {
+    let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
+    let tip = st.latest_cached_block().unwrap().height();
+    let _old = st.reset();
+    let (account, _) = st
+        .wallet_mut()
+        .create_account("restored", &seed, birthday, None)
+        .unwrap();
+    st.wallet_mut().update_chain_tip(tip).unwrap();
+    let from = birthday.height();
+    st.scan_cached_blocks(from, (u32::from(tip) - u32::from(from) + 1) as usize);
+    st.wallet_mut()
+        .db_mut()
+        .set_one_time_recovery_enabled(account, true)
+        .unwrap();
+    account
+}
+
+/// A restore that never scanned below its birthday covers that history with a span the
+/// reorg limit makes final, so I0's payment there opens the window, and the next span finds
+/// the later payment to I4.
+#[test]
+fn a_restore_without_blocks_below_its_birthday_covers_them_with_stable_spans() {
+    let mut st = scanned_wallet();
+    let paid0 = pay_candidate(&mut st, receive(0));
+    let birthday = birthday_after_cache(&st);
+    let paid4 = pay_candidate(&mut st, receive(4));
+    for _ in 0..1_000 {
+        st.generate_empty_block();
+    }
+    let account = restore_at(&mut st, &birthday);
+    assert!(st.wallet().get_block_hash(paid0.height).unwrap().is_none());
+    let below: Vec<_> = blocks_above(&st, activation(&st) - 1)
+        .into_iter()
+        .filter(|b| b.height < birthday.height())
+        .collect();
+    let end = *below.last().unwrap();
+    let span = FilterSpan {
+        revision: 0,
+        from: activation(&st),
+        parent: BlockHash([0; 32]),
+        end,
+    };
+    assert_eq!(
+        record(&mut st, account, &span, &[(paid0.height, receive(0))]),
+        FilterOutcome::Committed
+    );
+    assert_eq!(run_pir(&mut st, account), 1);
+    assert_eq!(behind(&st, account), [receive(4)]);
+    let rest = blocks_above(&st, end.height);
+    let span = FilterSpan {
+        revision: 0,
+        from: birthday.height(),
+        parent: end.hash,
+        end: *rest.last().unwrap(),
+    };
+    assert_eq!(
+        record(&mut st, account, &span, &[(paid4.height, receive(4))]),
+        FilterOutcome::Committed
+    );
+    assert_eq!(run_pir(&mut st, account), 1);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// A replay starting below the birthday has a parent the wallet does not hold, so it cannot
+/// be checked, and coverage restarts from activation.
+#[test]
+fn a_replay_whose_parent_the_wallet_lacks_restarts_coverage() {
+    let mut st = scanned_wallet();
+    st.generate_and_scan_empty_blocks(4);
+    let birthday = birthday_after_cache(&st);
+    for _ in 0..4 {
+        st.generate_empty_block();
+    }
+    let account = restore_at(&mut st, &birthday);
+    let mut blocks = blocks_above(&st, activation(&st) - 1);
+    blocks.pop();
+    let first = span_over(st.wallet().db(), 0, &blocks);
+    assert_eq!(
+        record(&mut st, account, &first, &[]),
+        FilterOutcome::Committed
+    );
+    let replay = span_over(
+        st.wallet().db(),
+        0,
+        &blocks_above(&st, birthday.height() - 3),
+    );
+    assert_eq!(
+        record(&mut st, account, &replay, &[]),
+        FilterOutcome::Restart
+    );
+    assert_eq!(status(st.wallet().db(), account).filter_frontier, None);
+    let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert!(receivers.iter().all(|r| r.covered == activation(&st) - 1));
+}
+
+/// A complete check's lookup is held while a filter span commits past it, then answered.
+/// The span counts the check's coverage, the held answer still settles it, each payment is
+/// admitted once, and only the keys the payments exposed need a re-check.
+#[test]
+fn a_span_over_a_held_complete_check_keeps_both() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let paid0 = pay_candidate(&mut st, receive(0));
+    let first = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, first, true)
+            .unwrap()
+    );
+    let held = work_of(&st, receive(0));
+    let paid1 = pay_candidate(&mut st, receive(1));
+    assert_eq!(
+        advance(&mut st, account, &[(paid1.height, receive(1))]),
+        FilterOutcome::Committed
+    );
+    let page = whole(
+        first,
+        vec![DirectoryRecord {
+            receiver: held.work.receiver,
+            page: 0,
+            total: 1,
+            payment: directory_answer(&paid0),
+            ordinal: 0,
+        }],
+    );
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, &held, &page, clock_now())
+            .unwrap()
+    );
+    run_pir(&mut st, account);
+    assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
+    // Only the keys the payments exposed wait for a re-check; I0 and I1 keep coverage.
+    assert_eq!(behind(&st, account), [receive(4), receive(5)]);
+    recheck(&mut st, account, &[]);
+    assert_eq!(run_pir(&mut st, account), 0);
+    assert!(behind(&st, account).is_empty());
+    assert!(status(st.wallet().db(), account).lookups.is_empty());
+}
+
+/// A filter hit's lookup is held while a complete check extends it, then answered with the
+/// shorter history. The rest is read from where that answer stopped, so the repeat payment
+/// is found and nothing is admitted twice.
+#[test]
+fn a_complete_check_over_a_held_hit_lookup_keeps_both() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
+    let paid0 = pay_candidate(&mut st, receive(0));
+    assert_eq!(
+        advance(&mut st, account, &[(paid0.height, receive(0))]),
+        FilterOutcome::Committed
+    );
+    let held = work_of(&st, receive(0));
+    let first = publication_at(&st, held.through);
+    pay_candidate(&mut st, receive(0));
+    let second = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, second, true)
+            .unwrap()
+    );
+    let page = whole(
+        first,
+        vec![DirectoryRecord {
+            receiver: held.work.receiver,
+            page: 0,
+            total: 1,
+            payment: directory_answer(&paid0),
+            ordinal: 0,
+        }],
+    );
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, &held, &page, clock_now())
+            .unwrap()
+    );
+    run_pir(&mut st, account);
+    assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
+    assert!(behind(&st, account).is_empty());
+    assert!(status(st.wallet().db(), account).lookups.is_empty());
+}
