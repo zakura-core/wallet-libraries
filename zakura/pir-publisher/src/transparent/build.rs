@@ -1102,6 +1102,9 @@ fn verify_encoded_rows(
     )
     .map_err(|error| match error {
         AssignmentError::Decode(error) => BuildError::Record(error),
+        AssignmentError::Lengths { tags, assignment } => {
+            BuildError::Invalid(format!("{tags} entries were placed with {assignment} rows"))
+        }
         AssignmentError::Duplicate => {
             BuildError::Invalid("a script tag appears twice in the directory".into())
         }
@@ -2085,5 +2088,27 @@ mod tests {
                 "b09f919075d25ece5ea5c15627126ead664afc3cee35647351e690cfee618d42",
             ]
         );
+    }
+
+    /// A small placement that fits one segment only through relocation:
+    /// greedy two-choice placement of the same scripts overflows. Its final
+    /// assignment is pinned at the commit before placement was shared.
+    #[test]
+    fn a_relocated_placement_matches_the_pinned_assignment() {
+        let (shard_id, rows, slots) = (9, 8u64, 3usize);
+        let owned = placement_set(16);
+        let refs: Vec<&[u8]> = owned.iter().map(|s| s.as_slice()).collect();
+        let mut used = vec![0usize; rows as usize];
+        let greedy = refs.iter().all(|script| {
+            let [a, b] = candidate_rows(shard_id, script, rows).map(|row| row as usize);
+            let row = if used[a] <= used[b] { a } else { b };
+            used[row] += 1;
+            used[row] <= slots
+        });
+        assert!(!greedy, "greedy placement fits, so nothing relocates");
+        let (placed, assignment) =
+            place_scripts(shard_id, &refs, &vec![1; refs.len()], rows, slots).expect("places");
+        assert_eq!(placed.segments, 1, "relocation keeps one segment");
+        assert_eq!(assignment, [3, 6, 5, 2, 1, 6, 4, 3, 5, 7, 7, 5, 3, 2, 0, 2]);
     }
 }
