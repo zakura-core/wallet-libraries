@@ -691,6 +691,24 @@ pub(crate) fn forget_output_shape_and_later(conn: &rusqlite::Connection) {
     .unwrap();
 }
 
+/// Test support: forgets that `one_time_activation` was applied, restoring the columns it
+/// dropped and dropping the one it added, so the next migration run upgrades the wallet's
+/// current one-time state as it would an older wallet's.
+#[cfg(test)]
+pub(crate) fn forget_one_time_activation(conn: &rusqlite::Connection) {
+    conn.execute_batch(
+        "ALTER TABLE ironwood_one_time_recovery DROP COLUMN used;
+         ALTER TABLE ironwood_one_time_recovery ADD COLUMN pir_coverage INTEGER NOT NULL
+            DEFAULT 0 CHECK (pir_coverage IN (0, 1));",
+    )
+    .unwrap();
+    conn.execute(
+        "DELETE FROM schemer_migrations WHERE id = ?1",
+        [one_time_activation::MIGRATION_ID.as_bytes().to_vec()],
+    )
+    .unwrap();
+}
+
 /// Test support: forgets that `transparent_txid_enhancement` and the migrations extending its
 /// tables were applied, dropping its tables, so the next migration run applies them to an
 /// existing wallet.
