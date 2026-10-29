@@ -87,7 +87,12 @@ pub fn near_observation(purpose: Purpose, status: &NearStatus<'_>) -> Observatio
         _ => &[],
     };
     let mut receipts: Vec<TxId> = vec![];
-    for txid in hashes.iter().copied().flatten().filter_map(|h| TxId::from_hex(h)) {
+    for txid in hashes
+        .iter()
+        .copied()
+        .flatten()
+        .filter_map(|h| TxId::from_hex(h))
+    {
         if !receipts.contains(&txid) {
             receipts.push(txid);
         }
