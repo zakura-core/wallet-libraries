@@ -7,6 +7,13 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- Embedded Tor directory downloads use `deflate` or `identity` encoding instead
+  of optional XZ/Zstandard compression, avoiding the native codec dependencies.
+  Downloads may be larger; embedded Tor and onion-service connections remain
+  supported.
+
 ## [0.1.0-rc9.6] - 2026-10-30
 
 ### Added
