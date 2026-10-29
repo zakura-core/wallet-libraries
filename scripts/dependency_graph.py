@@ -48,6 +48,21 @@ def check_role_api(directory, product, role):
     source.write_text(f"pub use subject::{product};\n")
 
 
+def check_previous_endpoint(directory):
+    """Retain the previous URL parser as an independent, verification-only oracle."""
+    (directory / "src").mkdir(parents=True)
+    protocol = ROOT / "zakura/pir-protocol"
+    (directory / "Cargo.toml").write_text(
+        '[package]\nname = "previous-endpoint-counterpart"\nversion = "0.0.0"\nedition = "2024"\n'
+        '[workspace]\nresolver = "2"\n[dependencies]\n'
+        f'candidate_protocol = {{ package = "zakura-pir-protocol", path = {json.dumps(str(protocol))}, features = ["http-endpoint"] }}\n'
+        'url = "=2.5.8"\n'
+    )
+    (directory / "src/main.rs").write_text((ROOT / "scripts/probes/previous_endpoint.rs").read_text())
+    subprocess.run(["cargo", "run", "--quiet", "--manifest-path",
+                    str(directory / "Cargo.toml")], check=True)
+
+
 def check_previous_native(directory):
     """Cross both directions with pinned pre-packaging code, independently of workspace features."""
     directory.mkdir()
@@ -186,6 +201,7 @@ def main():
                         check_role_api(Path(temporary) / name, product, role)
             receipt[name] = graph
             print(f"{name}: {len(graph) - 1} dependency packages; boundary passed", flush=True)
+        check_previous_endpoint(Path(temporary) / "previous-endpoint-counterpart")
         check_previous_native(Path(temporary) / "frozen-native-counterpart")
     output = Path(os.environ["CARGO_TARGET_DIR"]) / "dependency-graphs.json"
     output.write_text(json.dumps(receipt, indent=2) + "\n")

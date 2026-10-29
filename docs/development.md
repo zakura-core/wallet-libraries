@@ -133,6 +133,9 @@ parameters. Enable `proving-tests` for real proving fixtures; the `proving` and
 `pczt` configurations retain that coverage. This feature is only for tests.
 `python3 scripts/dev.py verify --only dependency-graph` checks fresh external
 consumers, including fixture availability and the engine's transport-free graph.
+It also compares endpoint normalization with the previous URL parser in an
+external consumer. This keeps the independent oracle and its URL/ICU stack out
+of ordinary workspace test builds.
 
 The PIR clients temporarily pin the IPIR family to the main revision that merged
 [IPIR PR 39](https://github.com/valargroup/ipir-sp/pull/39). Native setup derivation and byte framing live in the shared protocol package;

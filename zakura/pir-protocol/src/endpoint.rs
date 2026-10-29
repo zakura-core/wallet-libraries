@@ -250,40 +250,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supported_endpoints_match_the_previous_url_parser() {
-        for base in [
-            "https://example.org",
-            "  HTTPS://EXAMPLE.ORG:443/a/../base/  ",
-            "https://example.org/a%2Fb",
-            "https://example.org/a/%2e%2E/base/",
-            "https://example.org//a///base/",
-            "https://example.org/a/.",
-            "https://example.org/a/..",
-            "https://example.org/../../base/",
-            "https://example.org/a%20b",
-            "https://example.org/a%3Fb%23c",
-            "https://xn--bcher-kva.example/",
-            "https://EXAMPLE.ORG./base/",
-            "http://127.0.0.1:8080",
-            "http://127.2.3.4:080/base/",
-            "http://LOCALHOST:80/base",
-            "https://[2001:0db8::1]:443/base/",
-            "http://[0:0:0:0:0:0:0:1]:8080/base/",
-            "https://example.org:0/",
-        ] {
-            for route in ["/v1/enhance/init", "/v1/unit/42", "/a%2Fb", "/../query"] {
-                let mut old = url::Url::parse(base).unwrap();
-                old.set_path(&format!("{}{route}", old.path().trim_end_matches('/')));
-                assert_eq!(
-                    Endpoint::parse(base).unwrap().join(route).unwrap(),
-                    old.as_str(),
-                    "{base}, {route}"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn product_urls_keep_the_base_path_below_one_server() {
         let base = Endpoint::parse("https://wallet-pir.example/edge/").unwrap();
         let urls: Vec<_> = PirProduct::ALL
