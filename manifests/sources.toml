@@ -70,12 +70,12 @@ version = "0.1.0-rc9"
 [[crate]]
 path = "zcash_client_backend"
 package = "zakura-client-backend"
-version = "0.1.0-rc9.4"
+version = "0.1.0-rc9.5"
 
 [[crate]]
 path = "zcash_client_sqlite"
 package = "zakura-client-sqlite"
-version = "0.1.0-rc9.4"
+version = "0.1.0-rc9.5"
 
 # Minimum compatible Common release; Cargo.lock records the tested versions.
 # The upstream dependency key is kept, so crate sources continue to say

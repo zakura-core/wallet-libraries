@@ -1,6 +1,6 @@
 [package]
 name = "zakura-pir-publisher"
-version = "0.0.1-rc3"
+version = "0.0.1-rc4"
 edition = "2024"
 description = "PIR publication construction without request evaluation"
 rust-version.workspace = true
@@ -34,8 +34,8 @@ transparent = [
 ]
 
 [dependencies]
-zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc3", features = ["native"] }
-zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc3" }
+zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc4", features = ["native"] }
+zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc4" }
 base64 = { version = "0.22", optional = true }
 hex = { version = "0.4", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
@@ -48,7 +48,7 @@ incrementalmerkletree = { workspace = true, optional = true }
 orchard = { workspace = true, optional = true }
 
 [dev-dependencies]
-zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc3", features = ["filter-matching"] }
+zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc4", features = ["filter-matching"] }
 hex = { workspace = true }
 sha2 = { workspace = true }
 rand = "0.8"

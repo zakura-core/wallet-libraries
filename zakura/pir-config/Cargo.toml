@@ -20,7 +20,7 @@ path = "src/bin/wallet-pir-config.rs"
 # server may appear here: applications own transport, scheduling and storage.
 [dependencies]
 zakura-service-config = { path = "../service-config", version = "0.1.0" }
-zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc3", features = ["http-endpoint"] }
+zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc4", features = ["http-endpoint"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

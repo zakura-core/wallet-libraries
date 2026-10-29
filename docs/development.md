@@ -201,15 +201,15 @@ must configure this Trusted Publisher on crates.io:
 Use `python3 scripts/publish-crates.py --plan` to list the selected names and versions.
 Check every crate's publisher settings, including names already reserved by a
 placeholder release. Trusted Publishing needs existing crate names.
-Before a release, reserve the five new `zakura-pir-{protocol,client,publisher,query-server,server-core}`
-names and configure their Trusted Publishers. The packaging POC itself does not
-publish crates or change publisher settings. No permanent API token or new Infisical secret is required.
+The five `zakura-pir-{protocol,client,publisher,query-server,server-core}` names
+are registered and have been published through this workflow. No permanent API
+token or new Infisical secret is required.
 
 `zakura-service-config` and `zakura-pir-config` are also selected for release,
-in dependency order after any packages they use. Before their first release,
-publish each reserved `0.0.0` placeholder from `zakura-core/reserved` and configure
-the same Trusted Publisher for each crate: owner `zakura-core`, repository
-`wallet-libraries`, workflow `publish-crates.yml`, and environment `crates-io`.
+in dependency order after any packages they use. Both `0.0.0` placeholders are registered on crates.io. Before their first
+implementation release, an owner must configure the same Trusted Publisher for
+each crate: owner `zakura-core`, repository `wallet-libraries`, workflow
+`publish-crates.yml`, and environment `crates-io`.
 A reservation merged into `zakura-core/reserved` does not register the name on
 crates.io until the placeholder is published. Trusted Publishing can only be
 configured after that initial publication. The `verify` workflow's successful
