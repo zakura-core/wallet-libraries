@@ -14,6 +14,7 @@ pub mod record;
 pub mod session;
 pub mod shards;
 pub mod snapshot;
+pub mod v2;
 pub mod wire;
 pub mod witness;
 
@@ -30,6 +31,9 @@ pub enum Error {
     Coverage,
     #[error("receiver directory table or commitment history limit exceeded")]
     Capacity,
+    /// No candidate seed built a v2 segment's choice table.
+    #[error("receiver choice table could not be built")]
+    Choice,
     #[error("missing continuation page")]
     MissingPage,
     /// A payment or witness profile, or a record version, that a newer client supports.

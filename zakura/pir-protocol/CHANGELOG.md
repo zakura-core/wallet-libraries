@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- `receiver::v2`, the Receiver directory split alongside v1: a 2,048-row P8
+  directory of 22-byte tag entries per segment, a companion of 801-byte
+  record-and-payload slots with a trimmed `query_rows` prefix, a required
+  choice object bound by digest, length and key count, and the segment
+  `Publication` with its whole-segment checks. Salts retry per forcing block
+  and choice seeds are drawn from a block hash. The P8 profile and message
+  sizes are under `native`.
+
 ### Changed
 
 - Receiver block hints are sparse and keyed by height. `blocks::Range`
