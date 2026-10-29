@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `receiver::v2::Server`, alongside v1: P8 directory and companion tables,
+  each checked whole and prepared on its own. A directory query covers every
+  row; a companion query covers every row or exactly its `query_rows` prefix.
+
 ## [0.0.1-rc4] - 2026-10-26
 
 ### Changed

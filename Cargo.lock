@@ -8048,6 +8048,7 @@ dependencies = [
  "reinspiring",
  "sha2 0.10.9",
  "zakura-pir-protocol",
+ "zakura-pir-publisher",
  "zakura-pir-server-core",
 ]
 
