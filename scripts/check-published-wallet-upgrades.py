@@ -11,7 +11,7 @@ private work for a wallet that never had a private policy, repeat initialization
 readers treat the upgraded database. The rc9.2 wallet also uses that release's one-time IVK
 feature, reserving a receive address and a refund key and quoting both, so the upgrade's legacy
 one-time branch runs on real data: it must keep the keys and operations, drop the abandoned
-discovery progress, and leave recovery disabled. rc9 onwards and the pre-migration fork must refuse unknown
+discovery progress, and mark the account used, so its handed-out receive address is looked up. rc9 onwards and the pre-migration fork must refuse unknown
 migrations without changing it; rc5 and rc7 lack that guard and their successful opens are
 reported, not qualified. Separate consumers retain their own dependency families; no user wallet
 is accepted.
@@ -158,7 +158,8 @@ def assert_no_private_work(path, version, kept=None):
 
     One-time IVK tables must be empty, and abandoned progress tables must be gone. For a wallet
     that used the published one-time feature, `kept` holds its keys and operations, which the
-    upgrade keeps unchanged while recovery starts disabled with no queued work.
+    upgrade keeps unchanged. Handing out a key is evidence of use, so the account gets one
+    recovery row marked used and a bootstrap lookup for each receive key in its window.
     """
     with sqlite3.connect(path) as conn:
         applied = {row[0] for row in conn.execute("SELECT id FROM schemer_migrations")}
@@ -169,7 +170,15 @@ def assert_no_private_work(path, version, kept=None):
             count = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
             assert count == 0, f"{version}: the upgrade queued {count} rows in {table}"
         assert conn.execute("SELECT count(*) FROM ironwood_enhance_routing WHERE route = 2").fetchone()[0] == 0
+        if kept is not None:
+            assert conn.execute("SELECT count(*), MIN(used) FROM ironwood_one_time_recovery").fetchone() == (1, 1), f"{version}: the upgrade didn't mark the used account"
+            lookups = conn.execute(
+                "SELECT k.purpose, l.reasons & 1 FROM ironwood_one_time_lookups l "
+                "JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id").fetchall()
+            assert lookups and all(row == (1, 1) for row in lookups), f"{version}: the upgrade queued {lookups} instead of receive-key bootstrap lookups"
         for table in ONE_TIME_IVK_TABLES:
+            if kept is not None and table in ("ironwood_one_time_recovery", "ironwood_one_time_lookups"):
+                continue
             if kept is not None and table in ONE_TIME_KEPT:
                 assert one_time_rows(conn, table) == kept[table], f"{version}: the upgrade changed {table}"
                 continue
@@ -271,7 +280,7 @@ def main():
                 assert conn.execute("SELECT count(*) FROM tpir_coverage").fetchone()[0] == 0
             assert snapshot(db) == after_upgrade
             assert_no_private_work(db, version, kept)
-            one_time = "; one-time keys and operations kept, abandoned progress dropped, recovery disabled" if kept else ""
+            one_time = "; one-time keys and operations kept, abandoned progress dropped, the used account's receive key looked up" if kept else ""
             print(f"PASS {version}: ingestion before upgrade; current upgrade preserved accounts, transactions, classification values and UTXOs; legacy provenance grants no coverage; the unconditional migrations queued no private work; repeat initialization preserved journal{one_time}", flush=True)
             # The writer, now a prior reader, opens the upgraded database. A build that checks
             # for unknown migrations refuses it and changes nothing; rc5 and rc7 predate that
