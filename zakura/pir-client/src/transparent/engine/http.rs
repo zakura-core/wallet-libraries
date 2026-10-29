@@ -1058,6 +1058,8 @@ mod observation_tests {
                     while Instant::now() < deadline {
                         match listener.accept() {
                             Ok((mut stream, _)) => {
+                                // Accepted sockets inherit O_NONBLOCK on macOS.
+                                stream.set_nonblocking(false).unwrap();
                                 let mut headers = Vec::new();
                                 stream
                                     .set_read_timeout(Some(Duration::from_secs(2)))
