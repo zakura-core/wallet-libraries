@@ -1,7 +1,8 @@
 //! The use marker: which events set it, and that nothing clears it.
 use super::*;
 use crate::wallet::one_time_ivk::restore::tests::discovery::{
-    drain, key8, pay_candidate, publication_at, queue_late, status,
+    drain, key8, one_time_notes, pay_candidate, publication_at, queue_late, send_witness, status,
+    work_of,
 };
 
 /// Whether `account`'s use marker is set.
@@ -295,6 +296,76 @@ fn the_upgrade_resets_a_paused_accounts_partial_progress() {
     assert_eq!(progress, (None, None));
 }
 
+/// A legacy account whose only evidence is a one-time note and that has no progress row
+/// gets one, marked, with a receive window that covers the paid index.
+#[test]
+fn the_upgrade_keeps_a_note_only_account_monitored() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    let publication = queue_late(&mut st, key8(), &candidate);
+    send_witness(&mut st, key8(), &candidate);
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    exec(
+        st.wallet().conn(),
+        "DELETE FROM ironwood_one_time_recovery",
+        [],
+    );
+    upgrade(&mut st);
+    assert!(used(&st, account));
+    st.wallet_mut()
+        .db_mut()
+        .enable_one_time_recovery(account)
+        .unwrap();
+    let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert!(receivers.iter().any(|r| r.key == key8()));
+}
+
+/// An existing progress row whose receive window stops short of an outstanding I4
+/// reservation is widened to cover I4, and I4 gets a bootstrap lookup, so a payment to I4
+/// is recovered.
+#[test]
+fn the_upgrade_widens_a_short_window_over_an_outstanding_reservation() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let height = tip(&st).height;
+    recover(
+        st.wallet_mut().db_mut(),
+        account,
+        KeyId::new(Purpose::Receive, 4),
+        height,
+    );
+    let id = receive_id(&st, 4);
+    exec(
+        st.wallet().conn(),
+        "UPDATE ironwood_one_time_keys SET reserved_at = 1 WHERE id = ?1",
+        [id],
+    );
+    exec(
+        st.wallet().conn(),
+        "DELETE FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+        [id],
+    );
+    pay_candidate(&mut st, KeyId::new(Purpose::Receive, 4));
+    upgrade(&mut st);
+    let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert!(
+        receivers
+            .iter()
+            .any(|r| r.key == KeyId::new(Purpose::Receive, 4))
+    );
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
 /// A key the old admission marked paid only by a payment before the birthday is unmarked,
 /// so issuance hands I0 out again within the window instead of skipping past it.
 #[test]
@@ -334,9 +405,7 @@ fn the_upgrade_reissues_indexes_paid_only_before_the_birthday() {
 /// owes by clearing the frontier. The account stays marked, so it keeps being queried.
 #[test]
 fn the_upgrade_finds_a_pending_recheck_through_the_complete_check() {
-    use crate::wallet::one_time_ivk::restore::tests::discovery::{
-        blocks_above, one_time_notes, record_span, send_witness,
-    };
+    use crate::wallet::one_time_ivk::restore::tests::discovery::{blocks_above, record_span};
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let paid0 = pay_candidate(&mut st, KeyId::new(Purpose::Receive, 0));
