@@ -142,6 +142,57 @@ pub fn misrouted(
         .position(|(index, key)| candidates(salts, key, rows)[choose(key)] != row_of(index))
 }
 
+/// Why encoded rows disagree with a placement. See [`verify_assignment`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum AssignmentError<E> {
+    /// The caller's decoder refused a row.
+    Decode(E),
+    /// A tag appears twice.
+    Duplicate,
+    /// The rows hold `held` tags where `placed` entries were placed.
+    Count { held: usize, placed: usize },
+    /// Entry `index` is not in its assigned row `row`.
+    Misplaced { index: usize, row: u32 },
+}
+
+/// Checks the encoded rows, not the placer's intent.
+///
+/// `rows` are the encoded rows in logical order and `decode` returns the tags
+/// one holds. Entry `i` has tag `tags[i]` and was placed in row
+/// `assignment[i]`. Every entry's tag must decode from that row, no tag may
+/// appear twice, and the rows must hold exactly the entries placed.
+pub fn verify_assignment<'a, T: Copy + Eq + std::hash::Hash, E>(
+    rows: impl IntoIterator<Item = &'a [u8]>,
+    mut decode: impl FnMut(&[u8]) -> Result<Vec<T>, E>,
+    tags: &[T],
+    assignment: &[u32],
+) -> Result<(), AssignmentError<E>> {
+    let mut decoded = Vec::new();
+    let mut seen = std::collections::HashSet::with_capacity(tags.len());
+    for raw in rows {
+        let row = decode(raw).map_err(AssignmentError::Decode)?;
+        if !row.iter().all(|tag| seen.insert(*tag)) {
+            return Err(AssignmentError::Duplicate);
+        }
+        decoded.push(row);
+    }
+    if seen.len() != tags.len() {
+        return Err(AssignmentError::Count {
+            held: seen.len(),
+            placed: tags.len(),
+        });
+    }
+    for (index, (tag, row)) in tags.iter().zip(assignment).enumerate() {
+        if !decoded
+            .get(*row as usize)
+            .is_some_and(|held| held.contains(tag))
+        {
+            return Err(AssignmentError::Misplaced { index, row: *row });
+        }
+    }
+    Ok(())
+}
+
 /// Rows a relocation search may visit before giving up and taking a segment.
 ///
 /// A bound rather than a budget for the whole shard: the search is per key,
@@ -279,6 +330,39 @@ mod tests {
         assert_eq!(
             misrouted(&salts, keys, 4, |key| bits[key].into(), row_of),
             None
+        );
+    }
+
+    /// A caller's decoder: each row is two one-byte tags, zero for empty, and
+    /// `0xff` is malformed.
+    #[test]
+    fn assignment_is_checked_through_the_callers_decoder() {
+        let decode = |raw: &[u8]| -> Result<Vec<u8>, ()> {
+            if raw.contains(&0xff) {
+                return Err(());
+            }
+            Ok(raw.iter().copied().filter(|tag| *tag != 0).collect())
+        };
+        let check = |rows: &[u8], assignment: &[u32]| {
+            let rows = rows.as_chunks::<2>().0.iter().map(|row| &row[..]);
+            verify_assignment(rows, decode, &[1, 2, 3], assignment)
+        };
+        assert_eq!(check(&[1, 0, 2, 3], &[0, 1, 1]), Ok(()));
+        assert_eq!(
+            check(&[1, 0, 0xff, 3], &[0, 1, 1]),
+            Err(AssignmentError::Decode(()))
+        );
+        assert_eq!(
+            check(&[1, 1, 2, 3], &[0, 1, 1]),
+            Err(AssignmentError::Duplicate)
+        );
+        assert_eq!(
+            check(&[1, 0, 2, 0], &[0, 1, 1]),
+            Err(AssignmentError::Count { held: 2, placed: 3 })
+        );
+        assert_eq!(
+            check(&[1, 0, 2, 3], &[1, 1, 1]),
+            Err(AssignmentError::Misplaced { index: 0, row: 1 })
         );
     }
 }

@@ -31,8 +31,8 @@
 
 pub use zakura_pir_protocol::transparent::shard::choice::candidate_rows;
 
-use crate::directory::Overflow;
 pub use crate::directory::Placement;
+use crate::directory::{AssignmentError, Overflow};
 pub use zakura_pir_protocol::transparent::shard::choice::bucket_for;
 use zakura_pir_protocol::transparent::shard::choice::bucket_salts;
 
@@ -1078,10 +1078,9 @@ type PlacedDirectory = (
 /// Checks the encoded bytes, not the placer's intent.
 ///
 /// Rows carry tags, so a server cannot recompute a script's route; this is
-/// the last point where the scripts are known. Every entry's tag must decode
-/// from the row its assignment names, no tag may appear twice in the shard,
-/// and the rows must hold exactly the entries placed. A miss here would reach
-/// a wallet as absence, which it cannot tell from an empty history.
+/// the last point where the scripts are known. See
+/// [`crate::directory::verify_assignment`] for the checks. A miss here would
+/// reach a wallet as absence, which it cannot tell from an empty history.
 fn verify_encoded_rows(
     tables: &[Vec<u8>],
     entries: &[DirectoryEntry],
@@ -1089,44 +1088,31 @@ fn verify_encoded_rows(
     geometry: &Geometry,
     children: u32,
 ) -> Result<(), BuildError> {
-    let per_segment = geometry.directory_rows as usize;
-    let row_bytes = geometry.directory_row_bytes;
-    let mut rows: Vec<Vec<[u8; crate::transparent::tag::SCRIPT_TAG_BYTES]>> =
-        Vec::with_capacity(per_segment * tables.len());
-    let mut seen = std::collections::HashSet::with_capacity(entries.len());
-    for table in tables {
-        for raw in table.chunks_exact(row_bytes) {
-            let decoded = crate::transparent::records::decode_directory_row(raw, children)?;
-            let tags: Vec<_> = decoded.into_iter().map(|entry| entry.tag).collect();
-            for tag in &tags {
-                if !seen.insert(*tag) {
-                    return Err(BuildError::Invalid(
-                        "a script tag appears twice in the directory".into(),
-                    ));
-                }
-            }
-            rows.push(tags);
+    let tags: Vec<_> = entries.iter().map(|entry| entry.tag).collect();
+    crate::directory::verify_assignment(
+        tables
+            .iter()
+            .flat_map(|table| table.chunks_exact(geometry.directory_row_bytes)),
+        |raw| {
+            crate::transparent::records::decode_directory_row(raw, children)
+                .map(|row| row.into_iter().map(|entry| entry.tag).collect())
+        },
+        &tags,
+        assignment,
+    )
+    .map_err(|error| match error {
+        AssignmentError::Decode(error) => BuildError::Record(error),
+        AssignmentError::Duplicate => {
+            BuildError::Invalid("a script tag appears twice in the directory".into())
         }
-    }
-    if seen.len() != entries.len() {
-        return Err(BuildError::Invalid(format!(
-            "the directory holds {} entries, {} were placed",
-            seen.len(),
-            entries.len()
-        )));
-    }
-    for (entry, row) in entries.iter().zip(assignment) {
-        let held = rows
-            .get(*row as usize)
-            .is_some_and(|tags| tags.contains(&entry.tag));
-        if !held {
-            return Err(BuildError::Invalid(format!(
-                "script {} is not in its assigned row {row}",
-                hex::encode(&entry.script)
-            )));
-        }
-    }
-    Ok(())
+        AssignmentError::Count { held, placed } => BuildError::Invalid(format!(
+            "the directory holds {held} entries, {placed} were placed"
+        )),
+        AssignmentError::Misplaced { index, row } => BuildError::Invalid(format!(
+            "script {} is not in its assigned row {row}",
+            hex::encode(&entries[index].script)
+        )),
+    })
 }
 
 /// Returns the encoded directory and its choice table.
