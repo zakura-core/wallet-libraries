@@ -120,12 +120,12 @@ fn segment(counts: &[u32], rows: u32) -> Segment {
     .unwrap()
 }
 
+/// A record and its payload as a wallet reads them.
+type Read = (RawRecord, [u8; PAYLOAD_BYTES]);
+
 /// What a wallet reads for `r`: one directory row chosen by the choice object,
 /// then one companion row per record.
-fn find(
-    seg: &Segment,
-    r: &ReceiverBytes,
-) -> Option<(Entry, Vec<(RawRecord, [u8; PAYLOAD_BYTES])>)> {
+fn find(seg: &Segment, r: &ReceiverBytes) -> Option<(Entry, Vec<Read>)> {
     let d = &seg.directory.manifest;
     let choice = decode_choice(d, &seg.directory.choice).unwrap();
     let t = tag(&d.salt, r);
@@ -396,11 +396,11 @@ fn duplicate_tags_are_refused() {
 #[test]
 fn choice_objects_fail_closed() {
     let seg = segment(&[2, 1], 2048);
-    let edits: [&dyn Fn(&mut Vec<u8>); 4] = [
-        &|c| c.clear(),
-        &|c| c.truncate(c.len() - 1),
-        &|c| c.push(0),
-        &|c| c[0] = 2,
+    let edits: [fn(&mut Vec<u8>); 4] = [
+        |c| c.clear(),
+        |c| c.truncate(c.len() - 1),
+        |c| c.push(0),
+        |c| c[0] = 2,
     ];
     for edit in edits {
         let mut bad = seg.clone();
