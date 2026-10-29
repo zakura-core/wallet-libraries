@@ -125,7 +125,7 @@ async fn forward(service: InProcess, request: Request) -> Response {
 /// A wallet's [`HttpExchange`] over loopback HTTP to one served publication: one
 /// blocking request at a time, never retried, with a 60 s deadline.
 pub struct Loopback {
-    client: reqwest::blocking::Client,
+    client: ureq::Agent,
     url: String,
 }
 
@@ -133,10 +133,12 @@ impl Loopback {
     /// The exchange bound to the publication served at `url`.
     pub fn new(url: &str) -> Self {
         Self {
-            client: reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(60))
-                .build()
-                .expect("an HTTP client"),
+            client: ureq::Agent::new_with_config(
+                ureq::Agent::config_builder()
+                    .http_status_as_error(false)
+                    .timeout_global(Some(Duration::from_secs(60)))
+                    .build(),
+            ),
             url: url.to_owned(),
         }
     }
@@ -145,22 +147,24 @@ impl Loopback {
 impl HttpExchange for Loopback {
     fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
         let url = format!("{}{}", self.url, request.path);
-        let sending = match request.method {
-            HttpMethod::Get => self.client.get(url),
-            HttpMethod::Post => self
-                .client
-                .post(url)
-                .header("content-type", "application/octet-stream")
-                .body(request.body.clone()),
+        let mut sending = ureq::http::Request::builder().uri(url);
+        sending = match request.method {
+            HttpMethod::Get => sending.method("GET"),
+            HttpMethod::Post => sending
+                .method("POST")
+                .header("content-type", "application/octet-stream"),
         };
-        let failure = |error: reqwest::Error| {
-            if error.is_timeout() {
+        let failure = |error: ureq::Error| {
+            if matches!(error, ureq::Error::Timeout(_)) {
                 HttpFailure::Timeout
             } else {
                 HttpFailure::Unreachable
             }
         };
-        let response = sending.send().map_err(failure)?;
+        let request_body = sending
+            .body(request.body.as_slice())
+            .map_err(|_| HttpFailure::Unreachable)?;
+        let response = self.client.run(request_body).map_err(failure)?;
         let status = response.status().as_u16();
         let header = |name: &str| {
             response
@@ -170,7 +174,16 @@ impl HttpExchange for Loopback {
                 .map(str::to_owned)
         };
         let (retry_after, map_sha256) = (header("retry-after"), header("x-txid-map-sha256"));
-        let mut body = response.bytes().map_err(failure)?.to_vec();
+        let mut body = Vec::new();
+        std::io::Read::read_to_end(&mut response.into_body().into_reader(), &mut body).map_err(
+            |error| {
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    HttpFailure::Timeout
+                } else {
+                    HttpFailure::Unreachable
+                }
+            },
+        )?;
         if (200..300).contains(&status) {
             if body.len() > request.limit {
                 return Err(HttpFailure::TooLarge);

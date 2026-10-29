@@ -34,7 +34,9 @@ Transparent additionally selects `transparent-wallet`, which includes recovery
 and the backend's transparent inputs. `sqlite` adds Transparent settlement into
 the SQLite wallet. Storage and conformance remain independently selectable.
 
-`reqwest` opts into bundled HTTP transports. `lightwalletd` enables the explicit
+The legacy feature name `reqwest` opts into bundled blocking HTTP transports,
+implemented with Ureq and Rustls. Body-preserving POST redirects (307/308) are
+rejected rather than replaying a private query to another location. `lightwalletd` enables the explicit
 public transaction status source under `status::policy::lightwalletd`. With no
 lightwalletd feature, status policy and private queries have no bundled public
 transport. Applications retain ownership of route policy, timeouts and cancellation.

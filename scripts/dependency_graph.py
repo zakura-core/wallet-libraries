@@ -196,6 +196,7 @@ def main():
         ("receiver-evaluator", "zakura/pir-query-server", ["receiver"], wallet_roles | native_evaluators | {"zakura-pir-publisher", "zakura-server-chain", "sha1"}, {"reinspiring", "rayon"}),
         ("filter", "zakura/pir-protocol", ["transparent"], bitcoin_helpers | {"secp256k1", "secp256k1-sys", "zakura-protocol", "zakura-transparent"} | server_roles, {"zakura-filters", "siphasher"}),
         ("filter-cli", "zakura/pir-client", ["cli"], {"anstream", "anstyle-parse", "colorchoice"}, {"clap"}),
+        ("filter-http", "zakura/pir-client", ["transparent", "reqwest"], {"reqwest", "quinn", "hyper", "hyper-util", "hyper-rustls", "h2", "tokio", "url", "idna"}, {"ureq"}),
         ("filters", "zakura/filters", [], bitcoin_helpers | {"secp256k1", "secp256k1-sys"}, {"siphasher"}),
         ("receiver-formats", "zakura/pir-protocol", ["receiver"], bitcoin_helpers | {"secp256k1", "secp256k1-sys"} | server_roles | wallet_roles, {"zakura-filters", "siphasher"}),
         ("receiver-wallet", "zakura/pir-client", ["receiver-wallet"], {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"} | native_evaluators | server_roles, {"zakura-filters", "reinspiring"}),

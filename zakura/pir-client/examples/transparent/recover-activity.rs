@@ -58,29 +58,31 @@ const SYNCS: usize = 8;
 /// The harness's exchange with the origin: one blocking request at a time, a 30 s
 /// deadline, and no retries, as an `HttpExchange` must.
 struct Exchange {
-    client: reqwest::blocking::Client,
+    client: ureq::Agent,
     origin: String,
 }
 
 impl HttpExchange for Exchange {
     fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
         let url = format!("{}{}", self.origin.trim_end_matches('/'), request.path);
-        let sending = match request.method {
-            HttpMethod::Get => self.client.get(url),
-            HttpMethod::Post => self
-                .client
-                .post(url)
-                .header("content-type", "application/octet-stream")
-                .body(request.body.clone()),
+        let mut sending = ureq::http::Request::builder().uri(url);
+        sending = match request.method {
+            HttpMethod::Get => sending.method("GET"),
+            HttpMethod::Post => sending
+                .method("POST")
+                .header("content-type", "application/octet-stream"),
         };
-        let failure = |error: reqwest::Error| {
-            if error.is_timeout() {
+        let failure = |error: ureq::Error| {
+            if matches!(error, ureq::Error::Timeout(_)) {
                 HttpFailure::Timeout
             } else {
                 HttpFailure::Unreachable
             }
         };
-        let response = sending.send().map_err(failure)?;
+        let request_body = sending
+            .body(request.body.as_slice())
+            .map_err(|_| HttpFailure::Unreachable)?;
+        let response = self.client.run(request_body).map_err(failure)?;
         let status = response.status().as_u16();
         let header = |name: &str| {
             response
@@ -90,7 +92,16 @@ impl HttpExchange for Exchange {
                 .map(str::to_owned)
         };
         let (retry_after, map_sha256) = (header("retry-after"), header("x-txid-map-sha256"));
-        let mut body = response.bytes().map_err(failure)?.to_vec();
+        let mut body = Vec::new();
+        std::io::Read::read_to_end(&mut response.into_body().into_reader(), &mut body).map_err(
+            |error| {
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    HttpFailure::Timeout
+                } else {
+                    HttpFailure::Unreachable
+                }
+            },
+        )?;
         if (200..300).contains(&status) {
             if body.len() > request.limit {
                 return Err(HttpFailure::TooLarge);
@@ -294,9 +305,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     // bounded body and timeout, and never retries. Use a controlled capture
     // proxy as the origin to inspect the actual traffic.
     let exchange = Exchange {
-        client: reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()?,
+        client: ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .timeout_global(Some(Duration::from_secs(30)))
+                .build(),
+        ),
         origin: origin.clone(),
     };
 
