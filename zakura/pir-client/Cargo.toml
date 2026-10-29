@@ -277,6 +277,11 @@ path = "tests/receiver/block_transport.rs"
 required-features = ["receiver"]
 
 [[test]]
+name = "receiver_v2_tables"
+path = "tests/receiver/v2_tables.rs"
+required-features = ["receiver"]
+
+[[test]]
 name = "receiver_discovery"
 path = "tests/receiver/discovery.rs"
 required-features = ["receiver-wallet"]
