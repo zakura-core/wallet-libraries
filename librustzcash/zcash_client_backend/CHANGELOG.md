@@ -7,6 +7,13 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- Embedded Tor directory downloads use `deflate` or `identity` encoding instead
+  of optional XZ/Zstandard compression, avoiding the native codec dependencies.
+  Downloads may be larger; embedded Tor and onion-service connections remain
+  supported.
+
 ### Added
 
 - `data_api::WalletWrite::get_addresses_for_index_range`: generates, persists and marks as exposed the addresses at every diversifier index in a range, equivalent to `get_address_for_index` per index. The default implementation does exactly that; a store can override it to pay the per-call costs once for the range.
