@@ -64,11 +64,11 @@ thiserror = { version = "2", optional = true }
 http = { version = "1", optional = true }
 zakura-filters = { path = "../filters", version = "=0.0.1-rc0", optional = true }
 bitcoin_hashes = { version = "=0.14.101", default-features = false, features = ["std"], optional = true }
-reinspiring = { version = "=0.1.3-rc.1", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2", optional = true }
+reinspiring = { version = "=0.1.3-rc.1", optional = true }
 
 [dev-dependencies]
-ipir-native-client = { version = "=0.1.0-rc.1", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
-ipir-sp = { version = "=0.1.0-rc.7", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
+ipir-native-client = { version = "=0.1.0-rc.1" }
+ipir-sp = { version = "=0.1.0-rc.8" }
 bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
 hex = { workspace = true, features = ["std"] }
 serde_json = { workspace = true }
