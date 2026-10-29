@@ -287,15 +287,14 @@ impl Inventories {
             return Err(Error::Malformed);
         }
         let size: super::blocks::RangeSize = serde_json::from_slice(&bytes)?;
-        if size.revision != head.revision || size.from > from || size.from < head.first {
+        if size.revision != head.revision || size.from != from {
             return Err(zakura_pir_protocol::receiver::Error::Coverage.into());
         }
         Ok(size)
     }
 
     /// Fetches up to `limit` heights of hints from `from` for one captured head. The server
-    /// may start at the earlier boundary of the sealed chunk holding `from`, and stops at
-    /// [`super::blocks::MAX_RANGE_BYTES`], so a dense gap takes more than one request:
+    /// stops at [`super::blocks::MAX_RANGE_BYTES`], so a dense gap takes more than one request:
     /// continue after the returned range's end. Errors never mean an empty range.
     pub async fn block_range<T: Transport>(
         origin: &str,

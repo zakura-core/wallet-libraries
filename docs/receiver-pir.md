@@ -83,7 +83,7 @@ here depends on wallet-pir.
 
 ### Rolling block hints
 
-`blocks::Head` advertises a network, correction revision, the first served height, the end of the sealed archive and the tip. `blocks::Range` covers up to `MAX_RANGE_BLOCKS` consecutive heights within 4 MiB, and a server may return a shorter prefix to honor the byte limit, or start at the boundary of the sealed chunk holding the requested height. Only blocks that pay a receiver carry a set; missing ranges are errors, never empty sets. `blocks::RangeSize` reports the encoded bytes from a height to the tip.
+`blocks::Head` advertises a network, correction revision, the first served height and the tip. `blocks::Range` covers up to `MAX_RANGE_BLOCKS` consecutive heights within 4 MiB, starting exactly at the requested height, and a server may return a shorter prefix to honor the byte limit. Only blocks that pay a receiver carry a set; missing ranges are errors, never empty sets. `blocks::RangeSize` reports the encoded bytes from a height to the tip.
 
 The batch binds the captured revision and requested range, and checks parent linkage. Consumers must still compare block identities with their independently synced chain before using negative hints or advancing progress. The service is trusted for complete indexing. Matches only schedule PIR queries; payment authentication, inclusion and spend checks happen separately. Newly exposed receive indexes need historical PIR checks even if their blocks were already processed.
 

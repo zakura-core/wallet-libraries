@@ -9,8 +9,9 @@
   that pays a receiver, so an empty block costs nothing. A set's key comes from
   the network and height alone, so a wallet can match history below its
   birthday. One range covers up to `MAX_RANGE_BLOCKS` heights within
-  `MAX_RANGE_BYTES`. `blocks::Head` now describes a sealed archive and a tail,
-  and `blocks::RangeSize` reports what serving from a height would cost.
+  `MAX_RANGE_BYTES`. `blocks::Head` advertises the first served height and the tip,
+  a range starts exactly at the requested height, and `blocks::RangeSize`
+  reports what serving from a height would cost.
   `Range::raw_sets` and `Range::write` let a server join stored ranges from
   their encoded sets, which `HeightSet::bytes` also gives, without decoding them.
 - Breaking: `blocks::BlockFilter`, `blocks::Batch` (`IWBATCH1`),

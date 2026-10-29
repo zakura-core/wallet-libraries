@@ -191,7 +191,6 @@ impl Directory {
                 genesis: GENESIS,
                 revision,
                 first,
-                sealed: first - 1,
                 tip: BlockId {
                     height: tip.into(),
                     hash: chain.hash_at(tip).0,
