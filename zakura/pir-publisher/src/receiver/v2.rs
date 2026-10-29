@@ -2,10 +2,15 @@
 //! its tag salt, and building the segment's tables from its payments.
 pub use zakura_pir_protocol::receiver::v2::*;
 
-use crate::directory::{Overflow, place};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use zakura_pir_protocol::directory::{bucket::DIRECTORY_CHOICES, tag::resolve_salt};
-use zakura_pir_protocol::receiver::{Hash, ReceiverBytes};
+use crate::directory::{Overflow, choice_bits, place};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use zakura_pir_protocol::directory::{
+    bucket::DIRECTORY_CHOICES, choice::ChoiceTable, tag::resolve_salt,
+};
+use zakura_pir_protocol::receiver::{
+    Error, Hash, Payment, RawRecord, ReceiverBytes, wire::PAYLOAD_BYTES,
+};
 
 #[cfg(test)]
 mod tests;
@@ -180,4 +185,154 @@ fn tagged<'a>(
     let mut tagged: Vec<_> = receivers.map(|r| (tag_of(salt, r), *r)).collect();
     tagged.sort_unstable();
     tagged
+}
+
+/// One payment a segment holds: its receiver, the payment and its witness
+/// payload at the companion's tree.
+pub type Paid = (ReceiverBytes, Payment, [u8; PAYLOAD_BYTES]);
+
+/// A segment's two tables.
+#[derive(Clone)]
+pub struct Segment {
+    pub directory: DirectoryTable,
+    pub companion: CompanionTable,
+}
+
+/// Builds a segment's directory, choice object and companion of `rows` rows
+/// from its `payments` and the [`Projection`] of its blocks.
+///
+/// Slots go in tag order, then note position, with pages, totals and ordinals
+/// from the slots. The choice seeds come from `seed_block` over `seed_attempts`
+/// attempts ([`OPEN_SEED_ATTEMPTS`], or [`SEAL_SEED_ATTEMPTS`] at a seal). The
+/// result passes the whole-segment checks a server repeats at preparation.
+/// Fails with [`Error::Capacity`] past a limit, [`Error::Choice`] if no seed
+/// builds, and [`Error::Malformed`] if the payments and projection disagree.
+pub fn build(
+    projection: &Projection,
+    coverage: Coverage,
+    seed_block: &Hash,
+    seed_attempts: u32,
+    rows: u32,
+    tree: Tree,
+    payments: &[Paid],
+) -> Result<Segment, Error> {
+    validate_companion_rows(rows)?;
+    let mut by_receiver: BTreeMap<&ReceiverBytes, Vec<&Paid>> = BTreeMap::new();
+    for paid in payments {
+        by_receiver.entry(&paid.0).or_default().push(paid);
+    }
+    if payments.len() > (rows * ROW_SLOTS).min(CAPACITY) as usize
+        || by_receiver
+            .values()
+            .any(|p| p.len() > MAX_RECEIVER_PAYMENTS as usize)
+    {
+        return Err(Error::Capacity);
+    }
+    if by_receiver.len() != projection.tags.len() {
+        return Err(Error::Malformed);
+    }
+    let mut extents = by_receiver
+        .into_iter()
+        .map(|(receiver, mut paid)| {
+            paid.sort_unstable_by_key(|p| p.1.position);
+            Ok((
+                *projection.tags.get(receiver).ok_or(Error::Malformed)?,
+                paid,
+            ))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    extents.sort_unstable_by_key(|(tag, _)| *tag);
+
+    let row_of: HashMap<&Tag, u32> = projection.placement().collect();
+    let mut directory_rows = vec![Vec::new(); DIRECTORY_ROWS as usize];
+    let mut companion = vec![0; rows as usize * ROW_BYTES];
+    let mut slot = 0;
+    for (tag, paid) in &extents {
+        // At most MAX_RECEIVER_PAYMENTS, checked above.
+        let count = paid.len() as u16;
+        let last = paid[paid.len() - 1]
+            .1
+            .height
+            .checked_sub(coverage.start_height);
+        let first = slot;
+        let entry = Entry {
+            tag: *tag,
+            first,
+            count,
+            last: last.ok_or(Error::Malformed)?,
+        };
+        // Extents go in tag order, so each row's entries stay sorted.
+        directory_rows[row_of[tag] as usize].push(entry);
+        for (receiver, payment, payload) in paid.iter().copied() {
+            let record = RawRecord {
+                receiver: *receiver,
+                page: slot - first,
+                total: count.into(),
+                payment: payment.clone(),
+                ordinal: slot,
+            };
+            let at = slot_row(slot) as usize * ROW_BYTES + (slot % ROW_SLOTS) as usize * SLOT_BYTES;
+            companion[at..at + SLOT_BYTES].copy_from_slice(&encode_slot(&record, payload)?);
+            slot += 1;
+        }
+    }
+    let mut data = Vec::with_capacity(DIRECTORY_ROWS as usize * ROW_BYTES);
+    for entries in &directory_rows {
+        data.extend_from_slice(&encode_row(entries)?);
+    }
+
+    let salt = projection.salt;
+    let keys: Vec<&[u8]> = projection.rows.tags.iter().map(|tag| &tag[..]).collect();
+    let bits = choice_bits(
+        &projection.rows.salts,
+        &keys,
+        &projection.rows.assignment,
+        DIRECTORY_ROWS.into(),
+    );
+    let seeds = candidate_seeds(&salt, seed_block, 0..seed_attempts);
+    let choice = ChoiceTable::build(CHOICE_DOMAIN, &salt, seeds, &bits)
+        .map_err(|_| Error::Choice)?
+        .encode();
+
+    let keys = extents.len() as u32;
+    let choice_ref = ChoiceRef {
+        digest: Sha256::digest(&choice).into(),
+        bytes: choice.len() as u32,
+        keys,
+    };
+    let directory = Directory {
+        schema: SCHEMA.into(),
+        coverage: coverage.clone(),
+        salt,
+        entries: keys,
+        payments: slot,
+        choice: choice_ref,
+        data_sha256: Sha256::digest(&data).into(),
+    };
+    let companion_manifest = Companion {
+        schema: SCHEMA.into(),
+        coverage,
+        directory: directory.revision()?,
+        rows,
+        query_rows: query_rows(slot),
+        payments: slot,
+        tree,
+        data_sha256: Sha256::digest(&companion).into(),
+    };
+    let segment = Segment {
+        directory: DirectoryTable {
+            manifest: directory,
+            data,
+            choice,
+        },
+        companion: CompanionTable {
+            manifest: companion_manifest,
+            data: companion,
+        },
+    };
+    let entries = segment.directory.validate()?;
+    segment
+        .companion
+        .validate(&segment.directory.manifest, &entries)?;
+    Ok(segment)
 }

@@ -116,3 +116,104 @@ fn placement_failures_retry_and_then_seal() {
     assert_eq!(full.project(&paid, &block(1)), Err(SealBefore));
     assert_eq!((*full.salt(), full.tags.len()), (before, 2));
 }
+
+/// The same chain, with forced re-placements at two blocks, gives identical
+/// tables whether published after every block or once after replaying every
+/// block as a restart would.
+#[test]
+fn publication_cadence_and_restart_agree() {
+    let blocks: Vec<Vec<ReceiverBytes>> = (0..12)
+        .map(|b| (0..3).map(|i| receiver(b * 2 + i)).collect())
+        .collect();
+    let replay = |p: &mut Projection, b: usize| {
+        let committed = *p.salt();
+        let forced = colliding(vec![committed], blocks[b][2], blocks[b][0]);
+        let expected = u32::from(b == 3 || b == 8);
+        let result = match expected {
+            1 => p.project_by(&blocks[b], &block(b as u32), forced),
+            _ => p.project(&blocks[b], &block(b as u32)),
+        };
+        assert_eq!(result, Ok(expected));
+    };
+    let coverage = Coverage {
+        genesis: [1; 32],
+        history_revision: 0,
+        start_height: 100,
+        start_parent: [2; 32],
+        start_position: 0,
+        end_height: 111,
+        end_hash: [3; 32],
+        end_position: 1_000,
+    };
+    let tree = Tree {
+        height: 111,
+        hash: [3; 32],
+        size: 1_000,
+    };
+    let payment = |b: usize, i: usize, r: ReceiverBytes| -> Paid {
+        let height = 100 + b as u32;
+        let payment = Payment {
+            height,
+            block_hash: if height == 111 {
+                [3; 32]
+            } else {
+                [height as u8; 32]
+            },
+            txid: [(b * 3 + i) as u8; 32],
+            tx_index: 1 + i as u32,
+            action_index: 0,
+            position: (b * 3 + i) as u64,
+            action_nullifier: [5; 32],
+            cmx: [6; 32],
+            ephemeral_key: [7; 32],
+            ciphertext_prefix: [8; 52],
+        };
+        (r, payment, [0; PAYLOAD_BYTES])
+    };
+    let publish = |p: &Projection, through: usize| {
+        let paid: Vec<Paid> = (0..=through)
+            .flat_map(|b| {
+                blocks[b]
+                    .iter()
+                    .enumerate()
+                    .map(move |(i, r)| payment(b, i, *r))
+            })
+            .collect();
+        let mut coverage = coverage.clone();
+        coverage.end_height = 100 + through as u32;
+        coverage.end_hash = if through == 11 {
+            [3; 32]
+        } else {
+            [coverage.end_height as u8; 32]
+        };
+        let tree = Tree {
+            height: coverage.end_height,
+            hash: coverage.end_hash,
+            ..tree
+        };
+        build(
+            p,
+            coverage,
+            &block(through as u32),
+            OPEN_SEED_ATTEMPTS,
+            2048,
+            tree,
+            &paid,
+        )
+        .unwrap()
+    };
+
+    let mut every = Projection::new(initial_salt(&[2; 32], 0));
+    let mut published = None;
+    for b in 0..blocks.len() {
+        replay(&mut every, b);
+        published = Some(publish(&every, b));
+    }
+    let mut restarted = Projection::new(initial_salt(&[2; 32], 0));
+    (0..blocks.len()).for_each(|b| replay(&mut restarted, b));
+    let (a, b) = (published.unwrap(), publish(&restarted, 11));
+    assert_eq!(a.directory.data, b.directory.data);
+    assert_eq!(a.directory.choice, b.directory.choice);
+    assert_eq!(a.directory.manifest, b.directory.manifest);
+    assert_eq!(a.companion.manifest, b.companion.manifest);
+}

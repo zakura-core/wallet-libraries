@@ -68,6 +68,11 @@ path = "tests/receiver/witness.rs"
 required-features = ["receiver"]
 
 [[test]]
+name = "receiver_v2"
+path = "tests/receiver/v2.rs"
+required-features = ["receiver"]
+
+[[test]]
 name = "receiver_shard_paths"
 path = "tests/receiver/shard_paths.rs"
 required-features = ["receiver-crypto"]
