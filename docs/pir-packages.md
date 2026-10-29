@@ -69,6 +69,11 @@ and are selected explicitly by ingestion/publisher
 consumers. Operational services, HTTP routing, activation and cache policy remain
 in wallet-pir.
 
+Transparent and Receiver share their directory primitives. The protocol's `directory`
+module holds choice tables, bucket rows and tag salts, and the publisher's holds
+two-choice placement and its checks. Each format passes its own domains, keys, seed
+policy and overflow policy, and keeps its own row codec.
+
 ## Compatibility
 
 Package names and Rust imports change; database and protocol representations do
