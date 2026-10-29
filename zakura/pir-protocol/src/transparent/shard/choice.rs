@@ -10,13 +10,11 @@
 //! This is the shared [`crate::directory::choice`] table keyed by the shard id
 //! and the raw script, under seeds `0..MAX_SEEDS`.
 
-pub const DIRECTORY_CHOICES: usize = 2;
-
+pub use crate::directory::bucket::{DIRECTORY_CHOICES, bucket_for, candidates};
 use crate::directory::choice::{self as shared, SeedPolicy};
 pub use crate::directory::choice::{
     CHOICE_HEADER_BYTES, CHOICE_VERSION, ChoiceError, MAX_KEYS, segment_length,
 };
-use sha2::{Digest, Sha256};
 
 /// Hash domain for choice positions. Distinct from the bucket salt's, so the
 /// positions carry no relation to the candidate rows they select between.
@@ -75,38 +73,16 @@ impl ChoiceTable {
 pub fn candidate_rows(shard_id: u64, script: &[u8], rows: u64) -> [u64; DIRECTORY_CHOICES] {
     candidates(&bucket_salts(shard_id), script, rows)
 }
-/// Derives one of a shard's independently salted bucket keys.
+/// A shard's bucket salts, for deriving many scripts' candidate rows.
 ///
 /// Salting per shard means the same script lands in different rows in different
 /// shards, so an observer who learns one shard's row for a script learns
 /// nothing about where it sits in any other.
-fn bucket_salt(shard_id: u64, choice: usize) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"zcash-transparent-range-v1/directory-bucket\0");
-    hasher.update(shard_id.to_le_bytes());
-    hasher.update((choice as u32).to_le_bytes());
-    hasher.finalize().into()
-}
-/// A shard's bucket salts, for deriving many scripts' candidate rows.
 pub fn bucket_salts(shard_id: u64) -> [[u8; 32]; DIRECTORY_CHOICES] {
-    std::array::from_fn(|choice| bucket_salt(shard_id, choice))
-}
-/// [`candidate_rows`] under salts already derived for the shard.
-pub fn candidates(
-    salts: &[[u8; 32]; DIRECTORY_CHOICES],
-    script: &[u8],
-    rows: u64,
-) -> [u64; DIRECTORY_CHOICES] {
-    std::array::from_fn(|choice| bucket_for(&salts[choice], script, rows))
-}
-/// The row a script hashes to under one salt.
-pub fn bucket_for(salt: &[u8; 32], script: &[u8], rows: u64) -> u64 {
-    let mut hasher = Sha256::new();
-    hasher.update(salt);
-    hasher.update((script.len() as u32).to_le_bytes());
-    hasher.update(script);
-    let digest = hasher.finalize();
-    u64::from_le_bytes(digest[..8].try_into().expect("8 bytes")) % rows
+    crate::directory::bucket::bucket_salts(
+        b"zcash-transparent-range-v1/directory-bucket\0",
+        &shard_id.to_le_bytes(),
+    )
 }
 
 #[cfg(test)]
