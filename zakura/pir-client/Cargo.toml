@@ -1,6 +1,6 @@
 [package]
 name = "zakura-pir-client"
-version = "0.0.1-rc3"
+version = "0.0.1-rc4"
 edition = "2024"
 description = "Enhance, Status, Transparent and Receiver PIR clients over caller-owned transports"
 rust-version.workspace = true
@@ -115,9 +115,9 @@ testing = [
 
 [dependencies]
 clap = { version = "4", features = ["derive"], optional = true }
-zakura-pir-publisher = { path = "../pir-publisher", version = "=0.0.1-rc3", optional = true }
-zakura-pir-query-server = { path = "../pir-query-server", version = "=0.0.1-rc3", optional = true, features = ["testing"] }
-zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc3", optional = true }
+zakura-pir-publisher = { path = "../pir-publisher", version = "=0.0.1-rc4", optional = true }
+zakura-pir-query-server = { path = "../pir-query-server", version = "=0.0.1-rc4", optional = true, features = ["testing"] }
+zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc4", optional = true }
 zcash_client_backend = { workspace = true, optional = true }
 zcash_primitives = { workspace = true, optional = true }
 zcash_protocol = { workspace = true, optional = true }
@@ -134,7 +134,7 @@ serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
 thiserror = { version = "2", optional = true }
-zcash_client_sqlite = { version = "0.1.0-rc9.4", path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", optional = true, features = ["transparent-inputs"] }
+zcash_client_sqlite = { version = "0.1.0-rc9.5", path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", optional = true, features = ["transparent-inputs"] }
 transparent = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 same-file = { version = "1.0.6", optional = true }
@@ -142,12 +142,12 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 axum = { version = "0.7", optional = true }
 tonic = { workspace = true, optional = true, features = ["transport"] }
 tokio = { workspace = true, optional = true, features = ["time"] }
-zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc3", optional = true }
+zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc4", optional = true }
 
 [dev-dependencies]
 ipir-native-client = { version = "=0.1.0-rc.1", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
 bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
-zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", version = "0.1.0-rc9.4", features = ["orchard", "test-dependencies", "transparent-inputs", "unstable"] }
+zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", version = "0.1.0-rc9.5", features = ["orchard", "test-dependencies", "transparent-inputs", "unstable"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 incrementalmerkletree = { workspace = true }
 futures = "0.3"
@@ -169,9 +169,9 @@ ipir-sp = { version = "=0.1.0-rc.7", git = "https://github.com/valargroup/ipir-s
 orchard = { workspace = true }
 zcash_primitives = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-zakura-pir-query-server = { path = "../pir-query-server", version = "=0.0.1-rc3", features = ["transparent", "enhance", "status", "receiver", "testing"] }
-zakura-pir-publisher = { path = "../pir-publisher", version = "=0.0.1-rc3", features = ["transparent", "enhance", "status", "receiver-crypto"] }
-zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc3", features = ["transparent"] }
+zakura-pir-query-server = { path = "../pir-query-server", version = "=0.0.1-rc4", features = ["transparent", "enhance", "status", "receiver", "testing"] }
+zakura-pir-publisher = { path = "../pir-publisher", version = "=0.0.1-rc4", features = ["transparent", "enhance", "status", "receiver-crypto"] }
+zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc4", features = ["transparent"] }
 
 [target."cfg(unix)".dependencies]
 rustix = { version = "1", optional = true, default-features = false, features = ["std", "fs"] }

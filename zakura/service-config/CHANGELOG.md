@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 - 2026-10-24
+## 0.1.0 - 2026-10-26
 
 - Add transport-free static and dynamic service configuration resolution with
   optional SHA-256 pins, application-approved authentication methods, ordered
