@@ -61,7 +61,16 @@ impl RusqliteMigration for Migration {
     /// Applies the steps in order, in the migration's transaction.
     fn up(&self, conn: &rusqlite::Transaction) -> Result<(), Self::Error> {
         conn.execute_batch(
-            "-- Payment candidates before their account's birthday are no longer handled, so
+            "-- Repair-only reads of a paused account may have skipped receipts, and the
+             -- reset re-enabling used to run is gone with pausing. It runs before anything
+             -- below settles a lookup, so no paused read counts as discovery.
+             UPDATE ironwood_one_time_lookups SET inventory = NULL, shard = NULL,
+                 segment = NULL, last_record = NULL, checked_height = NULL, read_complete = 0
+             WHERE target_height IS NOT NULL AND (done_height IS NULL OR read_complete = 0)
+               AND one_time_key_id IN (SELECT k.id FROM ironwood_one_time_keys k
+                   JOIN ironwood_one_time_recovery r ON r.account_id = k.account_id
+                   WHERE r.enabled = 0);
+             -- Payment candidates before their account's birthday are no longer handled, so
              -- they go without rejection repair, and a completed read they held settles.
              DELETE FROM ironwood_one_time_payment_recovery WHERE height < (
                  SELECT a.birthday_height FROM ironwood_one_time_keys k
@@ -77,15 +86,7 @@ impl RusqliteMigration for Migration {
                AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n
                    WHERE n.one_time_key_id = ironwood_one_time_keys.id)
                AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o
-                   WHERE o.one_time_key_id = ironwood_one_time_keys.id);
-             -- Repair-only reads of a paused account may have skipped receipts, and the
-             -- reset re-enabling used to run is gone with pausing.
-             UPDATE ironwood_one_time_lookups SET inventory = NULL, shard = NULL,
-                 segment = NULL, last_record = NULL, checked_height = NULL, read_complete = 0
-             WHERE target_height IS NOT NULL AND (done_height IS NULL OR read_complete = 0)
-               AND one_time_key_id IN (SELECT k.id FROM ironwood_one_time_keys k
-                   JOIN ironwood_one_time_recovery r ON r.account_id = k.account_id
-                   WHERE r.enabled = 0);",
+                   WHERE o.one_time_key_id = ironwood_one_time_keys.id);",
         )?;
         // Every receive index handed out or paid stays inside its account's receive window.
         // An index newly inside it gets a bootstrap lookup through the processed frontier, as

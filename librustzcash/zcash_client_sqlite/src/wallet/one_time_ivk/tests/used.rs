@@ -2,7 +2,6 @@
 use super::*;
 use crate::wallet::one_time_ivk::restore::tests::discovery::{
     drain, key8, one_time_notes, pay_candidate, publication_at, queue_late, send_witness, status,
-    work_of,
 };
 
 /// Whether `account`'s use marker is set.
@@ -294,6 +293,51 @@ fn the_upgrade_resets_a_paused_accounts_partial_progress() {
         [id],
     );
     assert_eq!(progress, (None, None));
+}
+
+/// A paused account's completed repair read records no completed history, so after the
+/// upgrade drops the candidate before the birthday that held it open, the lookup is read
+/// again and finds the later payment the repair read passed over.
+#[test]
+fn the_upgrade_rereads_a_paused_repair_held_by_an_old_candidate() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let publication = publication_at(&st, tip(&st).height);
+    drain(&mut st, account, publication);
+    let early = pay_candidate(&mut st, key8());
+    let late = pay_candidate(&mut st, key8());
+    queue_late(&mut st, key8(), &early);
+    let id = value::<i64>(
+        st.wallet().conn(),
+        "SELECT id FROM ironwood_one_time_keys WHERE purpose = 1 AND key_index = ?1",
+        [key8().index().to_be_bytes()],
+    );
+    exec(
+        st.wallet().conn(),
+        "UPDATE ironwood_one_time_lookups SET read_complete = 1, done_height = NULL,
+             done_from = NULL, checked_height = target_height WHERE one_time_key_id = ?1",
+        [id],
+    );
+    exec(
+        st.wallet().conn(),
+        "UPDATE accounts SET birthday_height = ?1",
+        [u32::from(late.height)],
+    );
+    pause(&st);
+    upgrade(&mut st);
+    st.wallet_mut()
+        .db_mut()
+        .enable_one_time_recovery(account)
+        .unwrap();
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
 /// A legacy account whose only evidence is a one-time note and that has no progress row
