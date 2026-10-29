@@ -11,4 +11,3 @@ readme = "README.md"
 [dependencies]
 bitcoin_hashes = { version = "=0.14.101", default-features = false, features = ["std"] }
 bitcoin-io = { version = "=0.1.101", default-features = false, features = ["std"] }
-
