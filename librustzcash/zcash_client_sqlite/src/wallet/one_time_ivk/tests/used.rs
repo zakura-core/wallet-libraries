@@ -380,38 +380,34 @@ fn the_upgrade_keeps_a_note_only_account_monitored() {
 }
 
 /// An existing progress row whose receive window stops short of an outstanding I4
-/// reservation is widened to cover I4, and I4 gets a bootstrap lookup, so a payment to I4
-/// is recovered.
+/// reservation is widened to cover I4. I4 was paid before the old processed frontier and its
+/// coverage already passed that payment, so only the bootstrap lookup the upgrade queues can
+/// find it, from before the payment through the frontier.
 #[test]
 fn the_upgrade_widens_a_short_window_over_an_outstanding_reservation() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
-    let height = tip(&st).height;
-    recover(
-        st.wallet_mut().db_mut(),
-        account,
-        KeyId::new(Purpose::Receive, 4),
-        height,
-    );
+    let key4 = KeyId::new(Purpose::Receive, 4);
+    let paid = pay_candidate(&mut st, key4);
+    st.generate_and_scan_empty_blocks(2);
+    let frontier = tip(&st).height;
+    recover(st.wallet_mut().db_mut(), account, key4, frontier);
     let id = receive_id(&st, 4);
     exec(
         st.wallet().conn(),
-        "UPDATE ironwood_one_time_keys SET reserved_at = 1 WHERE id = ?1",
-        [id],
+        "UPDATE ironwood_one_time_keys SET reserved_at = 1, covered_height = ?2 WHERE id = ?1",
+        rusqlite::params![id, u32::from(frontier)],
     );
     exec(
         st.wallet().conn(),
         "DELETE FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
         [id],
     );
-    pay_candidate(&mut st, KeyId::new(Purpose::Receive, 4));
     upgrade(&mut st);
     let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert!(
-        receivers
-            .iter()
-            .any(|r| r.key == KeyId::new(Purpose::Receive, 4))
-    );
+    assert!(receivers.iter().any(|r| r.key == key4));
+    let bootstrap = work_of(&st, key4);
+    assert!(bootstrap.from <= paid.height && bootstrap.through >= frontier);
     let publication = publication_at(&st, tip(&st).height);
     assert!(
         st.wallet_mut()
