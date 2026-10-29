@@ -1,8 +1,6 @@
 //! The v2 evaluator's admission: full and trimmed companion queries, an
 //! untrimmed directory, and the zero suffix checked at preparation.
 use super::*;
-use rand::{RngCore, SeedableRng};
-use rand_chacha::ChaCha20Rng;
 use zakura_pir_protocol::receiver::{
     Payment,
     v2::native::{query_bytes, response_bytes},
@@ -72,11 +70,10 @@ fn servers(payments: u32, rows: u32) -> (Server<Directory>, Server<Companion>) {
     )
 }
 
-/// A request of `len` bytes framed for `id`, its upload random. Any bytes
+/// A request of `len` bytes framed for `id`, its upload arbitrary. Any bytes
 /// parse as a key and a selection, so only the length decides admission.
 fn request(id: &Hash, len: usize) -> Vec<u8> {
-    let mut body = vec![0; len];
-    ChaCha20Rng::from_seed([len as u8; 32]).fill_bytes(&mut body);
+    let mut body: Vec<u8> = (0..len).map(|i| (i * 31 % 251) as u8).collect();
     body[..4].copy_from_slice(MAGIC);
     body[4..36].copy_from_slice(id);
     body

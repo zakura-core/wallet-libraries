@@ -9,6 +9,7 @@ and this library adheres to Rust's notion of
 
 ### Added
 
+- `data_api::WalletWrite::get_addresses_for_index_range`: generates, persists and marks as exposed the addresses at every diversifier index in a range, equivalent to `get_address_for_index` per index. The default implementation does exactly that; a store can override it to pay the per-call costs once for the range.
 - `data_api::one_time_ivk::restore::{FilterSpan, FilterOutcome}` for span-based filter coverage.
 - `one_time_ivk::restore::RecoveryStatus::awaiting_admission` counts recovered payments waiting for ordinary sync to admit them.
 - `one_time_ivk::restore::RecoveryStatus::used` reports the account's one-time use marker.

@@ -7,6 +7,10 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Added
+
+- `WalletDb` implements `WalletWrite::get_addresses_for_index_range`, looking up the account, deriving its incoming viewing key and reading the chain tip once for the whole range. Exposing a deep window of addresses (a transparent recovery window on restore) is about seven times faster than one index at a time.
+
 ### Changed
 
 - `WalletDb::one_time_new_work` reads a wallet-wide sequence that goes up in the same transaction as each new one-time recovery obligation (a key registered, refund funding learned from a memo, a filter hit queuing or extending a lookup, a repair queued, a rescan requested, or history or coverage a rewind rolled back) and never goes back, even when an account is deleted. Refund memos are queued when their transaction is stored, decrypted, sent or privately enhanced, including a memo retrieved after the last block batch, which now registers its key at once. Block batches only retry the memos still waiting (unmined, past the 100-index gap, or unproven), instead of re-reading every historical memo; a reorg queues the memos above the fork again. Memos are inspected for every account, enabled or not: one that decodes and is mined enables recovery for its account in the same transaction, one that doesn't decode is dropped, and enabling no longer re-queues every stored memo.

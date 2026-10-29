@@ -98,14 +98,13 @@ struct Entry {
     row: u32,
 }
 
-/// One change a batch made, undone in reverse if the batch fails.
-enum Step {
-    Placed,
-    Moved {
-        entry: u32,
-        from: u32,
-        position: usize,
-    },
+/// A relocation move a batch made, undone if the batch fails. `placed` is the
+/// entry count when it was made, so entries placed after it are removed first.
+struct Move {
+    placed: u32,
+    entry: u32,
+    from: u32,
+    position: usize,
 }
 
 impl FixedRows {
@@ -137,7 +136,9 @@ impl FixedRows {
             return Err(i);
         }
         let rows = self.used.len() as u64;
-        let mut steps = Vec::new();
+        let first = self.entries.len();
+        self.entries.reserve(keys.len());
+        let mut moves = Vec::new();
         for (index, (key, &size)) in keys.iter().zip(sizes).enumerate() {
             let candidates = candidates(&self.salts, key, rows).map(|row| row as u32);
             let [a, b] = candidates.map(|row| row as usize);
@@ -149,9 +150,9 @@ impl FixedRows {
             let row = direct
                 .into_iter()
                 .find(|row| self.used[*row] + size <= self.capacity)
-                .or_else(|| self.relocate([a, b], size, &mut steps));
+                .or_else(|| self.relocate([a, b], size, &mut moves));
             let Some(row) = row else {
-                self.undo(steps);
+                self.undo(first, moves);
                 return Err(index);
             };
             self.occupants[row].push(self.entries.len() as u32);
@@ -161,7 +162,6 @@ impl FixedRows {
                 size,
                 row: row as u32,
             });
-            steps.push(Step::Placed);
         }
         Ok(())
     }
@@ -176,29 +176,34 @@ impl FixedRows {
         self.occupants
     }
 
-    /// Reverts `steps`, newest first, so each sees the state it left.
-    fn undo(&mut self, steps: Vec<Step>) {
-        for step in steps.into_iter().rev() {
-            match step {
-                Step::Placed => {
-                    let entry = self.entries.pop().expect("a placed entry is the newest");
-                    self.occupants[entry.row as usize].pop();
-                    self.used[entry.row as usize] -= entry.size;
-                }
-                Step::Moved {
-                    entry,
-                    from,
-                    position,
-                } => {
-                    let moved = &mut self.entries[entry as usize];
-                    let to = moved.row as usize;
-                    self.occupants[to].pop();
-                    self.occupants[from as usize].insert(position, entry);
-                    self.used[to] -= moved.size;
-                    self.used[from as usize] += moved.size;
-                    moved.row = from;
-                }
-            }
+    /// Reverts a failed batch to `first` entries: newest first, each move
+    /// after the entries placed since it, so each sees the state it left.
+    fn undo(&mut self, first: usize, moves: Vec<Move>) {
+        for Move {
+            placed,
+            entry,
+            from,
+            position,
+        } in moves.into_iter().rev()
+        {
+            self.truncate(placed as usize);
+            let moved = &mut self.entries[entry as usize];
+            let to = moved.row as usize;
+            self.occupants[to].pop();
+            self.occupants[from as usize].insert(position, entry);
+            self.used[to] -= moved.size;
+            self.used[from as usize] += moved.size;
+            moved.row = from;
+        }
+        self.truncate(first);
+    }
+
+    /// Removes the entries placed after the first `len`, newest first.
+    fn truncate(&mut self, len: usize) {
+        while self.entries.len() > len {
+            let entry = self.entries.pop().expect("more than `len` entries");
+            self.occupants[entry.row as usize].pop();
+            self.used[entry.row as usize] -= entry.size;
         }
     }
 }
@@ -319,12 +324,12 @@ impl FixedRows {
     /// being comparable, which is the property this whole module exists to keep.
     ///
     /// Returns the row left with space, having applied every move on the path and
-    /// recorded it in `steps`.
+    /// recorded it in `moves`.
     fn relocate(
         &mut self,
         roots: [usize; 2],
         incoming: usize,
-        steps: &mut Vec<Step>,
+        moves: &mut Vec<Move>,
     ) -> Option<usize> {
         // Each edge moves one resident large enough to satisfy its predecessor's
         // byte deficit. A path may never revisit a row. Failed searches mutate nothing.
@@ -363,7 +368,8 @@ impl FixedRows {
                     self.used[from] -= entry.size;
                     self.used[to] += entry.size;
                     entry.row = to as u32;
-                    steps.push(Step::Moved {
+                    moves.push(Move {
+                        placed: self.entries.len() as u32,
                         entry: moved,
                         from: from as u32,
                         position,

@@ -49,9 +49,6 @@ nonempty.workspace = true
 rand_core.workspace = true
 
 # - Encodings
-base64.workspace = true
-bech32.workspace = true
-bs58.workspace = true
 postcard = { workspace = true, optional = true }
 
 # - Errors
@@ -103,11 +100,9 @@ zcash_proofs = { workspace = true, optional = true }
 #    `hyper::Error`, `hyper::http::Error`, `serde_json::Error`. We could avoid this with
 #    changes to error handling.
 arti-client = { workspace = true, optional = true }
-dynosaur = { workspace = true, optional = true }
 fs-mistrust = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true, features = ["client", "http1"] }
 serde_json = { workspace = true, optional = true }
-trait-variant = { workspace = true, optional = true }
 
 # - Currency conversion
 rust_decimal = { workspace = true, optional = true }
@@ -119,10 +114,11 @@ document-features.workspace = true
 
 # - Encodings
 byteorder = { workspace = true, optional = true }
-percent-encoding.workspace = true
 
 # - Scanning
-flume.workspace = true
+# Scanning uses ordinary channels; async receive is enabled by sync-decryptor.
+# Neither path uses channel selection or its randomized fairness support.
+flume = { version = "0.11", default-features = false }
 rayon.workspace = true
 
 # - Tor
@@ -238,6 +234,7 @@ sync = [
 ## `sync` feature flag is replaced with a sync engine that makes use of the batch
 ## decryption engine.
 sync-decryptor = [
+    "flume/async",
     "dep:tokio",
     "tokio?/macros",
     "tokio?/rt",
@@ -253,7 +250,6 @@ sync-decryptor = [
 tor = [
     "dep:arti-client",
     "arti-client/onion-service-client",
-    "dep:dynosaur",
     "dep:fs-mistrust",
     "dep:futures-util",
     "dep:http-body-util",
@@ -266,7 +262,6 @@ tor = [
     "tokio?/time",
     "dep:tokio-rustls",
     "dep:tor-rtcompat",
-    "dep:trait-variant",
     "dep:tower",
     "dep:webpki-roots",
 ]

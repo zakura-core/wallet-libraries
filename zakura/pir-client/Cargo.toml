@@ -114,7 +114,8 @@ testing = [
 ]
 
 [dependencies]
-clap = { version = "4", features = ["derive"], optional = true }
+# Keep parsing, help and suggestions without the terminal-color stack.
+clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "suggestions"], optional = true }
 zakura-pir-publisher = { path = "../pir-publisher", version = "=0.0.1-rc4", optional = true }
 zakura-pir-query-server = { path = "../pir-query-server", version = "=0.0.1-rc4", optional = true, features = ["testing"] }
 zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc4", optional = true }
@@ -151,7 +152,6 @@ zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustz
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 incrementalmerkletree = { workspace = true }
 futures = "0.3"
-inspiring = { version = "=0.1.0-rc.3", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "test-util", "time"] }
 tempfile = "3"
 serde_json = { workspace = true }
@@ -168,7 +168,7 @@ flate2 = "1"
 ipir-sp = { version = "=0.1.0-rc.7", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
 orchard = { workspace = true }
 zcash_primitives = { workspace = true }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "suggestions"] }
 zakura-pir-query-server = { path = "../pir-query-server", version = "=0.0.1-rc4", features = ["transparent", "enhance", "status", "receiver", "testing"] }
 zakura-pir-publisher = { path = "../pir-publisher", version = "=0.0.1-rc4", features = ["transparent", "enhance", "status", "receiver-crypto"] }
 zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc4", features = ["transparent"] }
