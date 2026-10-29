@@ -92,6 +92,7 @@ impl RusqliteMigration for Migration {
         // An index newly inside it gets a bootstrap lookup through the processed frontier, as
         // entering monitoring does. An account with evidence of use and no progress row, as
         // published schemas and the legacy cutover allowed, gets one.
+        #[allow(clippy::type_complexity)]
         let windows: Vec<(i64, Option<Vec<u8>>, Option<Vec<u8>>)> = conn
             .prepare(&format!(
                 "SELECT a.id, r.receive_end, (SELECT MAX(k.key_index)
