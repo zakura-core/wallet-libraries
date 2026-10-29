@@ -9,7 +9,7 @@ use crate::wallet::init::WalletMigrationError;
 use super::{one_time_reset, transparent_detail_content_failures};
 
 /// The identifier of this migration.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x5b1c2a9e_7d43_4f0e_9a6b_2c8e1f7d0a11);
+pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xc7129551_bd36_46ca_9a98_f772ca01ca21);
 
 const DEPENDENCIES: &[Uuid] = &[
     one_time_reset::MIGRATION_ID,
