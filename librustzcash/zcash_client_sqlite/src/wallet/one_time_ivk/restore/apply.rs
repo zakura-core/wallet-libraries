@@ -36,8 +36,7 @@ pub(crate) struct Sessions<'a> {
 /// What [`apply_payment`] did with a late candidate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::wallet::one_time_ivk) enum Admission {
-    /// The note, its witness and any spend were stored, or it already was, or it predates
-    /// the account's birthday and only marks its key used.
+    /// The note, its witness and any spend were stored, or it already was.
     Admitted,
     /// The scan has not stored its block or reached a usable anchor, or the local tree lacks
     /// material a final path needs yet.
