@@ -11,6 +11,7 @@ use crate::transparent::filter::envelope::{FilterBatch, MAX_BATCH_BYTES};
 use crate::transparent::filter::error::FilterError;
 use crate::transparent::filter::transport::{ByteCharges, FilterTransport, RangeRequest};
 use crate::transparent::filter::wire::{ChainEntry, FilterServiceHealth, FilterServiceInfo};
+use crate::transparent::http_client::Client as BlockingClient;
 use crate::transparent::routes;
 use zakura_pir_protocol::endpoint::Endpoint;
 
@@ -23,7 +24,7 @@ pub struct HttpTransport {
     base_url: String,
     /// `base_url`, parsed; every request addresses a Transparent route below it.
     endpoint: Endpoint,
-    client: reqwest::blocking::Client,
+    client: BlockingClient,
     timeout: Duration,
 }
 
@@ -35,9 +36,7 @@ impl HttpTransport {
         let endpoint = Endpoint::parse(&base_url)
             .map_err(|error| FilterError::Response(format!("{base_url}: {error}")))?;
         let timeout = Duration::from_secs(120);
-        let client = reqwest::blocking::Client::builder()
-            .timeout(timeout)
-            .build()
+        let client = BlockingClient::new(timeout, None)
             .map_err(|error| FilterError::Response(error.to_string()))?;
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -77,6 +76,8 @@ impl HttpTransport {
             // error body or wait for its end before returning the HTTP error.
             let mut prefix = Vec::new();
             response
+                .into_body()
+                .into_reader()
                 .take(MAX_ERROR_BYTES)
                 .read_to_end(&mut prefix)
                 .map_err(|error| FilterError::Response(format!("{url}: {error}")))?;
@@ -92,6 +93,7 @@ impl HttpTransport {
             || FilterError::LimitExceeded(format!("{url}: response exceeds {max_bytes} bytes"));
         let max_bytes_u64 = u64::try_from(max_bytes).map_err(|_| limit_error())?;
         if response
+            .body()
             .content_length()
             .is_some_and(|length| length > max_bytes_u64)
         {
@@ -102,6 +104,8 @@ impl HttpTransport {
         let read_limit = max_bytes_u64.checked_add(1).ok_or_else(limit_error)?;
         let mut bytes = Vec::new();
         response
+            .into_body()
+            .into_reader()
             .take(read_limit)
             .read_to_end(&mut bytes)
             .map_err(|error| FilterError::Response(format!("{url}: {error}")))?;
@@ -202,11 +206,7 @@ mod tests {
         let transport = HttpTransport {
             endpoint: Endpoint::parse(&base_url).unwrap(),
             base_url,
-            client: reqwest::blocking::Client::builder()
-                .no_proxy()
-                .timeout(timeout)
-                .build()
-                .unwrap(),
+            client: BlockingClient::new(timeout, None).unwrap().without_proxy(),
             timeout,
         };
         (transport, worker)

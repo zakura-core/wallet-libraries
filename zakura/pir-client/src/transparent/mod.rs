@@ -101,6 +101,8 @@ pub use crate::transparent::engine::transport::{
 };
 
 pub mod filter;
+#[cfg(feature = "reqwest")]
+mod http_client;
 pub mod native;
 mod routes;
 pub mod txid_client;
