@@ -7520,7 +7520,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-backend"
-version = "0.1.0-rc9.4"
+version = "0.1.0-rc9.5"
 dependencies = [
  "ambassador",
  "arti-client",
@@ -7596,7 +7596,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-sqlite"
-version = "0.1.0-rc9.4"
+version = "0.1.0-rc9.5"
 dependencies = [
  "ambassador",
  "assert_matches",
@@ -7928,7 +7928,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-client"
-version = "0.0.1-rc3"
+version = "0.0.1-rc4"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -7988,7 +7988,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-protocol"
-version = "0.0.1-rc3"
+version = "0.0.1-rc4"
 dependencies = [
  "base64 0.22.1",
  "bitcoin",
@@ -8016,7 +8016,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-publisher"
-version = "0.0.1-rc3"
+version = "0.0.1-rc4"
 dependencies = [
  "base64 0.22.1",
  "bitcoin",
@@ -8037,7 +8037,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-query-server"
-version = "0.0.1-rc3"
+version = "0.0.1-rc4"
 dependencies = [
  "bitcoin",
  "hex",
@@ -8053,7 +8053,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-server-core"
-version = "0.0.1-rc3"
+version = "0.0.1-rc4"
 dependencies = [
  "bitcoin",
  "hex",
@@ -8244,7 +8244,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-wallet-lib"
-version = "0.1.0-rc9.4"
+version = "0.1.0-rc9.5"
 dependencies = [
  "orchard",
  "pczt",

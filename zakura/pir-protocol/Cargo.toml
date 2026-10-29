@@ -1,6 +1,6 @@
 [package]
 name = "zakura-pir-protocol"
-version = "0.0.1-rc3"
+version = "0.0.1-rc4"
 edition = "2024"
 description = "Shared formats and identities for independently compiled PIR roles"
 rust-version.workspace = true

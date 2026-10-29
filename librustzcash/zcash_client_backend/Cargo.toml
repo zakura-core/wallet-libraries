@@ -1,7 +1,7 @@
 [package]
 name = "zakura-client-backend"
 description = "APIs for creating shielded Zcash light clients"
-version = "0.1.0-rc9.4"
+version = "0.1.0-rc9.5"
 authors = [
     "Jack Grigg <jack@z.cash>",
     "Kris Nuttycombe <kris@electriccoin.co>"
@@ -25,7 +25,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-zakura-pir-protocol = { path = "../../zakura/pir-protocol", version = "=0.0.1-rc3", features = ["enhance", "recovery"] }
+zakura-pir-protocol = { path = "../../zakura/pir-protocol", version = "=0.0.1-rc4", features = ["enhance", "recovery"] }
 zakura-one-time-ivk = { version = "=0.0.1-rc4", path = "../../zakura/one-time-ivk", optional = true }
 zcash_address.workspace = true
 zcash_encoding.workspace = true
