@@ -148,7 +148,6 @@ tokio = { workspace = true, optional = true, features = ["macros", "time"] }
 zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc5", optional = true }
 
 [dev-dependencies]
-bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
 zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", version = "0.1.0-rc9.6", features = ["orchard", "test-dependencies", "transparent-inputs", "unstable"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 incrementalmerkletree = { workspace = true }

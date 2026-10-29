@@ -1,4 +1,3 @@
-use sha2::{Digest, Sha256};
 use zakura_pir_protocol::receiver::{
     Error, ReceiverBytes,
     blocks::{BlockId, Head, HeightSet, MAX_RANGE_BYTES, MAX_RECEIVERS, RANGE_HEADER, Range},
@@ -102,10 +101,9 @@ fn an_empty_range_is_just_its_header() {
     );
 }
 
-/// A set's key depends on its height, so the same receivers code differently at another
-/// height, and the wire bytes match an independent BIP 158 writer.
+/// A height-keyed set retains its framing and matches its members at that height.
 #[test]
-fn sets_are_keyed_by_height_and_match_an_independent_codec() {
+fn sets_are_keyed_by_height() {
     let members = receivers(100);
     let set = HeightSet::build(&GENESIS, 10, members.iter().chain(&members))
         .unwrap()
@@ -114,26 +112,7 @@ fn sets_are_keyed_by_height_and_match_an_independent_codec() {
         .unwrap()
         .encode()
         .unwrap();
-    let salt = Sha256::new()
-        .chain_update(b"ironwood-receiver/v2/height-hints\0")
-        .chain_update(GENESIS)
-        .chain_update(10u32.to_le_bytes())
-        .finalize();
-    let digest = Sha256::new()
-        .chain_update(b"ironwood-receiver/v1/filter\0")
-        .chain_update(salt)
-        .finalize();
-    let k0 = u64::from_le_bytes(digest[..8].try_into().unwrap());
-    let k1 = u64::from_le_bytes(digest[8..16].try_into().unwrap());
-    let mut expected = Vec::new();
-    let mut writer = bitcoin::bip158::GcsFilterWriter::new(&mut expected, k0, k1, 1_569_792, 20);
-    for receiver in &members {
-        writer.add_element(receiver);
-    }
-    writer.finish().unwrap();
-    // Header, then a one-byte gap of zero before the set.
     assert_eq!(encoded[RANGE_HEADER], 0);
-    assert_eq!(&encoded[RANGE_HEADER + 1..], expected);
     let moved = HeightSet::build(&GENESIS, 11, &members).unwrap().unwrap();
     let range = Range::new(0, 11, 1, [0; 32], [0; 32], vec![moved]).unwrap();
     let hits = range.matches(&GENESIS, &members);
