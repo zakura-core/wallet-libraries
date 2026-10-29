@@ -1143,3 +1143,27 @@ fn own_refund_funding_sets_the_marker() {
     txid.unwrap();
     assert!(used(&st, account));
 }
+
+/// A wallet upgraded with a mined refund memo still queued on an account that isn't
+/// enabled, as block batches before memo activation left it: enabling the account before
+/// any batch inspects the memo consumes it, and that sets the use marker, which stays set
+/// once the queue has drained.
+#[test]
+fn enabling_with_a_queued_mined_memo_sets_the_marker() {
+    let (mut st, account, tx) = unmined_internal_memo(&refund_memo(0));
+    let (mined, _) = st.generate_next_block_from_tx(1, &tx);
+    exec(
+        st.wallet().conn(),
+        "UPDATE transactions SET mined_height = ?1 WHERE txid = ?2",
+        rusqlite::params![u32::from(mined), tx.txid().as_ref()],
+    );
+    st.wallet_mut()
+        .db_mut()
+        .enable_one_time_recovery(account)
+        .unwrap();
+    assert_eq!(refund_keys(&st), [(0, u32::from(mined), true)]);
+    assert_eq!(pending_memos(&st), 0);
+    assert!(used(&st, account));
+    st.scan_cached_blocks(mined, 1);
+    assert!(used(&st, account));
+}

@@ -94,10 +94,10 @@ fn inspect_memos<P: Parameters>(
     Ok(())
 }
 
-/// Accepts a mined refund memo as evidence that `account` uses one-time addresses: sets its
-/// use marker (see `queue::mark_used`), then enables it if it isn't enabled, which recovers
-/// its memos, or recovers them (see [`recover_refund_memos`]). An account without an
-/// Orchard key holds no one-time keys, so it is left alone.
+/// Accepts a mined refund memo as evidence that `account` uses one-time addresses: enables
+/// it if it isn't enabled, which recovers its memos, or recovers them, and recovery sets the
+/// use marker (see [`recover_refund_memos`]). An account without an Orchard key holds no
+/// one-time keys, so it is left alone.
 fn accept_memo_evidence<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -111,10 +111,8 @@ fn accept_memo_evidence<P: Parameters>(
         |r| r.get(0),
     )?;
     if enabled {
-        super::queue::mark_used(conn, owner)?;
         recover_refund_memos(conn, params, account)
     } else if one_time_account(conn, params, account)?.is_some() {
-        super::queue::mark_used(conn, owner)?;
         super::queue::enable(conn, params, account)
     } else {
         Ok(())
@@ -153,6 +151,10 @@ pub(crate) fn memos_stored_by_txid<P: Parameters>(
 /// of memos from another device raises the bound step by step in whatever order they were
 /// mined. Issuance runs this first, and each issued index raises the bound, so an index
 /// another device funded is accepted before issuance could reach it.
+///
+/// A mined memo that decodes is evidence the account funded a swap, so it sets the use
+/// marker (see `queue::mark_used`) before the gap rule decides on it, whichever caller
+/// consumes it.
 pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -166,6 +168,9 @@ pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
             (Some(_), None) => {}
             (None, _) => drop_memo(conn, note)?,
         }
+    }
+    if !memos.is_empty() {
+        super::queue::mark_used(conn, owner.0)?;
     }
     memos.sort_unstable();
     let highest: Option<Vec<u8>> = conn.query_row(
