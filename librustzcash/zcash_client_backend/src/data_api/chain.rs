@@ -166,7 +166,7 @@ use crate::{
     data_api::{ScannedBlock, WalletWrite},
     proto::compact_formats::CompactBlock,
     scanning::{
-        Nullifiers, ScanningKeys,
+        AccountScanningKeys, Nullifiers, ScanningKeys,
         compact::{BatchRunners, scan_block_with_runners},
     },
 };
@@ -642,11 +642,161 @@ where
     DbT: WalletWrite,
     <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
 {
+    scan_cached_blocks_with_cache(
+        params,
+        block_source,
+        data_db,
+        from_height,
+        from_state,
+        limit,
+        &mut ScanningKeyCache::new(),
+    )
+}
+
+/// The decoded viewing keys and derived scanning keys of a wallet's accounts, kept by the
+/// caller across [`scan_cached_blocks_with_cache`] calls.
+///
+/// Every scan needs each account's scanning keys. Decoding a unified full viewing key
+/// validates each of its components, and deriving its IVKs needs Pedersen hashing (internal
+/// Sapling keys) and a Sinsemilla `CommitIvk` per Orchard IVK. A wallet that follows the
+/// chain tip scans a block or two at a time, so without a cache this work, repeated for
+/// every account, can cost more than scanning the blocks themselves.
+///
+/// Before each scan the cache compares each account's stored key encoding, as
+/// [`WalletRead::get_unified_full_viewing_key_encodings`] returns it, with the encoding its
+/// keys were derived from. It drops accounts that are gone or whose keys changed, and
+/// decodes and derives only new or changed accounts. A wallet that does not report
+/// encodings has its keys read and encoded on every scan, which still spares the
+/// derivation.
+///
+/// A cache is meant for one wallet: the same account identifiers in another wallet could
+/// name other keys. It holds viewing keys, which can detect the wallet's transactions, for
+/// as long as the caller keeps it, so drop or [`clear`](Self::clear) it when those keys
+/// should leave memory, for example when the wallet is locked or reset.
+pub struct ScanningKeyCache<AccountId> {
+    accounts: HashMap<AccountId, CachedAccountKeys>,
+}
+
+/// One account's scanning keys and the stored key encoding they were derived from.
+struct CachedAccountKeys {
+    encoding: String,
+    keys: AccountScanningKeys,
+}
+
+impl<AccountId> ScanningKeyCache<AccountId> {
+    /// Constructs an empty cache.
+    pub fn new() -> Self {
+        Self {
+            accounts: HashMap::new(),
+        }
+    }
+
+    /// Drops every cached key.
+    pub fn clear(&mut self) {
+        self.accounts.clear();
+    }
+}
+
+impl<AccountId> Default for ScanningKeyCache<AccountId> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<AccountId: Copy + Eq + std::hash::Hash + Send + Sync + 'static> ScanningKeyCache<AccountId> {
+    /// Brings the cache up to date with `data_db`'s accounts and returns the scanning keys
+    /// of the accounts that at most `limit` blocks from `from_height` are scanned for, as
+    /// [`account_ufvks_for_range`] selects them.
+    fn scanning_keys_for_range<ParamsT, DbT>(
+        &mut self,
+        params: &ParamsT,
+        data_db: &DbT,
+        from_height: BlockHeight,
+        limit: usize,
+    ) -> Result<ScanningKeys<AccountId, (AccountId, Scope)>, DbT::Error>
+    where
+        ParamsT: consensus::Parameters,
+        DbT: WalletRead<AccountId = AccountId>,
+    {
+        let (encodings, mut ufvks) = match data_db.get_unified_full_viewing_key_encodings()? {
+            Some(encodings) => (encodings, None),
+            None => {
+                let ufvks = data_db.get_unified_full_viewing_keys()?;
+                (encode_ufvks(params, &ufvks), Some(ufvks))
+            }
+        };
+
+        self.accounts.retain(|account, cached| {
+            encodings
+                .get(account)
+                .is_some_and(|encoding| *encoding == cached.encoding)
+        });
+        for (account, encoding) in encodings {
+            if self.accounts.contains_key(&account) {
+                continue;
+            }
+            if ufvks.is_none() {
+                ufvks = Some(data_db.get_unified_full_viewing_keys()?);
+            }
+            // A key removed between the two reads is skipped here, and dropped from the
+            // cache by the next scan.
+            if let Some(ufvk) = ufvks.as_ref().and_then(|ufvks| ufvks.get(&account)) {
+                self.accounts.insert(
+                    account,
+                    CachedAccountKeys {
+                        encoding,
+                        keys: AccountScanningKeys::derive(ufvk),
+                    },
+                );
+            }
+        }
+
+        let end = range_end(from_height, limit);
+        let mut in_range = Vec::with_capacity(self.accounts.len());
+        for (account, cached) in &self.accounts {
+            if u64::from(data_db.get_account_birthday(*account)?) < end {
+                in_range.push((*account, &cached.keys));
+            }
+        }
+        Ok(ScanningKeys::from_account_keys(in_range))
+    }
+}
+
+/// Scans at most `limit` blocks from the provided block source, as [`scan_cached_blocks`]
+/// does, taking the accounts' scanning keys from `cache` and updating it.
+///
+/// A caller that scans repeatedly keeps one [`ScanningKeyCache`] per wallet across calls,
+/// so that unchanged accounts' viewing keys are neither decoded nor derived again.
+///
+/// ## Errors
+///
+/// As for [`scan_cached_blocks`].
+///
+/// ## Panics
+///
+/// This method will panic if `from_height != from_state.block_height() + 1`.
+#[tracing::instrument(skip(params, block_source, data_db, from_state, cache))]
+#[allow(clippy::type_complexity)]
+pub fn scan_cached_blocks_with_cache<ParamsT, DbT, BlockSourceT>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &mut DbT,
+    from_height: BlockHeight,
+    from_state: &ChainState,
+    limit: usize,
+    cache: &mut ScanningKeyCache<<DbT as WalletRead>::AccountId>,
+) -> Result<ScanSummary, Error<<DbT as WalletRead>::Error, BlockSourceT::Error>>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: WalletWrite,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+{
     assert_eq!(from_height, from_state.block_height + 1);
 
-    let account_ufvks =
-        account_ufvks_for_range(&*data_db, from_height, limit).map_err(Error::Wallet)?;
-    let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
+    let scanning_keys = cache
+        .scanning_keys_for_range(params, &*data_db, from_height, limit)
+        .map_err(Error::Wallet)?;
     let (scan_summary, scanned_blocks) = scan_blocks(
         params,
         block_source,
@@ -832,6 +982,11 @@ fn encode_ufvks<ParamsT: consensus::Parameters, AccountId: Copy + Eq + std::hash
         .collect()
 }
 
+/// One past the last height of the at most `limit` blocks from `from_height`.
+fn range_end(from_height: BlockHeight, limit: usize) -> u64 {
+    u64::from(from_height).saturating_add(u64::try_from(limit).unwrap_or(u64::MAX))
+}
+
 /// The viewing keys of the accounts that the at most `limit` blocks from `from_height` are
 /// scanned for: those whose birthday is at or below the last of these heights.
 ///
@@ -843,7 +998,7 @@ fn account_ufvks_for_range<DbT: WalletRead>(
     from_height: BlockHeight,
     limit: usize,
 ) -> Result<HashMap<<DbT as WalletRead>::AccountId, UnifiedFullViewingKey>, DbT::Error> {
-    let end = u64::from(from_height).saturating_add(u64::try_from(limit).unwrap_or(u64::MAX));
+    let end = range_end(from_height, limit);
     let mut account_ufvks = HashMap::new();
     for (account, ufvk) in data_db.get_unified_full_viewing_keys()? {
         if u64::from(data_db.get_account_birthday(account)?) < end {

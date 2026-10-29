@@ -2280,6 +2280,19 @@ pub trait WalletRead {
         &self,
     ) -> Result<HashMap<Self::AccountId, UnifiedFullViewingKey>, Self::Error>;
 
+    /// Returns, for each account [`Self::get_unified_full_viewing_keys`] returns a key for,
+    /// the encoding of that key as this wallet stores it, or `None` if this wallet does not
+    /// store encodings.
+    ///
+    /// This lets a caller tell that keys it decoded earlier are unchanged without decoding
+    /// every key again; see [`chain::ScanningKeyCache`]. An account's encoding changes
+    /// whenever its key does.
+    fn get_unified_full_viewing_key_encodings(
+        &self,
+    ) -> Result<Option<HashMap<Self::AccountId, String>>, Self::Error> {
+        Ok(None)
+    }
+
     /// Returns the memo for a note.
     ///
     /// Returns `Ok(None)` if the note is known to the wallet but memo data has not yet been

@@ -11,6 +11,7 @@ and this library adheres to Rust's notion of
 
 - Migration `transparent_spend_map_prevout_index` indexes `transparent_spend_map`
   by `(prevout_txid, prevout_output_index)`.
+- `WalletDb` implements `WalletRead::get_unified_full_viewing_key_encodings` with the stored encodings, so a `zcash_client_backend` `ScanningKeyCache` decodes an account's viewing key only when it is new or has changed.
 
 ### Changed
 

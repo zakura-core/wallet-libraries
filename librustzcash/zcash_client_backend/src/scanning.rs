@@ -376,6 +376,40 @@ impl<AccountId: Copy + PartialEq, IvkTag> ScanningKeys<AccountId, IvkTag> {
     }
 }
 
+/// The scopes an account's scanning keys are derived for, in the order
+/// [`AccountScanningKeys`] stores them.
+const SCOPES: [Scope; 2] = [Scope::External, Scope::Internal];
+
+/// The scanning keys derived from one account's unified full viewing key.
+///
+/// The derivation is costly: internal Sapling keys need Pedersen hashing, and each Orchard
+/// IVK a Sinsemilla `CommitIvk`. Keeping these lets a caller that scans repeatedly build
+/// [`ScanningKeys`] without deriving them again; see
+/// [`ScanningKeyCache`](crate::data_api::chain::ScanningKeyCache).
+pub(crate) struct AccountScanningKeys {
+    sapling: Option<[(SaplingIvk, sapling::NullifierDerivingKey); 2]>,
+    #[cfg(feature = "orchard")]
+    orchard: Option<(
+        orchard::keys::FullViewingKey,
+        [orchard::keys::IncomingViewingKey; 2],
+    )>,
+}
+
+impl AccountScanningKeys {
+    /// Derives the external and internal scanning keys of `ufvk`'s shielded components.
+    pub(crate) fn derive(ufvk: &UnifiedFullViewingKey) -> Self {
+        Self {
+            sapling: ufvk
+                .sapling()
+                .map(|dfvk| SCOPES.map(|scope| (dfvk.to_ivk(scope), dfvk.to_nk(scope)))),
+            #[cfg(feature = "orchard")]
+            orchard: ufvk
+                .orchard()
+                .map(|fvk| (fvk.clone(), SCOPES.map(|scope| fvk.to_ivk(scope)))),
+        }
+    }
+}
+
 impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
     ScanningKeys<AccountId, (AccountId, Scope)>
 {
@@ -383,6 +417,17 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
     /// along with the account identifiers corresponding to those UFVKs.
     pub fn from_account_ufvks(
         ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
+    ) -> Self {
+        let keys: Vec<_> = ufvks
+            .into_iter()
+            .map(|(account_id, ufvk)| (account_id, AccountScanningKeys::derive(&ufvk)))
+            .collect();
+        Self::from_account_keys(keys.iter().map(|(account_id, keys)| (*account_id, keys)))
+    }
+
+    /// Constructs a [`ScanningKeys`] from keys already derived for each account.
+    pub(crate) fn from_account_keys<'a>(
+        accounts: impl IntoIterator<Item = (AccountId, &'a AccountScanningKeys)>,
     ) -> Self {
         #![allow(clippy::type_complexity)]
 
@@ -405,14 +450,14 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
             Box<dyn ScanningKeyOps<IronwoodDomain, AccountId, IronwoodNullifier> + Send + Sync>,
         > = HashMap::new();
 
-        for (account_id, ufvk) in ufvks {
-            if let Some(dfvk) = ufvk.sapling() {
-                for scope in [Scope::External, Scope::Internal] {
+        for (account_id, keys) in accounts {
+            if let Some(sapling_keys) = &keys.sapling {
+                for (scope, (ivk, nk)) in SCOPES.into_iter().zip(sapling_keys) {
                     sapling.insert(
                         (account_id, scope),
                         Box::new(ScanningKey {
-                            ivk: dfvk.to_ivk(scope),
-                            nk: Some(dfvk.to_nk(scope)),
+                            ivk: ivk.clone(),
+                            nk: Some(*nk),
                             account_id,
                             key_scope: Some(scope),
                         }),
@@ -421,26 +466,23 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
             }
 
             #[cfg(feature = "orchard")]
-            if let Some(fvk) = ufvk.orchard() {
-                for scope in [Scope::External, Scope::Internal] {
+            if let Some((fvk, ivks)) = &keys.orchard {
+                for (scope, ivk) in SCOPES.into_iter().zip(ivks) {
                     orchard.insert(
                         (account_id, scope),
                         Box::new(ScanningKey {
-                            ivk: fvk.to_ivk(scope),
+                            ivk: ivk.clone(),
                             nk: Some(fvk.clone()),
                             account_id,
                             key_scope: Some(scope),
                         }),
                     );
-                }
-
-                // Ironwood outputs are decrypted with the same Orchard viewing keys, but are
-                // tracked as a separate pool.
-                for scope in [Scope::External, Scope::Internal] {
+                    // Ironwood outputs are decrypted with the same Orchard viewing keys, but
+                    // are tracked as a separate pool.
                     ironwood.insert(
                         (account_id, scope),
                         Box::new(ScanningKey {
-                            ivk: fvk.to_ivk(scope),
+                            ivk: ivk.clone(),
                             nk: Some(fvk.clone()),
                             account_id,
                             key_scope: Some(scope),

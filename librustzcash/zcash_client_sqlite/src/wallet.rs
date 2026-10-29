@@ -1688,6 +1688,16 @@ pub(crate) fn involved_accounts(
 }
 
 /// Returns the [`UnifiedFullViewingKey`]s for the wallet.
+/// Returns the stored encoding of each account's unified full viewing key, for the
+/// accounts [`get_unified_full_viewing_keys`] returns, without decoding them.
+pub(crate) fn get_unified_full_viewing_key_encodings(
+    conn: &rusqlite::Connection,
+) -> Result<HashMap<AccountUuid, String>, SqliteClientError> {
+    let mut stmt = conn.prepare_cached("SELECT uuid, ufvk FROM accounts WHERE ufvk IS NOT NULL")?;
+    let rows = stmt.query_map([], |row| Ok((AccountUuid(row.get(0)?), row.get(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 pub(crate) fn get_unified_full_viewing_keys<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
