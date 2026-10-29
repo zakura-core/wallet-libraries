@@ -458,14 +458,17 @@ fn drawn_seeds_past_sixty_four_round_trip() {
     }
 }
 
-/// Round 6's attack: someone who knows a segment's salt grinds 128 receivers,
-/// one pair per seed, whose tags take the same three positions under each of
-/// seeds 0 to 63, so no fixed seed peels. Seeds drawn from a later block still
-/// build, and every receiver is found with one directory query.
-#[test]
-fn round_six_attack_set_builds_under_drawn_seeds() {
-    let salt = initial_salt(&coverage().start_parent, 0);
-    let segment = segment_length(128);
+/// Receivers, one pair per seed of `seeds`, whose tags under `salt` take the
+/// same three choice positions under that seed in a table of `keys` keys, so
+/// no such seed peels a set holding them. The positions are the shared choice
+/// table's: SHA-256 of its domain, the context (the salt), the seed and the
+/// length-prefixed key, each word reduced modulo the segment length.
+fn colliding_pairs(
+    salt: &Hash,
+    keys: u32,
+    seeds: impl IntoIterator<Item = u32>,
+) -> Vec<ReceiverBytes> {
+    let segment = u64::from(segment_length(keys));
     let positions = |seed: u32, t: &Tag| -> [u64; 3] {
         let digest = Sha256::new()
             .chain_update(CHOICE_DOMAIN)
@@ -475,31 +478,44 @@ fn round_six_attack_set_builds_under_drawn_seeds() {
             .chain_update(t)
             .finalize();
         std::array::from_fn(|i| {
-            u64::from_le_bytes(digest[i * 8..i * 8 + 8].try_into().unwrap()) % u64::from(segment)
+            u64::from_le_bytes(digest[i * 8..i * 8 + 8].try_into().unwrap()) % segment
         })
     };
-    let mut attackers = Vec::new();
-    for seed in 0..64u32 {
+    let mut pairs = Vec::new();
+    for seed in seeds {
         let mut seen = std::collections::HashMap::new();
         for counter in 0u32.. {
             let mut r = [0xcc; 43];
             r[..4].copy_from_slice(&seed.to_le_bytes());
             r[4..8].copy_from_slice(&counter.to_le_bytes());
-            if let Some(other) = seen.insert(positions(seed, &tag(&salt, &r)), r) {
-                attackers.extend([other, r]);
+            if let Some(other) = seen.insert(positions(seed, &tag(salt, &r)), r) {
+                pairs.extend([other, r]);
                 break;
             }
         }
     }
-    let paid: Vec<Paid> = attackers
-        .iter()
-        .enumerate()
-        .map(|(n, r)| {
-            let mut p = payment(0);
-            (p.position, p.action_index) = (n as u64, n as u32);
-            (*r, p, [0; PAYLOAD_BYTES])
-        })
-        .collect();
+    pairs
+}
+
+/// One payment to each of `receivers`, all in the first block.
+fn one_each(receivers: &[ReceiverBytes]) -> Vec<Paid> {
+    let paid = receivers.iter().enumerate().map(|(n, r)| {
+        let mut p = payment(0);
+        (p.position, p.action_index) = (n as u64, n as u32);
+        (*r, p, [0; PAYLOAD_BYTES])
+    });
+    paid.collect()
+}
+
+/// Round 6's attack: someone who knows a segment's salt grinds 128 receivers,
+/// one pair per seed, whose tags take the same three positions under each of
+/// seeds 0 to 63, so no fixed seed peels. Seeds drawn from a later block still
+/// build, and every receiver is found with one directory query.
+#[test]
+fn round_six_attack_set_builds_under_drawn_seeds() {
+    let salt = initial_salt(&coverage().start_parent, 0);
+    let paid = one_each(&colliding_pairs(&salt, 128, 0..64));
+    let attackers: Vec<ReceiverBytes> = paid.iter().map(|p| p.0).collect();
     let projection = project(&paid);
     assert_eq!(*projection.salt(), salt);
     let seg = build(
@@ -732,5 +748,35 @@ fn cross_record_rules_hold_across_receivers() {
         let mut seg = base.clone();
         edit(&mut seg);
         assert!(matches!(check(&seg), Err(Error::Malformed)), "{name}");
+    }
+}
+
+/// Through the real build, a seed that genuinely fails to peel is followed by
+/// the next attempt: two receivers collide under the seed block's first drawn
+/// seed, so the segment settles on its second.
+#[test]
+fn an_unpeelable_seed_moves_the_build_to_the_next() {
+    let salt = initial_salt(&coverage().start_parent, 0);
+    let drawn: Vec<u32> = candidate_seeds(&salt, &SEED_BLOCK, 0..2).collect();
+    let paid = one_each(&colliding_pairs(&salt, 2, [drawn[0]]));
+    let seg = build(
+        &project(&paid),
+        coverage(),
+        &SEED_BLOCK,
+        OPEN_SEED_ATTEMPTS,
+        2048,
+        tree(),
+        &paid,
+    )
+    .unwrap();
+    let table = ChoiceTable::decode(&seg.directory.choice, SeedPolicy::Any).unwrap();
+    assert_eq!(table.seed(), drawn[1]);
+    let (tags, rows) = placed(&seg);
+    let keys: Vec<&[u8]> = tags.iter().map(|t| &t[..]).collect();
+    let bits = choice_bits(&bucket_salts(&salt), &keys, &rows, DIRECTORY_ROWS.into());
+    let first = ChoiceTable::build(CHOICE_DOMAIN, &salt, [drawn[0]], &bits);
+    assert_eq!(first, Err(ChoiceError::Unpeelable { keys: 2 }));
+    for (receiver, _, _) in &paid {
+        assert!(find(&seg, receiver).is_some());
     }
 }
