@@ -2137,4 +2137,136 @@ mod tests {
             placed.max_row_bytes
         );
     }
+
+    /// SHA-256 over length-prefixed fields.
+    #[derive(Default)]
+    struct Pin(Sha256);
+
+    impl Pin {
+        fn put(&mut self, bytes: impl AsRef<[u8]>) {
+            let bytes = bytes.as_ref();
+            self.0.update((bytes.len() as u64).to_le_bytes());
+            self.0.update(bytes);
+        }
+
+        fn hex(self) -> String {
+            hex::encode(self.0.finalize())
+        }
+    }
+
+    /// Everything placement and its choice table publish for `scripts`.
+    fn pin_placement(
+        pin: &mut Pin,
+        shard_id: u64,
+        (scripts, sizes): (&[&[u8]], &[usize]),
+        rows: u64,
+        capacity: usize,
+    ) {
+        let (placed, assignment) =
+            place_scripts(shard_id, scripts, sizes, rows, capacity).expect("places");
+        pin.put(format!("{placed:?}"));
+        pin.put(
+            assignment
+                .iter()
+                .flat_map(|row| row.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        let space = rows * u64::from(placed.segments);
+        let table = choice_table(shard_id, scripts, &assignment, space).expect("peels");
+        pin.put(table.encode());
+    }
+
+    /// Transparent's published bytes, pinned at the commit before the
+    /// directory primitives were shared, so moving them cannot change a byte.
+    ///
+    /// The stream inputs are the walking test's chains, which seal many page
+    /// shards and directory shards. The placement inputs are the relocation,
+    /// cross-segment and mixed-size placement tests'.
+    #[test]
+    fn published_bytes_match_the_pinned_digests() {
+        let mut stream = Pin::default();
+        for seed in 0..6u64 {
+            let built = run(
+                small_policy([2u32, 3, 32][seed as usize % 3]),
+                &chain(seed, 500, 400),
+                |_| 0,
+            );
+            for child in &built.children {
+                // Every field of the manifest's page child: its segment
+                // digests are a function of `pages` and `segments`.
+                stream.put(&child.pages);
+                stream.put(format!(
+                    "{:?}",
+                    BuiltChild {
+                        pages: Vec::new(),
+                        ..child.clone()
+                    }
+                ));
+            }
+            for (directory, sealed) in &built.directories {
+                stream.put(format!(
+                    "{} {} {} {} {} {} {} {} {} {}",
+                    directory.shard_id,
+                    directory.start_height,
+                    directory.end_height,
+                    directory.children,
+                    directory.scripts,
+                    directory.events,
+                    directory.txids,
+                    directory.excluded_scripts,
+                    directory.tag_salt_counter,
+                    directory.sealed
+                ));
+                stream.put(directory.filter.as_slice());
+                for segment in &directory.directory {
+                    stream.put(segment);
+                }
+                stream.put(
+                    directory
+                        .choice
+                        .as_ref()
+                        .map(crate::transparent::manifest::encode_directory_choice)
+                        .unwrap_or_default(),
+                );
+                stream.put(format!("{sealed:?}"));
+            }
+        }
+
+        let mut placement = Pin::default();
+        let slots = crate::transparent::records::DIRECTORY_SLOTS as u64;
+        for (shard_id, count) in [(0, 2_048 * slots * 6 / 7), (5, 2_048 * slots + 1_000)] {
+            let owned = placement_set(count as u32);
+            let refs: Vec<&[u8]> = owned.iter().map(|s| s.as_slice()).collect();
+            let sizes = vec![1; refs.len()];
+            pin_placement(
+                &mut placement,
+                shard_id,
+                (&refs, &sizes),
+                2_048,
+                slots as usize,
+            );
+        }
+        let mut mixed = Vec::new();
+        let mut bytes = 0;
+        for i in 0..100_000u32 {
+            let size = [70, 98, 113, 121, 149, 177][i as usize % 6];
+            if bytes + size > 256 * 4_092 * 6 / 7 {
+                break;
+            }
+            mixed.push((script(i).as_slice().to_vec(), size));
+            bytes += size;
+        }
+        let ordered = placement_order(mixed.iter().map(|(s, n)| (s.as_slice(), *n)));
+        let scripts: Vec<_> = ordered.iter().map(|(s, _)| *s).collect();
+        let sizes: Vec<_> = ordered.iter().map(|(_, n)| *n).collect();
+        pin_placement(&mut placement, 42, (&scripts, &sizes), 256, 4_092);
+
+        assert_eq!(
+            [stream.hex(), placement.hex()],
+            [
+                "5c7c702bf604425131ed7567ec81693f8dc336a6c09084953873024cad611e3b",
+                "b09f919075d25ece5ea5c15627126ead664afc3cee35647351e690cfee618d42",
+            ]
+        );
+    }
 }
