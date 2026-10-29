@@ -107,7 +107,7 @@ def main():
         ("recovery-types", "zakura/pir-protocol", ["transparent-inputs"], recovery_forbidden | server_roles, {"zakura-protocol"}),
         ("recovery", "zakura/pir-client", ["recovery"], recovery_forbidden | endpoint_stack | server_roles | native_evaluators, {"zakura-pir-protocol"}),
         ("sqlite-default", "librustzcash/zcash_client_sqlite", [], {"rand_distr"}, set()),
-        ("tor", "librustzcash/zcash_client_backend", ["tor"], {"dynosaur", "dynosaur_derive", "trait-variant"}, {"arti-client", "rust_decimal"}),
+        ("tor", "librustzcash/zcash_client_backend", ["tor"], {"dynosaur", "dynosaur_derive", "trait-variant", "liblzma", "liblzma-sys", "zstd", "zstd-safe", "zstd-sys", "jobserver"}, {"arti-client", "rust_decimal", "flate2", "miniz_oxide", "tor-hsclient"}),
         ("wallet", "librustzcash/zcash_client_sqlite", ["orchard", "transparent-inputs"], {"prost-build", "tonic-prost-build", "which", "regex", "regex-automata", "regex-syntax"} | pczt_macros, {"rand_distr"}),
         ("pczt", "librustzcash/pczt", [], pczt_macros, {"serde_with"}),
         ("pir", "zakura/pir-client", ["native"], native_evaluators | server_roles | {"sha1"}, {"reinspiring"}),
