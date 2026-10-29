@@ -79,7 +79,7 @@ pub(super) fn scanned_wallet() -> State {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, true).unwrap();
+    db.enable_one_time_recovery(account).unwrap();
     st
 }
 
@@ -557,7 +557,7 @@ pub(crate) fn scan_and_recover(st: &mut State, from: BlockHeight, count: usize) 
     for account in accounts {
         let publication = store::restore::tests::discovery::publication_at(st, tip(st).height);
         let db = st.wallet_mut().db_mut();
-        db.set_one_time_recovery_enabled(account, true).unwrap();
+        db.enable_one_time_recovery(account).unwrap();
         assert!(
             db.begin_one_time_recovery(account, publication, false)
                 .unwrap()

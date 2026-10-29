@@ -13,7 +13,7 @@ fn ironwood_funded_wallet() -> (State, BlockHeight) {
     let account = st.test_account().unwrap().id();
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(account, true)
+        .enable_one_time_recovery(account)
         .unwrap();
     (st, first)
 }
@@ -149,7 +149,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     st.scan_cached_blocks(first, blocks as usize);
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(restored, true)
+        .enable_one_time_recovery(restored)
         .unwrap();
     let pending = |st: &State| {
         store::restore::recovery::refund_memos_pending(st.wallet().conn(), restored).unwrap()
@@ -252,7 +252,7 @@ fn refund_funding_refuses_its_memo_on_orchard_change() {
     let account = st.test_account().unwrap().id();
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(account, true)
+        .enable_one_time_recovery(account)
         .unwrap();
     let tip = st.wallet().chain_height().unwrap().unwrap();
     let deposit = p2pkh(7).encode(st.network());
@@ -440,7 +440,7 @@ fn restore_through_funding(
     let from = birthday.height();
     st.scan_cached_blocks(from, (u32::from(mined) - u32::from(from) + 1) as usize);
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(restored, true).unwrap();
+    db.enable_one_time_recovery(restored).unwrap();
     assert!(matches!(
         reserve_refund(db, restored, mined),
         Ok(Err(ReservationPolicy::FundingHistory))
@@ -727,7 +727,7 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
         st.scan_cached_blocks(first, blocks as usize);
         st.wallet_mut()
             .db_mut()
-            .set_one_time_recovery_enabled(restored, true)
+            .enable_one_time_recovery(restored)
             .unwrap();
 
         let work = st.wallet().db().transaction_enhancement_work().unwrap();
@@ -849,11 +849,16 @@ fn lookup_pending(db: &Db, account: AccountUuid) -> bool {
     )
 }
 
-/// Disabling receiver discovery does not discard independently authenticated outgoing details.
+/// An account whose receiver discovery isn't enabled still keeps independently
+/// authenticated outgoing details.
 #[test]
 fn outgoing_one_time_payment_details_survive_disabled_discovery() {
     for enabled in [false, true] {
-        let mut desktop = scanned_wallet();
+        let mut desktop = if enabled {
+            scanned_wallet()
+        } else {
+            restored_wallet()
+        };
         let account = desktop.test_account().unwrap().id();
         let start = desktop.sapling_activation_height();
         let key = reserve(
@@ -878,11 +883,6 @@ fn outgoing_one_time_payment_details_survive_disabled_discovery() {
             .wallet()
             .get_transaction(txid.unwrap())
             .unwrap()
-            .unwrap();
-        desktop
-            .wallet_mut()
-            .db_mut()
-            .set_one_time_recovery_enabled(account, enabled)
             .unwrap();
         let network = *desktop.network();
         decrypt_and_store_transaction(&network, desktop.wallet_mut(), &transaction, None).unwrap();
@@ -994,7 +994,7 @@ fn storing_a_queued_memos_transaction_again_retries_it() {
     st.scan_cached_blocks(first, blocks as usize);
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(restored, true)
+        .enable_one_time_recovery(restored)
         .unwrap();
     decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, None).unwrap();
     assert!(refund_keys(&st).is_empty(), "an unmined memo waits");

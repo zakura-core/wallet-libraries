@@ -115,7 +115,7 @@ fn accept_memo_evidence<P: Parameters>(
         recover_refund_memos(conn, params, account)
     } else if one_time_account(conn, params, account)?.is_some() {
         super::queue::mark_used(conn, owner)?;
-        super::queue::set_enabled(conn, params, account, true)
+        super::queue::enable(conn, params, account)
     } else {
         Ok(())
     }

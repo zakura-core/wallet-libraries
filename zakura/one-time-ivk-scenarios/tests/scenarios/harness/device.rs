@@ -79,7 +79,7 @@ impl Device {
         let (account, usk) = db
             .create_account("scenario", &SecretVec::new(seed.to_vec()), &birthday, None)
             .unwrap();
-        db.set_one_time_recovery_enabled(account, true).unwrap();
+        db.enable_one_time_recovery(account).unwrap();
         Self {
             db,
             account,

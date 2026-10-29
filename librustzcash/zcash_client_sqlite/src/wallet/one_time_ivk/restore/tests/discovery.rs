@@ -256,7 +256,7 @@ fn oracle(st: &State, receiver: [u8; 43], fvk: &FullViewingKey) -> Vec<Directory
 ///
 /// A reserved receiver held by invalidated history (see `queue::RECEIVE_PENDING`) must also
 /// have a runnable lookup that can lift the hold, or a payment candidate in progress, unless
-/// the user paused discovery, which refuses reservations anyway.
+/// discovery isn't enabled, which refuses reservations anyway.
 pub(in crate::wallet::one_time_ivk) fn assert_no_stall(db: &Db, account: AccountUuid) {
     let owner: i64 = value(
         &db.conn,
@@ -624,9 +624,10 @@ fn manual_bound_and_cancellation_do_not_use_the_seed_gap() {
     assert_eq!((done.active, done.next, done.receive_end), (false, 10, 10));
 }
 
-/// A callback captured before disabling cannot admit a payment or advance negative coverage.
+/// A callback captured before the account's generation moved, here by cancelling a history
+/// check, cannot admit a payment. The current capture then can.
 #[test]
-fn feature_toggle_rejects_stale_lookup_and_proof_callbacks() {
+fn a_stale_proof_callback_is_refused() {
     let (mut st, candidate, publication) = late_fixture();
     let account = st.test_account().unwrap().id();
     let old = status(st.wallet().db(), account);
@@ -635,20 +636,14 @@ fn feature_toggle_rejects_stale_lookup_and_proof_callbacks() {
     assert_eq!(request.position, candidate.position);
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(account, false)
+        .cancel_one_time_history(account)
         .unwrap();
-    let state = status(st.wallet().db(), account);
-    assert!(state.lookups.is_empty() && state.witnesses.is_empty());
     assert!(
         !st.wallet_mut()
             .db_mut()
             .record_one_time_witness(account, old.token, request, &answer, clock_now())
             .unwrap()
     );
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, true)
-        .unwrap();
     assert!(one_time_notes(&st).is_empty());
     drain(&mut st, account, publication);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
@@ -799,23 +794,20 @@ fn a_new_filter_target_survives_a_held_older_complete_answer() {
     );
 }
 
-/// Lowering the birthday retains explicit recheck intent across disable and restart.
+/// Lowering the birthday retains explicit recheck intent across a restart.
 #[test]
-fn birthday_recheck_survives_feature_off_and_restart() {
+fn birthday_recheck_survives_restart() {
     let (mut st, candidate, publication) = late_fixture();
     let account = st.test_account().unwrap().id();
     send_witness(&mut st, key8(), &candidate);
     drain(&mut st, account, publication);
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, false).unwrap();
     tx(db, |conn, _| {
         crate::wallet::one_time_rewind::reopen_discovery(conn, account)
     })
     .unwrap();
-    assert!(status(db, account).lookups.is_empty());
     reopen(&mut st);
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, true).unwrap();
     let id = key_ref(&db.conn, account, key8()).unwrap();
     let pending: bool = value(
         &db.conn,
@@ -980,41 +972,28 @@ fn orphaned_receipts_do_not_permanently_exhaust_the_receive_window() {
     assert_eq!(next.key_id().index(), 0);
 }
 
-/// Rewound owned funds can be repaired while off, without discovering another payment to the key.
+/// A rewind that displaces an owned receipt repairs it, and the same lookup also finds a
+/// later payment to the key.
 #[test]
-fn disabled_discovery_repairs_known_receipts_without_adding_payments() {
+fn a_rewound_receipt_is_repaired_and_a_later_payment_found() {
     let (mut st, candidate, publication) = late_fixture();
     let account = st.test_account().unwrap().id();
     send_witness(&mut st, key8(), &candidate);
     drain(&mut st, account, publication);
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, false)
-        .unwrap();
     pay_candidate(&mut st, key8());
     let end = tip(&st).height;
     st.truncate_to_height_retaining_cache(candidate.height - 1);
     reopen(&mut st);
     st.scan_cached_blocks(candidate.height, (end - candidate.height + 1) as usize);
     let publication = publication_at(&st, end);
-    let before = status(st.wallet().db(), account);
-    assert!(!before.enabled);
-    assert_eq!(before.lookups.len(), 1);
-    assert_eq!(before.lookups[0].work.key, key8());
     assert!(
         st.wallet_mut()
             .db_mut()
             .begin_one_time_recovery(account, publication, true)
             .unwrap()
     );
-    assert!(
-        !st.wallet_mut()
-            .db_mut()
-            .check_one_time_history(account, publication, Some(20))
-            .unwrap()
-    );
     drain(&mut st, account, publication);
-    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
     let mined: Option<u32> = value(
         st.wallet().conn(),
         "SELECT mined_height FROM transactions WHERE txid = ?1",
@@ -1022,46 +1001,7 @@ fn disabled_discovery_repairs_known_receipts_without_adding_payments() {
     );
     assert_eq!(mined, Some(u32::from(candidate.height)));
     let after = status(st.wallet().db(), account);
-    assert!(!after.enabled);
-    assert_eq!(after.restore_next, before.restore_next);
-    assert_eq!(after.filter_frontier, before.filter_frontier);
     assert!(after.lookups.is_empty() && after.witnesses.is_empty());
-}
-
-/// A disabled repair can skip a second receipt, but re-enabling must recover it from page zero.
-#[test]
-fn disabled_repair_does_not_consume_future_discovery_pages() {
-    let (mut st, candidate, publication) = late_fixture();
-    let account = st.test_account().unwrap().id();
-    send_witness(&mut st, key8(), &candidate);
-    drain(&mut st, account, publication);
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, false)
-        .unwrap();
-    pay_candidate(&mut st, key8());
-    let end = tip(&st).height;
-    st.truncate_to_height_retaining_cache(candidate.height - 1);
-    reopen(&mut st);
-    st.scan_cached_blocks(candidate.height, (end - candidate.height + 1) as usize);
-    let publication = publication_at(&st, end);
-    st.wallet_mut()
-        .db_mut()
-        .begin_one_time_recovery(account, publication, true)
-        .unwrap();
-    drain(&mut st, account, publication);
-    assert_eq!(one_time_notes(&st), [(100_000, false)]);
-    reopen(&mut st);
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, true)
-        .unwrap();
-    st.wallet_mut()
-        .db_mut()
-        .check_one_time_history(account, publication, Some(9))
-        .unwrap();
-    drain(&mut st, account, publication);
-    assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
 }
 
 /// A late payment waits while the scan's coverage ends one block short of its scanned tip,
@@ -1334,7 +1274,7 @@ fn wallet_after_leaves(prefix: &[MerkleHashOrchard]) -> State {
     let account = st.test_account().unwrap().id();
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(account, true)
+        .enable_one_time_recovery(account)
         .unwrap();
     st
 }
@@ -2052,49 +1992,6 @@ fn a_correction_restores_the_historical_start_of_active_requests() {
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
-/// While disabled, a repair read can pass shards and skip receipts that discovery would
-/// keep, even when a completed prefix survived a reorg. Enabling discovery between shards
-/// drops that partial progress and the cursor, keeping only the surviving prefix.
-#[test]
-fn enabling_between_shards_drops_partial_repair_progress() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let publication = publication_at(&st, tip(&st).height);
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .begin_one_time_recovery(account, publication, true)
-            .unwrap()
-    );
-    drain(&mut st, account, publication);
-    let key0 = KeyId::new(Purpose::Receive, 0);
-    let id = key_ref(&st.wallet().db().conn, account, key0).unwrap();
-    let done: u32 = value(
-        st.wallet().conn(),
-        "SELECT done_height FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
-        [id],
-    );
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, false)
-        .unwrap();
-    // A repair request after the surviving prefix, stopped between shards.
-    exec(
-        st.wallet().conn(),
-        "UPDATE ironwood_one_time_lookups SET target_height = ?2 + 5, reasons = 1,
-         start_height = ?2 + 1, checked_height = ?2 + 3, inventory = zeroblob(32), shard = 2,
-         segment = 0, read_complete = 0 WHERE one_time_key_id = ?1",
-        rusqlite::params![id, done],
-    );
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, true)
-        .unwrap();
-    let work = work_of(&st, key0);
-    assert_eq!(work.from, BlockHeight::from(done + 1));
-    assert!(work.cursor.is_none());
-}
-
 /// The seed walk checked I1 to I4 after authenticating I0's still unconfirmed payment.
 /// A reorg then drops that payment, so direct catch-up must still check I4.
 #[test]
@@ -2535,9 +2432,7 @@ fn seeded_recovery_sequences_never_stall() {
                 }
                 _ => {
                     let db = st.wallet_mut().db_mut();
-                    db.set_one_time_recovery_enabled(account, false).unwrap();
-                    status(db, account);
-                    db.set_one_time_recovery_enabled(account, true).unwrap();
+                    db.enable_one_time_recovery(account).unwrap();
                     status(db, account);
                 }
             }
@@ -2775,17 +2670,11 @@ fn receipts(st: &State) -> Vec<(i64, Vec<u8>, bool)> {
 /// fetched raw transaction does not hold it: the receipt keeps its note row and only its label
 /// becomes disputed, and its key's history is read again. The raw transaction is kept, so the
 /// same mislabeled record repeated later is refused at admission. The true record then moves
-/// the same row to its own transaction. This holds with discovery enabled, and disabled before
-/// the raw transaction arrived.
+/// the same row to its own transaction.
 #[test]
 fn a_raw_transaction_without_the_claimed_action_disputes_the_label() {
     use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
-    for (mislabel, enabled) in [
-        (Mislabel::OtherTransaction, true),
-        (Mislabel::OtherTransaction, false),
-        (Mislabel::CommitmentOnly, true),
-        (Mislabel::CommitmentOnly, false),
-    ] {
+    for mislabel in [Mislabel::OtherTransaction, Mislabel::CommitmentOnly] {
         let Mislabeled {
             mut st,
             candidate,
@@ -2798,16 +2687,10 @@ fn a_raw_transaction_without_the_claimed_action_disputes_the_label() {
             panic!("one receipt under the wrong label");
         };
         assert_eq!(*label, forged.txid.as_ref().to_vec());
-        if !enabled {
-            st.wallet_mut()
-                .db_mut()
-                .set_one_time_recovery_enabled(account, false)
-                .unwrap();
-        }
 
         decrypt_and_store_transaction(&network, st.wallet_mut(), &wrong, None).unwrap();
         let disputed = vec![(note, forged.txid.as_ref().to_vec(), true)];
-        assert_eq!(receipts(&st), disputed, "{mislabel:?} {enabled}");
+        assert_eq!(receipts(&st), disputed, "{mislabel:?}");
         assert_eq!(one_time_notes(&st), [(50_000, false)]);
         let id = key_ref(&st.wallet().db().conn, account, key8()).unwrap();
         let reopened: bool = value(
@@ -2821,11 +2704,7 @@ fn a_raw_transaction_without_the_claimed_action_disputes_the_label() {
         // The directory repeats the same mislabeled record: the kept raw bytes refuse it.
         let publication = queue_late(&mut st, key8(), &forged);
         send_witness(&mut st, key8(), &forged);
-        assert_eq!(
-            receipts(&st),
-            disputed,
-            "{mislabel:?} {enabled}: refused again"
-        );
+        assert_eq!(receipts(&st), disputed, "{mislabel:?}: refused again");
 
         // After the rejection's backoff, the true record is read.
         exec(
@@ -2834,11 +2713,10 @@ fn a_raw_transaction_without_the_claimed_action_disputes_the_label() {
             [],
         );
         drain(&mut st, account, publication);
-        assert_eq!(status(st.wallet().db(), account).enabled, enabled);
         assert_eq!(
             receipts(&st),
             [(note, candidate.txid.as_ref().to_vec(), false)],
-            "{mislabel:?} {enabled}"
+            "{mislabel:?}"
         );
         assert_eq!(one_time_notes(&st), [(50_000, false)]);
     }
@@ -2885,14 +2763,13 @@ fn an_orchard_build_checks_raw_bytes_a_build_without_it_stored() {
 /// label. Disputing it keeps the note row and its spend, so the note stays unavailable and the
 /// balance unchanged, while history, transaction outputs and transaction details stop
 /// attributing it to the disproven transaction. The true record moves that same row to its
-/// own transaction with the spend intact, and history shows it received there, with
-/// discovery enabled and disabled.
+/// own transaction with the spend intact, and history shows it received there.
 #[test]
 fn a_disputed_label_keeps_the_receipts_pending_spend() {
     use zcash_client_backend::data_api::{
         transparent_ledger::TransparentDetailRead as _, wallet::decrypt_and_store_transaction,
     };
-    for enabled in [true, false] {
+    {
         let Mislabeled {
             mut st,
             candidate,
@@ -2923,12 +2800,6 @@ fn a_disputed_label_keeps_the_receipts_pending_spend() {
         };
         assert_eq!(spends(&st), [send.as_ref().to_vec()]);
         assert_eq!(one_time_notes(&st), [(50_000, true)]);
-        if !enabled {
-            st.wallet_mut()
-                .db_mut()
-                .set_one_time_recovery_enabled(account.id(), false)
-                .unwrap();
-        }
 
         decrypt_and_store_transaction(&network, st.wallet_mut(), &wrong, None).unwrap();
         assert_eq!(receipts(&st), [(note, forged.txid.as_ref().to_vec(), true)]);
@@ -2943,7 +2814,7 @@ fn a_disputed_label_keeps_the_receipts_pending_spend() {
         assert_eq!(
             received_in(&st, account.id()),
             [(send.as_ref().to_vec(), 0, 50_000)],
-            "enabled {enabled}: history during the dispute"
+            "history during the dispute"
         );
         assert!(outputs_of(&st, forged.txid).is_empty());
         assert!(
@@ -2955,20 +2826,16 @@ fn a_disputed_label_keeps_the_receipts_pending_spend() {
         );
 
         let publication = publication_at(&st, tip(&st).height);
-        if enabled {
-            assert!(
-                st.wallet_mut()
-                    .db_mut()
-                    .begin_one_time_recovery(account.id(), publication, true)
-                    .unwrap()
-            );
-        }
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .begin_one_time_recovery(account.id(), publication, true)
+                .unwrap()
+        );
         drain(&mut st, account.id(), publication);
-        assert_eq!(status(st.wallet().db(), account.id()).enabled, enabled);
         assert_eq!(
             receipts(&st),
-            [(note, candidate.txid.as_ref().to_vec(), false)],
-            "enabled {enabled}"
+            [(note, candidate.txid.as_ref().to_vec(), false)]
         );
         assert_eq!(spends(&st), [send.as_ref().to_vec()]);
         assert_eq!(one_time_notes(&st), [(50_000, true)]);
@@ -2979,10 +2846,7 @@ fn a_disputed_label_keeps_the_receipts_pending_spend() {
             (send.as_ref().to_vec(), 0, 50_000),
         ];
         expected.sort();
-        assert_eq!(
-            history, expected,
-            "enabled {enabled}: history after relabeling"
-        );
+        assert_eq!(history, expected, "history after relabeling");
         assert_eq!(outputs_of(&st, candidate.txid), [50_000]);
     }
 }
@@ -3250,10 +3114,10 @@ fn enrollment_invalidates_a_held_filter_request() {
 /// One transaction pays two private receipts. A reorg moves it to later positions. Each
 /// receipt keeps its own repair eligibility until its own position and witness are
 /// restored, so repairing the first, which marks the transaction mined, cannot leave the
-/// second at its stale position, with recovery enabled or disabled.
+/// second at its stale position.
 #[test]
 fn a_reorg_repairs_each_private_receipt_of_one_transaction() {
-    for enabled in [true, false] {
+    {
         let mut st = scanned_wallet();
         let account = st.test_account().unwrap().id();
         let publication = publication_at(&st, tip(&st).height);
@@ -3313,12 +3177,6 @@ fn a_reorg_repairs_each_private_receipt_of_one_transaction() {
         got.sort_by_key(|(_, p)| *p);
         assert_eq!(got, expected);
 
-        if !enabled {
-            st.wallet_mut()
-                .db_mut()
-                .set_one_time_recovery_enabled(account, false)
-                .unwrap();
-        }
         st.truncate_to_height(floor);
         // Another payment first moves the transaction's outputs to later positions. It is
         // mined and scanned directly, since `pay` would enable recovery again.
@@ -3332,9 +3190,7 @@ fn a_reorg_repairs_each_private_receipt_of_one_transaction() {
         );
         payment_indexes(&st, shifted, 1);
         st.scan_cached_blocks(shifted, 1);
-        assert_eq!(status(st.wallet().db(), account).enabled, enabled);
         let (height, moved) = mine(&mut st);
-        assert_eq!(status(st.wallet().db(), account).enabled, enabled);
         assert_ne!(moved, positions);
         let mut expected: Vec<_> = moved
             .iter()
@@ -3343,7 +3199,7 @@ fn a_reorg_repairs_each_private_receipt_of_one_transaction() {
         expected.sort_by_key(|(_, p)| *p);
         let mut got = placed(&st);
         got.sort_by_key(|(_, p)| *p);
-        assert_eq!(got, expected, "enabled {enabled}");
+        assert_eq!(got, expected);
         assert_eq!(one_time_notes(&st).len(), 2);
     }
 }
@@ -4864,7 +4720,6 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
         // Receivers come first: with no progress row they must still read as disabled.
         let (_, receivers) = db.one_time_receivers(account).unwrap();
         assert!(receivers.is_empty());
-        db.set_one_time_recovery_enabled(account, false).unwrap();
         let state = db.one_time_recovery(account, clock_now(), None).unwrap();
         assert!(!state.enabled && state.lookups.is_empty() && state.witnesses.is_empty());
         assert!(
@@ -4926,7 +4781,7 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
         let _ = db.refund_funding_memo(account, 0, "deposit");
         if !orchard {
             assert!(matches!(
-                db.set_one_time_recovery_enabled(account, true),
+                db.enable_one_time_recovery(account),
                 Err(SqliteClientError::BadAccountData(_))
             ));
         }
@@ -4935,28 +4790,10 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
     st.generate_and_scan_empty_blocks(2);
     assert_eq!(rows(&st), 0);
 
-    // Only enabling creates progress, and pausing and enabling again keep their behavior.
+    // Only enabling creates progress.
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, true).unwrap();
-    assert!(
-        db.one_time_recovery(account, clock_now(), None)
-            .unwrap()
-            .enabled
-    );
-    db.set_one_time_recovery_enabled(account, false).unwrap();
-    assert!(
-        !db.one_time_recovery(account, clock_now(), None)
-            .unwrap()
-            .enabled
-    );
-    assert_eq!(
-        db.prepare_receive_reservation(account, clock_now())
-            .unwrap()
-            .map(drop),
-        Err(ReservationPolicy::Disabled)
-    );
-    db.set_one_time_recovery_enabled(account, true).unwrap();
+    db.enable_one_time_recovery(account).unwrap();
     assert!(
         db.one_time_recovery(account, clock_now(), None)
             .unwrap()
@@ -4971,10 +4808,10 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
     assert_eq!(rows(&st), 1);
 }
 
-/// Pausing an account that is not enabled, or reporting an upgrade it already waits for, only
-/// reads: both succeed on a read-only connection, before and after the account has a row.
+/// Reporting an upgrade an account already waits for, or one for an account with no
+/// progress row, only reads, so it succeeds on a read-only connection.
 #[test]
-fn pausing_a_disabled_account_needs_no_write() {
+fn reporting_a_known_upgrade_needs_no_write() {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
     let read_only = |st: &mut State, on: bool| {
@@ -4985,16 +4822,13 @@ fn pausing_a_disabled_account_needs_no_write() {
     };
     read_only(&mut st, true);
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, false).unwrap();
     db.require_one_time_upgrade(account).unwrap();
     read_only(&mut st, false);
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, true).unwrap();
-    db.set_one_time_recovery_enabled(account, false).unwrap();
+    db.enable_one_time_recovery(account).unwrap();
     db.require_one_time_upgrade(account).unwrap();
     read_only(&mut st, true);
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, false).unwrap();
     db.require_one_time_upgrade(account).unwrap();
     read_only(&mut st, false);
 }
@@ -5025,7 +4859,7 @@ fn a_batch_history_check_starts_all_jobs_or_none() {
     assert_eq!(refused, Some(other));
     assert!(!active(&st, account) && !active(&st, other));
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(other, true).unwrap();
+    db.enable_one_time_recovery(other).unwrap();
     assert_eq!(
         db.check_one_time_history_for(&[account, other], publication)
             .unwrap(),

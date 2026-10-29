@@ -113,7 +113,7 @@ pub(crate) fn truncate(
     )?;
     // A private receipt's position came from the directory, not a rescan that would replace
     // it, so each one loses its placement until its own repair restores it (see
-    // `restore::queue::UNPLACED`).
+    // `restore::queue::REPAIR_KEY`).
     conn.execute(
         "UPDATE ironwood_received_notes SET commitment_tree_position = NULL
         WHERE one_time_key_id IS NOT NULL AND transaction_id IN

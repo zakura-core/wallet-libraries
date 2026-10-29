@@ -351,14 +351,7 @@ fn multiple_accounts_sync_independently() {
             .one_time_recovery(second, chain.now(), None)
             .unwrap();
         assert!(!second_state.enabled && second_state.lookups.is_empty());
-        wallet
-            .db
-            .set_one_time_recovery_enabled(first, false)
-            .unwrap();
-        wallet
-            .db
-            .set_one_time_recovery_enabled(second, true)
-            .unwrap();
+        wallet.db.enable_one_time_recovery(second).unwrap();
         wallet.account = second;
         wallet.recover(&chain, &directory).await;
         assert_eq!(wallet.unspent_one_time_value(), 300_000);
@@ -393,10 +386,6 @@ fn lowering_birthday_recovers_an_excluded_payment_after_restart() {
         assert_eq!(desktop.status(&chain).restore_next, 4);
         desktop
             .db
-            .set_one_time_recovery_enabled(desktop.account, false)
-            .unwrap();
-        desktop
-            .db
             .rewind_to_chain_state(
                 chain.state_below(ACTIVATION.into()),
                 HashSet::from([desktop.account]),
@@ -405,10 +394,6 @@ fn lowering_birthday_recovers_an_excluded_payment_after_restart() {
         desktop.reopen();
         desktop.scan(&chain);
         assert_eq!(desktop.unspent_one_time_value(), 0);
-        desktop
-            .db
-            .set_one_time_recovery_enabled(desktop.account, true)
-            .unwrap();
         desktop.recover(&chain, &directory).await;
         assert_eq!(desktop.unspent_one_time_value(), 100_000);
     });
@@ -489,9 +474,9 @@ fn failures_and_manual_cancellation_survive_restart() {
     });
 }
 
-/// A real receipt re-mined at a new position is repaired while off, without discovering new notes.
+/// A real receipt re-mined at a new position is repaired, without crediting it twice.
 #[test]
-fn known_receipt_reorg_repairs_position_while_disabled() {
+fn known_receipt_reorg_repairs_position() {
     run(async {
         let mut chain = Chain::new();
         let mut payer = Device::new(&mut chain, [9; 32], ACTIVATION.into());
@@ -514,10 +499,6 @@ fn known_receipt_reorg_repairs_position_while_disabled() {
             .recover(&chain, &Directory::publish(&chain, 0, 0, 256, 0))
             .await;
         assert_eq!(receiver.unspent_one_time_value(), original.value);
-        receiver
-            .db
-            .set_one_time_recovery_enabled(receiver.account, false)
-            .unwrap();
         chain.rewind(fork);
         chain.mine(11);
         let height = chain.mine_tx(&transaction);
@@ -545,7 +526,6 @@ fn known_receipt_reorg_repairs_position_while_disabled() {
             .unwrap();
         assert_eq!(position, replacement.position);
         assert_eq!(receiver.unspent_one_time_value(), 1_000_000);
-        assert!(!receiver.status(&chain).enabled);
     });
 }
 

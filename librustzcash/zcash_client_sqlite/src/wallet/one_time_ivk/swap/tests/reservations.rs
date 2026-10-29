@@ -211,30 +211,6 @@ fn outcomes_and_started_request_ownership_are_stable() {
     ));
 }
 
-/// Disabling the feature prevents new addresses and start instructions without deleting requests.
-#[test]
-fn disabled_feature_refuses_issuance() {
-    let mut st = scanned_wallet();
-    let now = clock_now();
-    let account = st.test_account().unwrap().id();
-    let (key, request) = quote(&mut st, now, "pending", false);
-    let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, false).unwrap();
-    assert!(matches!(
-        db.prepare_receive_reservation(account, now).unwrap(),
-        Err(ReservationPolicy::Disabled)
-    ));
-    assert!(matches!(
-        db.begin_receive_operation(account, key.index(), now + 60, now)
-            .unwrap(),
-        Err(ReservationPolicy::Disabled)
-    ));
-    assert!(matches!(
-        db.start_receive_operation(account, &request, now).unwrap(),
-        Err(ReservationPolicy::Disabled)
-    ));
-}
-
 /// A swap the provider reports as finished with no refund retires its funded refund key:
 /// a newer frontier no longer queues its history, though no refund ever reached it.
 #[test]
@@ -495,7 +471,7 @@ fn a_restored_seeds_paid_index_is_not_issued_before_its_history() {
     store::restore::tests::discovery::pay_candidate(&mut st, KeyId::new(Purpose::Receive, 0));
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(account, true)
+        .enable_one_time_recovery(account)
         .unwrap();
     assert!(matches!(
         st.wallet_mut()
@@ -822,13 +798,6 @@ fn a_rewound_reservation_is_released_by_its_queued_recheck() {
         "the rewind queued a runnable recheck"
     );
 
-    let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, false).unwrap();
-    assert_eq!(prepare(&mut st), Err(ReservationPolicy::Disabled));
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, true)
-        .unwrap();
     settle(&mut st);
     assert_eq!(prepare(&mut st), Ok(0));
 }
@@ -954,9 +923,8 @@ fn seeded_reservation_sequences_never_hold_without_work() {
                 }
                 6 => {
                     let db = st.wallet_mut().db_mut();
-                    db.set_one_time_recovery_enabled(account, false).unwrap();
+                    db.enable_one_time_recovery(account).unwrap();
                     status(db, account);
-                    db.set_one_time_recovery_enabled(account, true).unwrap();
                 }
                 7 => {
                     store::restore::tests::discovery::pay_candidate(

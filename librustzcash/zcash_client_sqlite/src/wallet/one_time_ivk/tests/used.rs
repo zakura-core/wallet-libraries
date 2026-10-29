@@ -262,7 +262,7 @@ fn the_upgrade_keeps_a_published_wallets_reservation_monitored() {
     assert!(used(&st, account));
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(account, true)
+        .enable_one_time_recovery(account)
         .unwrap();
     let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
     assert!(

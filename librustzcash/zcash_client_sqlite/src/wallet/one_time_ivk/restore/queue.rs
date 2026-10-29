@@ -61,26 +61,22 @@ pub(crate) fn activation<P: Parameters>(params: &P) -> u32 {
         .map_or(0, u32::from)
 }
 
-/// SQL over receipt alias `n` and its transaction `t`: the receipt's own chain placement is
-/// not restored. Placement is per receipt: a rewind clears each private receipt's position
-/// (see `one_time_rewind::truncate`), and repairing one receipt marks its whole transaction
-/// mined while a sibling receipt still waits for its own position and witness.
-const UNPLACED: &str = "(t.mined_height IS NULL OR n.commitment_tree_position IS NULL)";
-
 const _: () = assert!(
     PRUNING_DEPTH == 100,
     "REPAIR_KEY writes the pruning depth inline"
 );
 
-/// SQL over key alias `k`: an already-owned receipt is [`UNPLACED`], or its transaction
-/// label is disputed (see [`check_raw_receipts`]), so it needs repair.
+/// SQL over key alias `k`: an already-owned receipt's own chain placement is not restored,
+/// or its transaction label is disputed (see [`check_raw_receipts`]), so it needs repair.
+/// Placement is per receipt: a rewind clears each private receipt's position (see
+/// `one_time_rewind::truncate`), and repairing one receipt marks its whole transaction
+/// mined while a sibling receipt still waits for its own position and witness.
 ///
 /// A reorg-displaced receipt needs none once the key's completed history reaches its
 /// transaction's expiry height and filters have passed [`PRUNING_DEPTH`] blocks beyond it.
 /// A reorg clamps that history to the fork and reads it again from there, so the current
 /// chain does not hold the transaction, and no reorg the wallet follows can mine it again.
-/// That happens when another transaction replaced it. A paused account records no history,
-/// so it keeps repairing.
+/// That happens when another transaction replaced it.
 const REPAIR_KEY: &str = "(EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
     ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = k.id
     AND (t.mined_height IS NULL OR n.commitment_tree_position IS NULL)
@@ -114,18 +110,6 @@ const CHECKED_THROUGH: &str = "EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
     AND l.read_complete = 1
     AND l.target_height IS NULL AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
         WHERE p.one_time_key_id = k.id))";
-
-/// Whether this exact output was already admitted, independent of its current chain placement.
-fn known_receipt(
-    conn: &Connection,
-    key: i64,
-    txid: TxId,
-    action: u32,
-) -> Result<bool, SqliteClientError> {
-    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
-        ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = ?1 AND t.txid = ?2 AND n.action_index = ?3)",
-        params![key, txid.as_ref(), action], |r| r.get(0))?)
-}
 
 /// Whether this exact output is already admitted and mined where the directory places it,
 /// under a label no raw bytes disputed, so reading its history again needs no new witness
@@ -190,30 +174,6 @@ fn rewind_lookup(
     Ok(())
 }
 
-/// Whether disabled discovery may still admit `candidate` for key `id`: the exact output
-/// was already admitted, or its authenticated note is a stored receipt whose transaction
-/// label is disputed (see [`check_raw_receipts`]), so the candidate may carry its true label.
-fn repairable<P: Parameters>(
-    conn: &Connection,
-    params: &P,
-    account: AccountUuid,
-    key: KeyId,
-    id: i64,
-    candidate: &PendingPayment,
-) -> Result<bool, SqliteClientError> {
-    if known_receipt(conn, id, candidate.txid, candidate.action_index)? {
-        return Ok(true);
-    }
-    let (_, note) = authenticate(conn, params, account, key, candidate)?;
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_disputed_receipts d
-             JOIN ironwood_received_notes n ON n.id = d.note_id
-             WHERE n.one_time_key_id = ?1 AND n.nf = ?2)",
-        params![id, note.nullifier().to_bytes()],
-        |r| r.get(0),
-    )?)
-}
-
 /// Marks `key`'s lookup with [`INVALIDATED`] after an event voided its settled history.
 fn invalidate(conn: &Connection, key: i64) -> Result<(), SqliteClientError> {
     conn.execute(
@@ -246,28 +206,10 @@ fn refresh_witness(
     Ok(())
 }
 
-/// Allows disabled accounts to repair only keys with a receipt that needs it (see
-/// [`REPAIR_KEY`]).
-fn can_lookup(
-    conn: &Connection,
-    owner: i64,
-    key: i64,
-    captured: RecoveryToken,
-) -> Result<bool, SqliteClientError> {
-    let (enabled, current) = token(conn, owner)?;
-    Ok(current == captured
-        && (enabled
-            || conn.query_row(
-                &format!("SELECT {REPAIR_KEY} FROM ironwood_one_time_keys k WHERE k.id = ?1"),
-                [key],
-                |r| r.get(0),
-            )?))
-}
-
-/// Ensures account progress exists without enabling network work. Only enabling recovery
-/// and the flows it starts (registering keys, widening the receive window) create it, and
-/// [`begin`] for an account that already holds receipts needing repair, so an account that
-/// never used the feature has no row and costs no per-batch work.
+/// Ensures account progress exists without enabling network work. Only enabling recovery,
+/// the flows it starts (registering keys, widening the receive window) and the use marker
+/// create it, so an account that never used the feature has no row and costs no per-batch
+/// work.
 pub(crate) fn ensure_account(conn: &Connection, owner: i64) -> Result<(), SqliteClientError> {
     conn.execute(
         "INSERT OR IGNORE INTO ironwood_one_time_recovery(account_id) VALUES (?1)",
@@ -596,55 +538,23 @@ pub(crate) fn funded<P: Parameters>(
     })
 }
 
-/// Pauses work and invalidates in-flight responses without deleting notes or pending requests.
-/// Pausing never creates state: an account without an Orchard key or a progress row is
-/// already disabled, so it is left untouched. Pausing an account that is not enabled only
-/// reads, so it works on a read-only connection and never waits on another writer.
-pub(crate) fn set_enabled<P: Parameters>(
+/// Enables discovery, which stays enabled: registers the receive window and recovers the
+/// queued refund memos. Enabling an account that isn't enabled advances its generation, so
+/// work captured before does not commit.
+pub(crate) fn enable<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
-    enabled: bool,
 ) -> Result<(), SqliteClientError> {
-    if !enabled {
-        if let Some(owner) = one_time_account(conn, params, account)? {
-            // SQLite takes the write lock for an UPDATE even when no row matches.
-            if recovery_flag(conn, owner.0, "enabled")? == Some(true) {
-                conn.execute(
-                    "UPDATE ironwood_one_time_recovery SET enabled = 0, generation = generation + 1
-                    WHERE account_id = ?1",
-                    [owner.0],
-                )?;
-            }
-        }
-        return Ok(());
-    }
     let (owner, _) = account_key(conn, params, account)?;
     ensure_account(conn, owner.0)?;
-    let changed = conn.execute(
-        "UPDATE ironwood_one_time_recovery SET enabled = ?2, generation = generation + 1
-        WHERE account_id = ?1 AND enabled != ?2",
-        params![owner.0, enabled],
+    conn.execute(
+        "UPDATE ironwood_one_time_recovery SET enabled = 1, generation = generation + 1
+        WHERE account_id = ?1 AND enabled = 0",
+        [owner.0],
     )?;
-    if changed > 0 && enabled {
-        // Repair-only reads may have skipped new receipts. Start their history again
-        // before enabled discovery can treat any saved page as complete, including partial
-        // progress past a completed prefix that survived a reorg.
-        conn.execute(
-            &format!(
-                "UPDATE ironwood_one_time_lookups SET {CURSOR_RESET}, checked_height = NULL,
-                read_complete = 0 WHERE target_height IS NOT NULL
-                AND (done_height IS NULL OR read_complete = 0)
-                AND one_time_key_id IN (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)"
-            ),
-            [owner.0],
-        )?;
-    }
-    if enabled {
-        ensure_window(conn, params, account)?;
-        recover_refund_memos(conn, params, account)?;
-    }
-    Ok(())
+    ensure_window(conn, params, account)?;
+    recover_refund_memos(conn, params, account)
 }
 
 /// Checks full-history publication coverage against locally scanned chain identity and tree size.
@@ -686,23 +596,12 @@ pub(crate) fn begin<P: Parameters>(
         return Ok(false);
     };
     let (enabled, current) = token(conn, owner.0)?;
-    let repair: bool = conn.query_row(
-        &format!(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys k
-        WHERE k.account_id = ?1 AND {REPAIR_KEY})"
-        ),
-        [owner.0],
-        |r| r.get(0),
-    )?;
-    if (!enabled && !repair)
+    if !enabled
         || publication.history_revision < current.history_revision
         || !accepts(conn, params, publication)?
     {
         return Ok(false);
     }
-    // Repairing receipts an earlier release or an earlier enable left needs progress even
-    // while disabled. An account with no one-time state never gets here.
-    ensure_account(conn, owner.0)?;
     // This client captured the publication, so the service speaks a format it supports.
     conn.execute(
         "UPDATE ironwood_one_time_recovery SET upgrade_required = 0 WHERE account_id = ?1",
@@ -711,19 +610,6 @@ pub(crate) fn begin<P: Parameters>(
     let height = u32::from(publication.end.height);
     if publication.history_revision > current.history_revision {
         correct(conn, params, owner.0, publication.history_revision, height)?;
-    }
-    if !enabled {
-        let keys = conn
-            .prepare(&format!(
-                "SELECT k.id FROM ironwood_one_time_keys k
-            WHERE k.account_id = ?1 AND {REPAIR_KEY}"
-            ))?
-            .query_map([owner.0], |r| r.get::<_, i64>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        for key in keys {
-            enqueue(conn, key, activation(params), height, AUTOMATIC)?;
-        }
-        return Ok(true);
     }
     ensure_window(conn, params, account)?;
     recover_refund_memos(conn, params, account)?;
@@ -1515,8 +1401,7 @@ fn disabled() -> RecoveryStatus {
     }
 }
 
-/// Exposes bounded due work. Disabled accounts expose only repair of already-owned receipts.
-/// With `inventory_end`, only lookups whose target it reaches are listed, before the limit,
+/// Exposes bounded due work. An account that isn't enabled exposes none. With `inventory_end`, only lookups whose target it reaches are listed, before the limit,
 /// so lookups waiting for a later publication never hide a runnable one.
 pub(crate) fn status<P: Parameters>(
     conn: &Connection,
@@ -1552,20 +1437,22 @@ pub(crate) fn status<P: Parameters>(
     }).optional()? else {
         return Ok(disabled());
     };
-    // Pending lookups the account may run, over parameters ?1 to ?4.
-    let pending = format!(
-        "FROM ironwood_one_time_lookups l JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
+    if !enabled {
+        return Ok(status);
+    }
+    // Pending lookups the account may run, over parameters ?1 to ?3.
+    let pending = "FROM ironwood_one_time_lookups l
+        JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
         WHERE k.account_id = ?1 AND l.target_height IS NOT NULL AND l.reasons & 3 != 0
-            AND (?3 OR {REPAIR_KEY}) AND l.read_complete = 0"
-    );
+            AND l.read_complete = 0";
     let end = inventory_end.map_or(u32::MAX, u32::from);
     status.lookups = conn
         .prepare(&format!(
             "SELECT k.purpose, k.key_index, k.receiver, l.target_height, {PROGRESS}
-        {pending} AND l.next_attempt_at <= ?2 AND l.target_height <= ?4
+        {pending} AND l.next_attempt_at <= ?2 AND l.target_height <= ?3
         ORDER BY l.next_attempt_at, k.id LIMIT 4"
         ))?
-        .query_and_then(params![owner.0, now, enabled, end], |r| {
+        .query_and_then(params![owner.0, now, end], |r| {
             let (from, cursor) = progress_of(r, 4)?;
             Ok::<_, SqliteClientError>(LookupWork {
                 token,
@@ -1590,22 +1477,18 @@ pub(crate) fn status<P: Parameters>(
     (status.waits_for_retry, status.waits_for_publication) = conn.query_row(
         &format!(
             "SELECT TOTAL(l.next_attempt_at > ?2) > 0,
-            TOTAL(l.next_attempt_at <= ?2 AND l.target_height > ?4) > 0 {pending}"
+            TOTAL(l.next_attempt_at <= ?2 AND l.target_height > ?3) > 0 {pending}"
         ),
-        params![owner.0, now, enabled, end],
+        params![owner.0, now, end],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     status.witnesses = conn.prepare(&format!("SELECT k.purpose, k.key_index, p.position, substr(p.encrypted_note, 33, 32),
             p.payments, p.witnesses, p.ordinal
         FROM ironwood_one_time_payment_recovery p JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
         WHERE k.account_id = ?1 AND p.witness IS NULL AND p.payments IS NOT NULL
-        AND (?2 OR EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t ON t.id_tx = n.transaction_id
-            WHERE n.one_time_key_id = k.id AND t.txid = p.txid AND n.action_index = p.action_index AND {UNPLACED})
-            OR EXISTS(SELECT 1 FROM ironwood_one_time_disputed_receipts d
-                JOIN ironwood_received_notes n ON n.id = d.note_id WHERE n.one_time_key_id = k.id))
         AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id AND l.reasons & 3 != 0)
         ORDER BY p.height, p.position LIMIT 64"))?
-        .query_and_then(params![owner.0, enabled], |r| Ok::<_, SqliteClientError>(WitnessRequest {
+        .query_and_then([owner.0], |r| Ok::<_, SqliteClientError>(WitnessRequest {
             key: stored_key_id(r)?, position: r.get(2)?, cmx: r.get(3)?, payments: r.get(4)?,
             witnesses: r.get(5)?, ordinal: r.get(6)?
         }))?.collect::<Result<_, _>>()?;
@@ -1628,7 +1511,7 @@ pub(crate) fn record_lookup<P: Parameters>(
     let (owner, _) = account_key(conn, params, account)?;
     let id = key_ref(conn, account, work.work.key)?;
     let publication = page.publication;
-    if !can_lookup(conn, owner.0, id, work.token)?
+    if token(conn, owner.0)? != (true, work.token)
         || publication.history_revision != work.token.history_revision
         || publication.end.height < work.through
         || !accepts(conn, params, publication)?
@@ -1726,7 +1609,6 @@ pub(crate) fn record_lookup<P: Parameters>(
         authenticate(conn, params, account, work.work.key, &candidate)?;
         previous = Some(record);
     }
-    let discovery_enabled = token(conn, owner.0)?.0;
     // The wallet doesn't handle payments before the birthday, so they are passed over
     // here, before anything is stored for them, while the page still counts as read.
     let birthday: u32 = conn.query_row(
@@ -1740,11 +1622,7 @@ pub(crate) fn record_lookup<P: Parameters>(
         if let Some(segment) = page.segment {
             for record in &page.records {
                 let candidate = directory_candidate(&record.payment).expect("validated above");
-                if u32::from(candidate.height) >= birthday
-                    && (discovery_enabled
-                        || repairable(conn, params, account, work.work.key, id, &candidate)?)
-                    && !admitted(conn, id, &candidate)?
-                {
+                if u32::from(candidate.height) >= birthday && !admitted(conn, id, &candidate)? {
                     queue_payment(
                         conn,
                         params,
@@ -1789,11 +1667,10 @@ pub(crate) fn record_lookup<P: Parameters>(
             conn.execute(
                 &format!(
                     "UPDATE ironwood_one_time_lookups SET checked_height = ?2, {CURSOR_RESET},
-                    read_complete = ?3, done_height = CASE WHEN ?4 THEN ?2 ELSE NULL END,
-                    done_from = CASE WHEN ?4 THEN ?5 ELSE NULL END, attempts = 0,
+                    read_complete = ?3, done_height = ?2, done_from = ?4, attempts = 0,
                     next_attempt_at = 0 WHERE one_time_key_id = ?1"
                 ),
-                params![id, end, end >= target, discovery_enabled, joined],
+                params![id, end, end >= target, joined],
             )?;
             // A candidate this history did not bind again still lacks a usable witness, so the
             // read cannot settle the key: its shard is read again later.
@@ -1823,7 +1700,7 @@ pub(crate) fn require_upgrade<P: Parameters>(
     account: AccountUuid,
 ) -> Result<(), SqliteClientError> {
     // An account without progress has no work to hold back, and one already waiting needs
-    // no write (see `set_enabled`).
+    // no write: SQLite takes the write lock for an UPDATE even when no row matches.
     let Some(owner) = one_time_account(conn, params, account)? else {
         return Ok(());
     };
@@ -1862,7 +1739,7 @@ pub(crate) fn defer<P: Parameters>(
 ) -> Result<(), SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
     let id = key_ref(conn, account, work.work.key)?;
-    if !can_lookup(conn, owner.0, id, work.token)? {
+    if token(conn, owner.0)? != (true, work.token) {
         return Ok(());
     }
     #[allow(clippy::type_complexity)]
@@ -1893,7 +1770,7 @@ pub(crate) fn defer<P: Parameters>(
 }
 
 /// The candidate `request` names, if it still waits for a witness under the same binding
-/// and `captured` is current. Disabled accounts reach only already-owned unmined receipts.
+/// and `captured` is current for an enabled account.
 fn requested(
     conn: &Connection,
     owner: i64,
@@ -1901,29 +1778,21 @@ fn requested(
     captured: RecoveryToken,
     request: &WitnessRequest,
 ) -> Result<Option<(TxId, u32, BlockHeight)>, SqliteClientError> {
-    let (enabled, current) = token(conn, owner)?;
-    if current != captured {
+    if token(conn, owner)? != (true, captured) {
         return Ok(None);
     }
     let found: Option<(Vec<u8>, u32, u32)> = conn
         .query_row(
-            &format!("SELECT p.txid, p.action_index, p.height
+            "SELECT p.txid, p.action_index, p.height
         FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = ?1 AND p.position = ?2
             AND substr(p.encrypted_note, 33, 32) = ?3 AND p.payments = ?4 AND p.ordinal = ?5
-            AND p.witnesses = ?7 AND p.witness IS NULL AND (?6 OR EXISTS(SELECT 1 FROM transactions t
-                JOIN ironwood_received_notes n ON n.transaction_id = t.id_tx
-                WHERE t.txid = p.txid AND n.one_time_key_id = p.one_time_key_id
-                    AND n.action_index = p.action_index AND {UNPLACED})
-                OR EXISTS(SELECT 1 FROM ironwood_one_time_disputed_receipts d
-                    JOIN ironwood_received_notes n2 ON n2.id = d.note_id
-                    WHERE n2.one_time_key_id = p.one_time_key_id))"),
+            AND p.witnesses = ?6 AND p.witness IS NULL",
             params![
                 key,
                 request.position,
                 request.cmx,
                 request.payments,
                 request.ordinal,
-                enabled,
                 request.witnesses
             ],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -1954,7 +1823,7 @@ pub(crate) fn record_witness<P: Parameters>(
     now: i64,
 ) -> Result<bool, SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
-    if token(conn, owner.0)?.1 != captured {
+    if token(conn, owner.0)? != (true, captured) {
         return Ok(false);
     }
     let id = key_ref(conn, account, request.key)?;
@@ -1991,8 +1860,6 @@ pub(crate) fn record_witness<P: Parameters>(
                 answer.context.tree_size
             ],
         )?;
-    } else if !token(conn, owner.0)?.0 {
-        return Ok(false);
     }
     admit(conn, params, sessions, account, now)?;
     progress(conn, params, account)?;
@@ -2017,8 +1884,8 @@ pub(crate) fn refresh<P: Parameters>(
     Ok(true)
 }
 
-/// Ordinary sync can repair already-owned receipts while discovery is disabled, and a
-/// queued refund memo its blocks mined enables recovery for its account (see
+/// Admits and settles each enabled account's work after ordinary sync stored blocks, and a
+/// queued refund memo the blocks mined enables recovery for its account (see
 /// `recovery::recover_memo_accounts`).
 pub(crate) fn after_blocks_stored<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
@@ -2033,7 +1900,7 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
     let accounts: Vec<AccountUuid> = conn
         .prepare(
             "SELECT a.uuid FROM accounts a
-        JOIN ironwood_one_time_recovery r ON r.account_id = a.id",
+        JOIN ironwood_one_time_recovery r ON r.account_id = a.id WHERE r.enabled = 1",
         )?
         .query_map([], |r| Ok(AccountUuid(r.get(0)?)))?
         .collect::<Result<_, _>>()?;
@@ -2254,9 +2121,6 @@ fn admit_waiting<P: Parameters>(
         let Some(candidate) = pending_payment(conn, txid, action)? else {
             continue;
         };
-        if !token(conn, owner)?.0 && !repairable(conn, params, account, key, id, &candidate)? {
-            continue;
-        }
         let admission = apply_payment(
             conn,
             sessions,

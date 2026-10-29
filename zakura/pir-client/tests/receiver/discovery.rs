@@ -636,7 +636,7 @@ async fn drain(st: &mut State, account: AccountUuid, client: &InventoryClient<&D
 /// Starts recovery without retaining a database handle across network work.
 fn begin(r: &mut Restored, client: &InventoryClient<&Directory>, direct: bool) {
     let db = r.st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(r.account, true).unwrap();
+    db.enable_one_time_recovery(r.account).unwrap();
     assert!(
         db.begin_one_time_recovery(r.account, wallet_publication(client.inventory()), direct)
             .unwrap()
@@ -773,9 +773,10 @@ async fn manual_bound_crosses_a_gap() {
     );
 }
 
-/// A response obtained before disabling the feature cannot import funds or finish a lookup.
+/// A response obtained before the account's generation moved, here by cancelling a history
+/// check, cannot import funds or finish a lookup.
 #[tokio::test]
-async fn disabling_fences_a_held_encrypted_response() {
+async fn a_generation_change_fences_a_held_encrypted_response() {
     let mut r = restored(&[0]);
     let directory = serve(&r.st, &r.records, r.through);
     let client = connect(&directory, r.through).await;
@@ -790,7 +791,7 @@ async fn disabling_fences_a_held_encrypted_response() {
     let page = lookup(&client, &work).await.unwrap();
     r.st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(r.account, false)
+        .cancel_one_time_history(r.account)
         .unwrap();
     assert!(
         !r.st
@@ -800,14 +801,6 @@ async fn disabling_fences_a_held_encrypted_response() {
             .unwrap()
     );
     assert_eq!(one_time_value(&r.st), 0);
-    assert!(
-        r.st.wallet()
-            .db()
-            .one_time_recovery(r.account, NOW, None)
-            .unwrap()
-            .lookups
-            .is_empty()
-    );
     begin(&mut r, &client, true);
     drain(&mut r.st, r.account, &client).await;
     assert_eq!(one_time_value(&r.st), VALUE);
@@ -1440,7 +1433,7 @@ async fn a_publication_ahead_of_the_wallet_waits() {
     let directory = serve(&r.st, &r.records, ahead);
     let client = connect(&directory, ahead).await;
     let db = r.st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(r.account, true).unwrap();
+    db.enable_one_time_recovery(r.account).unwrap();
     let before = db.one_time_recovery(r.account, NOW, None).unwrap();
     assert!(
         !db.begin_one_time_recovery(r.account, wallet_publication(client.inventory()), true)

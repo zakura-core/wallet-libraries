@@ -309,7 +309,7 @@ pub enum FilterOutcome {
 }
 
 /// One account's durable progress and a bounded batch of due work.
-/// With discovery disabled, work is restricted to repairing already-owned receipts.
+/// An account whose discovery isn't enabled exposes no work.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryStatus {
     pub enabled: bool,

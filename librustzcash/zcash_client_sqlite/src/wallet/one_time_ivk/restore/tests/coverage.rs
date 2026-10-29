@@ -637,7 +637,7 @@ fn restore_at(
     st.scan_cached_blocks(from, (u32::from(tip) - u32::from(from) + 1) as usize);
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(account, true)
+        .enable_one_time_recovery(account)
         .unwrap();
     account
 }
@@ -888,7 +888,7 @@ fn late_wallet() -> State {
     let account = st.test_account().unwrap().id();
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(account, true)
+        .enable_one_time_recovery(account)
         .unwrap();
     assert_eq!(run_pir(&mut st, account), 4);
     st
@@ -1180,7 +1180,7 @@ fn the_work_sequence_survives_account_deletion() {
     let seen = work(&st);
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(other, true)
+        .enable_one_time_recovery(other)
         .unwrap();
     let grown = work(&st);
     assert!(grown > seen);
@@ -1318,7 +1318,7 @@ fn awaiting_admission_counts_a_witnessed_payment_until_it_is_admitted() {
         .unwrap();
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(other, true)
+        .enable_one_time_recovery(other)
         .unwrap();
     assert_eq!(waiting(&st, account), 0);
     let (mut st, _) = waiting_witness_in(st);

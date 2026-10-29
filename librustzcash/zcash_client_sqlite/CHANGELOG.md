@@ -21,6 +21,8 @@ and this library adheres to Rust's notion of
 - `WalletDb::check_one_time_history_for` starts the history check of several accounts in one transaction. If any account refuses, none start and the call returns that account.
 - `WalletDb::one_time_recovery` takes the captured inventory's end. The four listed lookups are then ones that inventory can answer, so lookups waiting for a later publication no longer hide a runnable one.
 
+- `WalletDb::enable_one_time_recovery` replaces `WalletDb::set_one_time_recovery_enabled`. One-time recovery can no longer be paused: an enabled account stays enabled. An account that isn't enabled exposes no work, including the repair-only work a paused account used to run, and re-enabling no longer resets lookup progress.
+
 ### Removed
 
 - `WalletDb::record_one_time_filters`, its per-block identities and 256-block cap, and `WalletDb::one_time_direct_query_count`.

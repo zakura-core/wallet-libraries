@@ -19,7 +19,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// Returns bounded due network work without retaining a database lock across requests.
-    /// Disabled discovery still exposes repair work for already-owned receipts. With the
+    /// An account that isn't enabled exposes none. With the
     /// captured inventory's `inventory_end`, the listed lookups are those it can answer,
     /// and `waits_for_retry` and `waits_for_publication` tell why any others wait.
     pub fn one_time_recovery(
@@ -60,13 +60,15 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, CL, R> {
-    /// Pauses or resumes discovery without deleting known notes or extending the receive window.
-    pub fn set_one_time_recovery_enabled(
+    /// Enables discovery for `account`, which then stays enabled: it registers the receive
+    /// window and recovers queued refund memos. Enabling an enabled account changes nothing
+    /// that a later step would not redo. There is no pause: an app stops querying an account
+    /// by leaving it out of its rounds.
+    pub fn enable_one_time_recovery(
         &mut self,
         account: AccountUuid,
-        enabled: bool,
     ) -> Result<(), SqliteClientError> {
-        self.transactionally(|db| queue::set_enabled(db.conn.0, db.params, account, enabled))
+        self.transactionally(|db| queue::enable(db.conn.0, db.params, account))
     }
 
     /// Accepts a chain-compatible publication for queued work. With `complete`, it also runs
