@@ -6,6 +6,44 @@ use bitcoin::{
 use zakura_filters::{BitStreamReader, GcsFilterWriter, read_compact_size, write_compact_size};
 
 #[test]
+fn previous_custom_io_implementations_work_through_the_standard_bridge() {
+    struct LegacyWriter(Vec<u8>);
+    impl bitcoin_io::Write for LegacyWriter {
+        fn write(&mut self, bytes: &[u8]) -> bitcoin_io::Result<usize> {
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> bitcoin_io::Result<()> {
+            Ok(())
+        }
+    }
+    struct LegacyReader<'a>(&'a [u8]);
+    impl bitcoin_io::Read for LegacyReader<'_> {
+        fn read(&mut self, output: &mut [u8]) -> bitcoin_io::Result<usize> {
+            bitcoin_io::Read::read(&mut self.0, output)
+        }
+    }
+    let mut previous = Vec::new();
+    let mut writer = UpstreamWriter::new(&mut previous, 0, 0, 1024, 10);
+    writer.add_element(b"legacy");
+    writer.finish().unwrap();
+
+    let mut output = LegacyWriter(Vec::new());
+    let mut writer = GcsFilterWriter::new(bitcoin_io::ToStd::new_mut(&mut output), 0, 0, 1024, 10);
+    writer.add_element(b"legacy");
+    writer.finish().unwrap();
+    assert_eq!(output.0, previous);
+
+    let mut reader = LegacyReader(&output.0);
+    let reader = bitcoin_io::ToStd::new_mut(&mut reader);
+    assert_eq!(read_compact_size(reader).unwrap(), 1);
+    let mut actual = BitStreamReader::new(reader);
+    let mut expected_input = &previous[1..];
+    let mut expected = UpstreamBits::new(&mut expected_input);
+    assert_eq!(actual.read(4).unwrap(), expected.read(4).unwrap());
+}
+
+#[test]
 fn hash_mapping_matches_upstream_at_boundaries() {
     let bytes: Vec<_> = (0u8..=255).collect();
     for (k0, k1) in [

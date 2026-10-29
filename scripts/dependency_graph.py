@@ -178,7 +178,6 @@ def main():
         "zakura-tor-general-addr",
     }
     cases = [
-        ("filter-codec", "zakura/filters", [], bitcoin_helpers, {"siphasher"}),
         ("scanning", "librustzcash/zcash_client_backend", [], {"nanorand", "futures-core", "futures-sink"}, {"flume"}),
         ("async-scanning", "librustzcash/zcash_client_backend", ["sync-decryptor"], {"nanorand"}, {"flume", "futures-core", "futures-sink", "tokio"}),
         ("wallet-sync", "librustzcash/zcash_client_backend", ["sync"], {"futures-macro"}, {"futures-util", "tonic"}),
@@ -194,10 +193,10 @@ def main():
         ("status-policy", "zakura/pir-client", ["status"], recovery_forbidden | server_roles | native_evaluators | {"tonic", "tonic-prost", "tokio", "hyper", "hyper-util", "h2"}, {"zakura-protocol"}),
         ("status-lightwalletd", "zakura/pir-client", ["lightwalletd"], server_roles | {"httpdate"}, {"zakura-client-backend", "tonic", "tokio"}),
         ("receiver-evaluator", "zakura/pir-query-server", ["receiver"], wallet_roles | native_evaluators | {"zakura-pir-publisher", "zakura-server-chain", "sha1"}, {"reinspiring", "rayon"}),
-        ("filter", "zakura/pir-protocol", ["transparent"], {"bitcoin", "secp256k1", "secp256k1-sys", "zakura-protocol", "zakura-transparent"} | server_roles, {"bitcoin_hashes"}),
+        ("filter", "zakura/pir-protocol", ["transparent"], bitcoin_helpers | {"secp256k1", "secp256k1-sys", "zakura-protocol", "zakura-transparent"} | server_roles, {"zakura-filters", "siphasher"}),
         ("filter-cli", "zakura/pir-client", ["cli"], {"anstream", "anstyle-parse", "colorchoice"}, {"clap"}),
-        ("filters", "zakura/filters", [], {"bitcoin", "secp256k1", "secp256k1-sys"}, {"bitcoin_hashes"}),
-        ("receiver-formats", "zakura/pir-protocol", ["receiver"], {"bitcoin", "secp256k1", "secp256k1-sys"} | server_roles | wallet_roles, {"zakura-filters", "bitcoin_hashes"}),
+        ("filters", "zakura/filters", [], bitcoin_helpers | {"secp256k1", "secp256k1-sys"}, {"siphasher"}),
+        ("receiver-formats", "zakura/pir-protocol", ["receiver"], bitcoin_helpers | {"secp256k1", "secp256k1-sys"} | server_roles | wallet_roles, {"zakura-filters", "siphasher"}),
         ("receiver-wallet", "zakura/pir-client", ["receiver-wallet"], {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"} | native_evaluators | server_roles, {"zakura-filters", "reinspiring"}),
         # The borrowed reader needs only protocol value types and the txid hashes.
         ("transaction-wire", "zakura/transaction-wire", [], recovery_forbidden | wallet_roles - {"zakura-protocol"} | server_roles | {"zakura-transparent", "zakura-redjubjub", "zakura-pasta-curves", "zakura-jubjub", "zakura-bls12-381"}, {"zakura-protocol", "sha2", "blake2b_simd"}),
