@@ -88,7 +88,7 @@ impl Database {
             let count = input.len() / ROW_BYTES;
             for col in 0..COLS {
                 let output = &mut values[col * rows + start..][..count];
-                for (value, row) in output.iter_mut().zip(input.chunks_exact(ROW_BYTES)) {
+                for (value, row) in output.iter_mut().zip(input.as_chunks::<ROW_BYTES>().0) {
                     *value = u16::from_le_bytes([row[2 * col], row[2 * col + 1]]);
                 }
             }
@@ -114,78 +114,6 @@ impl Database {
                 }) & (Q - 1)
             })
             .collect())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ipir_sp::{SimplePirProfile, server::IPIRServer};
-    use zakura_pir_protocol::receiver::session::MIN_ROWS;
-
-    #[test]
-    fn native_scan_matches_previous_evaluator() {
-        const Q: u64 = crate::native::Q;
-        for rows in [MIN_ROWS as usize, 2 * MIN_ROWS as usize] {
-            let values: Vec<_> = (0..rows * COLS)
-                .map(|i| (i as u16).wrapping_mul(40503).wrapping_add(19))
-                .collect();
-            let data: Vec<_> = values
-                .iter()
-                .flat_map(|value| value.to_le_bytes())
-                .collect();
-            let database = Database::new(rows, &data).unwrap();
-            let (_, mut params) = ipir_sp::params_for_simplepir_profile(
-                rows as u64,
-                (ROW_BYTES * 8) as u64,
-                SimplePirProfile::P16Q48,
-            )
-            .unwrap();
-            params.query_bits = crate::native::QUERY_BITS;
-            params.q_prime_1 = 1 << crate::native::RESPONSE_BITS;
-            let previous = IPIRServer::new_auto_kernel(params, values.iter().copied(), false, true);
-            assert_eq!(previous.db_rows_padded(), rows);
-            assert_eq!(database.values, previous.db());
-            for query in [
-                vec![0; rows],
-                vec![Q - 1; rows],
-                (0..rows)
-                    .map(|i| (i as u64).wrapping_mul(Q / 3) & (Q - 1))
-                    .collect(),
-            ] {
-                let actual = database.multiply(&query).unwrap();
-                assert_eq!(
-                    actual,
-                    previous.try_multiply_power_of_two(Q, &query).unwrap()
-                );
-                for col in [0, COLS / 2, COLS - 1] {
-                    let exact: u128 = (0..rows)
-                        .map(|row| u128::from(values[row * COLS + col]) * u128::from(query[row]))
-                        .sum();
-                    assert_eq!(actual[col], (exact % u128::from(Q)) as u64);
-                }
-            }
-            assert!(database.multiply(&vec![0; rows - 1]).is_err());
-            assert!(database.multiply(&vec![Q; rows]).is_err());
-        }
-    }
-
-    #[test]
-    fn native_database_handles_partial_tiles_and_rejects_bad_lengths() {
-        let rows = 35;
-        let data: Vec<_> = (0..rows * COLS)
-            .flat_map(|i| (i as u16).to_le_bytes())
-            .collect();
-        let database = Database::new(rows, &data).unwrap();
-        for row in 0..rows {
-            for col in 0..COLS {
-                assert_eq!(database.values[col * rows + row], (row * COLS + col) as u16);
-            }
-        }
-        assert!(Database::new(0, &[]).is_err());
-        assert!(Database::new(rows, &data[..data.len() - 1]).is_err());
-        assert!(Database::new(rows + 1, &data).is_err());
-        assert!(Database::new(usize::MAX, &[]).is_err());
     }
 }
 
@@ -296,5 +224,77 @@ impl WitnessServer {
     /// Answer one encrypted query for this session, rejecting any other length or session.
     pub fn respond(&self, body: &[u8]) -> Result<Vec<u8>, Error> {
         self.prepared.respond(&self.id, body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ipir_sp::{SimplePirProfile, server::IPIRServer};
+    use zakura_pir_protocol::receiver::session::MIN_ROWS;
+
+    #[test]
+    fn native_scan_matches_previous_evaluator() {
+        const Q: u64 = crate::native::Q;
+        for rows in [MIN_ROWS as usize, 2 * MIN_ROWS as usize] {
+            let values: Vec<_> = (0..rows * COLS)
+                .map(|i| (i as u16).wrapping_mul(40503).wrapping_add(19))
+                .collect();
+            let data: Vec<_> = values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect();
+            let database = Database::new(rows, &data).unwrap();
+            let (_, mut params) = ipir_sp::params_for_simplepir_profile(
+                rows as u64,
+                (ROW_BYTES * 8) as u64,
+                SimplePirProfile::P16Q48,
+            )
+            .unwrap();
+            params.query_bits = crate::native::QUERY_BITS;
+            params.q_prime_1 = 1 << crate::native::RESPONSE_BITS;
+            let previous = IPIRServer::new_auto_kernel(params, values.iter().copied(), false, true);
+            assert_eq!(previous.db_rows_padded(), rows);
+            assert_eq!(database.values, previous.db());
+            for query in [
+                vec![0; rows],
+                vec![Q - 1; rows],
+                (0..rows)
+                    .map(|i| (i as u64).wrapping_mul(Q / 3) & (Q - 1))
+                    .collect(),
+            ] {
+                let actual = database.multiply(&query).unwrap();
+                assert_eq!(
+                    actual,
+                    previous.try_multiply_power_of_two(Q, &query).unwrap()
+                );
+                for col in [0, COLS / 2, COLS - 1] {
+                    let exact: u128 = (0..rows)
+                        .map(|row| u128::from(values[row * COLS + col]) * u128::from(query[row]))
+                        .sum();
+                    assert_eq!(actual[col], (exact % u128::from(Q)) as u64);
+                }
+            }
+            assert!(database.multiply(&vec![0; rows - 1]).is_err());
+            assert!(database.multiply(&vec![Q; rows]).is_err());
+        }
+    }
+
+    #[test]
+    fn native_database_handles_partial_tiles_and_rejects_bad_lengths() {
+        let rows = 35;
+        let data: Vec<_> = (0..rows * COLS)
+            .flat_map(|i| (i as u16).to_le_bytes())
+            .collect();
+        let database = Database::new(rows, &data).unwrap();
+        for row in 0..rows {
+            for col in 0..COLS {
+                assert_eq!(database.values[col * rows + row], (row * COLS + col) as u16);
+            }
+        }
+        assert!(Database::new(0, &[]).is_err());
+        assert!(Database::new(rows, &data[..data.len() - 1]).is_err());
+        assert!(Database::new(rows + 1, &data).is_err());
+        assert!(Database::new(usize::MAX, &[]).is_err());
     }
 }
