@@ -46,9 +46,11 @@ pub struct NearStatus<'a> {
 /// unreported. Every status from `KNOWN_DEPOSIT_TX` on, including `FAILED`,
 /// implies a deposit; `PENDING_DEPOSIT` and an unrecognized status do not.
 ///
-/// An incoming key's receipts are the destination-chain transactions and a refund
-/// key's are the origin-chain ones, since only that side is Zcash. Each hash is read
-/// as a canonical Zcash transaction ID, and one that is not is skipped.
+/// An incoming key's receipts are the destination-chain transactions. A refund key's
+/// are the origin-chain ones plus the destination-chain ones, since NEAR sometimes
+/// files a ZEC refund under the destination, as the receiver indexer also allows. A
+/// hash from the other chain only names a candidate that never pays the key. Each hash
+/// is read as a canonical Zcash transaction ID, and one that is not is skipped.
 pub fn near_observation(purpose: Purpose, status: &NearStatus<'_>) -> Observation {
     use OperationStatus::*;
     use ReceiptExpectation::Positive;
@@ -79,15 +81,21 @@ pub fn near_observation(purpose: Purpose, status: &NearStatus<'_>) -> Observatio
             | "REFUNDED"
             | "FAILED"
     );
-    let hashes = match purpose {
-        Purpose::Receive => status.destination_tx_hashes,
-        Purpose::Refund => status.origin_tx_hashes,
+    let hashes: &[&[&str]] = match purpose {
+        Purpose::Receive => &[status.destination_tx_hashes],
+        Purpose::Refund => &[status.origin_tx_hashes, status.destination_tx_hashes],
         _ => &[],
     };
+    let mut receipts: Vec<TxId> = vec![];
+    for txid in hashes.iter().copied().flatten().filter_map(|h| TxId::from_hex(h)) {
+        if !receipts.contains(&txid) {
+            receipts.push(txid);
+        }
+    }
     Observation {
         status: outcome,
         funded,
-        receipts: hashes.iter().filter_map(|h| TxId::from_hex(h)).collect(),
+        receipts,
     }
 }
 
@@ -280,7 +288,8 @@ mod tests {
         }
     }
 
-    /// Each direction reads its Zcash side's hashes, skipping any that is not a txid.
+    /// A payout is read from the destination side, and a refund from both sides,
+    /// skipping any hash that is not a txid and any repeat.
     #[test]
     fn receipts_come_from_the_zcash_side_of_the_swap() {
         let payout = TxId::from_bytes([1; 32]);
@@ -295,6 +304,26 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(near_observation(Receive, &status).receipts, [payout]);
+        assert_eq!(near_observation(Refund, &status).receipts, [refund, payout]);
+    }
+
+    /// A ZEC refund NEAR filed under the destination hashes is still a refund receipt.
+    #[test]
+    fn a_refund_listed_under_the_destination_is_read() {
+        let refund = TxId::from_bytes([2; 32]);
+        let refund_hex = refund.to_string();
+        let both = [refund_hex.as_str()];
+        let status = NearStatus {
+            status: "REFUNDED",
+            origin_tx_hashes: &[],
+            destination_tx_hashes: &both,
+            ..Default::default()
+        };
         assert_eq!(near_observation(Refund, &status).receipts, [refund]);
+        let twice = NearStatus {
+            origin_tx_hashes: &both,
+            ..status
+        };
+        assert_eq!(near_observation(Refund, &twice).receipts, [refund]);
     }
 }
