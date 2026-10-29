@@ -148,7 +148,6 @@ zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc4", option
 
 [dev-dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
 zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", version = "0.1.0-rc9.5", features = ["orchard", "test-dependencies", "transparent-inputs", "unstable"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 incrementalmerkletree = { workspace = true }
@@ -230,11 +229,6 @@ required-features = ["native"]
 name = "native_p8"
 path = "tests/native/p8.rs"
 required-features = ["native"]
-
-[[test]]
-name = "transparent_filter_bip158_vectors"
-path = "tests/transparent_filter/bip158_vectors.rs"
-required-features = ["transparent", "reqwest"]
 
 [[test]]
 name = "transparent_filter_golden_envelope"

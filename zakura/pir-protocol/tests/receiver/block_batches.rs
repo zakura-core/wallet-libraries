@@ -73,42 +73,6 @@ fn round_trip_preserves_members_and_empty_blocks() {
     assert!(decoded.matches(3, &members).is_err());
 }
 
-/// The independent BIP158 writer agrees with the actual serialized block payload.
-#[test]
-fn payload_matches_independent_codec() {
-    let members = receivers(100);
-    let block = BlockId {
-        height: 10,
-        hash: [10; 32],
-    };
-    let filter =
-        BlockFilter::build(&GENESIS, block, [9; 32], members.iter().chain(&members)).unwrap();
-    let encoded = Batch::new(GENESIS, 0, vec![filter])
-        .unwrap()
-        .encode()
-        .unwrap();
-    let salt = Sha256::new()
-        .chain_update(b"ironwood-receiver/v1/block-hints\0")
-        .chain_update(GENESIS)
-        .chain_update(10u32.to_le_bytes())
-        .chain_update([10; 32])
-        .finalize();
-    let digest = Sha256::new()
-        .chain_update(b"ironwood-receiver/v1/filter\0")
-        .chain_update(salt)
-        .finalize();
-    let k0 = u64::from_le_bytes(digest[..8].try_into().unwrap());
-    let k1 = u64::from_le_bytes(digest[8..16].try_into().unwrap());
-    let mut expected = Vec::new();
-    let mut writer = bitcoin::bip158::GcsFilterWriter::new(&mut expected, k0, k1, 1_569_792, 20);
-    for receiver in &members {
-        writer.add_element(receiver);
-    }
-    writer.finish().unwrap();
-    // Header: magic/genesis/revision/count; block: height/hash/parent/payload length.
-    assert_eq!(&encoded[52 + 72..], expected);
-}
-
 /// Truncation and extra bytes cannot turn malformed data into negative membership.
 #[test]
 fn malformed_envelopes_and_gcs_are_rejected() {
