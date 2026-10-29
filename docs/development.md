@@ -137,6 +137,14 @@ It also compares endpoint normalization with the previous URL parser in an
 external consumer. This keeps the independent oracle and its URL/ICU stack out
 of ordinary workspace test builds.
 
+IPIR's previous setup, codec, metadata and Receiver scan implementations also
+run in a fresh verification consumer. Ordinary golden tests use an independent
+bit-by-bit encoder, and local metadata/scan tests use frozen provider outputs.
+Dependency verification recomputes those fixtures with the pinned old provider
+and checks both codecs, mask derivation, invalid shapes and row coefficients.
+Thus ordinary test builds omit the IPIR server/client wrappers and SimplePIR
+kernel without losing the previous-provider comparisons.
+
 The PIR clients temporarily pin the IPIR family to the main revision that merged
 [IPIR PR 39](https://github.com/valargroup/ipir-sp/pull/39). Native setup derivation and byte framing live in the shared protocol package;
 client encryption and server operations use ReinspiRING directly. Production

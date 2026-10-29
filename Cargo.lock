@@ -2583,39 +2583,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ipir-native-client"
-version = "0.1.0-rc.1"
-source = "git+https://github.com/valargroup/ipir-sp?rev=5ea080a3281a01c5459f585e0a1bbbde50ec2bd2#5ea080a3281a01c5459f585e0a1bbbde50ec2bd2"
-dependencies = [
- "rand 0.9.5",
- "rand_chacha 0.3.1",
- "reinspiring",
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "ipir-sp"
-version = "0.1.0-rc.7"
-source = "git+https://github.com/valargroup/ipir-sp?rev=5ea080a3281a01c5459f585e0a1bbbde50ec2bd2#5ea080a3281a01c5459f585e0a1bbbde50ec2bd2"
-dependencies = [
- "fastrand",
- "inspiring",
- "ipir-native-client",
- "log",
- "rand 0.9.5",
- "rand_chacha 0.3.1",
- "rayon",
- "reinspiring",
- "serde",
- "serde_json",
- "sha1",
- "sha2 0.10.9",
- "simplepir-kernel",
- "valar-spiral-rs",
- "zeroize",
-]
-
-[[package]]
 name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4763,16 +4730,6 @@ name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
-
-[[package]]
-name = "simplepir-kernel"
-version = "0.1.0-rc.4"
-source = "git+https://github.com/valargroup/ipir-sp?rev=5ea080a3281a01c5459f585e0a1bbbde50ec2bd2#5ea080a3281a01c5459f585e0a1bbbde50ec2bd2"
-dependencies = [
- "inspiring",
- "rayon",
- "valar-spiral-rs",
-]
 
 [[package]]
 name = "sinsemilla"
@@ -7717,8 +7674,6 @@ dependencies = [
  "hex",
  "http",
  "incrementalmerkletree 0.8.2",
- "ipir-native-client",
- "ipir-sp",
  "rand 0.10.3",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
@@ -7773,8 +7728,6 @@ dependencies = [
  "hex",
  "http",
  "incrementalmerkletree 0.8.2",
- "ipir-native-client",
- "ipir-sp",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
  "reinspiring",
@@ -7809,9 +7762,10 @@ dependencies = [
 name = "zakura-pir-query-server"
 version = "0.0.1-rc5"
 dependencies = [
- "ipir-sp",
+ "hex",
  "rayon",
  "reinspiring",
+ "serde_json",
  "sha2 0.10.9",
  "zakura-pir-protocol",
  "zakura-pir-publisher",
