@@ -122,7 +122,9 @@ byteorder = { workspace = true, optional = true }
 percent-encoding.workspace = true
 
 # - Scanning
-flume.workspace = true
+# Scanning uses ordinary channels; async receive is enabled by sync-decryptor.
+# Neither path uses channel selection or its randomized fairness support.
+flume = { version = "0.11", default-features = false }
 rayon.workspace = true
 
 # - Tor
@@ -238,6 +240,7 @@ sync = [
 ## `sync` feature flag is replaced with a sync engine that makes use of the batch
 ## decryption engine.
 sync-decryptor = [
+    "flume/async",
     "dep:tokio",
     "tokio?/macros",
     "tokio?/rt",

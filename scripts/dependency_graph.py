@@ -85,6 +85,8 @@ def main():
     server_roles = {"zakura-pir-publisher", "zakura-pir-query-server", "zakura-pir-server-core", "zakura-server-chain"}
     wallet_roles = {"ipir-native-client", "zakura-pir-client", "zakura-client-backend", "zakura-client-sqlite", "zakura-protocol", "zakura-transparent", "zakura-orchard"}
     cases = [
+        ("scanning", "librustzcash/zcash_client_backend", [], {"nanorand", "futures-core", "futures-sink"}, {"flume"}),
+        ("async-scanning", "librustzcash/zcash_client_backend", ["sync-decryptor"], {"nanorand"}, {"flume", "futures-core", "futures-sink", "tokio"}),
         ("record-types", "zakura/pir-protocol", ["enhance"], endpoint_stack | server_roles | {"http", "bytes", "ipir-native-client", "reinspiring"}, set()),
         ("endpoint", "zakura/pir-protocol", ["http-endpoint"], endpoint_stack | server_roles, {"http"}),
         ("recovery-types", "zakura/pir-protocol", ["transparent-inputs"], recovery_forbidden | server_roles, {"zakura-protocol"}),
@@ -137,6 +139,14 @@ def main():
                 (Path(temporary) / name / "src/main.rs").write_text(source)
                 subprocess.run(
                     ["cargo", "run", "--locked", "--quiet", "--manifest-path",
+                     str(Path(temporary) / name / "Cargo.toml")], check=True,
+                )
+            if name == "async-scanning":
+                (Path(temporary) / name / "src/lib.rs").write_text(
+                    "pub use subject::sync::decryptor;\n"
+                )
+                subprocess.run(
+                    ["cargo", "check", "--locked", "--quiet", "--manifest-path",
                      str(Path(temporary) / name / "Cargo.toml")], check=True,
                 )
             if name == "status-policy":
