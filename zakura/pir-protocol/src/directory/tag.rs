@@ -17,15 +17,16 @@ pub fn salt(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// The tag of `key` under `salt`: SHA-256 of `domain`, the salt, the key's
-/// `u16` length and the key, truncated to [`TAG_BYTES`].
-pub fn tag(domain: &[u8], salt: &[u8; 32], key: &[u8]) -> [u8; TAG_BYTES] {
+/// A tag under `salt`: SHA-256 of `domain`, the salt and `key` in order,
+/// truncated to [`TAG_BYTES`]. `key` carries the format's own framing, such
+/// as a length prefix, so a fixed-length key can be hashed bare.
+pub fn tag(domain: &[u8], salt: &[u8; 32], key: &[&[u8]]) -> [u8; TAG_BYTES] {
     let mut hasher = Sha256::new();
     hasher.update(domain);
     hasher.update(salt);
-    let length = u16::try_from(key.len()).expect("a tagged key is at most u16::MAX bytes");
-    hasher.update(length.to_le_bytes());
-    hasher.update(key);
+    for part in key {
+        hasher.update(part);
+    }
     let digest = hasher.finalize();
     digest[..TAG_BYTES].try_into().expect("14 bytes")
 }
@@ -70,7 +71,7 @@ mod tests {
             if *salt == committed || *salt == salt_at(1) {
                 [0; TAG_BYTES]
             } else {
-                tag(DOMAIN, salt, key)
+                tag(DOMAIN, salt, &[key])
             }
         };
         assert_eq!(
@@ -78,5 +79,17 @@ mod tests {
             Some((2, salt_at(2)))
         );
         assert_eq!(resolve_salt(0..=1, salt_at, &keys, colliding), None);
+    }
+
+    /// Both framings against vectors computed independently with Python's
+    /// `hashlib`: a bare 43-byte key, and the same key after a `u16` length.
+    #[test]
+    fn tags_hash_the_callers_framing() {
+        let key: Vec<u8> = (0..43).collect();
+        let salt = [5; 32];
+        let bare = tag(DOMAIN, &salt, &[&key]);
+        let framed = tag(DOMAIN, &salt, &[&43u16.to_le_bytes(), &key]);
+        assert_eq!(hex::encode(bare), "a312a2f53895dbfaeabeb897a91d");
+        assert_eq!(hex::encode(framed), "acd7e1477d23e9103cceaa1aa9e7");
     }
 }

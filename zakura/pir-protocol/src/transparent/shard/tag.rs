@@ -65,9 +65,10 @@ pub fn page_tag_salt(
     crate::directory::tag::salt(PAGE_TAG_SALT_DOMAIN, &parts)
 }
 
-/// The 14-byte tag of one raw script under `salt`.
+/// The 14-byte tag of one raw script under `salt`, after its `u16` length.
 pub fn script_tag(salt: &[u8; 32], script: &[u8]) -> [u8; SCRIPT_TAG_BYTES] {
-    crate::directory::tag::tag(SCRIPT_TAG_DOMAIN, salt, script)
+    let length = u16::try_from(script.len()).expect("a tagged script is at most MAX_SCRIPT_BYTES");
+    crate::directory::tag::tag(SCRIPT_TAG_DOMAIN, salt, &[&length.to_le_bytes(), script])
 }
 
 /// The counter whose tags are unique, and the salt at that counter.
