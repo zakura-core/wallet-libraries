@@ -36,7 +36,6 @@ fn head() -> Head {
         genesis: GENESIS,
         revision: 3,
         first: 1,
-        sealed: 0,
         tip: BlockId {
             height: 20,
             hash: [20; 32],
@@ -184,13 +183,16 @@ fn malformed_ranges_are_rejected() {
     assert!(Range::new(3, 0, 1, [9; 32], [9; 32], vec![]).is_err());
 }
 
-/// A response is bound to the head's revision and tip and to the request, and may start
-/// at an earlier chunk boundary as long as it covers the requested height.
+/// A response is bound to the head's revision and tip and to the request, and starts
+/// exactly at the requested height.
 #[test]
 fn check_binds_head_and_request() {
     let (range, _) = sample();
     range.check(&head(), 10, 5).unwrap();
-    range.check(&head(), 12, 3).unwrap();
+    assert!(
+        range.check(&head(), 12, 3).is_err(),
+        "starts before the request"
+    );
     let stale = Head {
         revision: 4,
         ..head()
@@ -224,7 +226,7 @@ fn check_binds_head_and_request() {
     assert!(head().check_range(1, 0).is_err());
     assert!(
         Head {
-            sealed: 21,
+            first: 21,
             ..head()
         }
         .validate(&GENESIS)

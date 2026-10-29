@@ -33,8 +33,8 @@ pub struct BlockId {
     pub hash: Hash,
 }
 
-/// The hints a server holds: a sealed archive from `first` through `sealed`, then a tail
-/// through `tip` that can still change with a reorg.
+/// The hints a server holds, from `first` through `tip`. Blocks near the tip can still
+/// change with a reorg.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Head {
@@ -43,23 +43,13 @@ pub struct Head {
     pub revision: u64,
     /// First height served, inclusive. Genesis itself has no set.
     pub first: u32,
-    /// Last height of the sealed archive, or `first - 1` when nothing is sealed yet.
-    pub sealed: u32,
     pub tip: BlockId,
 }
 
 impl Head {
     /// Checks the network and that the advertised heights are ordered.
     pub fn validate(&self, genesis: &Hash) -> Result<(), Error> {
-        if &self.genesis != genesis
-            || self.first == 0
-            || self.first > self.tip.height
-            || self
-                .sealed
-                .checked_add(1)
-                .is_none_or(|next| next < self.first)
-            || self.sealed > self.tip.height
-        {
+        if &self.genesis != genesis || self.first == 0 || self.first > self.tip.height {
             return Err(Error::Coverage);
         }
         Ok(())
@@ -76,8 +66,7 @@ impl Head {
 }
 
 /// What serving from a height to the tip would cost, so a wallet can compare hints with
-/// PIR before downloading. The server may start earlier than asked, at the start of the
-/// sealed chunk holding the requested height; `from` says where.
+/// PIR before downloading. `from` is the requested height.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RangeSize {
@@ -342,16 +331,14 @@ impl Range {
     }
 
     /// Binds a response to the captured head and a request for `limit` heights from
-    /// `from`. The range may start earlier, at the start of the sealed chunk holding
-    /// `from`, but must cover `from` and stay within the request. When it reaches the
-    /// head's tip it must end at the tip's hash.
+    /// `from`. The range must start at `from` and stay within the request. When it reaches
+    /// the head's tip it must end at the tip's hash.
     pub fn check(&self, head: &Head, from: u32, limit: u32) -> Result<(), Error> {
         head.check_range(from, limit)?;
         let end = self.end().height;
         let last = from.saturating_add(limit - 1);
         if self.revision != head.revision
-            || self.from < head.first
-            || self.from > from
+            || self.from != from
             || end < from
             || end > last.min(head.tip.height)
             || (end == head.tip.height && self.end != head.tip.hash)
