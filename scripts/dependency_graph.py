@@ -87,6 +87,7 @@ def main():
     cases = [
         ("scanning", "librustzcash/zcash_client_backend", [], {"nanorand", "futures-core", "futures-sink"}, {"flume"}),
         ("async-scanning", "librustzcash/zcash_client_backend", ["sync-decryptor"], {"nanorand"}, {"flume", "futures-core", "futures-sink", "tokio"}),
+        ("wallet-sync", "librustzcash/zcash_client_backend", ["sync"], {"futures-macro"}, {"futures-util", "tonic"}),
         ("record-types", "zakura/pir-protocol", ["enhance"], endpoint_stack | server_roles | {"http", "bytes", "ipir-native-client", "reinspiring"}, set()),
         ("endpoint", "zakura/pir-protocol", ["http-endpoint"], endpoint_stack | server_roles, {"http"}),
         ("recovery-types", "zakura/pir-protocol", ["transparent-inputs"], recovery_forbidden | server_roles, {"zakura-protocol"}),
@@ -118,7 +119,7 @@ def main():
     for product in ("enhance", "status", "transparent", "receiver"):
         evaluator = {"ipir-native-client"} if product == "receiver" else set()
         cases.extend([
-            (f"{product}-client", "zakura/pir-client", [product], server_roles | native_evaluators | endpoint_stack, {"zakura-pir-protocol", "reinspiring"}),
+            (f"{product}-client", "zakura/pir-client", [product], server_roles | native_evaluators | endpoint_stack | {"futures-macro"}, {"zakura-pir-protocol", "reinspiring"}),
             (f"{product}-publisher", "zakura/pir-publisher", [product], wallet_roles | {"zakura-pir-query-server", "zakura-server-chain"}, {"zakura-pir-protocol", "zakura-pir-server-core"}),
             (f"{product}-query-server", "zakura/pir-query-server", [product], wallet_roles - evaluator | {"zakura-pir-publisher", "zakura-server-chain"}, {"zakura-pir-protocol", "zakura-pir-server-core"}),
         ])
@@ -144,9 +145,10 @@ def main():
                     ["cargo", "run", "--locked", "--quiet", "--manifest-path",
                      str(Path(temporary) / name / "Cargo.toml")], check=True,
                 )
-            if name == "async-scanning":
+            if name in {"async-scanning", "wallet-sync"}:
+                symbol = "sync::decryptor" if name == "async-scanning" else "sync"
                 (Path(temporary) / name / "src/lib.rs").write_text(
-                    "pub use subject::sync::decryptor;\n"
+                    f"pub use subject::{symbol};\n"
                 )
                 subprocess.run(
                     ["cargo", "check", "--locked", "--quiet", "--manifest-path",
