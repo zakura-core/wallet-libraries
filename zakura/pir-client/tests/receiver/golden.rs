@@ -3,8 +3,10 @@
 //! manifest-only changes alter session framing but preserve native setup and rows.
 mod common;
 use common::{manifest, receiver, record};
-use ipir_sp::bits::u64s_to_contiguous_bytes;
+#[path = "../support/reference_bits.rs"]
+mod reference_bits;
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
+use reference_bits::u64s_to_contiguous_bytes;
 use sha2::{Digest, Sha256};
 use zakura_pir_client::native::{D, NativeKeys, NativeSecret, NativeSetup, Q, Q_BITS, QUERY_BITS};
 use zakura_pir_client::receiver::{

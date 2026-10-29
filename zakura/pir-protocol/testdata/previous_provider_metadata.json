@@ -1,0 +1,22 @@
+{
+  "16384": {
+    "q48": "{\"num_items\":16384,\"item_size_bits\":172392,\"poly_len\":2048,\"db_dim_1\":3,\"db_dim_2\":1,\"instances\":6,\"db_rows\":16384,\"db_cols\":12288,\"p\":65536,\"q_prime_1\":1048576,\"q_prime_2\":268369921,\"q2_bits\":28,\"t_exp_left\":3,\"t_exp_right\":2,\"query_bits\":48}",
+    "served": "{\"num_items\":16384,\"item_size_bits\":172392,\"poly_len\":2048,\"db_dim_1\":3,\"db_dim_2\":1,\"instances\":6,\"db_rows\":16384,\"db_cols\":12288,\"p\":65536,\"q_prime_1\":4194304,\"q_prime_2\":268369921,\"q2_bits\":28,\"t_exp_left\":3,\"t_exp_right\":2,\"query_bits\":49}"
+  },
+  "2048": {
+    "q48": "{\"num_items\":2048,\"item_size_bits\":172392,\"poly_len\":2048,\"db_dim_1\":0,\"db_dim_2\":1,\"instances\":6,\"db_rows\":2048,\"db_cols\":12288,\"p\":65536,\"q_prime_1\":1048576,\"q_prime_2\":268369921,\"q2_bits\":28,\"t_exp_left\":3,\"t_exp_right\":2,\"query_bits\":48}",
+    "served": null
+  },
+  "32768": {
+    "q48": "{\"num_items\":32768,\"item_size_bits\":172392,\"poly_len\":2048,\"db_dim_1\":4,\"db_dim_2\":1,\"instances\":6,\"db_rows\":32768,\"db_cols\":12288,\"p\":65536,\"q_prime_1\":1048576,\"q_prime_2\":268369921,\"q2_bits\":28,\"t_exp_left\":3,\"t_exp_right\":2,\"query_bits\":48}",
+    "served": "{\"num_items\":32768,\"item_size_bits\":172392,\"poly_len\":2048,\"db_dim_1\":4,\"db_dim_2\":1,\"instances\":6,\"db_rows\":32768,\"db_cols\":12288,\"p\":65536,\"q_prime_1\":4194304,\"q_prime_2\":268369921,\"q2_bits\":28,\"t_exp_left\":3,\"t_exp_right\":2,\"query_bits\":49}"
+  },
+  "4096": {
+    "q48": "{\"num_items\":4096,\"item_size_bits\":172392,\"poly_len\":2048,\"db_dim_1\":1,\"db_dim_2\":1,\"instances\":6,\"db_rows\":4096,\"db_cols\":12288,\"p\":65536,\"q_prime_1\":1048576,\"q_prime_2\":268369921,\"q2_bits\":28,\"t_exp_left\":3,\"t_exp_right\":2,\"query_bits\":48}",
+    "served": "{\"num_items\":4096,\"item_size_bits\":172392,\"poly_len\":2048,\"db_dim_1\":1,\"db_dim_2\":1,\"instances\":6,\"db_rows\":4096,\"db_cols\":12288,\"p\":65536,\"q_prime_1\":4194304,\"q_prime_2\":268369921,\"q2_bits\":28,\"t_exp_left\":3,\"t_exp_right\":2,\"query_bits\":49}"
+  },
+  "8192": {
+    "q48": "{\"num_items\":8192,\"item_size_bits\":172392,\"poly_len\":2048,\"db_dim_1\":2,\"db_dim_2\":1,\"instances\":6,\"db_rows\":8192,\"db_cols\":12288,\"p\":65536,\"q_prime_1\":1048576,\"q_prime_2\":268369921,\"q2_bits\":28,\"t_exp_left\":3,\"t_exp_right\":2,\"query_bits\":48}",
+    "served": "{\"num_items\":8192,\"item_size_bits\":172392,\"poly_len\":2048,\"db_dim_1\":2,\"db_dim_2\":1,\"instances\":6,\"db_rows\":8192,\"db_cols\":12288,\"p\":65536,\"q_prime_1\":4194304,\"q_prime_2\":268369921,\"q2_bits\":28,\"t_exp_left\":3,\"t_exp_right\":2,\"query_bits\":49}"
+  }
+}

@@ -230,12 +230,14 @@ impl WitnessServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ipir_sp::{SimplePirProfile, server::IPIRServer};
     use zakura_pir_protocol::receiver::session::MIN_ROWS;
 
     #[test]
-    fn native_scan_matches_previous_evaluator() {
+    fn native_scan_matches_previous_provider_fixtures() {
         const Q: u64 = crate::native::Q;
+        let fixtures: serde_json::Value =
+            serde_json::from_str(include_str!("../../testdata/previous_provider_scans.json"))
+                .unwrap();
         for rows in [MIN_ROWS as usize, 2 * MIN_ROWS as usize] {
             let values: Vec<_> = (0..rows * COLS)
                 .map(|i| (i as u16).wrapping_mul(40503).wrapping_add(19))
@@ -245,29 +247,28 @@ mod tests {
                 .flat_map(|value| value.to_le_bytes())
                 .collect();
             let database = Database::new(rows, &data).unwrap();
-            let (_, mut params) = ipir_sp::params_for_simplepir_profile(
-                rows as u64,
-                (ROW_BYTES * 8) as u64,
-                SimplePirProfile::P16Q48,
-            )
-            .unwrap();
-            params.query_bits = crate::native::QUERY_BITS;
-            params.q_prime_1 = 1 << crate::native::RESPONSE_BITS;
-            let previous = IPIRServer::new_auto_kernel(params, values.iter().copied(), false, true);
-            assert_eq!(previous.db_rows_padded(), rows);
-            assert_eq!(database.values, previous.db());
-            for query in [
+            let fixture = &fixtures[rows.to_string()];
+            let mut hash = Sha256::new();
+            for value in &database.values {
+                hash.update(value.to_le_bytes());
+            }
+            assert_eq!(hex::encode(hash.finalize()), fixture["database"]);
+            for (index, query) in [
                 vec![0; rows],
                 vec![Q - 1; rows],
                 (0..rows)
                     .map(|i| (i as u64).wrapping_mul(Q / 3) & (Q - 1))
                     .collect(),
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let actual = database.multiply(&query).unwrap();
-                assert_eq!(
-                    actual,
-                    previous.try_multiply_power_of_two(Q, &query).unwrap()
-                );
+                let mut hash = Sha256::new();
+                for value in &actual {
+                    hash.update(value.to_le_bytes());
+                }
+                assert_eq!(hex::encode(hash.finalize()), fixture["scans"][index]);
                 for col in [0, COLS / 2, COLS - 1] {
                     let exact: u128 = (0..rows)
                         .map(|row| u128::from(values[row * COLS + col]) * u128::from(query[row]))
