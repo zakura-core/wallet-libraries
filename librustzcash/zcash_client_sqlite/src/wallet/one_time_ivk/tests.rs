@@ -230,6 +230,7 @@ pub(super) fn answer_prepared_empty(db: &mut Db, account: AccountUuid, purpose: 
     // The prepared key's lookup can sit behind the receive window's bootstrap lookups, so
     // it is read from its row rather than from the bounded status.
     use zcash_client_backend::data_api::one_time_ivk::restore::{DiscoveryWork, LookupWork};
+    #[allow(clippy::type_complexity)]
     let found: Option<(Vec<u8>, Vec<u8>, u32, u32, Option<u32>)> = db
         .conn
         .query_row(

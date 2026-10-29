@@ -1482,12 +1482,12 @@ pub(crate) fn status<P: Parameters>(
         params![owner.0, now, end],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    status.witnesses = conn.prepare(&format!("SELECT k.purpose, k.key_index, p.position, substr(p.encrypted_note, 33, 32),
+    status.witnesses = conn.prepare("SELECT k.purpose, k.key_index, p.position, substr(p.encrypted_note, 33, 32),
             p.payments, p.witnesses, p.ordinal
         FROM ironwood_one_time_payment_recovery p JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
         WHERE k.account_id = ?1 AND p.witness IS NULL AND p.payments IS NOT NULL
         AND EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id AND l.reasons & 3 != 0)
-        ORDER BY p.height, p.position LIMIT 64"))?
+        ORDER BY p.height, p.position LIMIT 64")?
         .query_and_then([owner.0], |r| Ok::<_, SqliteClientError>(WitnessRequest {
             key: stored_key_id(r)?, position: r.get(2)?, cmx: r.get(3)?, payments: r.get(4)?,
             witnesses: r.get(5)?, ordinal: r.get(6)?
