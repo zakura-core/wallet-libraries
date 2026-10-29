@@ -21,6 +21,7 @@ pub use filter::GcsFilterWriter;
 /// Uses the high 64 bits of the product of the keyed hash and `range`. A zero
 /// range returns zero. Callers derive the keys and validate their set's range;
 /// this function does not validate a filter or establish membership.
+#[inline]
 pub fn hash_to_range(k0: u64, k1: u64, range: u64, element: &[u8]) -> u64 {
     let hash = siphasher::sip::SipHasher24::new_with_keys(k0, k1).hash(element);
     ((u128::from(hash) * u128::from(range)) >> 64) as u64
