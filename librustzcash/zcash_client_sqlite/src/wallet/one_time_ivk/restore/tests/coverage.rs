@@ -1,4 +1,4 @@
-//! Filter coverage: spans, re-checks, complete checks and their rollback.
+//! Filter coverage: spans, bootstrap lookups, complete checks and their rollback.
 use super::discovery::*;
 use super::*;
 use zcash_client_backend::data_api::one_time_ivk::restore::{FilterOutcome, FilterSpan};
@@ -77,33 +77,6 @@ fn run_pir(st: &mut State, account: AccountUuid) -> usize {
     panic!("recovery did not converge");
 }
 
-/// The monitored keys whose coverage is behind the account's frontier.
-fn behind(st: &State, account: AccountUuid) -> Vec<KeyId> {
-    let frontier = status(st.wallet().db(), account)
-        .filter_frontier
-        .map(|f| f.height);
-    let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    receivers
-        .iter()
-        .filter(|r| frontier.is_some_and(|f| r.covered < f))
-        .map(|r| r.work.key)
-        .collect()
-}
-
-/// Re-checks every key behind the frontier over all committed history, with `hits`.
-fn recheck(st: &mut State, account: AccountUuid, hits: &[(BlockHeight, KeyId)]) {
-    let keys = behind(st, account);
-    let state = status(st.wallet().db(), account);
-    let frontier = state.filter_frontier.unwrap().height;
-    let from = activation(st);
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .recheck_one_time_filters(account, state.token, 0, from..=frontier, &keys, hits)
-            .unwrap()
-    );
-}
-
 /// Starts a complete check at the tip and answers it, returning how many lookups ran.
 fn complete(st: &mut State, account: AccountUuid) -> usize {
     let publication = publication_at(st, tip(st).height);
@@ -135,15 +108,17 @@ fn reserve_receive(st: &mut State, account: AccountUuid) -> (KeyId, usize) {
     panic!("issuance did not settle");
 }
 
-/// An account that never swapped finishes its seed walk from one span with no PIR query,
-/// stays fresh, and hands out its first address after that address's own lookup.
+/// An account that never swapped finishes its seed walk with the four bootstrap lookups
+/// its receive window queued, stays fresh, and hands out its first address.
 #[test]
-fn an_account_that_never_swapped_walks_with_no_pir() {
+fn an_account_that_never_swapped_walks_with_four_lookups() {
     let mut st = scanned_wallet();
     st.generate_and_scan_empty_blocks(3);
     let account = st.test_account().unwrap().id();
     assert!(status(st.wallet().db(), account).fresh);
     assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
+    assert!(!status(st.wallet().db(), account).restore_complete);
+    assert_eq!(run_pir(&mut st, account), 4);
     let state = status(st.wallet().db(), account);
     assert!(state.lookups.is_empty() && state.witnesses.is_empty());
     assert_eq!(
@@ -156,66 +131,118 @@ fn an_account_that_never_swapped_walks_with_no_pir() {
     );
     assert_eq!(state.filter_frontier, Some(tip(&st)));
     assert!(state.fresh);
-    assert_eq!(reserve_receive(&mut st, account), (receive(0), 1));
+    assert_eq!(reserve_receive(&mut st, account).0, receive(0));
 }
 
-/// I0 and I4 are both paid in history. Filters match only I0, whose lookup slides the
-/// window, and re-checking the newly watched I4 over the history already covered finds
-/// its payment with one more lookup. The walk then finishes on re-checks alone.
+/// I0 and I4 are both paid in history. Filters match only I0, whose payment slides the
+/// window, and I4's bootstrap lookup over the history filters already passed finds its
+/// payment. The walk then finishes on the bootstrap lookups of I5 to I8.
 #[test]
-fn paid_i0_and_i4_are_found_through_rechecking() {
+fn paid_i0_and_i4_are_found_through_bootstrap() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let paid0 = pay_candidate(&mut st, receive(0));
-    let paid4 = pay_candidate(&mut st, receive(4));
+    pay_candidate(&mut st, receive(4));
     assert_eq!(
         advance(&mut st, account, &[(paid0.height, receive(0))]),
         FilterOutcome::Committed
     );
-    assert_eq!(run_pir(&mut st, account), 1);
+    assert_eq!(run_pir(&mut st, account), 9);
     assert!(!status(st.wallet().db(), account).fresh);
-    assert_eq!(behind(&st, account), [receive(4)]);
-    recheck(&mut st, account, &[(paid4.height, receive(4))]);
-    assert_eq!(run_pir(&mut st, account), 1);
-    assert_eq!(
-        behind(&st, account),
-        [receive(5), receive(6), receive(7), receive(8)]
-    );
-    recheck(&mut st, account, &[]);
-    assert_eq!(run_pir(&mut st, account), 0);
     assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
     let state = status(st.wallet().db(), account);
     assert!(state.restore_complete && state.lookups.is_empty());
     assert_eq!(state.restore_next, 9);
 }
 
-/// A re-check must continue each key's coverage and stay inside committed history.
+/// The coverage of receive index `index`.
+fn covered_height(st: &State, index: u64) -> Option<u32> {
+    value(
+        st.wallet().conn(),
+        "SELECT covered_height FROM ironwood_one_time_keys WHERE purpose = 1 AND key_index = ?1",
+        [index.to_be_bytes()],
+    )
+}
+
+/// A key that enters monitoring after filters passed its history gets one lookup from
+/// activation through the frontier, and its coverage reaches the frontier, so the next
+/// span carries it forward without reading that history again.
 #[test]
-fn a_recheck_cannot_skip_history() {
+fn an_enrolled_key_gets_one_obligation_and_no_recheck() {
     let mut st = scanned_wallet();
-    st.generate_and_scan_empty_blocks(3);
     let account = st.test_account().unwrap().id();
     assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
-    let frontier = tip(&st).height;
-    // Pretend I0 is behind, so a re-check must start at activation.
-    exec(
-        st.wallet().conn(),
-        "UPDATE ironwood_one_time_keys SET covered_height = NULL WHERE key_index = ?1",
-        [0u64.to_be_bytes()],
+    assert_eq!(run_pir(&mut st, account), 4);
+    let paid = pay_candidate(&mut st, receive(0));
+    assert_eq!(
+        advance(&mut st, account, &[(paid.height, receive(0))]),
+        FilterOutcome::Committed
     );
-    let token = status(st.wallet().db(), account).token;
-    let start = activation(&st);
-    let db = st.wallet_mut().db_mut();
-    for heights in [start + 1..=frontier, start..=frontier + 1] {
-        assert!(
-            db.recheck_one_time_filters(account, token, 0, heights, &[receive(0)], &[])
-                .is_err()
-        );
-    }
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(answer_lookup(&mut st, account, publication));
+    send_witness(&mut st, receive(0), &paid);
+    let frontier = tip(&st).height;
+    assert_eq!(due(&st, account), [receive(4)]);
+    let bootstrap = work_of(&st, receive(4));
+    assert_eq!(
+        (bootstrap.from, bootstrap.through),
+        (activation(&st), frontier)
+    );
+    assert_eq!(covered_height(&st, 4), Some(u32::from(frontier)));
+    st.generate_and_scan_empty_blocks(1);
+    assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
+    assert_eq!(work_of(&st, receive(4)).through, frontier);
+    assert_eq!(covered_height(&st, 4), Some(u32::from(tip(&st).height)));
+    assert_eq!(run_pir(&mut st, account), 1);
+    assert!(status(st.wallet().db(), account).lookups.is_empty());
+}
+
+/// A hit past a pending bootstrap's target extends that same lookup through the span's end,
+/// keeping its start, so the payment costs no second obligation.
+#[test]
+fn a_hit_while_a_bootstrap_is_pending_extends_it() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let bootstrap = work_of(&st, receive(1));
+    let paid = pay_candidate(&mut st, receive(1));
+    assert!(paid.height > bootstrap.through);
+    assert_eq!(
+        advance(&mut st, account, &[(paid.height, receive(1))]),
+        FilterOutcome::Committed
+    );
+    let extended = work_of(&st, receive(1));
+    assert_eq!(
+        (extended.from, extended.through),
+        (bootstrap.from, tip(&st).height)
+    );
+    run_pir(&mut st, account);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// A rewind below a pending bootstrap's target keeps the target, so the lookup waits for
+/// the replacement chain to reach it and then completes.
+#[test]
+fn a_rewind_below_a_pending_target_keeps_it() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    assert_eq!(run_pir(&mut st, account), 4);
+    st.generate_and_scan_empty_blocks(4);
+    let target = tip(&st).height;
+    recover(st.wallet_mut().db_mut(), account, refund(0), target - 3);
+    st.truncate_to_height(target - 2);
+    let work = work_of(&st, refund(0));
+    assert_eq!(work.through, target);
+    let short = publication_at(&st, target - 2);
+    let page = whole(short, vec![]);
     assert!(
-        db.recheck_one_time_filters(account, token, 0, start..=frontier, &[receive(0)], &[])
+        !st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, &work, &page, clock_now())
             .unwrap()
     );
+    st.generate_and_scan_empty_blocks(2);
+    assert_eq!(run_pir(&mut st, account), 1);
+    assert!(status(st.wallet().db(), account).lookups.is_empty());
 }
 
 /// I0 was paid before a late restore birthday, and I4 after it.
@@ -242,10 +269,11 @@ fn a_hit_before_the_birthday_advances_the_window() {
         advance(&mut st, account, &[(paid0.height, receive(0))]),
         FilterOutcome::Committed
     );
-    assert_eq!(run_pir(&mut st, account), 1);
-    assert!(
-        one_time_notes(&st).is_empty(),
-        "notes before the birthday are not tracked"
+    run_pir(&mut st, account);
+    assert_eq!(
+        one_time_notes(&st),
+        [(100_000, false)],
+        "only I4's note, after the birthday, is tracked"
     );
     let marked: Option<u32> = value(
         st.wallet().conn(),
@@ -253,21 +281,20 @@ fn a_hit_before_the_birthday_advances_the_window() {
         [0u64.to_be_bytes()],
     );
     assert!(marked.is_some());
-    assert_eq!(behind(&st, account), [receive(4)]);
+    let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert!(receivers.iter().any(|r| r.work.key == receive(4)));
 }
 
 /// Filters cover history from activation, so a late birthday cannot hide I0's earlier
 /// payment, and the window it opens still finds the later payment to I4.
 #[test]
 fn a_late_birthday_still_finds_a_later_payment_to_i4() {
-    let (mut st, account, paid0, paid4) = late_birthday();
+    let (mut st, account, paid0, _) = late_birthday();
     assert_eq!(
         advance(&mut st, account, &[(paid0.height, receive(0))]),
         FilterOutcome::Committed
     );
     run_pir(&mut st, account);
-    recheck(&mut st, account, &[(paid4.height, receive(4))]);
-    assert_eq!(run_pir(&mut st, account), 1);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
@@ -277,6 +304,7 @@ fn a_false_match_costs_one_lookup() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
+    assert_eq!(run_pir(&mut st, account), 4);
     st.generate_and_scan_empty_blocks(1);
     let block = tip(&st).height;
     assert_eq!(
@@ -287,7 +315,6 @@ fn a_false_match_costs_one_lookup() {
     let state = status(st.wallet().db(), account);
     assert!(state.lookups.is_empty() && state.witnesses.is_empty());
     assert!(state.restore_complete && one_time_notes(&st).is_empty());
-    assert!(behind(&st, account).is_empty());
 }
 
 /// A span whose end or parent disagrees with the wallet's chain or committed coverage is
@@ -419,7 +446,6 @@ fn a_correction_with_negative_filters_queues_no_sweep() {
     assert_eq!(run_pir(&mut st, account), 1);
     let state = status(st.wallet().db(), account);
     assert!(state.lookups.is_empty() && state.restore_complete);
-    assert!(behind(&st, account).is_empty());
 }
 
 /// After a correction, a replacement filter hit still queues a lookup for its key alone.
@@ -460,7 +486,6 @@ fn a_reorg_rolls_back_span_and_key_coverage() {
     assert!(receivers.iter().all(|r| r.covered <= floor));
     st.generate_and_scan_empty_blocks(3);
     assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
-    assert!(behind(&st, account).is_empty());
 }
 
 /// A sealed chunk replayed from inside committed coverage is accepted when its parent is
@@ -488,7 +513,6 @@ fn a_replay_overlapping_committed_coverage_is_accepted() {
         status(st.wallet().db(), account).filter_frontier,
         Some(tip(&st))
     );
-    assert!(behind(&st, account).is_empty());
 }
 
 /// A complete check reads a paid key again over the gap from its coverage, so it finds a
@@ -547,8 +571,8 @@ fn restore_at(
 }
 
 /// A restore that never scanned below its birthday covers that history with a span the
-/// reorg limit makes final, so I0's payment there opens the window, and the next span finds
-/// the later payment to I4.
+/// reorg limit makes final, and the bootstrap lookups find I0's payment there, which opens
+/// the window, and the later payment to I4. The next span then continues the frontier.
 #[test]
 fn a_restore_without_blocks_below_its_birthday_covers_them_with_stable_spans() {
     let mut st = scanned_wallet();
@@ -575,8 +599,8 @@ fn a_restore_without_blocks_below_its_birthday_covers_them_with_stable_spans() {
         record(&mut st, account, &span, &[(paid0.height, receive(0))]),
         FilterOutcome::Committed
     );
-    assert_eq!(run_pir(&mut st, account), 1);
-    assert_eq!(behind(&st, account), [receive(4)]);
+    run_pir(&mut st, account);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
     let rest = blocks_above(&st, end.height);
     let span = FilterSpan {
         revision: 0,
@@ -588,7 +612,7 @@ fn a_restore_without_blocks_below_its_birthday_covers_them_with_stable_spans() {
         record(&mut st, account, &span, &[(paid4.height, receive(4))]),
         FilterOutcome::Committed
     );
-    assert_eq!(run_pir(&mut st, account), 1);
+    assert_eq!(run_pir(&mut st, account), 0);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
@@ -626,7 +650,7 @@ fn a_replay_whose_parent_the_wallet_lacks_restarts_coverage() {
 
 /// A complete check's lookup is held while a filter span commits past it, then answered.
 /// The span counts the check's coverage, the held answer still settles it, each payment is
-/// admitted once, and only the keys the payments exposed need a re-check.
+/// admitted once, and the keys the payments exposed get their bootstrap lookups.
 #[test]
 fn a_span_over_a_held_complete_check_keeps_both() {
     let mut st = scanned_wallet();
@@ -663,11 +687,6 @@ fn a_span_over_a_held_complete_check_keeps_both() {
     );
     run_pir(&mut st, account);
     assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
-    // Only the keys the payments exposed wait for a re-check; I0 and I1 keep coverage.
-    assert_eq!(behind(&st, account), [receive(4), receive(5)]);
-    recheck(&mut st, account, &[]);
-    assert_eq!(run_pir(&mut st, account), 0);
-    assert!(behind(&st, account).is_empty());
     assert!(status(st.wallet().db(), account).lookups.is_empty());
 }
 
@@ -712,16 +731,15 @@ fn a_complete_check_over_a_held_hit_lookup_keeps_both() {
     );
     run_pir(&mut st, account);
     assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
-    assert!(behind(&st, account).is_empty());
     assert!(status(st.wallet().db(), account).lookups.is_empty());
 }
 
-/// I0's payment, matched by filters, is found by an extended manual check, which brings I4
-/// into monitoring and then queues I4 with only a manual reason. Cancelling the check
-/// leaves that target with no reason. A negative re-check still counts I4 as checked, so
-/// the seed walk finishes without the paused lookup.
+/// I0's payment, matched by filters, is found while an extended manual check runs, and the
+/// window it opens brings I4 into monitoring with its bootstrap lookup, which the check
+/// then also needs. Cancelling the check keeps that automatic obligation, so the seed walk
+/// finishes once it runs.
 #[test]
-fn a_cancelled_manual_target_does_not_block_a_filter_checked_key() {
+fn a_cancelled_manual_check_keeps_an_enrolled_keys_bootstrap() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let paid0 = pay_candidate(&mut st, receive(0));
@@ -754,10 +772,9 @@ fn a_cancelled_manual_target_does_not_block_a_filter_checked_key() {
         .db_mut()
         .cancel_one_time_history(account)
         .unwrap();
-    assert!(due(&st, account).is_empty());
+    assert_eq!(due(&st, account), [receive(4)]);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
-    assert_eq!(behind(&st, account), [receive(4)]);
-    recheck(&mut st, account, &[]);
+    assert_eq!(run_pir(&mut st, account), 1);
     let state = status(st.wallet().db(), account);
     assert!(state.lookups.is_empty());
     assert_eq!((state.restore_next, state.restore_complete), (5, true));
@@ -768,7 +785,8 @@ fn a_cancelled_manual_target_does_not_block_a_filter_checked_key() {
 const LATE: u32 = 200_000;
 
 /// A wallet born [`LATE`] blocks after Ironwood activation and scanned through one block,
-/// so stable spans can cover more than the memo refund window below its birthday.
+/// so stable spans can cover more than the memo refund window below its birthday. Its
+/// receive window's bootstrap lookups are already answered.
 fn late_wallet() -> State {
     use zcash_client_backend::data_api::{chain::ChainState, testing::InitialChainState};
     let mut st = TestBuilder::new()
@@ -795,6 +813,7 @@ fn late_wallet() -> State {
         .db_mut()
         .set_one_time_recovery_enabled(account, true)
         .unwrap();
+    assert_eq!(run_pir(&mut st, account), 4);
     st
 }
 
@@ -908,7 +927,8 @@ fn a_refund_on_day_45_is_found_automatically() {
 }
 
 /// Once a memo-only refund key's own coverage passes 90 days after its funding, filters
-/// stop watching it, and a later refund is found only by the manual history check.
+/// stop watching it, and after its bootstrap lookup has read that window, a later refund is
+/// found only by the manual history check.
 #[test]
 fn a_refund_after_90_days_is_found_only_by_the_manual_check() {
     let mut st = late_wallet();
@@ -917,6 +937,7 @@ fn a_refund_after_90_days_is_found_only_by_the_manual_check() {
     recover(st.wallet_mut().db_mut(), account, refund(0), funded);
     cover_below_birthday(&mut st, account);
     assert_eq!(refunds_watched(&st, account), Vec::<u64>::new());
+    assert_eq!(run_pir(&mut st, account), 1);
     pay_candidate(&mut st, refund(0));
     assert_eq!(
         commit_to_tip(&mut st, account, &[]),
@@ -935,23 +956,23 @@ fn a_refund_after_90_days_is_found_only_by_the_manual_check() {
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
-/// A funding memo learned after its window has passed is still checked over that window
-/// first, so a refund already paid is found, and only then does the key retire.
+/// A funding memo learned after its 90-day window has passed still gets its bootstrap
+/// lookup over that window. The key retires from monitoring at once, but the pending lookup
+/// still runs, so a refund already paid is found.
 #[test]
-fn a_memo_learned_after_its_window_gets_the_backfill() {
+fn a_late_memo_older_than_90_days_still_gets_its_lookup() {
     let mut st = late_wallet();
     let account = st.test_account().unwrap().id();
     cover_below_birthday(&mut st, account);
-    let paid = pay_candidate(&mut st, refund(0));
+    pay_candidate(&mut st, refund(0));
     assert_eq!(
         commit_to_tip(&mut st, account, &[]),
         FilterOutcome::Committed
     );
     let funded = tip(&st).height - days(100);
     recover(st.wallet_mut().db_mut(), account, refund(0), funded);
-    assert_eq!(refunds_watched(&st, account), [0]);
-    assert_eq!(behind(&st, account), [refund(0)]);
-    recheck(&mut st, account, &[(paid.height, refund(0))]);
+    assert_eq!(refunds_watched(&st, account), Vec::<u64>::new());
+    assert_eq!(due(&st, account), [refund(0)]);
     assert_eq!(run_pir(&mut st, account), 1);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
     assert_eq!(refunds_watched(&st, account), Vec::<u64>::new());
@@ -1044,8 +1065,6 @@ fn a_candidate_that_returns_a_retired_key_to_monitoring_fences_held_filters() {
         FilterOutcome::Stale,
         "a request captured without R0 cannot commit"
     );
-    // Filters watched R0 until it retired at the frontier, so nothing is behind.
-    assert!(behind(&st, account).is_empty());
 }
 
 /// A rewind that reopens an empty completed history is new work, and one that rolls back

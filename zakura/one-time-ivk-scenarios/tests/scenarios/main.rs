@@ -7,7 +7,7 @@ use harness::{
 };
 use orchard::keys::Scope;
 use zakura_one_time_ivk::{KeyId, Purpose};
-use zakura_pir_client::receiver::{blocks::Head, transport::Inventories};
+use zakura_pir_client::receiver::transport::Inventories;
 use zcash_client_backend::{
     data_api::{
         WalletRead as _, WalletWrite as _,
@@ -17,7 +17,6 @@ use zcash_client_backend::{
     wallet::OvkPolicy,
 };
 use zcash_primitives::block::BlockHash;
-use zcash_protocol::consensus::BlockHeight;
 
 /// Runs deterministic async network steps without giving the future a database lock.
 fn run(future: impl std::future::Future<Output = ()>) {
@@ -122,8 +121,7 @@ fn live_filters_and_late_publication() {
 }
 
 /// Downloads real GCS bodies from the account's frontier and commits the span with its
-/// locally matched receivers, then re-checks any receiver left behind the frontier over the
-/// same served history.
+/// locally matched receivers.
 async fn hints(device: &mut Device, directory: &Directory) {
     let head = Inventories::block_head(ORIGIN, &directory, &GENESIS)
         .await
@@ -159,67 +157,15 @@ async fn hints(device: &mut Device, directory: &Directory) {
             .unwrap(),
         FilterOutcome::Committed
     );
-    recheck(device, directory, &head).await;
     device.assert_no_stall();
 }
 
-/// Commits filters from the frontier, then alternates lookups with re-checks of newly
-/// watched receivers until neither has work, as a wallet round would.
+/// Commits filters from the frontier, then runs the lookups that queued, as a wallet round
+/// would.
 async fn filter_round(device: &mut Device, chain: &Chain, directory: &Directory) {
     hints(device, directory).await;
-    let head = Inventories::block_head(ORIGIN, &directory, &GENESIS)
-        .await
-        .unwrap();
     let client = device.connect(directory).await;
-    for _ in 0..64 {
-        device.drain(chain, &client).await;
-        let state = device.db.one_time_recovery(device.account, 0).unwrap();
-        let (_, receivers) = device.db.one_time_receivers(device.account).unwrap();
-        let frontier = state.filter_frontier.map(|f| f.height);
-        if !receivers
-            .iter()
-            .any(|r| frontier.is_some_and(|f| r.covered < f))
-        {
-            return;
-        }
-        recheck(device, directory, &head).await;
-    }
-    panic!("filter round did not settle");
-}
-
-/// Re-checks each receiver whose coverage is behind the account's frontier over the
-/// history it missed, as a wallet would from its cached ranges.
-async fn recheck(device: &mut Device, directory: &Directory, head: &Head) {
-    let state = device.db.one_time_recovery(device.account, 0).unwrap();
-    let Some(frontier) = state.filter_frontier else {
-        return;
-    };
-    let (token, receivers) = device.db.one_time_receivers(device.account).unwrap();
-    for receiver in receivers.iter().filter(|r| r.covered < frontier.height) {
-        let from = u32::from(receiver.covered) + 1;
-        let limit = u32::from(frontier.height) - from + 1;
-        let range = Inventories::block_range(ORIGIN, &directory, head, from, limit)
-            .await
-            .unwrap();
-        let hits: Vec<_> = range
-            .matches(&GENESIS, &[receiver.work.receiver])
-            .into_iter()
-            .map(|(height, _)| (height.into(), receiver.work.key))
-            .collect();
-        assert!(
-            device
-                .db
-                .recheck_one_time_filters(
-                    device.account,
-                    token,
-                    head.revision,
-                    BlockHeight::from(range.from())..=BlockHeight::from(range.end().height),
-                    &[receiver.work.key],
-                    &hits,
-                )
-                .unwrap()
-        );
-    }
+    device.drain(chain, &client).await;
 }
 
 /// A complete check after time offline reads paid keys too, so it finds a repeat payment to

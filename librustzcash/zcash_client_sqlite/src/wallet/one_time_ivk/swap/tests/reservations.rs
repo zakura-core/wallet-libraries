@@ -827,8 +827,8 @@ fn a_rewound_reservation_is_released_by_its_queued_recheck() {
 
 /// Every key that entered automatic monitoring since `before` was read, with the filter
 /// frontier then at `frontier`, has history settled through that frontier, a runnable
-/// lookup reaching it, coverage behind it for a filter re-check, or a funding height past
-/// it, since filters never watched it there. Returns the monitored keys
+/// lookup reaching it, or a funding height past it, since filters never watched it there.
+/// Returns the monitored keys
 /// and frontier for the next check.
 fn assert_entered_with_history(
     st: &State,
@@ -846,7 +846,7 @@ fn assert_entered_with_history(
                  JOIN accounts a ON a.id = k.account_id
                  LEFT JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id
                  WHERE a.uuid = ?1 AND k.purpose = ?2 AND k.key_index = ?3
-                   AND (l.done_height >= ?4 OR k.covered_height < ?4 OR k.funding_height > ?4
+                   AND (l.done_height >= ?4 OR k.funding_height > ?4
                      OR (l.target_height >= ?4 AND l.reasons & 3 != 0 AND l.read_complete = 0)
                      OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
                          WHERE p.one_time_key_id = k.id)))",

@@ -218,8 +218,7 @@ impl Device {
         {
             return;
         }
-        // Filters, not lookups, re-check a receive key behind the account's coverage.
-        let (unstarted, syncing, hidden, filters): (bool, bool, bool, bool) = self
+        let (unstarted, syncing, hidden): (bool, bool, bool) = self
             .conn()
             .query_row(
                 "SELECT r.restore_height IS NULL,
@@ -229,22 +228,17 @@ impl Device {
                     EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
                         JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
                         WHERE k.account_id = r.account_id
-                          AND l.target_height IS NOT NULL AND l.read_complete = 0 AND l.reasons & 3 != 0),
-                    r.pir_coverage = 0 AND EXISTS(SELECT 1 FROM ironwood_one_time_keys k
-                        WHERE k.account_id = r.account_id AND k.purpose = 1
-                          AND k.key_index < r.receive_end
-                          AND COALESCE(k.covered_height, ?2 - 1) < MAX(COALESCE(r.restore_height, 0),
-                              COALESCE(r.filter_height, 0)))
+                          AND l.target_height IS NOT NULL AND l.read_complete = 0 AND l.reasons & 3 != 0)
                  FROM ironwood_one_time_recovery r JOIN accounts a ON a.id = r.account_id
                  WHERE a.uuid = ?1",
-                rusqlite::params![self.account.expose_uuid(), ACTIVATION],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                [self.account.expose_uuid()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
         let manual = state.manual.is_some_and(|m| m.active);
         let complete = state.restore_complete && !manual && !hidden;
         assert!(
-            complete || syncing || filters || (unstarted && !manual && !hidden),
+            complete || syncing || (unstarted && !manual && !hidden),
             "recovery stalled with no runnable work: restore_next {}, restore_gap {}, \
              manual {:?}, hidden lookups {hidden}",
             state.restore_next,

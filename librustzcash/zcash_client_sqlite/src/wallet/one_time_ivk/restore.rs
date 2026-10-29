@@ -10,7 +10,6 @@ use payments::PendingPayment;
 use rand_core::Rng;
 use rusqlite::Connection;
 use std::borrow::{Borrow, BorrowMut};
-use std::ops::RangeInclusive;
 use zakura_one_time_ivk::KeyId;
 use zcash_client_backend::data_api::one_time_ivk::restore::{
     FilterOutcome, FilterReceiver, FilterSpan, LookupPage, LookupWork, RecoveryPublication,
@@ -42,9 +41,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     }
 
     /// Captures the monitored receivers for local filter matching, each with how far its
-    /// filter coverage reaches, and the cancellation fence the match commits under. A
-    /// receiver covered below the account's frontier needs
-    /// [`Self::recheck_one_time_filters`] from just past its coverage.
+    /// filter coverage reaches, and the cancellation fence the match commits under.
     pub fn one_time_receivers(
         &self,
         account: AccountUuid,
@@ -69,7 +66,6 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// its filter coverage through the publication's end, and the account's frontier moves
     /// there. A repeat payment to a paid key is found either way. For a fresh account
     /// without a frontier (see `RecoveryStatus::fresh`), this is the four-lookup seed window.
-    /// Until a filter span commits, keys that become watched get lookups too.
     pub fn begin_one_time_recovery(
         &mut self,
         account: AccountUuid,
@@ -94,33 +90,6 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     ) -> Result<FilterOutcome, SqliteClientError> {
         self.transactionally(|db| {
             queue::record_filter_span(db.conn.0, db.params, account, captured, span, hits)
-        })
-    }
-
-    /// Commits a re-check of `keys` over `heights`, history the account's coverage already
-    /// passed, matched against ranges the caller kept from committed spans under `revision`.
-    /// Each key's coverage must reach the range's start minus one; it then reaches its end,
-    /// and each hit past it queues a lookup. False if `captured` or `revision` is stale.
-    pub fn recheck_one_time_filters(
-        &mut self,
-        account: AccountUuid,
-        captured: RecoveryToken,
-        revision: u64,
-        heights: RangeInclusive<BlockHeight>,
-        keys: &[KeyId],
-        hits: &[(BlockHeight, KeyId)],
-    ) -> Result<bool, SqliteClientError> {
-        self.transactionally(|db| {
-            queue::recheck_filters(
-                db.conn.0,
-                db.params,
-                account,
-                captured,
-                revision,
-                (u32::from(*heights.start()), u32::from(*heights.end())),
-                keys,
-                hits,
-            )
         })
     }
 

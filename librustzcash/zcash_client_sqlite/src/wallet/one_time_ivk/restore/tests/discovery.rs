@@ -312,23 +312,15 @@ pub(in crate::wallet::one_time_ivk) fn assert_no_stall(db: &Db, account: Account
     {
         return;
     }
-    // Restore before any publication, a proven payment waiting for ordinary sync, or a
-    // receive key behind filter coverage waiting for a re-check.
-    let (unstarted, syncing, filters): (bool, bool, bool) = row(
+    // Restore before any publication, or a proven payment waiting for ordinary sync.
+    let (unstarted, syncing): (bool, bool) = row(
         &db.conn,
         "SELECT r.restore_height IS NULL, EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
              JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
-             WHERE k.account_id = r.account_id AND p.witness IS NOT NULL),
-             r.pir_coverage = 0 AND EXISTS(SELECT 1 FROM ironwood_one_time_keys k
-                WHERE k.account_id = r.account_id AND k.purpose = 1 AND k.key_index < r.receive_end
-                  AND COALESCE(k.covered_height, ?2 - 1) < MAX(COALESCE(r.restore_height, 0),
-                      COALESCE(r.filter_height, 0)))
+             WHERE k.account_id = r.account_id AND p.witness IS NOT NULL)
          FROM ironwood_one_time_recovery r JOIN accounts a ON a.id = r.account_id
          WHERE a.uuid = ?1",
-        rusqlite::params![
-            account.0,
-            crate::wallet::one_time_ivk::restore::queue::activation(&db.params)
-        ],
+        [account.0],
     );
     let hidden: bool = value(
         &db.conn,
@@ -341,7 +333,7 @@ pub(in crate::wallet::one_time_ivk) fn assert_no_stall(db: &Db, account: Account
     let manual = state.manual.is_some_and(|m| m.active);
     let complete = state.restore_complete && !manual && !hidden;
     assert!(
-        complete || syncing || filters || (unstarted && !manual && !hidden),
+        complete || syncing || (unstarted && !manual && !hidden),
         "recovery stalled with no runnable work: restore_next {}, restore_gap {}, \
          restore_complete {}, manual {:?}, hidden lookups {hidden}",
         state.restore_next,
@@ -688,7 +680,7 @@ fn delayed_window_expansion_checks_history_after_the_filter_frontier() {
     let key0 = KeyId::new(Purpose::Receive, 0);
     let payment0 = pay_candidate(&mut st, key0);
     let key4 = KeyId::new(Purpose::Receive, 4);
-    let payment4 = pay_candidate(&mut st, key4);
+    pay_candidate(&mut st, key4);
     let publication = publication_at(&st, tip(&st).height);
     let blocks = blocks_above(&st, initial.end.height);
     let captured = status(st.wallet().db(), account).token;
@@ -717,36 +709,13 @@ fn delayed_window_expansion_checks_history_after_the_filter_frontier() {
     );
     send_witness(&mut st, key0, &payment0);
     reopen(&mut st);
-    let (token, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    let frontier = publication.end.height;
-    let behind: Vec<_> = receivers
-        .iter()
-        .filter(|r| r.covered < frontier)
-        .map(|r| r.work.key)
-        .collect();
-    assert_eq!(behind, [key4]);
-    let start = publication.start_height;
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .recheck_one_time_filters(
-                account,
-                token,
-                0,
-                start..=frontier,
-                &behind,
-                &[(payment4.height, key4)]
-            )
-            .unwrap()
+    // The window exposed I4 after filters passed its payment, so its bootstrap lookup
+    // reads that history through the frontier.
+    let work = work_of(&st, key4);
+    assert_eq!(
+        (work.from, work.through),
+        (publication.start_height, publication.end.height)
     );
-    let db = st.wallet().db();
-    let id = key_ref(&db.conn, account, key4).unwrap();
-    let target: u32 = value(
-        &db.conn,
-        "SELECT target_height FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
-        [id],
-    );
-    assert_eq!(target, u32::from(frontier));
     drain(&mut st, account, publication);
     assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
     let next = st
@@ -3861,26 +3830,9 @@ fn a_refund_paid_while_its_key_was_retired_is_found_after_a_newer_status() {
         now + 120,
     );
     assert!(watched(&st), "the newer status returns R0 to monitoring");
-    // R0 is re-checked over the history filters passed without it, which finds the hit.
-    let (token, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    let covered = receivers.iter().find(|r| r.work.key == r0).unwrap().covered;
-    let through = status(st.wallet().db(), account)
-        .filter_frontier
-        .unwrap()
-        .height;
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .recheck_one_time_filters(
-                account,
-                token,
-                0,
-                covered + 1..=through,
-                &[r0],
-                &[(paid.height, r0)]
-            )
-            .unwrap()
-    );
+    // R0's lookup reads the history filters passed without it, which holds the refund.
+    let work = work_of(&st, r0);
+    assert!(work.from <= paid.height && work.through >= paid.height);
     let current = publication_at(&st, tip(&st).height);
     drain(&mut st, account, current);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
@@ -4926,14 +4878,6 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
             },
         };
         let _ = db.record_one_time_filter_span(account, token, &span, &[]);
-        let _ = db.recheck_one_time_filters(
-            account,
-            token,
-            0,
-            publication.end.height..=publication.end.height,
-            &[],
-            &[],
-        );
         let _ = db.defer_one_time_lookup(account, &work, clock_now());
         let _ = db.record_one_time_lookup(account, &work, &page, clock_now());
         let _ = db.record_one_time_witness(account, token, request, &answer, clock_now());

@@ -227,15 +227,39 @@ pub(super) fn answer_prepared_empty(db: &mut Db, account: AccountUuid, purpose: 
             tree_size,
         },
     };
-    let state = db.one_time_recovery(account, 0).unwrap();
-    for work in state
-        .lookups
-        .iter()
-        .filter(|w| w.work.key.purpose() == purpose)
-    {
-        let page = store::restore::tests::discovery::whole_for(work, publication, vec![]);
-        assert!(db.record_one_time_lookup(account, work, &page, 0).unwrap());
-    }
+    // The prepared key's lookup can sit behind the receive window's bootstrap lookups, so
+    // it is read from its row rather than from the bounded status.
+    use zcash_client_backend::data_api::one_time_ivk::restore::{DiscoveryWork, LookupWork};
+    let found: Option<(Vec<u8>, Vec<u8>, u32, u32, Option<u32>)> = db
+        .conn
+        .query_row(
+            "SELECT k.key_index, k.receiver, l.target_height, l.start_height, l.checked_height
+             FROM ironwood_one_time_preparations pr
+             JOIN ironwood_one_time_keys k ON k.id = pr.one_time_key_id
+             JOIN accounts a ON a.id = k.account_id
+             JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id
+             WHERE a.uuid = ?1 AND pr.purpose = ?2 AND l.target_height IS NOT NULL
+               AND l.read_complete = 0",
+            rusqlite::params![account.0, u8::from(purpose == Purpose::Receive)],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()
+        .unwrap();
+    let Some((index, receiver, target, start, checked)) = found else {
+        return;
+    };
+    let work = LookupWork {
+        token: db.one_time_recovery(account, 0).unwrap().token,
+        work: DiscoveryWork {
+            key: KeyId::new(purpose, u64::from_be_bytes(index.try_into().unwrap())),
+            receiver: receiver.try_into().unwrap(),
+        },
+        from: BlockHeight::from(checked.map_or(start, |c| start.max(c + 1))),
+        through: BlockHeight::from(target),
+        cursor: None,
+    };
+    let page = store::restore::tests::discovery::whole_for(&work, publication, vec![]);
+    assert!(db.record_one_time_lookup(account, &work, &page, 0).unwrap());
 }
 
 /// Records `observation` for `key`'s operation `reference` at `now`, adding the

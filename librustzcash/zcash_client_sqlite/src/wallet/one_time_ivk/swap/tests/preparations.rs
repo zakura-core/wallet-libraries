@@ -13,6 +13,15 @@ fn refund(index: u64) -> KeyId {
     KeyId::new(Purpose::Refund, index)
 }
 
+/// [`scanned_wallet`] with its receive window's bootstrap lookups answered and one more
+/// block, so each preparation needs a lookup of its own.
+fn fresh_wallet() -> State {
+    let mut st = fresh_wallet();
+    run(&mut st);
+    st.generate_and_scan_empty_blocks(1);
+    st
+}
+
 /// Prepares both keys, returning each prepared key, or the policy it waits on.
 fn prepare(
     st: &mut State,
@@ -61,7 +70,7 @@ fn rows_prepared(st: &State) -> Vec<(u8, i64)> {
 /// consumes its preparation, so the next refund preparation takes the next index.
 #[test]
 fn preparations_survive_duplicate_calls_and_restart() {
-    let mut st = scanned_wallet();
+    let mut st = fresh_wallet();
     let account = st.test_account().unwrap().id();
     let waiting = (
         Err(ReservationPolicy::ReceiveHistory),
@@ -97,7 +106,7 @@ fn preparations_survive_duplicate_calls_and_restart() {
 /// the cancelled refund index, registered but never handed out, is passed over.
 #[test]
 fn a_cancelled_preparation_starts_again() {
-    let mut st = scanned_wallet();
+    let mut st = fresh_wallet();
     let account = st.test_account().unwrap().id();
     let _ = prepare(&mut st);
     st.wallet_mut()
@@ -118,7 +127,7 @@ fn a_cancelled_preparation_starts_again() {
 /// finds the payment, so the preparation moves to the next hole with a fresh lookup.
 #[test]
 fn a_receive_candidate_paid_mid_wait_moves_on() {
-    let mut st = scanned_wallet();
+    let mut st = fresh_wallet();
     assert_eq!(prepare(&mut st).0, Err(ReservationPolicy::ReceiveHistory));
     pay_candidate(&mut st, receive(0));
     run(&mut st);
@@ -132,7 +141,7 @@ fn a_receive_candidate_paid_mid_wait_moves_on() {
 /// ineligible, so the preparation moves to the next index with a fresh lookup.
 #[test]
 fn a_refund_candidate_funded_or_paid_mid_wait_moves_on() {
-    let mut st = scanned_wallet();
+    let mut st = fresh_wallet();
     let account = st.test_account().unwrap().id();
     assert_eq!(prepare(&mut st).1, Err(ReservationPolicy::RefundHistory));
     let height = tip(&st).height;
@@ -152,7 +161,7 @@ fn a_refund_candidate_funded_or_paid_mid_wait_moves_on() {
 #[test]
 fn a_lagging_publication_readies_the_preparation_after_one_lookup() {
     use crate::wallet::one_time_ivk::restore::tests::discovery::{blocks_above, record_span};
-    let mut st = scanned_wallet();
+    let mut st = fresh_wallet();
     let account = st.test_account().unwrap().id();
     let filter_to_tip = |st: &mut State| {
         let state = status(st.wallet().db(), account);
@@ -188,7 +197,7 @@ fn a_lagging_publication_readies_the_preparation_after_one_lookup() {
 #[test]
 fn a_watched_candidate_paid_after_its_target_moves_on() {
     use crate::wallet::one_time_ivk::restore::tests::discovery::{blocks_above, span_over};
-    let mut st = scanned_wallet();
+    let mut st = fresh_wallet();
     let account = st.test_account().unwrap().id();
     let _ = prepare(&mut st);
     run(&mut st);
@@ -225,7 +234,7 @@ fn activation_height(st: &State) -> BlockHeight {
 /// the next call. The index stays allocated, so the preparation moves to the next one.
 #[test]
 fn a_funded_candidate_stays_retired_after_a_reorg_clears_its_funding() {
-    let mut st = scanned_wallet();
+    let mut st = fresh_wallet();
     st.generate_and_scan_empty_blocks(3);
     let account = st.test_account().unwrap().id();
     assert_eq!(prepare(&mut st).1, Err(ReservationPolicy::RefundHistory));
@@ -260,7 +269,7 @@ fn filter_from_activation(st: &mut State, hits: &[(BlockHeight, KeyId)]) {
 /// A ready receive address that another device pays after its target. Returns the wallet
 /// and the payment's height.
 fn receive_paid_after_target() -> (State, BlockHeight) {
-    let mut st = scanned_wallet();
+    let mut st = fresh_wallet();
     let _ = prepare(&mut st);
     run(&mut st);
     assert_eq!(prepare(&mut st).0, Ok(receive(0)));
@@ -299,7 +308,7 @@ fn a_receive_address_paid_after_its_target_is_refused_after_the_filter_hit() {
 /// hit and hand-out waits for the lookup. Cancelling the preparation stops watching it.
 #[test]
 fn a_prepared_refund_index_paid_after_its_target_is_refused_once_filters_see_it() {
-    let mut st = scanned_wallet();
+    let mut st = fresh_wallet();
     let account = st.test_account().unwrap().id();
     let _ = prepare(&mut st);
     run(&mut st);

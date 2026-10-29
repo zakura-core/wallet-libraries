@@ -397,28 +397,21 @@ fn candidates(conn: &Connection, key: i64) -> Result<bool, SqliteClientError> {
 }
 
 /// Newly learned receivers must cover history from `from`, including history filters
-/// already passed. The key's coverage (see [`covered`]) drops below `from`, so filters
-/// re-check that history. While a complete check last advanced the account's coverage
-/// (`pir_coverage`), a lookup through the processed frontier covers it instead.
+/// already passed. That is the key's bootstrap obligation: one lookup through the processed
+/// frontier, which the key's coverage (see [`covered`]) then reaches, so filters only carry
+/// it forward and never re-check history.
 pub(crate) fn register_history(
     conn: &Connection,
     owner: i64,
     key: i64,
     from: u32,
 ) -> Result<(), SqliteClientError> {
+    let through = queue_history(conn, owner, key, from)?;
     conn.execute(
-        "UPDATE ironwood_one_time_keys SET covered_height = MIN(COALESCE(covered_height, ?2), ?2)
-         WHERE id = ?1",
-        params![key, from.saturating_sub(1)],
+        "UPDATE ironwood_one_time_keys
+         SET covered_height = MAX(MIN(COALESCE(covered_height, ?2), ?2), ?3) WHERE id = ?1",
+        params![key, from.saturating_sub(1), through],
     )?;
-    if recovery_flag(conn, owner, "pir_coverage")? == Some(true) {
-        let through = queue_history(conn, owner, key, from)?;
-        conn.execute(
-            "UPDATE ironwood_one_time_keys SET covered_height = MAX(covered_height, ?2)
-             WHERE id = ?1",
-            params![key, through],
-        )?;
-    }
     Ok(())
 }
 
@@ -731,7 +724,7 @@ pub(crate) fn begin<P: Parameters>(
                 cover(conn, params, key, height, AUTOMATIC)?;
             }
             conn.execute(
-                "UPDATE ironwood_one_time_recovery SET pir_coverage = 1,
+                "UPDATE ironwood_one_time_recovery SET
                  filter_height = CASE WHEN COALESCE(filter_height, 0) <= ?2 THEN ?2 ELSE filter_height END,
                  filter_hash = CASE WHEN COALESCE(filter_height, 0) <= ?2 THEN ?3 ELSE filter_hash END
                  WHERE account_id = ?1",
@@ -760,7 +753,7 @@ fn correct<P: Parameters>(
 ) -> Result<(), SqliteClientError> {
     conn.execute(
         "UPDATE ironwood_one_time_recovery SET history_revision = ?2, generation = generation + 1,
-        filter_height = NULL, filter_hash = NULL, fresh = 0, pir_coverage = 0,
+        filter_height = NULL, filter_hash = NULL, fresh = 0,
         restore_next = CASE WHEN restore_done = 0 THEN X'0000000000000000' ELSE restore_next END,
         restore_gap = CASE WHEN restore_done = 0 THEN 0 ELSE restore_gap END,
         manual_purpose = CASE WHEN manual_end IS NOT NULL THEN 0 ELSE manual_purpose END,
@@ -1072,8 +1065,7 @@ fn restart_coverage(conn: &Connection, owner: i64) -> Result<(), SqliteClientErr
 ///
 /// A newer revision applies the correction (see [`correct`]). Committing advances every
 /// monitored key whose coverage reaches the span's start to its end, and a hit past a key's
-/// coverage queues a lookup from there (see [`apply_hits`]). Keys behind the span keep
-/// their coverage and need a re-check (see [`recheck_filters`]).
+/// coverage queues a lookup from there (see [`apply_hits`]).
 pub(crate) fn record_filter_span<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -1155,7 +1147,7 @@ pub(crate) fn record_filter_span<P: Parameters>(
         )?;
         conn.execute(
             "UPDATE ironwood_one_time_recovery SET filter_height = ?2, filter_hash = ?3,
-             pir_coverage = 0, restore_height = COALESCE(restore_height, ?2)
+             restore_height = COALESCE(restore_height, ?2)
              WHERE account_id = ?1",
             params![owner.0, end, span.end.hash.0],
         )?;
@@ -1163,68 +1155,6 @@ pub(crate) fn record_filter_span<P: Parameters>(
     })?;
     progress(conn, params, account)?;
     Ok(FilterOutcome::Committed)
-}
-
-/// Commits a re-check of `keys` over `[from, through]` of committed coverage, matched
-/// against ranges the caller kept, so a key that became watched after filters passed that
-/// history needs no new download. Each key's coverage must reach `from - 1`, and `through`
-/// must not pass the account's frontier. The ranges were fenced when their span committed,
-/// so no chain check applies. Each key's coverage then reaches `through`, and a hit past it
-/// queues a lookup (see [`apply_hits`]). False if `captured` or `revision` is stale.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn recheck_filters<P: Parameters>(
-    conn: &rusqlite::Transaction<'_>,
-    params: &P,
-    account: AccountUuid,
-    captured: RecoveryToken,
-    revision: u64,
-    (from, through): (u32, u32),
-    keys: &[KeyId],
-    hits: &[(BlockHeight, KeyId)],
-) -> Result<bool, SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
-    if token(conn, owner.0)? != (true, captured) || revision != captured.history_revision {
-        return Ok(false);
-    }
-    let frontier: Option<u32> = conn.query_row(
-        "SELECT filter_height FROM ironwood_one_time_recovery WHERE account_id = ?1",
-        [owner.0],
-        |r| r.get(0),
-    )?;
-    if from < activation(params) || through < from || frontier.is_none_or(|f| through > f) {
-        return Err(invalid("filter re-check outside committed coverage"));
-    }
-    let checked: Vec<_> = keys
-        .iter()
-        .map(|key| (BlockHeight::from(from), *key))
-        .collect();
-    let ids: Vec<i64> = hit_keys(conn, params, account, owner.0, (from, through), &checked)?
-        .into_iter()
-        .map(|(_, id)| id)
-        .collect();
-    for id in &ids {
-        if covered(conn, params, *id)?.saturating_add(1) < from {
-            return Err(invalid("filter re-check leaves a gap in a key's coverage"));
-        }
-    }
-    let hits = hit_keys(conn, params, account, owner.0, (from, through), hits)?;
-    if hits.iter().any(|(_, hit)| !ids.contains(hit)) {
-        return Err(invalid("filter re-check hit for a key it did not check"));
-    }
-    // Coverage can carry a memo-only refund key past its window (see `refund_retired`).
-    fencing_monitoring(conn, params, &[owner.0], || {
-        apply_hits(conn, params, &hits, through)?;
-        for id in ids {
-            conn.execute(
-                "UPDATE ironwood_one_time_keys
-                 SET covered_height = MAX(COALESCE(covered_height, 0), ?2) WHERE id = ?1",
-                params![id, through],
-            )?;
-        }
-        Ok(())
-    })?;
-    progress(conn, params, account)?;
-    Ok(true)
 }
 
 /// Settles fully admitted requests and advances seed recovery only across genuine completed answers.
@@ -1253,7 +1183,6 @@ fn progress<P: Parameters>(
         return Ok(());
     }
     let mut handed = None;
-    let pir = recovery_flag(conn, owner.0, "pir_coverage")? == Some(true);
     for _ in 0..STEP_BUDGET {
         let (height, next, gap, done): (Option<u32>, Vec<u8>, u8, bool) = conn.query_row(
             "SELECT restore_height, restore_next, restore_gap, restore_done FROM ironwood_one_time_recovery WHERE account_id = ?1",
@@ -1283,12 +1212,6 @@ fn progress<P: Parameters>(
             covered_sql(activation(params))),
             params![id, height, activation(params)], |r| r.get(0)).optional()?;
         let Some(paid) = checked else {
-            // Without a complete check behind the frontier, filters re-check the key.
-            if pir && cover(conn, params, id, height, AUTOMATIC)? {
-                // A settled key can carry the continuation if the budget runs out.
-                handed = Some((id, height));
-                continue;
-            }
             handed = None;
             break;
         };
