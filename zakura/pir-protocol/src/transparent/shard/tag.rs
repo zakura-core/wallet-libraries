@@ -6,7 +6,6 @@
 //! what a row stores and what a wallet compares.
 
 use crate::transparent::filter::BlockHash;
-use sha2::{Digest, Sha256};
 
 /// Domain for the per-revision salt. The trailing NUL keeps this input from
 /// being a prefix of another SHA-256 use.
@@ -19,7 +18,7 @@ pub const PAGE_TAG_SALT_DOMAIN: &[u8] = b"transparent-shard-page-tag-salt-v1\0";
 pub const SCRIPT_TAG_DOMAIN: &[u8] = b"transparent-shard-script-tag-v2\0";
 
 /// Bytes stored in place of a raw script.
-pub const SCRIPT_TAG_BYTES: usize = 14;
+pub const SCRIPT_TAG_BYTES: usize = crate::directory::tag::TAG_BYTES;
 
 /// Counters tried before publication fails.
 ///
@@ -34,12 +33,12 @@ pub const MAX_TAG_SALT_COUNTER: u32 = 8;
 /// The wallet recomputes this from the manifest and never accepts a salt
 /// supplied separately.
 pub fn tag_salt(shard_id: u64, terminal: &BlockHash, counter: u32) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(TAG_SALT_DOMAIN);
-    hasher.update(shard_id.to_le_bytes());
-    hasher.update(terminal.internal_bytes());
-    hasher.update(counter.to_le_bytes());
-    hasher.finalize().into()
+    let parts: [&[u8]; 3] = [
+        &shard_id.to_le_bytes(),
+        terminal.internal_bytes(),
+        &counter.to_le_bytes(),
+    ];
+    crate::directory::tag::salt(TAG_SALT_DOMAIN, &parts)
 }
 
 /// The salt for one page shard of a directory shard.
@@ -56,26 +55,19 @@ pub fn page_tag_salt(
     terminal: &BlockHash,
     counter: u32,
 ) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(PAGE_TAG_SALT_DOMAIN);
-    hasher.update(shard_id.to_le_bytes());
-    hasher.update(child.to_le_bytes());
-    hasher.update(end_height.to_le_bytes());
-    hasher.update(terminal.internal_bytes());
-    hasher.update(counter.to_le_bytes());
-    hasher.finalize().into()
+    let parts: [&[u8]; 5] = [
+        &shard_id.to_le_bytes(),
+        &child.to_le_bytes(),
+        &end_height.to_le_bytes(),
+        terminal.internal_bytes(),
+        &counter.to_le_bytes(),
+    ];
+    crate::directory::tag::salt(PAGE_TAG_SALT_DOMAIN, &parts)
 }
 
 /// The 14-byte tag of one raw script under `salt`.
 pub fn script_tag(salt: &[u8; 32], script: &[u8]) -> [u8; SCRIPT_TAG_BYTES] {
-    let mut hasher = Sha256::new();
-    hasher.update(SCRIPT_TAG_DOMAIN);
-    hasher.update(salt);
-    let length = u16::try_from(script.len()).expect("a tagged script is at most MAX_SCRIPT_BYTES");
-    hasher.update(length.to_le_bytes());
-    hasher.update(script);
-    let digest = hasher.finalize();
-    digest[..SCRIPT_TAG_BYTES].try_into().expect("14 bytes")
+    crate::directory::tag::tag(SCRIPT_TAG_DOMAIN, salt, script)
 }
 
 /// The counter whose tags are unique, and the salt at that counter.
@@ -118,25 +110,12 @@ fn resolve_salt(
     shard_id: u64,
     salt_at: impl Fn(u32) -> [u8; 32],
     scripts: &[&[u8]],
-    mut tag_of: impl FnMut(&[u8; 32], &[u8]) -> [u8; SCRIPT_TAG_BYTES],
+    tag_of: impl FnMut(&[u8; 32], &[u8]) -> [u8; SCRIPT_TAG_BYTES],
 ) -> Result<(u32, [u8; 32]), String> {
-    for counter in 0..=MAX_TAG_SALT_COUNTER {
-        let salt = salt_at(counter);
-        let mut seen = std::collections::HashSet::with_capacity(scripts.len());
-        let mut collision = false;
-        for script in scripts {
-            if !seen.insert(tag_of(&salt, script)) {
-                collision = true;
-                break;
-            }
-        }
-        if !collision {
-            return Ok((counter, salt));
-        }
-    }
-    Err(format!(
-        "tag salt counter exceeded {MAX_TAG_SALT_COUNTER} for shard {shard_id}"
-    ))
+    crate::directory::tag::resolve_salt(0..=MAX_TAG_SALT_COUNTER, salt_at, scripts, tag_of)
+        .ok_or_else(|| {
+            format!("tag salt counter exceeded {MAX_TAG_SALT_COUNTER} for shard {shard_id}")
+        })
 }
 
 #[cfg(test)]
