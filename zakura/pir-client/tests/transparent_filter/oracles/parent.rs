@@ -1,7 +1,8 @@
 //! Parent filter precision compared with the pinned independent Bitcoin reader.
 use std::collections::BTreeSet;
 use zakura_pir_client::transparent::filter::{
-    Parent, ParentClientExt, RANGE_PROFILE, experimental_parent::optimal_p,
+    ParentClientExt, RANGE_PROFILE,
+    experimental_parent::{Parent, optimal_p},
 };
 use zakura_pir_publisher::transparent::filter::ParentPublisherExt;
 

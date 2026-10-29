@@ -173,15 +173,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "base58ck"
-version = "0.1.101"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "365c0acd5b2e8dd0111a46c4faea83fb3cfb6e39a49a7c73a06e090db7b2eff0"
-dependencies = [
- "bitcoin_hashes",
-]
-
-[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -243,7 +234,7 @@ dependencies = [
  "bs58",
  "hmac 0.13.0",
  "ripemd 0.2.0",
- "secp256k1 0.33.1",
+ "secp256k1",
  "sha2 0.11.1",
  "subtle",
  "zeroize",
@@ -263,22 +254,6 @@ name = "bit-vec"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
-
-[[package]]
-name = "bitcoin"
-version = "0.32.102"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb0ce8bd5baaa0d303a19915a6d93afed161f528654e42da2a7a97d05c59499a"
-dependencies = [
- "base58ck",
- "bech32",
- "bitcoin-io",
- "bitcoin-units",
- "bitcoin_hashes",
- "hex-conservative 0.2.3",
- "hex_lit",
- "secp256k1 0.29.1",
-]
 
 [[package]]
 name = "bitcoin-consensus-encoding"
@@ -302,15 +277,6 @@ name = "bitcoin-io"
 version = "0.1.101"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb5de036369d1ac59d3c1819ebc4d850f89466f5401c571a285b6ed564a4cb78"
-dependencies = [
- "bitcoin-consensus-encoding",
-]
-
-[[package]]
-name = "bitcoin-units"
-version = "0.1.101"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cb95693f371d089a4b5b6fc41c6f3ea6e01ee8c15388335dfac8ea685173b51"
 dependencies = [
  "bitcoin-consensus-encoding",
 ]
@@ -1581,12 +1547,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hex_lit"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3011d1213f159867b13cfd6ac92d2cd5f1345762c63be3554e84092d85a50bbd"
-
-[[package]]
 name = "hkdf"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2497,7 +2457,7 @@ dependencies = [
  "rand_core 0.10.1",
  "redjubjub",
  "sapling-crypto",
- "secp256k1 0.33.1",
+ "secp256k1",
  "serde",
  "serde_with",
  "subtle",
@@ -3400,31 +3360,12 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "secp256k1"
-version = "0.29.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9465315bc9d4566e1724f0fffcbcc446268cb522e60f9a27bcded6b19c108113"
-dependencies = [
- "bitcoin_hashes",
- "secp256k1-sys 0.10.1",
-]
-
-[[package]]
-name = "secp256k1"
 version = "0.33.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7f404a8dab7a7a5a631e741d8699aa9c8e1d689fc26ccf897c7187565490b69"
 dependencies = [
  "rand 0.9.5",
- "secp256k1-sys 0.14.1",
-]
-
-[[package]]
-name = "secp256k1-sys"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4387882333d3aa8cb20530a17c69a3752e97837832f34f6dccc760e715001d9"
-dependencies = [
- "cc",
+ "secp256k1-sys",
 ]
 
 [[package]]
@@ -4817,7 +4758,7 @@ dependencies = [
  "rand_core 0.10.1",
  "rayon",
  "rust_decimal",
- "secp256k1 0.33.1",
+ "secp256k1",
  "secrecy",
  "serde",
  "serde_json",
@@ -4881,7 +4822,7 @@ dependencies = [
  "rusqlite",
  "schemerz",
  "schemerz-rusqlite",
- "secp256k1 0.33.1",
+ "secp256k1",
  "secrecy",
  "serde",
  "shardtree 0.7.1",
@@ -4924,7 +4865,6 @@ dependencies = [
 name = "zakura-filters"
 version = "0.0.1-rc0"
 dependencies = [
- "bitcoin",
  "bitcoin-io",
  "bitcoin_hashes",
 ]
@@ -5174,7 +5114,7 @@ dependencies = [
  "rand 0.10.3",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
- "secp256k1 0.33.1",
+ "secp256k1",
  "serde",
  "shardtree 0.7.1",
  "zakura-note-encryption",
@@ -5196,7 +5136,6 @@ version = "0.0.1-rc5"
 dependencies = [
  "axum",
  "base64 0.22.1",
- "bitcoin",
  "clap",
  "flate2",
  "futures",
@@ -5253,7 +5192,6 @@ name = "zakura-pir-protocol"
 version = "0.0.1-rc5"
 dependencies = [
  "base64 0.22.1",
- "bitcoin",
  "bitcoin_hashes",
  "hex",
  "http",
@@ -5330,7 +5268,7 @@ dependencies = [
  "nonempty",
  "proptest",
  "rand_core 0.10.1",
- "secp256k1 0.33.1",
+ "secp256k1",
  "sha2 0.10.9",
  "zakura-equihash",
  "zakura-jubjub",
@@ -6363,7 +6301,7 @@ dependencies = [
  "nonempty",
  "proptest",
  "ripemd 0.1.3",
- "secp256k1 0.33.1",
+ "secp256k1",
  "sha2 0.10.9",
  "subtle",
  "zakura-address",
@@ -6677,7 +6615,7 @@ dependencies = [
  "bounded-vec",
  "hex",
  "ripemd 0.1.3",
- "secp256k1 0.33.1",
+ "secp256k1",
  "sha1",
  "sha2 0.10.9",
  "thiserror 2.0.21",
@@ -6706,7 +6644,7 @@ dependencies = [
  "hex",
  "nonempty",
  "ripemd 0.1.3",
- "secp256k1 0.33.1",
+ "secp256k1",
  "sha2 0.10.9",
  "subtle",
  "zcash_encoding 0.5.0",
