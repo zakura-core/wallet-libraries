@@ -1102,6 +1102,9 @@ fn verify_encoded_rows(
     )
     .map_err(|error| match error {
         AssignmentError::Decode(error) => BuildError::Record(error),
+        AssignmentError::Lengths { tags, assignment } => {
+            BuildError::Invalid(format!("{tags} entries were placed with {assignment} rows"))
+        }
         AssignmentError::Duplicate => {
             BuildError::Invalid("a script tag appears twice in the directory".into())
         }

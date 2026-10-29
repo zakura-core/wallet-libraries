@@ -240,7 +240,9 @@ pub fn misrouted(
 pub enum AssignmentError<E> {
     /// The caller's decoder refused a row.
     Decode(E),
-    /// A tag appears twice.
+    /// `tags` and `assignment` differ in length.
+    Lengths { tags: usize, assignment: usize },
+    /// A tag appears twice, in the rows or among the expected tags.
     Duplicate,
     /// The rows hold `held` tags where `placed` entries were placed.
     Count { held: usize, placed: usize },
@@ -252,7 +254,8 @@ pub enum AssignmentError<E> {
 ///
 /// `rows` are the encoded rows in logical order and `decode` returns the tags
 /// one holds. Entry `i` has tag `tags[i]` and was placed in row
-/// `assignment[i]`. Every entry's tag must decode from that row, no tag may
+/// `assignment[i]`. Both must have one item per entry and the expected tags
+/// must be distinct. Every entry's tag must decode from its row, no tag may
 /// appear twice, and the rows must hold exactly the entries placed.
 pub fn verify_assignment<'a, T: Copy + Eq + std::hash::Hash, E>(
     rows: impl IntoIterator<Item = &'a [u8]>,
@@ -260,8 +263,18 @@ pub fn verify_assignment<'a, T: Copy + Eq + std::hash::Hash, E>(
     tags: &[T],
     assignment: &[u32],
 ) -> Result<(), AssignmentError<E>> {
-    let mut decoded = Vec::new();
+    if tags.len() != assignment.len() {
+        return Err(AssignmentError::Lengths {
+            tags: tags.len(),
+            assignment: assignment.len(),
+        });
+    }
     let mut seen = std::collections::HashSet::with_capacity(tags.len());
+    if !tags.iter().all(|tag| seen.insert(*tag)) {
+        return Err(AssignmentError::Duplicate);
+    }
+    seen.clear();
+    let mut decoded = Vec::new();
     for raw in rows {
         let row = decode(raw).map_err(AssignmentError::Decode)?;
         if !row.iter().all(|tag| seen.insert(*tag)) {
@@ -497,10 +510,11 @@ mod tests {
             }
             Ok(raw.iter().copied().filter(|tag| *tag != 0).collect())
         };
-        let check = |rows: &[u8], assignment: &[u32]| {
+        let check_tags = |rows: &[u8], tags: &[u8], assignment: &[u32]| {
             let rows = rows.as_chunks::<2>().0.iter().map(|row| &row[..]);
-            verify_assignment(rows, decode, &[1, 2, 3], assignment)
+            verify_assignment(rows, decode, tags, assignment)
         };
+        let check = |rows: &[u8], assignment: &[u32]| check_tags(rows, &[1, 2, 3], assignment);
         assert_eq!(check(&[1, 0, 2, 3], &[0, 1, 1]), Ok(()));
         assert_eq!(
             check(&[1, 0, 0xff, 3], &[0, 1, 1]),
@@ -517,6 +531,19 @@ mod tests {
         assert_eq!(
             check(&[1, 0, 2, 3], &[1, 1, 1]),
             Err(AssignmentError::Misplaced { index: 0, row: 1 })
+        );
+        // An assignment missing an entry, which `zip` would have skipped.
+        assert_eq!(
+            check_tags(&[1, 2], &[1, 2], &[0]),
+            Err(AssignmentError::Lengths {
+                tags: 2,
+                assignment: 1
+            })
+        );
+        // A repeated expected tag hiding the substituted 3.
+        assert_eq!(
+            check_tags(&[1, 3], &[1, 1], &[0, 0]),
+            Err(AssignmentError::Duplicate)
         );
     }
 }
