@@ -113,8 +113,7 @@ def main():
         ("pir", "zakura/pir-client", ["native"], native_evaluators | server_roles | {"sha1"}, {"reinspiring"}),
         ("status-policy", "zakura/pir-client", ["status"], recovery_forbidden | server_roles | native_evaluators | {"tonic", "tonic-prost", "tokio", "hyper", "hyper-util", "h2"}, {"zakura-protocol"}),
         ("status-lightwalletd", "zakura/pir-client", ["lightwalletd"], server_roles, {"zakura-client-backend", "tonic", "tokio"}),
-        # The receiver evaluator scans with ipir-sp, which brings IPIR's native client.
-        ("receiver-evaluator", "zakura/pir-query-server", ["receiver"], wallet_roles - {"ipir-native-client"} | {"zakura-pir-publisher", "zakura-server-chain"}, {"ipir-sp", "simplepir-kernel"}),
+        ("receiver-evaluator", "zakura/pir-query-server", ["receiver"], wallet_roles | native_evaluators | {"zakura-pir-publisher", "zakura-server-chain", "sha1"}, {"reinspiring", "rayon"}),
         ("filter", "zakura/pir-protocol", ["transparent"], {"bitcoin", "secp256k1", "secp256k1-sys", "zakura-protocol", "zakura-transparent"} | server_roles, {"bitcoin_hashes"}),
         ("filter-cli", "zakura/pir-client", ["cli"], {"anstream", "anstyle-parse", "colorchoice"}, {"clap"}),
         ("filter-http", "zakura/pir-client", ["transparent", "reqwest"], {"reqwest", "quinn", "hyper", "hyper-util", "hyper-rustls", "h2", "tokio", "url", "idna"}, {"ureq"}),
@@ -132,11 +131,10 @@ def main():
         ("proving", "librustzcash/zcash_client_sqlite", ["pczt-tests"], set(), {"wagyu-zcash-parameters"}),
     ]
     for product in ("enhance", "status", "transparent", "receiver"):
-        evaluator = {"ipir-native-client"} if product == "receiver" else set()
         cases.extend([
             (f"{product}-client", "zakura/pir-client", [product], server_roles | native_evaluators | endpoint_stack, {"zakura-pir-protocol", "reinspiring"}),
             (f"{product}-publisher", "zakura/pir-publisher", [product], wallet_roles | {"zakura-pir-query-server", "zakura-server-chain"}, {"zakura-pir-protocol", "zakura-pir-server-core"}),
-            (f"{product}-query-server", "zakura/pir-query-server", [product], wallet_roles - evaluator | {"zakura-pir-publisher", "zakura-server-chain"}, {"zakura-pir-protocol", "zakura-pir-server-core"}),
+            (f"{product}-query-server", "zakura/pir-query-server", [product], wallet_roles | native_evaluators | {"zakura-pir-publisher", "zakura-server-chain"}, {"zakura-pir-protocol", "zakura-pir-server-core"}),
         ])
     defaults_disabled = set()
     receipt = {}
