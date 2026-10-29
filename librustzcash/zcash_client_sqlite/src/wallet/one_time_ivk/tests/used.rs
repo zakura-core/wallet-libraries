@@ -2,6 +2,7 @@
 use super::*;
 use crate::wallet::one_time_ivk::restore::tests::discovery::{
     drain, key8, one_time_notes, pay_candidate, publication_at, queue_late, send_witness, status,
+    work_of,
 };
 
 /// Whether `account`'s use marker is set.
@@ -272,27 +273,39 @@ fn the_upgrade_keeps_a_published_wallets_reservation_monitored() {
     );
 }
 
-/// A paused account's partial repair progress is dropped by the upgrade, since a paused
-/// account read only repairs, so the lookup reads its history again once enabled.
+/// A paused account's repair read that passed a payment without keeping it, stopped between
+/// shards after a completed prefix, resumes right after that prefix once enabled, and finds
+/// the payment.
 #[test]
-fn the_upgrade_resets_a_paused_accounts_partial_progress() {
+fn the_upgrade_resumes_a_paused_repair_after_its_completed_prefix() {
     let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let prefix = tip(&st).height;
+    let publication = publication_at(&st, prefix);
+    drain(&mut st, account, publication);
+    pay_candidate(&mut st, KeyId::new(Purpose::Receive, 0));
+    st.generate_and_scan_empty_blocks(2);
     let id = receive_id(&st, 0);
     exec(
         st.wallet().conn(),
-        "UPDATE ironwood_one_time_lookups SET checked_height = start_height,
-             inventory = zeroblob(32), shard = 0, segment = 0 WHERE one_time_key_id = ?1",
-        [id],
+        "UPDATE ironwood_one_time_lookups SET target_height = ?2, reasons = 1,
+             start_height = ?3, checked_height = ?2, inventory = zeroblob(32), shard = 2,
+             segment = 0, read_complete = 0 WHERE one_time_key_id = ?1",
+        rusqlite::params![id, u32::from(tip(&st).height), u32::from(prefix) + 1],
     );
     pause(&st);
     upgrade(&mut st);
-    let progress: (Option<u32>, Option<Vec<u8>>) = row(
-        st.wallet().conn(),
-        "SELECT checked_height, inventory FROM ironwood_one_time_lookups
-         WHERE one_time_key_id = ?1",
-        [id],
+    st.wallet_mut()
+        .db_mut()
+        .enable_one_time_recovery(account)
+        .unwrap();
+    assert_eq!(
+        work_of(&st, KeyId::new(Purpose::Receive, 0)).from,
+        prefix + 1
     );
-    assert_eq!(progress, (None, None));
+    let publication = publication_at(&st, tip(&st).height);
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
 /// A paused account's completed repair read records no completed history, so after the
