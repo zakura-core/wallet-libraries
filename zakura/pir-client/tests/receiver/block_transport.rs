@@ -44,7 +44,6 @@ fn head() -> Head {
         genesis: [9; 32],
         revision: 2,
         first: 1,
-        sealed: 0,
         tip: BlockId {
             height: 1,
             hash: [1; 32],
@@ -137,7 +136,7 @@ fn range_checks_session_and_matches() {
     assert!(ready(Inventories::block_range(base, &http, &changed, 1, 4)).is_err());
 }
 
-/// A size answer must belong to the captured revision and start no later than asked.
+/// A size answer must belong to the captured revision and start exactly where asked.
 #[test]
 fn range_size_is_bound_to_the_head() {
     let head = head();
@@ -175,6 +174,18 @@ fn range_size_is_bound_to_the_head() {
     ] {
         assert!(ready(Inventories::range_size(base, &answer(bad), &head, 1)).is_err());
     }
+    let taller = Head {
+        tip: BlockId {
+            height: 5,
+            hash: [5; 32],
+        },
+        ..head
+    };
+    ready(Inventories::range_size(base, &good, &taller, 1)).unwrap();
+    assert!(
+        ready(Inventories::range_size(base, &good, &taller, 2)).is_err(),
+        "starts before the request"
+    );
 }
 
 /// A server base with a path keeps it for every block-hint route, and a base that is not
