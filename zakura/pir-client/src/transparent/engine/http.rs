@@ -76,8 +76,10 @@ fn status_error(
 /// Reads a reply, turning a refusal the wallet can act on into one.
 ///
 /// The body and the `retry-after` header are read before the status is thrown
-/// away: `error_for_status` keeps only the code, and the map digest a stale
-/// refusal carries lives in the body.
+/// away, because a stale refusal carries its map digest in the body. For raw
+/// Ureq calls, disable automatic status errors with
+/// [`ureq::config::ConfigBuilder::http_status_as_error`] so refusal bodies reach
+/// this function.
 pub fn checked(
     response: ureq::http::Response<ureq::Body>,
     shard_id: u64,
@@ -123,7 +125,7 @@ pub struct HttpObservation {
     /// Response payload bytes read, including error responses.
     pub bytes_down: u64,
     pub failed: bool,
-    /// Underlying transport causes, without the top-level request URL.
+    /// Transport error category, without URLs or peer-supplied error text.
     pub transport_error: Option<String>,
 }
 
