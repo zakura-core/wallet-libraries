@@ -184,4 +184,66 @@ mod tests {
         let foreign = script_tag(&tag_salt(9, &hash, 1), script);
         assert_ne!(wallet, foreign);
     }
+
+    /// A resolver whose tags collide under every counter below `last`.
+    fn collide_below(
+        last: u32,
+        salt_at: impl Fn(u32) -> [u8; 32],
+    ) -> impl FnMut(&[u8; 32], &[u8]) -> [u8; SCRIPT_TAG_BYTES] {
+        move |salt, script| {
+            if (0..last).any(|counter| *salt == salt_at(counter)) {
+                [0; SCRIPT_TAG_BYTES]
+            } else {
+                script_tag(salt, script)
+            }
+        }
+    }
+
+    /// Salts and a tag at nonzero counters, pinned at the commit before tag
+    /// resolution was shared, then success at the last counter and
+    /// exhaustion after it, for directory and page salts.
+    #[test]
+    fn nonzero_counters_match_the_pinned_bytes() {
+        let hash = terminal(5);
+        let last_salt = tag_salt(3, &hash, MAX_TAG_SALT_COUNTER);
+        let pinned = [
+            hex::encode(tag_salt(3, &hash, 1)),
+            hex::encode(last_salt),
+            hex::encode(page_tag_salt(3, 2, 700, &hash, 1)),
+            hex::encode(page_tag_salt(3, 2, 700, &hash, MAX_TAG_SALT_COUNTER)),
+            hex::encode(script_tag(&last_salt, b"\x76\xa9pinned")),
+        ];
+        assert_eq!(
+            pinned,
+            [
+                "b5470d910aa9312842563e986aaf9b0845b320dee382e8f42d0919bf8a09da82",
+                "5dc2ed6f7fb122cad44e2d742de0fcf226526d4e02b31a7a9544384770dcdc7a",
+                "716ca18209b5c30b6c6b817d2e82cd49d0c24401ce6aebef19b48bb3dcba5ae7",
+                "9165c85112b4bfdcdd16ef6afae9976383c06da3db61add967d0686304c2a424",
+                "b6e5123d22ec57c860a1897b7ba1",
+            ]
+        );
+
+        let scripts: [&[u8]; 2] = [b"one", b"two"];
+        let directory = |counter| tag_salt(3, &hash, counter);
+        let page = |counter| page_tag_salt(3, 2, 700, &hash, counter);
+        let last = MAX_TAG_SALT_COUNTER;
+        assert_eq!(
+            resolve_tag_salt(3, &hash, &scripts, collide_below(last, directory)),
+            Ok((last, directory(last)))
+        );
+        assert_eq!(
+            resolve_page_tag_salt(3, 2, 700, &hash, &scripts, collide_below(last, page)),
+            Ok((last, page(last)))
+        );
+        let exhausted = Err(format!("tag salt counter exceeded {last} for shard 3"));
+        assert_eq!(
+            resolve_tag_salt(3, &hash, &scripts, collide_below(last + 1, directory)),
+            exhausted
+        );
+        assert_eq!(
+            resolve_page_tag_salt(3, 2, 700, &hash, &scripts, collide_below(last + 1, page)),
+            exhausted
+        );
+    }
 }
