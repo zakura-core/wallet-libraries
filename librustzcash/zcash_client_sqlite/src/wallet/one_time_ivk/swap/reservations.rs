@@ -4,7 +4,7 @@ use zakura_one_time_ivk::swap::Observation;
 use zcash_protocol::consensus::Parameters;
 
 use super::{RESERVED, ReservationPolicy, lifecycle::record};
-use crate::wallet::one_time_ivk::restore::queue::RECEIVE_PENDING;
+use crate::wallet::one_time_ivk::restore::queue::{RECEIVE_PENDING, mark_used};
 use crate::wallet::one_time_ivk::{
     KeyId, OneTimeKey, Purpose, account_key, decode_index, index_after, invalid, key_by_id,
     register,
@@ -403,6 +403,9 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
                 if pending {
                     return Ok(Err(ReservationPolicy::ReceiveHistory));
                 }
+                if reserve {
+                    mark_used(conn, owner.0)?;
+                }
                 return key_by_id(conn, params, account, id).map(Ok);
             }
         }
@@ -421,6 +424,7 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
         return Ok(Ok(key));
     }
     super::preparations::consume(conn, params, owner.0, Purpose::Receive)?;
+    mark_used(conn, owner.0)?;
     conn.execute(
         "UPDATE ironwood_one_time_keys SET reserved_at = ?2, released_at = NULL,
             reservation_floor = IFNULL((SELECT MAX(id) FROM ironwood_one_time_operations

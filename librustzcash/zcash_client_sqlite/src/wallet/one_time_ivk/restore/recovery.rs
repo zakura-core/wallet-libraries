@@ -94,10 +94,10 @@ fn inspect_memos<P: Parameters>(
     Ok(())
 }
 
-/// Accepts a mined refund memo as evidence that `account` uses one-time addresses. An
-/// account that isn't enabled is enabled, which recovers its memos; an enabled one
-/// recovers them (see [`recover_refund_memos`]). An account without an Orchard key holds
-/// no one-time keys, so it is left alone.
+/// Accepts a mined refund memo as evidence that `account` uses one-time addresses: sets its
+/// use marker (see `queue::mark_used`), then enables it if it isn't enabled, which recovers
+/// its memos, or recovers them (see [`recover_refund_memos`]). An account without an
+/// Orchard key holds no one-time keys, so it is left alone.
 fn accept_memo_evidence<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -111,8 +111,10 @@ fn accept_memo_evidence<P: Parameters>(
         |r| r.get(0),
     )?;
     if enabled {
+        super::queue::mark_used(conn, owner)?;
         recover_refund_memos(conn, params, account)
     } else if one_time_account(conn, params, account)?.is_some() {
+        super::queue::mark_used(conn, owner)?;
         super::queue::set_enabled(conn, params, account, true)
     } else {
         Ok(())

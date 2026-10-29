@@ -2249,7 +2249,8 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_PREPARATIONS: &str = "CREATE TABLE iron
 /// receive indexes enrolled for automatic discovery. It never shrinks. `filter_height` and
 /// `filter_hash` end the last committed filter span or complete check (activation - 1 when
 /// unset). `fresh` holds until a key is paid or registered beyond the initial window, or a
-/// correction or birthday change clears coverage.
+/// correction or birthday change clears coverage. `used` is the use marker: evidence the
+/// account used one-time addresses (see `restore::queue::mark_used`). It is never cleared.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str = "CREATE TABLE ironwood_one_time_recovery (
                 account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
                 enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
@@ -2270,5 +2271,6 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str = "CREATE TABLE ironwood
                 receive_end BLOB NOT NULL DEFAULT X'0000000000000000' CHECK (length(receive_end) = 8),
                 upgrade_required INTEGER NOT NULL DEFAULT 0 CHECK (upgrade_required IN (0, 1)),
                 fresh INTEGER NOT NULL DEFAULT 1 CHECK (fresh IN (0, 1)),
+                used INTEGER NOT NULL DEFAULT 0 CHECK (used IN (0, 1)),
                 CHECK ((filter_height IS NULL) = (filter_hash IS NULL))
             )";

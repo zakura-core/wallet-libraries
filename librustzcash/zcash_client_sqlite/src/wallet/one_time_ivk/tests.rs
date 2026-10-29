@@ -730,6 +730,7 @@ mod key_access;
 mod marker;
 mod scanning;
 mod selection;
+mod used;
 
 /// Reservations survive a reopen, and each purpose and account has its own index space,
 /// whose keys another account cannot look up.

@@ -1023,6 +1023,12 @@ fn enabled(st: &State, account: AccountUuid) -> bool {
     db.one_time_recovery(account, 0, None).unwrap().enabled
 }
 
+/// Whether `account`'s use marker is set.
+fn used(st: &State, account: AccountUuid) -> bool {
+    let db = st.wallet().db();
+    db.one_time_recovery(account, 0, None).unwrap().used
+}
+
 /// A restored wallet that never enabled recovery, holding `memo` on an unmined payment to
 /// its internal address, stored. Returns the transaction.
 fn unmined_internal_memo(
@@ -1041,9 +1047,9 @@ fn unmined_internal_memo(
 }
 
 /// A refund memo that a block batch mines on a never-enabled account is evidence of a swap.
-/// The batch's transaction enables recovery, registers the refund key and queues its
-/// bootstrap lookup from the funding height, and a rolled back transaction leaves none of
-/// it.
+/// The batch's transaction sets the use marker, enables recovery, registers the refund key
+/// and queues its bootstrap lookup from the funding height, and a rolled back transaction
+/// leaves none of it.
 #[test]
 fn a_mined_refund_memo_enables_a_never_enabled_account_in_one_transaction() {
     let (mut st, account, tx) = unmined_internal_memo(&refund_memo(0));
@@ -1058,11 +1064,11 @@ fn a_mined_refund_memo_enables_a_never_enabled_account_in_one_transaction() {
         Err(corrupt("test rollback"))
     });
     assert!(aborted.is_err());
-    assert!(!enabled(&st, account) && refund_keys(&st).is_empty());
+    assert!(!enabled(&st, account) && !used(&st, account) && refund_keys(&st).is_empty());
     assert_eq!(pending_memos(&st), 1);
     let work = st.wallet().db().one_time_new_work().unwrap();
     st.scan_cached_blocks(mined, 1);
-    assert!(enabled(&st, account));
+    assert!(enabled(&st, account) && used(&st, account));
     assert_eq!(refund_keys(&st), [(0, u32::from(mined), true)]);
     let bootstrap = store::restore::tests::discovery::work_of(&st, KeyId::new(Purpose::Refund, 0));
     assert_eq!(bootstrap.from, mined);
@@ -1076,7 +1082,7 @@ fn a_mined_refund_memo_enables_a_never_enabled_account_in_one_transaction() {
 fn an_unmined_refund_memo_waits_for_the_batch_that_mines_it() {
     let (mut st, account, tx) = unmined_internal_memo(&refund_memo(0));
     st.generate_and_scan_empty_blocks(1);
-    assert!(!enabled(&st, account) && refund_keys(&st).is_empty());
+    assert!(!enabled(&st, account) && !used(&st, account) && refund_keys(&st).is_empty());
     assert_eq!(pending_memos(&st), 1);
     let (mined, _) = st.generate_next_block_from_tx(1, &tx);
     st.scan_cached_blocks(mined, 1);
@@ -1094,6 +1100,46 @@ fn a_malformed_refund_memo_enables_nothing_and_leaves_the_queue() {
     assert_eq!(pending_memos(&st), 0);
     let (mined, _) = st.generate_next_block_from_tx(1, &tx);
     st.scan_cached_blocks(mined, 1);
-    assert!(!enabled(&st, account) && refund_keys(&st).is_empty());
+    assert!(!enabled(&st, account) && !used(&st, account) && refund_keys(&st).is_empty());
     assert_eq!(pending_memos(&st), 0);
+}
+
+/// A mined memo the 100-index gap rule defers registers no key, but it is still evidence of
+/// a swap: it enables the account and sets the marker, and stays queued.
+#[test]
+fn a_gap_deferred_memo_enables_the_account_and_sets_the_marker() {
+    let (mut st, account, tx) = unmined_internal_memo(&refund_memo(150));
+    let (mined, _) = st.generate_next_block_from_tx(1, &tx);
+    st.scan_cached_blocks(mined, 1);
+    assert!(enabled(&st, account) && used(&st, account));
+    assert!(refund_keys(&st).is_empty());
+    assert_eq!(pending_memos(&st), 1);
+}
+
+/// Recording the wallet's own funding of a refund key sets the use marker, before the
+/// funding transaction is mined.
+#[test]
+fn own_refund_funding_sets_the_marker() {
+    let (mut st, _) = ironwood_funded_wallet();
+    let account = st.test_account().unwrap().id();
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    let deposit = p2pkh(7).encode(st.network());
+    let now = clock_now();
+    let db = st.wallet_mut().db_mut();
+    let index = reserve_refund(db, account, tip)
+        .unwrap()
+        .unwrap()
+        .key_id()
+        .index();
+    db.record_refund_operation(account, index, &deposit, now + 3_600, now)
+        .unwrap();
+    let memo = db.refund_funding_memo(account, index, &deposit).unwrap();
+    exec(
+        st.wallet().conn(),
+        "UPDATE ironwood_one_time_recovery SET used = 0",
+        [],
+    );
+    let (_, txid) = try_send(&mut st, vec![payment(&p2pkh(7), 100_000, None)], &memo);
+    txid.unwrap();
+    assert!(used(&st, account));
 }

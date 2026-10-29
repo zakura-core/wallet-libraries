@@ -313,6 +313,10 @@ pub enum FilterOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryStatus {
     pub enabled: bool,
+    /// The account has used one-time addresses: one was handed out, it funded a refund, a
+    /// payment to one was found, or a refund memo was accepted. Set whether or not recovery
+    /// is enabled, and never cleared.
+    pub used: bool,
     /// The receiver service needs a newer client. No work is exposed until a capture this
     /// client supports begins recovery again; every pending request is kept.
     pub upgrade_required: bool,

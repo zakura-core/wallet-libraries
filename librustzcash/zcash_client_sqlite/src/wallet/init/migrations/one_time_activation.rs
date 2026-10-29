@@ -1,5 +1,6 @@
-//! Drops the one-time recovery state that only served filter re-checks: every newly watched
-//! key now gets a bootstrap lookup, so `pir_coverage` no longer chooses between the two.
+//! Adds the one-time use marker, and drops the recovery state that only served filter
+//! re-checks: every newly watched key now gets a bootstrap lookup, so `pir_coverage` no
+//! longer chooses between the two.
 use std::collections::HashSet;
 
 use schemerz_rusqlite::RusqliteMigration;
@@ -8,7 +9,7 @@ use uuid::Uuid;
 use super::one_time_new_work;
 use crate::wallet::init::WalletMigrationError;
 
-/// Drops `ironwood_one_time_recovery.pir_coverage`.
+/// Adds `ironwood_one_time_recovery.used` and drops its `pir_coverage`.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x755fb50a_f4e6_4b3e_80f0_8a21829607df);
 
 const DEPENDENCIES: &[Uuid] = &[one_time_new_work::MIGRATION_ID];
@@ -28,7 +29,7 @@ impl schemerz::Migration<Uuid> for Migration {
 
     /// Describes the stored-state change for migration diagnostics.
     fn description(&self) -> &'static str {
-        "Drop the one-time complete-check flag."
+        "Add the one-time use marker and drop the complete-check flag."
     }
 }
 
@@ -38,7 +39,11 @@ impl RusqliteMigration for Migration {
     /// Drops the flag. Keys already behind the frontier keep their coverage and pending
     /// lookups; the next key to enter monitoring gets a bootstrap lookup.
     fn up(&self, conn: &rusqlite::Transaction) -> Result<(), Self::Error> {
-        conn.execute_batch("ALTER TABLE ironwood_one_time_recovery DROP COLUMN pir_coverage;")?;
+        conn.execute_batch(
+            "ALTER TABLE ironwood_one_time_recovery ADD COLUMN used INTEGER NOT NULL DEFAULT 0
+                CHECK (used IN (0, 1));
+             ALTER TABLE ironwood_one_time_recovery DROP COLUMN pir_coverage;",
+        )?;
         Ok(())
     }
 

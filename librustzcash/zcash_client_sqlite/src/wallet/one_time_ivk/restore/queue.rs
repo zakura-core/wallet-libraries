@@ -276,6 +276,23 @@ pub(crate) fn ensure_account(conn: &Connection, owner: i64) -> Result<(), Sqlite
     Ok(())
 }
 
+/// Sets `owner`'s use marker, creating its progress row, whether or not recovery is enabled.
+/// It records evidence that the account used one-time addresses: an address or refund key
+/// handed out, its own refund funding, a payment candidate at or after the birthday, or an
+/// accepted refund memo. The first set raises the new-work counter, since it can add the
+/// account to the set an app runs rounds for. Later sets change nothing.
+pub(crate) fn mark_used(conn: &Connection, owner: i64) -> Result<(), SqliteClientError> {
+    ensure_account(conn, owner)?;
+    if conn.execute(
+        "UPDATE ironwood_one_time_recovery SET used = 1 WHERE account_id = ?1 AND used = 0",
+        [owner],
+    )? > 0
+    {
+        crate::wallet::one_time_rewind::new_work(conn)?;
+    }
+    Ok(())
+}
+
 /// The fence of an account that never enabled one-time recovery, which has no progress row.
 const NO_RECOVERY: RecoveryToken = RecoveryToken {
     generation: 0,
@@ -1481,6 +1498,7 @@ fn progress_of(
 fn disabled() -> RecoveryStatus {
     RecoveryStatus {
         enabled: false,
+        used: false,
         upgrade_required: false,
         token: NO_RECOVERY,
         filter_frontier: None,
@@ -1516,13 +1534,13 @@ pub(crate) fn status<P: Parameters>(
         restore_next, restore_gap, restore_done, manual_active, manual_purpose, manual_next, manual_end,
         upgrade_required, (SELECT COUNT(*) FROM ironwood_one_time_payment_recovery p
             JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
-            WHERE k.account_id = ?1 AND p.witness IS NOT NULL)
+            WHERE k.account_id = ?1 AND p.witness IS NOT NULL), used
         FROM ironwood_one_time_recovery WHERE account_id = ?1", [owner.0], |r| {
         let height: Option<u32> = r.get(0)?;
         let next: [u8; 8] = r.get(3)?;
         let manual_next: [u8; 8] = r.get(8)?;
         let manual_end: Option<[u8; 8]> = r.get(9)?;
-        Ok(RecoveryStatus { enabled, upgrade_required: r.get(10)?, token,
+        Ok(RecoveryStatus { enabled, used: r.get(12)?, upgrade_required: r.get(10)?, token,
             filter_frontier: height.map(|height| Ok::<_, rusqlite::Error>(ChainPoint {
                 height: height.into(), hash: BlockHash(r.get(1)?) })).transpose()?,
             fresh: r.get(2)?,
