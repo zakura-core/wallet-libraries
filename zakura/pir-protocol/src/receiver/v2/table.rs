@@ -8,6 +8,7 @@ use crate::receiver::{
     snapshot::{PageMeta, TREE_SIZE, check_pages},
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// A segment's chain coverage, shared by its directory and companion.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -445,7 +446,9 @@ impl CompanionTable {
     /// `entries` from [`DirectoryTable::validate`]: the S1.7 binding, digest and
     /// length, zero rows past `query_rows` and zero slots past the payments,
     /// every record and payload by [`lookup_slot`], and across the segment
-    /// complete page runs with unique outputs and positions.
+    /// complete page runs, unique outputs and positions, and one block hash per
+    /// height and one transaction per `(height, tx_index)`, whichever
+    /// receivers the records pay.
     pub fn validate(&self, directory: &Directory, entries: &[Entry]) -> Result<(), Error> {
         let m = &self.manifest;
         m.check_directory(directory)?;
@@ -458,10 +461,12 @@ impl CompanionTable {
         }
         let rows = self.data[..query_end].as_chunks::<ROW_BYTES>().0;
         let mut pages = Vec::with_capacity(m.payments as usize);
+        let mut identities = Identities::default();
         for entry in entries {
             for slot in entry.slots() {
                 let (record, _) =
                     lookup_slot(directory, m, entry, slot, &rows[slot_row(slot) as usize])?;
+                identities.add(&record.payment)?;
                 pages.push(PageMeta::from(&record));
             }
         }
@@ -473,5 +478,26 @@ impl CompanionTable {
             return Err(Error::Malformed);
         }
         check_pages(pages)
+    }
+}
+
+/// The block and transaction identities a segment's records have named so far.
+#[derive(Default)]
+struct Identities {
+    blocks: HashMap<u32, Hash>,
+    transactions: HashMap<(u32, u32), Hash>,
+    locations: HashMap<Hash, (u32, u32)>,
+}
+
+impl Identities {
+    /// Records `p`'s block and transaction, refusing a second block hash at
+    /// one height, a second txid at one `(height, tx_index)`, or one txid at
+    /// two locations.
+    fn add(&mut self, p: &Payment) -> Result<(), Error> {
+        let at = (p.height, p.tx_index);
+        let consistent = *self.blocks.entry(p.height).or_insert(p.block_hash) == p.block_hash
+            && *self.transactions.entry(at).or_insert(p.txid) == p.txid
+            && *self.locations.entry(p.txid).or_insert(at) == at;
+        consistent.then_some(()).ok_or(Error::Malformed)
     }
 }

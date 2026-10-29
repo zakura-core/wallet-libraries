@@ -662,3 +662,75 @@ fn exhausted_choice_seeds_fail_the_build() {
     );
     assert!(matches!(built, Err(Error::Choice)));
 }
+
+/// Rules across records hold whichever receivers the records pay. Each edit
+/// keeps tags, pages, totals, ordinals and digests valid and breaks one rule:
+/// a position or output shared by two receivers, positions decreasing within
+/// an extent, or two receivers naming different blocks at one height or
+/// different transactions at one `(height, tx_index)`. The untouched segment,
+/// whose tag order differs from both receiver and position order, is valid.
+#[test]
+fn cross_record_rules_hold_across_receivers() {
+    // Receiver 0 has payments 0, 6 and 7; receivers 1 to 5 one each, 1 to 5.
+    let mut paid = payments(&[3, 1, 1, 1, 1, 1]);
+    for p in &mut paid {
+        (p.1.position, p.2) = (p.1.position * 10, [0; PAYLOAD_BYTES]);
+    }
+    let base = build(
+        &project(&paid),
+        coverage(),
+        &SEED_BLOCK,
+        OPEN_SEED_ATTEMPTS,
+        2048,
+        tree(),
+        &paid,
+    )
+    .unwrap();
+    check(&base).unwrap();
+    let mut by_tag: Vec<u32> = (0..6).collect();
+    by_tag.sort_by_key(|i| find(&base, &receiver(*i)).unwrap().0.first);
+    assert_ne!(
+        by_tag,
+        (0..6).collect::<Vec<_>>(),
+        "tag order matches receiver and position order"
+    );
+
+    let slot = |seg: &Segment, i: u32, page: u32| find(seg, &receiver(i)).unwrap().0.first + page;
+    let of = |n: usize| paid[n].1.clone();
+    type Edit<'a> = Box<dyn Fn(&mut Segment) + 'a>;
+    let edits: Vec<(&str, Edit)> = vec![
+        (
+            "position shared across receivers",
+            Box::new(|s| edit_slot(s, slot(s, 2, 0), |r| r.payment.position = of(1).position)),
+        ),
+        (
+            "output shared across receivers",
+            Box::new(|s| {
+                edit_slot(s, slot(s, 2, 0), |r| {
+                    (r.payment.txid, r.payment.tx_index) = (of(1).txid, of(1).tx_index)
+                })
+            }),
+        ),
+        (
+            "decreasing positions in an extent",
+            Box::new(|s| {
+                edit_slot(s, slot(s, 0, 2), |r| {
+                    r.payment.position = of(6).position - 5
+                })
+            }),
+        ),
+        (
+            "two blocks at one height",
+            Box::new(|s| edit_slot(s, slot(s, 2, 0), |r| r.payment.block_hash = [0x77; 32])),
+        ),
+        (
+            "two transactions at one index",
+            Box::new(|s| edit_slot(s, slot(s, 2, 0), |r| r.payment.tx_index = of(1).tx_index)),
+        ),
+    ];
+    for (name, edit) in &edits {
+        let mut seg = base.clone();
+        edit(&mut seg);
+        assert!(matches!(check(&seg), Err(Error::Malformed)), "{name}");
+    }
+}
