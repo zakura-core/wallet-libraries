@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc4] - 2026-10-26
+
+### Changed
+
+- Use PIR protocol and server core `0.0.1-rc4`.
+
 ## [0.0.1-rc3] - 2026-10-23
 
 ### Added
