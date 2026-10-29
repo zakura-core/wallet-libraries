@@ -9,7 +9,7 @@ use crate::wallet::init::WalletMigrationError;
 use super::transactions_mined_height_index;
 
 /// The identifier of this migration.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x5b1c2a9e_7d43_4f0e_9a6b_2c8e1f7d0a11);
+pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xc7129551_bd36_46ca_9a98_f772ca01ca21);
 
 const DEPENDENCIES: &[Uuid] = &[transactions_mined_height_index::MIGRATION_ID];
 
