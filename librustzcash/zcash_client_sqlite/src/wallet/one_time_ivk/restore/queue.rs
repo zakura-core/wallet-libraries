@@ -625,7 +625,6 @@ pub(crate) fn set_enabled<P: Parameters>(
     }
     if enabled {
         ensure_window(conn, params, account)?;
-        super::recovery::queue_all_refund_memos(conn, owner.0)?;
         recover_refund_memos(conn, params, account)?;
     }
     Ok(())
@@ -1992,7 +1991,9 @@ pub(crate) fn refresh<P: Parameters>(
     Ok(true)
 }
 
-/// Ordinary sync can repair already-owned receipts while discovery is disabled.
+/// Ordinary sync can repair already-owned receipts while discovery is disabled, and a
+/// queued refund memo its blocks mined enables recovery for its account (see
+/// `recovery::recover_memo_accounts`).
 pub(crate) fn after_blocks_stored<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -2000,19 +2001,17 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
     now: i64,
 ) -> Result<(), SqliteClientError> {
     check_deferred_receipts(conn, params)?;
+    super::recovery::recover_memo_accounts(conn, params, None)?;
     // Enabling recovery validated each account's key, so the steps below look up only its
     // row and leave decoding it, about 0.4 ms, to the rare calls that register a key.
-    let accounts: Vec<(AccountUuid, bool)> = conn
+    let accounts: Vec<AccountUuid> = conn
         .prepare(
-            "SELECT a.uuid, r.enabled FROM accounts a
+            "SELECT a.uuid FROM accounts a
         JOIN ironwood_one_time_recovery r ON r.account_id = a.id",
         )?
-        .query_map([], |r| Ok((AccountUuid(r.get(0)?), r.get(1)?)))?
+        .query_map([], |r| Ok(AccountUuid(r.get(0)?)))?
         .collect::<Result<_, _>>()?;
-    for (account, enabled) in accounts {
-        if enabled {
-            recover_refund_memos(conn, params, account)?;
-        }
+    for account in accounts {
         admit(conn, params, sessions, account, now)?;
         progress(conn, params, account)?;
     }

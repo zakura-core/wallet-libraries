@@ -53,7 +53,13 @@ fn refund_memo(index: u64) -> MemoBytes {
 fn recover_memos(st: &mut State, account: AccountUuid) {
     tx(st.wallet_mut().db_mut(), |c, p| {
         let owner = crate::wallet::get_account_ref(c, account)?;
-        store::restore::recovery::queue_all_refund_memos(c, owner.0)?;
+        c.execute(
+            "INSERT OR IGNORE INTO ironwood_one_time_pending_memos (note_id)
+             SELECT id FROM ironwood_received_notes
+             WHERE account_id = ?1 AND recipient_key_scope = 1 AND one_time_key_id IS NULL
+               AND substr(memo, 1, 5) = X'FF5A535750'",
+            [owner.0],
+        )?;
         store::restore::recovery::recover_refund_memos(c, p, account)
     })
     .unwrap()
@@ -1009,4 +1015,85 @@ fn the_pending_memo_query_is_driven_by_the_queue() {
         [1],
     );
     assert_eq!(plan[0].3, "SCAN q", "{plan:?}");
+}
+
+/// Whether `account` has one-time recovery enabled.
+fn enabled(st: &State, account: AccountUuid) -> bool {
+    let db = st.wallet().db();
+    db.one_time_recovery(account, 0, None).unwrap().enabled
+}
+
+/// A restored wallet that never enabled recovery, holding `memo` on an unmined payment to
+/// its internal address, stored. Returns the transaction.
+fn unmined_internal_memo(
+    memo: &MemoBytes,
+) -> (
+    State,
+    AccountUuid,
+    zcash_primitives::transaction::Transaction,
+) {
+    let mut st = restored_wallet();
+    let account = st.test_account().unwrap().id();
+    let network = *st.network();
+    let tx = external_payment(parent(&st).address_at(0u32, Scope::Internal), memo);
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, None).unwrap();
+    (st, account, tx)
+}
+
+/// A refund memo that a block batch mines on a never-enabled account is evidence of a swap.
+/// The batch's transaction enables recovery, registers the refund key and queues its
+/// bootstrap lookup from the funding height, and a rolled back transaction leaves none of
+/// it.
+#[test]
+fn a_mined_refund_memo_enables_a_never_enabled_account_in_one_transaction() {
+    let (mut st, account, tx) = unmined_internal_memo(&refund_memo(0));
+    assert_eq!(pending_memos(&st), 1);
+    let (mined, _) = st.generate_next_block_from_tx(1, &tx);
+    let aborted: Result<(), SqliteClientError> = super::tx(st.wallet_mut().db_mut(), |c, p| {
+        c.execute(
+            "UPDATE transactions SET mined_height = ?1 WHERE txid = ?2",
+            rusqlite::params![u32::from(mined), tx.txid().as_ref()],
+        )?;
+        store::restore::recovery::recover_memo_accounts(c, p, None)?;
+        Err(corrupt("test rollback"))
+    });
+    assert!(aborted.is_err());
+    assert!(!enabled(&st, account) && refund_keys(&st).is_empty());
+    assert_eq!(pending_memos(&st), 1);
+    let work = st.wallet().db().one_time_new_work().unwrap();
+    st.scan_cached_blocks(mined, 1);
+    assert!(enabled(&st, account));
+    assert_eq!(refund_keys(&st), [(0, u32::from(mined), true)]);
+    let bootstrap = store::restore::tests::discovery::work_of(&st, KeyId::new(Purpose::Refund, 0));
+    assert_eq!(bootstrap.from, mined);
+    assert!(st.wallet().db().one_time_new_work().unwrap() > work);
+    assert_eq!(pending_memos(&st), 0);
+}
+
+/// A refund memo whose transaction is unmined enables nothing and stays queued through
+/// block batches that don't mine it, until the batch that mines it enables the account.
+#[test]
+fn an_unmined_refund_memo_waits_for_the_batch_that_mines_it() {
+    let (mut st, account, tx) = unmined_internal_memo(&refund_memo(0));
+    st.generate_and_scan_empty_blocks(1);
+    assert!(!enabled(&st, account) && refund_keys(&st).is_empty());
+    assert_eq!(pending_memos(&st), 1);
+    let (mined, _) = st.generate_next_block_from_tx(1, &tx);
+    st.scan_cached_blocks(mined, 1);
+    assert!(enabled(&st, account));
+    assert_eq!(refund_keys(&st), [(0, u32::from(mined), true)]);
+}
+
+/// A memo with the refund prefix that doesn't decode enables nothing, mined or not, and
+/// storing it already removes it from the queue.
+#[test]
+fn a_malformed_refund_memo_enables_nothing_and_leaves_the_queue() {
+    let mut invalid = RefundMemo::new(0).encode();
+    invalid[5] = 0xff;
+    let (mut st, account, tx) = unmined_internal_memo(&MemoBytes::from_bytes(&invalid).unwrap());
+    assert_eq!(pending_memos(&st), 0);
+    let (mined, _) = st.generate_next_block_from_tx(1, &tx);
+    st.scan_cached_blocks(mined, 1);
+    assert!(!enabled(&st, account) && refund_keys(&st).is_empty());
+    assert_eq!(pending_memos(&st), 0);
 }
