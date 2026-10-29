@@ -57,6 +57,7 @@ mod status_reconfirmation;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
 mod transaction_reconfirmation_receipts;
+mod transactions_mined_height_index;
 mod transparent_activation_schema;
 mod transparent_activity_metadata;
 mod transparent_detail_content_failures;
@@ -94,7 +95,6 @@ mod v_tx_outputs_use_legacy_false;
 mod wallet_summaries;
 mod witness_stabilized_notes;
 mod zip318_classification;
-mod transactions_mined_height_index;
 
 use std::{rc::Rc, sync::Mutex};
 
@@ -180,6 +180,7 @@ pub mod ids {
         support_legacy_sqlite::MIGRATION_ID as SUPPORT_LEGACY_SQLITE,
         support_zcashd_wallet_import::MIGRATION_ID as SUPPORT_ZCASHD_WALLET_IMPORT,
         transaction_reconfirmation_receipts::MIGRATION_ID as TRANSACTION_RECONFIRMATION_RECEIPTS,
+        transactions_mined_height_index::MIGRATION_ID as TRANSACTIONS_MINED_HEIGHT_INDEX,
         transparent_activation_schema::MIGRATION_ID as TRANSPARENT_ACTIVATION_SCHEMA,
         transparent_activity_metadata::MIGRATION_ID as TRANSPARENT_ACTIVITY_METADATA,
         transparent_detail_content_failures::MIGRATION_ID as TRANSPARENT_DETAIL_CONTENT_FAILURES,
@@ -188,7 +189,6 @@ pub mod ids {
         transparent_policy_generation::MIGRATION_ID as TRANSPARENT_POLICY_GENERATION,
         transparent_recovery_schema::MIGRATION_ID as TRANSPARENT_RECOVERY_SCHEMA,
         transparent_shared_derivations::MIGRATION_ID as TRANSPARENT_SHARED_DERIVATIONS,
-        transactions_mined_height_index::MIGRATION_ID as TRANSACTIONS_MINED_HEIGHT_INDEX,
         transparent_txid_enhancement::MIGRATION_ID as TRANSPARENT_TXID_ENHANCEMENT,
         tree_retained_checkpoints::MIGRATION_ID as TREE_RETAINED_CHECKPOINTS,
         tx_observation_height::MIGRATION_ID as TX_OBSERVATION_HEIGHT,
