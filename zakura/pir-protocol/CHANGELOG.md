@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Transparent and Receiver filter matching share the codec's SipHash-2-4
+  mapping, removing Bitcoin hash/I/O wrapper dependencies. Filter bytes, keys,
+  mapped values and membership behavior are unchanged.
+
 ## [0.0.1-rc4] - 2026-10-26
 
 ### Added
