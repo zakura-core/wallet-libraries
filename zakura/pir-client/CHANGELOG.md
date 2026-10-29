@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The reference blocking HTTP adapters use Ureq with Rustls instead of
+  Reqwest. The `reqwest` feature name remains available. `engine::http::checked`
+  now accepts `ureq::http::Response<ureq::Body>`; transport constructors and
+  caller-owned transport traits keep their signatures.
+- Reference POST requests reject body-preserving 307/308 redirects. Applications
+  requiring a different redirect policy can supply their own transport.
+- HTTP telemetry reports transport categories without embedding library error
+  strings that could contain a URL or server-controlled text.
+
 ## [0.0.1-rc4] - 2026-10-26
 
 ### Changed

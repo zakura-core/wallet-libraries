@@ -13,6 +13,7 @@ use crate::transparent::engine::sync::ServiceGeometry;
 use crate::transparent::engine::transport::{
     BoxError, FilterSource, ShardReply, ShardRequest, ShardTransport, TransferFailure, refusal,
 };
+use crate::transparent::http_client::{Client as BlockingClient, Request as BufferedRequest};
 use crate::transparent::routes;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -40,11 +41,11 @@ impl Default for HttpOptions {
     }
 }
 
-fn build(options: &HttpOptions) -> Result<reqwest::blocking::Client, BoxError> {
-    Ok(reqwest::blocking::Client::builder()
-        .timeout(options.timeout)
-        .user_agent(options.user_agent.clone())
-        .build()?)
+fn build(options: &HttpOptions) -> Result<BlockingClient, BoxError> {
+    Ok(BlockingClient::new(
+        options.timeout,
+        Some(&options.user_agent),
+    )?)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -56,7 +57,12 @@ struct HttpStatusError {
     cause: Option<BoxError>,
 }
 
-fn status_error(status: reqwest::StatusCode, shard: u64, revision: &str, body: &[u8]) -> BoxError {
+fn status_error(
+    status: ureq::http::StatusCode,
+    shard: u64,
+    revision: &str,
+    body: &[u8],
+) -> BoxError {
     Box::new(HttpStatusError {
         status: status.as_u16(),
         cause: None,
@@ -73,7 +79,7 @@ fn status_error(status: reqwest::StatusCode, shard: u64, revision: &str, body: &
 /// away: `error_for_status` keeps only the code, and the map digest a stale
 /// refusal carries lives in the body.
 pub fn checked(
-    response: reqwest::blocking::Response,
+    response: ureq::http::Response<ureq::Body>,
     shard_id: u64,
     revision: &str,
 ) -> Result<Vec<u8>, BoxError> {
@@ -83,7 +89,7 @@ pub fn checked(
     }
     let retry_after = response
         .headers()
-        .get(reqwest::header::RETRY_AFTER)
+        .get(ureq::http::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
     let body = response_body(response, "checked", DEFAULT_RESPONSE_LIMIT)?;
@@ -160,7 +166,7 @@ fn transport_cause<'a, E: std::error::Error + 'static>(
 /// are never retried here. The observer records every attempt; callers must
 /// still impose an overall recovery deadline.
 fn execute(
-    request: reqwest::blocking::RequestBuilder,
+    request: BufferedRequest,
     stage: &'static str,
     bytes_up: u64,
     binding: Option<(u64, &str)>,
@@ -171,7 +177,7 @@ fn execute(
 }
 
 fn execute_measured(
-    request: reqwest::blocking::RequestBuilder,
+    request: BufferedRequest,
     stage: &'static str,
     bytes_up: u64,
     binding: Option<(u64, &str)>,
@@ -200,10 +206,7 @@ fn execute_measured(
                 observer(event);
             }) as HttpObserver
         });
-        let copy = request
-            .try_clone()
-            .ok_or("HTTP request cannot be retried")?
-            .timeout(remaining);
+        let copy = request.clone().timeout(remaining);
         let result = execute_once(
             copy,
             stage,
@@ -242,21 +245,19 @@ fn execute_measured(
             if transport_cause::<std::io::Error>(error.as_ref()).is_some() {
                 return Some(transient_backoff(attempt));
             }
-            transport_cause::<reqwest::Error>(error.as_ref()).and_then(|error| {
-                (error.is_timeout()
-                    || error.is_connect()
-                    // These read-only API calls have buffered, replayable bodies.
-                    // Established-connection failures are often Request or Body,
-                    // rather than Connect. Builder/status errors stay separate.
-                    || error.is_request()
-                    || error.is_body()
-                    // Response::bytes classifies an interrupted body as Decode.
-                    // Protocol decoding happens after execute and is not retried.
-                    || error.is_decode()
-                    || error.status().is_some_and(|s| {
-                        matches!(s.as_u16(), 408 | 502 | 504)
-                            || (retry_overload && s.as_u16() == 503)
-                    }))
+            transport_cause::<ureq::Error>(error.as_ref()).and_then(|error| {
+                // Only transport failures replay buffered requests. Builder,
+                // status and application-decoding errors stay separate.
+                matches!(
+                    error,
+                    ureq::Error::Timeout(_)
+                        | ureq::Error::HostNotFound
+                        | ureq::Error::ConnectionFailed
+                        | ureq::Error::Io(_)
+                        | ureq::Error::Protocol(_)
+                        | ureq::Error::Tls(_)
+                        | ureq::Error::Rustls(_)
+                )
                 .then(|| transient_backoff(attempt))
             })
         });
@@ -288,7 +289,7 @@ fn transient_backoff(attempt: usize) -> Duration {
 }
 
 fn response_body(
-    response: reqwest::blocking::Response,
+    response: ureq::http::Response<ureq::Body>,
     stage: &str,
     response_limit: usize,
 ) -> Result<Vec<u8>, BoxError> {
@@ -306,6 +307,7 @@ fn response_body(
     .min(response_limit)
     .min(usize::MAX - 1);
     if response
+        .body()
         .content_length()
         .is_some_and(|length| length > limit as u64)
     {
@@ -313,7 +315,12 @@ fn response_body(
     }
     use std::io::Read;
     let mut bytes = Vec::new();
-    if let Err(error) = response.take(limit as u64 + 1).read_to_end(&mut bytes) {
+    if let Err(error) = response
+        .into_body()
+        .into_reader()
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+    {
         return Err(TransferFailure::boxed(bytes.len() as u64, error.into()));
     }
     if bytes.len() > limit {
@@ -326,7 +333,7 @@ fn response_body(
 }
 
 fn execute_once(
-    request: reqwest::blocking::RequestBuilder,
+    request: BufferedRequest,
     stage: &'static str,
     bytes_up: u64,
     binding: Option<(u64, &str)>,
@@ -340,7 +347,7 @@ fn execute_once(
         let response = request.send()?;
         let code = response.status();
         status = Some(code.as_u16());
-        let public_error = response.error_for_status_ref().err();
+        let public_error = code.is_client_error() || code.is_server_error();
         let retry_after = response
             .headers()
             .get("retry-after")
@@ -371,7 +378,7 @@ fn execute_once(
                 }
                 return Err(status_error(code, shard, revision, &body));
             }
-        } else if let Some(error) = public_error {
+        } else if public_error {
             if let Some(overloaded) = crate::transparent::engine::transport::Overloaded::from_http(
                 code.as_u16(),
                 retry_after.as_deref(),
@@ -382,7 +389,11 @@ fn execute_once(
                     cause: Some(Box::new(overloaded)),
                 }));
             }
-            return Err(Box::new(error) as BoxError);
+            return Err(Box::new(HttpStatusError {
+                status: code.as_u16(),
+                message: format!("HTTP {code}"),
+                cause: None,
+            }) as BoxError);
         }
         Ok(body)
     })();
@@ -397,17 +408,23 @@ fn execute_once(
             bytes_down,
             failed: result.is_err(),
             transport_error: result.as_ref().err().and_then(|error| {
-                let error = transport_cause::<reqwest::Error>(error.as_ref())?;
-                if error.is_status() {
-                    return None;
-                }
-                let mut causes = Vec::new();
-                let mut source = std::error::Error::source(error);
-                while let Some(cause) = source {
-                    causes.push(cause.to_string());
-                    source = cause.source();
-                }
-                Some(causes.join(": "))
+                let Some(error) = transport_cause::<ureq::Error>(error.as_ref()) else {
+                    return transport_cause::<std::io::Error>(error.as_ref())
+                        .map(|_| "HTTP I/O failure".into());
+                };
+                let description = match error {
+                    ureq::Error::Http(_) | ureq::Error::BadUri(_) | ureq::Error::StatusCode(_) => {
+                        return None;
+                    }
+                    ureq::Error::Timeout(_) => "HTTP timeout",
+                    ureq::Error::HostNotFound => "name resolution failed",
+                    ureq::Error::ConnectionFailed => "connection failed",
+                    ureq::Error::Io(_) => "HTTP I/O failure",
+                    ureq::Error::Protocol(_) => "invalid HTTP response",
+                    ureq::Error::Tls(_) | ureq::Error::Rustls(_) => "TLS failure",
+                    _ => "HTTP transport failure",
+                };
+                Some(description.into())
             }),
         });
     }
@@ -423,7 +440,7 @@ fn execute_once(
 /// A public immutable resource downloaded with the same measured retry policy.
 /// Response bytes are returned before any application decoding occurs.
 pub struct HttpResourceClient {
-    client: reqwest::blocking::Client,
+    client: BlockingClient,
     observer: Option<HttpObserver>,
     retry: RetryPolicy,
 }
@@ -441,14 +458,7 @@ impl HttpResourceClient {
         attempts: usize,
     ) -> Result<Self, BoxError> {
         Ok(Self {
-            client: reqwest::blocking::Client::builder()
-                .timeout(options.timeout)
-                .user_agent(options.user_agent.clone())
-                .no_gzip()
-                .no_brotli()
-                .no_deflate()
-                .no_zstd()
-                .build()?,
+            client: build(options)?,
             observer,
             retry: RetryPolicy {
                 response_limit: DEFAULT_RESPONSE_LIMIT,
@@ -479,7 +489,7 @@ impl HttpResourceClient {
 pub struct HttpShardTransport {
     /// The server base; every request addresses a Transparent route below it.
     base: Endpoint,
-    client: reqwest::blocking::Client,
+    client: BlockingClient,
     observer: Option<HttpObserver>,
     retry: RetryPolicy,
     /// Requests a batch keeps in flight.
@@ -708,7 +718,7 @@ pub struct HttpFilterSource {
     parent_experiments: Vec<ParentExperiment>,
     /// The server base; every request addresses a Transparent route below it.
     base: Endpoint,
-    client: reqwest::blocking::Client,
+    client: BlockingClient,
     observer: Option<HttpObserver>,
     retry: RetryPolicy,
     /// Filters fetched ahead of the walk, each handed out at most once.
@@ -1628,14 +1638,15 @@ mod observation_tests {
 
     #[test]
     fn receipt_and_io_wrappers_preserve_the_contained_transport_error() {
-        // A builder failure needs no network and supplies the same reqwest
+        // A builder failure needs no network and supplies the same HTTP client
         // error type the bounded body reader retains inside an IO error.
-        let original = reqwest::blocking::Client::new()
+        let original = BlockingClient::new(Duration::from_secs(30), None)
+            .unwrap()
             .get("http://[")
-            .build()
+            .send()
             .unwrap_err();
         let error = TransferFailure::boxed(7, std::io::Error::other(original).into());
-        assert!(transport_cause::<reqwest::Error>(error.as_ref()).is_some());
+        assert!(transport_cause::<ureq::Error>(error.as_ref()).is_some());
         assert!(transport_cause::<std::io::Error>(error.as_ref()).is_some());
         assert_eq!(TransferFailure::downloaded(&error), 7);
     }
@@ -1695,10 +1706,7 @@ mod observation_tests {
                         Arc::new(move |o: HttpObservation| observed.lock().unwrap().push(o))
                             as HttpObserver
                     });
-                    let client = reqwest::blocking::Client::builder()
-                        .timeout(Duration::from_secs(30))
-                        .build()
-                        .unwrap();
+                    let client = BlockingClient::new(Duration::from_secs(30), None).unwrap();
                     let url = format!("http://{address}");
                     let request = if private {
                         client.post(&url).body("payload")
@@ -1797,7 +1805,9 @@ mod observation_tests {
             let observations = Arc::new(Mutex::new(Vec::new()));
             let observed = observations.clone();
             let observer: HttpObserver = Arc::new(move |o| observed.lock().unwrap().push(o));
-            let request = reqwest::blocking::Client::new().get(format!("http://{address}"));
+            let request = BlockingClient::new(Duration::from_secs(30), None)
+                .unwrap()
+                .get(format!("http://{address}"));
             let result = execute_measured(
                 request,
                 "setup_directory",
