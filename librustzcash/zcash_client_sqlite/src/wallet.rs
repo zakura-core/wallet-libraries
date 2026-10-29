@@ -1544,12 +1544,14 @@ pub(crate) fn upsert_address<P: consensus::Parameters>(
     // error.
     if force_update_address {
         let previously_exposed_as = conn
-            .query_row(
+            .prepare_cached(
                 "SELECT address, exposed_at_height
                  FROM addresses
                  WHERE account_id = :account_id
                  AND diversifier_index_be = :diversifier_index_be
                  AND key_scope = :key_scope",
+            )?
+            .query_row(
                 named_params![
                     ":account_id": account_id.0,
                     ":diversifier_index_be": di_be,
