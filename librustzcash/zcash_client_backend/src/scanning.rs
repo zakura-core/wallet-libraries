@@ -23,6 +23,7 @@ use zcash_protocol::{
     ShieldedPool,
     consensus::{self, BlockHeight},
 };
+use zeroize::Zeroize;
 use zip32::Scope;
 
 use crate::{
@@ -386,8 +387,11 @@ const SCOPES: [Scope; 2] = [Scope::External, Scope::Internal];
 /// IVK a Sinsemilla `CommitIvk`. Keeping these lets a caller that scans repeatedly build
 /// [`ScanningKeys`] without deriving them again; see
 /// [`ScanningKeyCache`](crate::data_api::chain::ScanningKeyCache).
+///
+/// Dropping it overwrites the Sapling keys. The Orchard keys are dropped without being
+/// overwritten, because the Orchard key types offer no way to wipe them.
 pub(crate) struct AccountScanningKeys {
-    sapling: Option<[(SaplingIvk, sapling::NullifierDerivingKey); 2]>,
+    sapling: Option<[SaplingScopeKeys; 2]>,
     #[cfg(feature = "orchard")]
     orchard: Option<(
         orchard::keys::FullViewingKey,
@@ -395,17 +399,38 @@ pub(crate) struct AccountScanningKeys {
     )>,
 }
 
+/// The Sapling IVK and nullifier deriving key of one scope, held as their underlying values,
+/// which [`zeroize`] can overwrite (the Sapling key types do not implement `Zeroize`).
+#[derive(Clone, Copy, Default)]
+struct SaplingScopeKeys {
+    ivk: jubjub::Fr,
+    nk: jubjub::SubgroupPoint,
+}
+
+impl zeroize::DefaultIsZeroes for SaplingScopeKeys {}
+
 impl AccountScanningKeys {
     /// Derives the external and internal scanning keys of `ufvk`'s shielded components.
     pub(crate) fn derive(ufvk: &UnifiedFullViewingKey) -> Self {
         Self {
-            sapling: ufvk
-                .sapling()
-                .map(|dfvk| SCOPES.map(|scope| (dfvk.to_ivk(scope), dfvk.to_nk(scope)))),
+            sapling: ufvk.sapling().map(|dfvk| {
+                SCOPES.map(|scope| SaplingScopeKeys {
+                    ivk: dfvk.to_ivk(scope).0,
+                    nk: dfvk.to_nk(scope).0,
+                })
+            }),
             #[cfg(feature = "orchard")]
             orchard: ufvk
                 .orchard()
                 .map(|fvk| (fvk.clone(), SCOPES.map(|scope| fvk.to_ivk(scope)))),
+        }
+    }
+}
+
+impl Drop for AccountScanningKeys {
+    fn drop(&mut self) {
+        if let Some(sapling) = &mut self.sapling {
+            sapling.zeroize();
         }
     }
 }
@@ -452,12 +477,12 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
 
         for (account_id, keys) in accounts {
             if let Some(sapling_keys) = &keys.sapling {
-                for (scope, (ivk, nk)) in SCOPES.into_iter().zip(sapling_keys) {
+                for (scope, scope_keys) in SCOPES.into_iter().zip(sapling_keys) {
                     sapling.insert(
                         (account_id, scope),
                         Box::new(ScanningKey {
-                            ivk: ivk.clone(),
-                            nk: Some(*nk),
+                            ivk: SaplingIvk(scope_keys.ivk),
+                            nk: Some(sapling::NullifierDerivingKey(scope_keys.nk)),
                             account_id,
                             key_scope: Some(scope),
                         }),

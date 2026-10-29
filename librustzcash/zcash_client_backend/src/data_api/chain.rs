@@ -160,6 +160,7 @@ use subtle::ConditionallySelectable;
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::{block::BlockHash, transaction::components::sapling::zip212_enforcement};
 use zcash_protocol::consensus::{self, BlockHeight};
+use zeroize::Zeroizing;
 use zip32::Scope;
 
 use crate::{
@@ -673,13 +674,17 @@ where
 /// name other keys. It holds viewing keys, which can detect the wallet's transactions, for
 /// as long as the caller keeps it, so drop or [`clear`](Self::clear) it when those keys
 /// should leave memory, for example when the wallet is locked or reset.
+///
+/// Dropping or clearing it overwrites the stored key encodings and the Sapling scanning
+/// keys. The Orchard keys are freed without being overwritten, because the Orchard key
+/// types offer no way to wipe them; nor are the short-lived copies a scan makes.
 pub struct ScanningKeyCache<AccountId> {
     accounts: HashMap<AccountId, CachedAccountKeys>,
 }
 
 /// One account's scanning keys and the stored key encoding they were derived from.
 struct CachedAccountKeys {
-    encoding: String,
+    encoding: Zeroizing<String>,
     keys: AccountScanningKeys,
 }
 
@@ -691,7 +696,8 @@ impl<AccountId> ScanningKeyCache<AccountId> {
         }
     }
 
-    /// Drops every cached key.
+    /// Drops every cached key, overwriting what can be overwritten (see the type's
+    /// documentation).
     pub fn clear(&mut self) {
         self.accounts.clear();
     }
@@ -718,39 +724,91 @@ impl<AccountId: Copy + Eq + std::hash::Hash + Send + Sync + 'static> ScanningKey
         ParamsT: consensus::Parameters,
         DbT: WalletRead<AccountId = AccountId>,
     {
-        let (encodings, mut ufvks) = match data_db.get_unified_full_viewing_key_encodings()? {
+        let (encodings, ufvks) = match data_db.get_unified_full_viewing_key_encodings()? {
             Some(encodings) => (encodings, None),
             None => {
                 let ufvks = data_db.get_unified_full_viewing_keys()?;
                 (encode_ufvks(params, &ufvks), Some(ufvks))
             }
         };
+        self.refresh(params, encodings, ufvks, || {
+            data_db.get_unified_full_viewing_keys()
+        })?;
+        self.in_range(data_db, from_height, limit)
+    }
+
+    /// Brings the cache up to date with the wallet's stored key `encodings`.
+    ///
+    /// Cached accounts whose encoding is missing or different are dropped. If any account is
+    /// then uncached, its keys are decoded from `ufvks` if those were read together with
+    /// `encodings`, or else from `read_ufvks`, a later read of the wallet. The wallet may
+    /// have changed between the two reads, so a later read decides which accounts are cached:
+    /// an account visible to it must not be left out of the scan.
+    fn refresh<ParamsT, E>(
+        &mut self,
+        params: &ParamsT,
+        encodings: HashMap<AccountId, String>,
+        ufvks: Option<HashMap<AccountId, UnifiedFullViewingKey>>,
+        read_ufvks: impl FnOnce() -> Result<HashMap<AccountId, UnifiedFullViewingKey>, E>,
+    ) -> Result<(), E>
+    where
+        ParamsT: consensus::Parameters,
+    {
+        let mut encodings: HashMap<AccountId, Zeroizing<String>> = encodings
+            .into_iter()
+            .map(|(account, encoding)| (account, Zeroizing::new(encoding)))
+            .collect();
 
         self.accounts.retain(|account, cached| {
             encodings
                 .get(account)
                 .is_some_and(|encoding| *encoding == cached.encoding)
         });
-        for (account, encoding) in encodings {
-            if self.accounts.contains_key(&account) {
-                continue;
-            }
-            if ufvks.is_none() {
-                ufvks = Some(data_db.get_unified_full_viewing_keys()?);
-            }
-            // A key removed between the two reads is skipped here, and dropped from the
-            // cache by the next scan.
-            if let Some(ufvk) = ufvks.as_ref().and_then(|ufvks| ufvks.get(&account)) {
-                self.accounts.insert(
-                    account,
-                    CachedAccountKeys {
-                        encoding,
-                        keys: AccountScanningKeys::derive(ufvk),
-                    },
-                );
-            }
+        if encodings
+            .keys()
+            .all(|account| self.accounts.contains_key(account))
+        {
+            return Ok(());
         }
 
+        let ufvks = match ufvks {
+            Some(ufvks) => ufvks,
+            None => read_ufvks()?,
+        };
+        self.accounts
+            .retain(|account, _| ufvks.contains_key(account));
+        for (account, ufvk) in &ufvks {
+            if self.accounts.contains_key(account) {
+                continue;
+            }
+            // An account added between the two reads has no stored encoding yet, so its
+            // keys are cached under their own encoding, which the next scan replaces if the
+            // wallet stores the key differently.
+            let encoding = encodings
+                .remove(account)
+                .unwrap_or_else(|| Zeroizing::new(ufvk.encode(params)));
+            self.accounts.insert(
+                *account,
+                CachedAccountKeys {
+                    encoding,
+                    keys: AccountScanningKeys::derive(ufvk),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// The scanning keys of the cached accounts that at most `limit` blocks from
+    /// `from_height` are scanned for, as [`account_ufvks_for_range`] selects them.
+    fn in_range<DbT>(
+        &self,
+        data_db: &DbT,
+        from_height: BlockHeight,
+        limit: usize,
+    ) -> Result<ScanningKeys<AccountId, (AccountId, Scope)>, DbT::Error>
+    where
+        DbT: WalletRead<AccountId = AccountId>,
+    {
         let end = range_end(from_height, limit);
         let mut in_range = Vec::with_capacity(self.accounts.len());
         for (account, cached) in &self.accounts {
@@ -1206,5 +1264,105 @@ pub mod testing {
         {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::convert::Infallible;
+
+    use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
+    use zcash_protocol::consensus::Network;
+
+    use super::ScanningKeyCache;
+
+    const PARAMS: Network = Network::TestNetwork;
+
+    fn ufvk(seed: u8) -> UnifiedFullViewingKey {
+        UnifiedSpendingKey::from_seed(&PARAMS, &[seed; 32], zip32::AccountId::ZERO)
+            .unwrap()
+            .to_unified_full_viewing_key()
+    }
+
+    fn cached_accounts(cache: &ScanningKeyCache<u32>) -> Vec<u32> {
+        let mut accounts: Vec<_> = cache.accounts.keys().copied().collect();
+        accounts.sort();
+        accounts
+    }
+
+    /// The wallet can change between reading the key encodings and reading the keys; the
+    /// later read decides which accounts are scanned for.
+    #[test]
+    fn the_later_key_read_decides_the_cached_accounts() {
+        let (a, b) = (ufvk(1), ufvk(2));
+
+        let mut imported_between_reads = ScanningKeyCache::new();
+        imported_between_reads
+            .refresh(
+                &PARAMS,
+                HashMap::from([(1, a.encode(&PARAMS))]),
+                None,
+                || Ok::<_, Infallible>(HashMap::from([(1, a.clone()), (2, b.clone())])),
+            )
+            .unwrap();
+        assert_eq!(cached_accounts(&imported_between_reads), [1, 2]);
+
+        let mut deleted_between_reads = ScanningKeyCache::new();
+        deleted_between_reads
+            .refresh(
+                &PARAMS,
+                HashMap::from([(1, a.encode(&PARAMS)), (2, b.encode(&PARAMS))]),
+                None,
+                || Ok::<_, Infallible>(HashMap::from([(1, a.clone())])),
+            )
+            .unwrap();
+        assert_eq!(cached_accounts(&deleted_between_reads), [1]);
+    }
+
+    /// Accounts whose stored encoding is unchanged are neither read nor derived again, and a
+    /// changed or removed encoding drops the account's keys.
+    #[test]
+    fn only_new_or_changed_accounts_are_read_again() {
+        let (a, b) = (ufvk(1), ufvk(2));
+        let mut cache = ScanningKeyCache::new();
+        cache
+            .refresh(
+                &PARAMS,
+                HashMap::from([(1, a.encode(&PARAMS))]),
+                None,
+                || Ok::<_, Infallible>(HashMap::from([(1, a.clone())])),
+            )
+            .unwrap();
+
+        cache
+            .refresh(
+                &PARAMS,
+                HashMap::from([(1, a.encode(&PARAMS))]),
+                None,
+                || -> Result<_, Infallible> { panic!("unchanged keys were read again") },
+            )
+            .unwrap();
+        assert_eq!(cached_accounts(&cache), [1]);
+
+        cache
+            .refresh(
+                &PARAMS,
+                HashMap::from([(1, b.encode(&PARAMS))]),
+                None,
+                || Ok::<_, Infallible>(HashMap::from([(1, b.clone())])),
+            )
+            .unwrap();
+        assert_eq!(*cache.accounts[&1].encoding, b.encode(&PARAMS));
+
+        cache
+            .refresh(
+                &PARAMS,
+                HashMap::new(),
+                None,
+                || -> Result<_, Infallible> { panic!("no account needs decoding") },
+            )
+            .unwrap();
+        assert!(cached_accounts(&cache).is_empty());
     }
 }

@@ -9,7 +9,7 @@ and this library adheres to Rust's notion of
 
 ### Added
 
-- `data_api::chain::ScanningKeyCache` and `data_api::chain::scan_cached_blocks_with_cache`. A caller that scans repeatedly keeps one cache per wallet across calls, so that unchanged accounts' viewing keys are neither decoded nor derived again for every scanned range. The cache holds viewing keys for as long as the caller keeps it, and `ScanningKeyCache::clear` drops them.
+- `data_api::chain::ScanningKeyCache` and `data_api::chain::scan_cached_blocks_with_cache`. A caller that scans repeatedly keeps one cache per wallet across calls, so that unchanged accounts' viewing keys are neither decoded nor derived again for every scanned range. The cache holds viewing keys for as long as the caller keeps it, and `ScanningKeyCache::clear` drops them. Dropping or clearing a cache overwrites its stored key encodings and Sapling scanning keys; the Orchard key types cannot be wiped, so their memory is freed without being overwritten.
 - `data_api::WalletRead::get_unified_full_viewing_key_encodings`, which returns each account's stored viewing key encoding without decoding it. The default implementation returns `None`; a `ScanningKeyCache` then reads and encodes the keys on every scan, which still spares their derivation.
 
 ### Changed

@@ -67,10 +67,12 @@ tonic-prost = { workspace = true, optional = true }
 # - Secret management
 secrecy.workspace = true
 subtle.workspace = true
+zeroize = { workspace = true, features = ["alloc"] }
 
 # - Shielded protocols
 bls12_381.workspace = true
 group.workspace = true
+jubjub.workspace = true
 orchard.workspace = true
 sapling.workspace = true
 
@@ -90,7 +92,6 @@ shardtree.workspace = true
 assert_matches = { workspace = true, optional = true }
 pasta_curves = { workspace = true, optional = true }
 proptest = { workspace = true, optional = true }
-jubjub = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
 zcash_proofs = { workspace = true, optional = true }
 
@@ -273,7 +274,6 @@ tor = [
 test-dependencies = [
     "dep:assert_matches",
     "dep:proptest",
-    "dep:jubjub",
     "dep:rand_chacha",
     "dep:rand_08",
     "transparent/test-dependencies",
