@@ -148,7 +148,6 @@ zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc5", option
 
 [dev-dependencies]
 ipir-native-client = { version = "=0.1.0-rc.1", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
-bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }
 zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", version = "0.1.0-rc9.6", features = ["orchard", "test-dependencies", "transparent-inputs", "unstable"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 incrementalmerkletree = { workspace = true }

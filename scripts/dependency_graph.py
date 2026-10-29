@@ -63,6 +63,33 @@ def check_previous_endpoint(directory):
                     str(directory / "Cargo.toml")], check=True)
 
 
+def check_bitcoin_oracles(directory):
+    """Run the pinned Bitcoin codec/vector oracles outside workspace test builds."""
+    (directory / "src").mkdir(parents=True)
+    (directory / "src/lib.rs").write_text("")
+    manifest = (
+        '[package]\nname = "bitcoin-filter-counterpart"\nversion = "0.0.0"\nedition = "2024"\n'
+        '[workspace]\nresolver = "2"\n[profile.test]\nopt-level = 3\n[dependencies]\n'
+        'bitcoin = { version = "=0.32.102", default-features = false, features = ["std"] }\n'
+        'bitcoin-io = { version = "=0.1.101", default-features = false, features = ["std"] }\n'
+        'hex = "0.4"\nserde_json = "1"\nsha2 = "0.10"\n'
+    )
+    for package, features in (("filters", []), ("pir-client", ["transparent"]),
+                              ("pir-protocol", ["receiver"]), ("pir-publisher", ["transparent"])):
+        manifest += (f'zakura-{package} = {{ path = {json.dumps(str(ROOT / "zakura" / package))}, '
+                     f'features = {json.dumps(features)} }}\n')
+    for name, source in (
+        ("codec", "zakura/filters/tests/oracles/upstream.rs"),
+        ("bip158_vectors", "zakura/pir-client/tests/transparent_filter/bip158_vectors.rs"),
+        ("parent", "zakura/pir-client/tests/transparent_filter/oracles/parent.rs"),
+        ("receiver", "zakura/pir-protocol/tests/receiver/oracles/bitcoin.rs"),
+    ):
+        manifest += f'\n[[test]]\nname = "{name}"\npath = {json.dumps(str(ROOT / source))}\n'
+    (directory / "Cargo.toml").write_text(manifest)
+    subprocess.run(["cargo", "test", "--quiet", "--manifest-path",
+                    str(directory / "Cargo.toml")], check=True)
+
+
 def check_previous_native(directory):
     """Cross both directions with pinned pre-packaging code, independently of workspace features."""
     directory.mkdir()
@@ -85,6 +112,11 @@ def check_previous_native(directory):
 
 
 def main():
+    legacy_helpers = {"bitcoin"}
+    workspace_lock = tomllib.loads((ROOT / "Cargo.lock").read_text())
+    retained = legacy_helpers & {package["name"] for package in workspace_lock["package"]}
+    if retained:
+        raise RuntimeError(f"verification-only providers in workspace lockfile: {sorted(retained)}")
     # Check both feature-off libraries and real consumer capabilities. The
     # proving consumer also ensures the real fixture remains available.
     pczt_macros = {"serde_with_macros", "darling", "darling_core", "darling_macro", "ident_case", "strsim"}
@@ -201,6 +233,7 @@ def main():
             receipt[name] = graph
             print(f"{name}: {len(graph) - 1} dependency packages; boundary passed", flush=True)
         check_previous_endpoint(Path(temporary) / "previous-endpoint-counterpart")
+        check_bitcoin_oracles(Path(temporary) / "bitcoin-filter-counterpart")
         check_previous_native(Path(temporary) / "frozen-native-counterpart")
     output = Path(os.environ["CARGO_TARGET_DIR"]) / "dependency-graphs.json"
     output.write_text(json.dumps(receipt, indent=2) + "\n")
