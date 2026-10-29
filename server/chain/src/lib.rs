@@ -24,6 +24,7 @@ pub mod rpc;
 pub mod status;
 #[cfg(feature = "testing")]
 pub mod testing;
+pub mod transparent;
 
 pub use fee::{DEFAULT_CACHE_OUTPUTS, FeeError};
 pub use rpc::{NodeClient, NodeError};
@@ -36,7 +37,7 @@ pub enum Network {
 }
 
 impl Network {
-    fn node(self) -> zakura_chain::parameters::Network {
+    pub(crate) fn node(self) -> zakura_chain::parameters::Network {
         match self {
             Self::Mainnet => zakura_chain::parameters::Network::Mainnet,
             Self::Testnet => zakura_chain::parameters::Network::new_default_testnet(),

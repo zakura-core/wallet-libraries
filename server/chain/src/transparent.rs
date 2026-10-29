@@ -1,0 +1,741 @@
+//! Transparent's chain reads: every transaction's transparent outputs and the
+//! outputs its inputs spend, raw, with its exact fee.
+//!
+//! A block is read either over the node's RPC or, with the `rocksdb` feature,
+//! straight from the node's database ([`state::StateReader`]); both give the same
+//! [`FetchedBlock`] and the same [`TransparentBlock`]. Scripts are the raw bytes on
+//! chain, never the node's notion of a standard script: a filter that silently
+//! omitted unusual scripts would report "no activity" to a wallet that has some.
+//!
+//! An input's spent output resolves from earlier transactions in the same block
+//! first, then from the caller's resolver; an output that cannot be resolved fails
+//! the block. It is never treated as an empty script.
+//!
+//! Which scripts become filter elements and events, and how display records are
+//! encoded, is the PIR services' business; this module only reads the chain.
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+
+use serde_json::json;
+use zakura_chain::block::Block;
+use zakura_chain::serialization::ZcashDeserialize;
+use zakura_chain::transaction::{self, Transaction};
+use zakura_chain::transparent::{Input as ChainInput, OutPoint, Utxo};
+
+use crate::{NodeClient, NodeError};
+
+mod compact;
+#[cfg(feature = "rocksdb")]
+pub mod state;
+
+pub use compact::{
+    CompactAction, CompactBlock, CompactInput, CompactSaplingOutput, CompactTransaction,
+};
+
+/// Previous transactions requested per JSON-RPC batch.
+pub const PREVOUT_BATCH: usize = 256;
+
+/// Default cross-block budget of an [`OutputCache`], in transparent outputs.
+pub const DEFAULT_CACHE_OUTPUTS: usize = 8_000_000;
+
+/// A boxed error from a [`PreviousOutputs`] resolver.
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// A transparent output: its value and its raw locking script.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Output {
+    pub value: u64,
+    pub script: Vec<u8>,
+}
+
+/// A transparent input that spends an earlier output, with that output resolved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Input {
+    /// The input's position among all of the transaction's inputs.
+    pub input_index: u32,
+    /// The spent output's transaction ID, in protocol byte order, and index.
+    pub prevout_txid: [u8; 32],
+    pub prevout_index: u32,
+    /// The output it spends.
+    pub spent: Output,
+}
+
+/// A transaction's fee.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fee {
+    /// A coinbase transaction has no fee of its own.
+    NotApplicable,
+    /// The remaining value of the transaction's value pool, in zatoshis.
+    Exact(u64),
+}
+
+/// One transaction's transparent parts. Hashes use protocol byte order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransparentTransaction {
+    pub txid: [u8; 32],
+    /// The transaction's position in its block.
+    pub transaction_index: u16,
+    pub coinbase: bool,
+    pub fee: Fee,
+    /// How many inputs spend an earlier output; a coinbase input does not.
+    pub transparent_input_count: u32,
+    /// Whether the transaction has Sprout, Sapling, Orchard or Ironwood parts.
+    pub has_shielded_components: bool,
+    /// Every transparent output, in order.
+    pub outputs: Vec<Output>,
+    /// Every input that spends an earlier output, in input order.
+    pub inputs: Vec<Input>,
+}
+
+/// One block's transparent transactions, in block order, and how many spent outputs
+/// its resolver looked up and found cached. Hashes use protocol byte order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransparentBlock {
+    pub height: u32,
+    pub hash: [u8; 32],
+    pub parent: [u8; 32],
+    pub transactions: Vec<TransparentTransaction>,
+    pub lookups: u64,
+    pub cache_hits: u64,
+}
+
+/// Why a block's transparent parts could not be read.
+#[derive(Debug, thiserror::Error)]
+pub enum ExtractError {
+    #[error("transaction metadata: {0}")]
+    Metadata(String),
+    #[error("previous output {0} is unavailable; refusing to build a partial block")]
+    MissingPreviousOutput(String),
+    #[error("block has {0} transactions, more than the event encoding can index")]
+    BlockTooLarge(usize),
+    #[error("previous output lookup failed for {outpoint}: {source}")]
+    Lookup {
+        outpoint: String,
+        #[source]
+        source: BoxError,
+    },
+    #[error("height {0} does not fit a block height")]
+    Height(u64),
+    #[error(transparent)]
+    Node(#[from] NodeError),
+}
+
+/// Renders an outpoint for diagnostics: display-order txid and index, as a person
+/// would look it up.
+pub fn outpoint_label(txid: &[u8; 32], index: u32) -> String {
+    format!("{}:{index}", crate::hash::display(txid))
+}
+
+fn label(outpoint: &OutPoint) -> String {
+    outpoint_label(&outpoint.hash.0, outpoint.index)
+}
+
+/// Supplies the value and locking script of an output created before a block.
+pub trait PreviousOutputs {
+    /// The output `index` of the transaction `txid` (protocol byte order), or `None`
+    /// if it is not known. `None` aborts the block; it must never be treated as an
+    /// empty script.
+    fn previous_output(&mut self, txid: [u8; 32], index: u32) -> Result<Option<Output>, BoxError>;
+}
+
+/// A decoded block, read over RPC or from the node's database.
+#[derive(Clone, Debug)]
+pub struct FetchedBlock(Arc<Block>);
+
+impl FetchedBlock {
+    /// The block serialized in `raw`.
+    pub fn from_bytes(raw: &[u8]) -> Result<Self, NodeError> {
+        Block::zcash_deserialize(raw)
+            .map(|block| Self(Arc::new(block)))
+            .map_err(|error| NodeError::Block(error.to_string()))
+    }
+
+    /// The block hash in protocol byte order.
+    pub fn hash(&self) -> [u8; 32] {
+        self.0.hash().0
+    }
+
+    /// The parent block's hash in protocol byte order.
+    pub fn parent(&self) -> [u8; 32] {
+        self.0.header.previous_block_hash.0
+    }
+
+    /// The header time the miner stamped, in Unix seconds.
+    pub fn time(&self) -> i64 {
+        self.0.header.time.timestamp()
+    }
+
+    /// The transaction IDs, in block order and protocol byte order.
+    pub fn txids(&self) -> Vec<[u8; 32]> {
+        self.0.transactions.iter().map(|tx| tx.hash().0).collect()
+    }
+
+    /// This block's transparent parts at `height`, resolving spent outputs not
+    /// created in this block through `previous`.
+    pub fn transparent(
+        &self,
+        height: u32,
+        previous: &mut impl PreviousOutputs,
+    ) -> Result<Vec<TransparentTransaction>, ExtractError> {
+        extract(&self.0.transactions, previous, height)
+    }
+}
+
+/// Every transaction's transparent parts. Same-block spends resolve from this
+/// block's own outputs before `previous` is consulted.
+pub(crate) fn extract(
+    transactions: &[Arc<Transaction>],
+    previous: &mut impl PreviousOutputs,
+    height: u32,
+) -> Result<Vec<TransparentTransaction>, ExtractError> {
+    // Every output this block creates, keyed by outpoint, for same-block spends.
+    let mut created: HashMap<OutPoint, zakura_chain::transparent::Output> = HashMap::new();
+    for transaction in transactions {
+        let txid = transaction.hash();
+        for (index, output) in transaction.outputs().iter().enumerate() {
+            created.insert(
+                OutPoint {
+                    hash: txid,
+                    index: index as u32,
+                },
+                output.clone(),
+            );
+        }
+    }
+    let mut extracted = Vec::with_capacity(transactions.len());
+    for (transaction_index, transaction) in transactions.iter().enumerate() {
+        // A transaction index beyond u16 would silently alias another transaction's
+        // events. No Zcash block comes close, which is why it is checked.
+        let transaction_index = u16::try_from(transaction_index)
+            .map_err(|_| ExtractError::BlockTooLarge(transactions.len()))?;
+        let coinbase = transaction
+            .inputs()
+            .iter()
+            .any(|input| matches!(input, ChainInput::Coinbase { .. }));
+        let mut prevouts = HashMap::new();
+        let mut inputs = Vec::new();
+        for (input_index, input) in transaction.inputs().iter().enumerate() {
+            let ChainInput::PrevOut { outpoint, .. } = input else {
+                continue;
+            };
+            let output = match created.get(outpoint) {
+                Some(output) => output.clone(),
+                None => {
+                    let found = previous
+                        .previous_output(outpoint.hash.0, outpoint.index)
+                        .map_err(|source| ExtractError::Lookup {
+                            outpoint: label(outpoint),
+                            source,
+                        })?
+                        .ok_or_else(|| ExtractError::MissingPreviousOutput(label(outpoint)))?;
+                    zakura_chain::transparent::Output {
+                        value: zakura_chain::amount::Amount::try_from(found.value)
+                            .map_err(|e| ExtractError::Metadata(e.to_string()))?,
+                        lock_script: zakura_chain::transparent::Script::new(&found.script),
+                    }
+                }
+            };
+            inputs.push(Input {
+                input_index: input_index as u32,
+                prevout_txid: outpoint.hash.0,
+                prevout_index: outpoint.index,
+                spent: Output {
+                    value: u64::from(output.value),
+                    script: output.lock_script.as_raw_bytes().to_vec(),
+                },
+            });
+            if prevouts
+                .insert(
+                    *outpoint,
+                    Utxo {
+                        output,
+                        height: zakura_chain::block::Height(height),
+                        from_coinbase: false,
+                    },
+                )
+                .is_some()
+            {
+                return Err(ExtractError::Metadata("duplicate transaction input".into()));
+            }
+        }
+        let transparent_input_count = u32::try_from(prevouts.len())
+            .map_err(|_| ExtractError::Metadata("input count exceeds u32".into()))?;
+        let fee = if coinbase {
+            Fee::NotApplicable
+        } else {
+            let balance = transaction
+                .value_balance(&prevouts)
+                .map_err(|e| ExtractError::Metadata(e.to_string()))?;
+            let fee = balance
+                .remaining_transaction_value()
+                .map_err(|e| ExtractError::Metadata(e.to_string()))?;
+            Fee::Exact(u64::from(fee))
+        };
+        extracted.push(TransparentTransaction {
+            txid: transaction.hash().0,
+            transaction_index,
+            coinbase,
+            fee,
+            transparent_input_count,
+            has_shielded_components: transaction.has_shielded_data(),
+            outputs: transaction
+                .outputs()
+                .iter()
+                .map(|o| Output {
+                    value: u64::from(o.value),
+                    script: o.lock_script.as_raw_bytes().to_vec(),
+                })
+                .collect(),
+            inputs,
+        });
+    }
+    Ok(extracted)
+}
+
+/// Spent-output values and scripts of recently seen transactions, evicted oldest
+/// first, shared across blocks read over RPC.
+///
+/// Entries are keyed by outpoint, and a txid commits to its outputs, so an entry
+/// stays correct across reorganizations; a reorganized-out transaction is only a
+/// wasted entry. Eviction removes whole transactions; the budget counts outputs.
+pub struct OutputCache {
+    outputs: HashMap<OutPoint, zakura_chain::transparent::Output>,
+    order: VecDeque<(transaction::Hash, u32)>,
+    count: usize,
+    capacity: usize,
+}
+
+impl OutputCache {
+    /// A cache holding at most about `capacity` transparent outputs; see
+    /// [`DEFAULT_CACHE_OUTPUTS`].
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            outputs: HashMap::new(),
+            order: VecDeque::new(),
+            count: 0,
+            capacity: capacity.max(1),
+        }
+    }
+
+    fn insert_transaction(&mut self, transaction: &Transaction) {
+        let txid = transaction.hash();
+        let outputs = transaction.outputs();
+        for (index, output) in outputs.iter().enumerate() {
+            self.outputs.insert(
+                OutPoint {
+                    hash: txid,
+                    index: index as u32,
+                },
+                output.clone(),
+            );
+        }
+        if !outputs.is_empty() {
+            self.order.push_back((txid, outputs.len() as u32));
+            self.count += outputs.len();
+            // A transaction larger than the budget is kept until another arrives, so
+            // the block being processed can still resolve it.
+            while self.count > self.capacity && self.order.len() > 1 {
+                if let Some((evicted, count)) = self.order.pop_front() {
+                    for index in 0..count {
+                        self.outputs.remove(&OutPoint {
+                            hash: evicted,
+                            index,
+                        });
+                    }
+                    self.count = self.count.saturating_sub(count as usize);
+                }
+            }
+        }
+    }
+
+    fn get(&self, outpoint: &OutPoint) -> Option<&zakura_chain::transparent::Output> {
+        self.outputs.get(outpoint)
+    }
+
+    /// The outputs held.
+    pub fn len(&self) -> usize {
+        self.outputs.len()
+    }
+
+    /// Whether the cache holds nothing.
+    pub fn is_empty(&self) -> bool {
+        self.outputs.is_empty()
+    }
+}
+
+/// Resolves spent outputs from an [`OutputCache`], then from the node one
+/// transaction at a time, blocking on `runtime`.
+struct RpcPreviousOutputs<'a> {
+    client: &'a NodeClient,
+    runtime: tokio::runtime::Handle,
+    cache: &'a mut OutputCache,
+    lookups: u64,
+    cache_hits: u64,
+}
+
+impl PreviousOutputs for RpcPreviousOutputs<'_> {
+    fn previous_output(&mut self, txid: [u8; 32], index: u32) -> Result<Option<Output>, BoxError> {
+        let outpoint = OutPoint {
+            hash: transaction::Hash(txid),
+            index,
+        };
+        if let Some(output) = self.cache.get(&outpoint) {
+            self.cache_hits += 1;
+            return Ok(Some(Output {
+                value: u64::from(output.value),
+                script: output.lock_script.as_raw_bytes().to_vec(),
+            }));
+        }
+        self.lookups += 1;
+        let found = self
+            .runtime
+            .block_on(self.client.transparent_transactions(&[txid]))?
+            .pop()
+            .flatten();
+        let Some(transaction) = found else {
+            return Ok(None);
+        };
+        self.cache.insert_transaction(&transaction);
+        let output = transaction.outputs().get(index as usize).map(|o| Output {
+            value: u64::from(o.value),
+            script: o.lock_script.as_raw_bytes().to_vec(),
+        });
+        if output.is_none() {
+            tracing::warn!(
+                outpoint = %label(&outpoint),
+                outputs = transaction.outputs().len(),
+                "previous transaction has no output at this index"
+            );
+        }
+        Ok(output)
+    }
+}
+
+impl NodeClient {
+    /// The block at `height`, from its raw serialization.
+    pub async fn fetch_block(&self, height: u64) -> Result<FetchedBlock, NodeError> {
+        FetchedBlock::from_bytes(&self.raw_block(height.to_string()).await?)
+    }
+
+    /// `fetched`'s transparent parts at `height`, resolving spent outputs from the
+    /// block itself, then `cache`, then the node in batches of [`PREVOUT_BATCH`].
+    /// The block's own transactions enter the cache first, so a later block spending
+    /// them needs no lookup.
+    pub async fn transparent_block(
+        &self,
+        height: u64,
+        fetched: FetchedBlock,
+        cache: &mut OutputCache,
+    ) -> Result<TransparentBlock, ExtractError> {
+        let event_height = u32::try_from(height).map_err(|_| ExtractError::Height(height))?;
+        for transaction in &fetched.0.transactions {
+            cache.insert_transaction(transaction);
+        }
+        let batched = self.prefetch(cache, &fetched.0.transactions).await?;
+        let runtime = tokio::runtime::Handle::current();
+        let client = self.clone();
+        let block = fetched.clone();
+        // Extraction is synchronous and may block on straggler lookups, so it must
+        // not run on an async worker thread.
+        let mut owned = std::mem::replace(cache, OutputCache::new(1));
+        let (result, lookups, cache_hits, owned) = tokio::task::spawn_blocking(move || {
+            let mut previous = RpcPreviousOutputs {
+                client: &client,
+                runtime,
+                cache: &mut owned,
+                lookups: 0,
+                cache_hits: 0,
+            };
+            let result = extract(&block.0.transactions, &mut previous, event_height);
+            let counts = (previous.lookups, previous.cache_hits);
+            (result, counts.0, counts.1, owned)
+        })
+        .await
+        .map_err(|e| ExtractError::Metadata(e.to_string()))?;
+        *cache = owned;
+        Ok(TransparentBlock {
+            height: event_height,
+            hash: fetched.hash(),
+            parent: fetched.parent(),
+            transactions: result?,
+            // The pre-pass did the fetching; stragglers are counted with it.
+            lookups: lookups + batched,
+            cache_hits,
+        })
+    }
+
+    /// Fetches, in batches, every transaction `transactions` spend from that is not
+    /// in `cache`, and caches it. Returns how many it fetched.
+    async fn prefetch(
+        &self,
+        cache: &mut OutputCache,
+        transactions: &[Arc<Transaction>],
+    ) -> Result<u64, NodeError> {
+        let mut wanted = Vec::new();
+        let mut seen = HashSet::new();
+        for transaction in transactions {
+            for input in transaction.inputs() {
+                let ChainInput::PrevOut { outpoint, .. } = input else {
+                    continue;
+                };
+                if cache.get(outpoint).is_some() || !seen.insert(outpoint.hash) {
+                    continue;
+                }
+                wanted.push(outpoint.hash.0);
+            }
+        }
+        let mut fetched = 0u64;
+        for chunk in wanted.chunks(PREVOUT_BATCH) {
+            for transaction in self
+                .transparent_transactions(chunk)
+                .await?
+                .into_iter()
+                .flatten()
+            {
+                cache.insert_transaction(&transaction);
+                fetched += 1;
+            }
+        }
+        Ok(fetched)
+    }
+
+    /// Transactions by protocol-order ID in one JSON-RPC 2.0 batch, each identity
+    /// verified, `None` where the node does not have one (-5).
+    async fn transparent_transactions(
+        &self,
+        txids: &[[u8; 32]],
+    ) -> Result<Vec<Option<Transaction>>, NodeError> {
+        let entries = self
+            .batch::<String>(
+                "getrawtransaction",
+                txids
+                    .iter()
+                    .map(|txid| json!([crate::hash::display(txid), 0]))
+                    .collect(),
+            )
+            .await?;
+        txids
+            .iter()
+            .zip(entries)
+            .map(|(txid, entry)| {
+                let displayed = crate::hash::display(txid);
+                let raw_hex = match entry {
+                    Ok(raw) => raw,
+                    // "No information available about transaction".
+                    Err((-5, _)) => return Ok(None),
+                    Err((code, message)) => return Err(NodeError::Rpc(code, message)),
+                };
+                let raw = hex::decode(raw_hex)?;
+                let transaction =
+                    Transaction::zcash_deserialize(raw.as_slice()).map_err(|error| {
+                        NodeError::Transaction(displayed.clone(), error.to_string())
+                    })?;
+                if transaction.hash().0 != *txid {
+                    return Err(NodeError::Transaction(
+                        displayed,
+                        "returned transaction identity differs".into(),
+                    ));
+                }
+                Ok(Some(transaction))
+            })
+            .collect()
+    }
+
+    /// Whether the node has the transaction `txid` (protocol byte order), checking
+    /// the identity of what it returns.
+    pub async fn has_transaction(&self, txid: [u8; 32]) -> Result<bool, NodeError> {
+        Ok(self
+            .transparent_transactions(&[txid])
+            .await?
+            .pop()
+            .flatten()
+            .is_some())
+    }
+
+    /// One JSON-RPC call whose result is returned as raw JSON, for tools that
+    /// deliberately read the node's verbose answers instead of this crate's parser.
+    pub async fn call_value(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, NodeError> {
+        self.call(method, params).await
+    }
+
+    /// Several JSON-RPC calls in one JSON-RPC 2.0 batch, results positional and raw.
+    /// A call answered with an RPC error fails the whole batch, since a positional
+    /// hole would be indistinguishable from a null result.
+    pub async fn call_batch_values(
+        &self,
+        calls: &[(&str, serde_json::Value)],
+    ) -> Result<Vec<serde_json::Value>, NodeError> {
+        let mut results = Vec::with_capacity(calls.len());
+        // One method per sub-batch keeps the shared batch reader's placement by id.
+        let requests: Vec<serde_json::Value> = calls
+            .iter()
+            .map(|(method, params)| json!({"method": method, "params": params}))
+            .collect();
+        for entry in self.batch_mixed(requests).await? {
+            results.push(entry.map_err(|(code, message)| NodeError::Rpc(code, message))?);
+        }
+        Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Map(HashMap<([u8; 32], u32), Output>, u64);
+
+    impl PreviousOutputs for Map {
+        fn previous_output(
+            &mut self,
+            txid: [u8; 32],
+            index: u32,
+        ) -> Result<Option<Output>, BoxError> {
+            self.1 += 1;
+            Ok(self.0.get(&(txid, index)).cloned())
+        }
+    }
+
+    fn output(value: i64, script: &[u8]) -> zakura_chain::transparent::Output {
+        zakura_chain::transparent::Output {
+            value: zakura_chain::amount::Amount::try_from(value).unwrap(),
+            lock_script: zakura_chain::transparent::Script::new(script),
+        }
+    }
+
+    fn spend(txid: [u8; 32], index: u32) -> zakura_chain::transparent::Input {
+        zakura_chain::transparent::Input::PrevOut {
+            outpoint: OutPoint {
+                hash: transaction::Hash(txid),
+                index,
+            },
+            unlock_script: zakura_chain::transparent::Script::new(&[0x47, 0x30]),
+            sequence: 0,
+        }
+    }
+
+    fn tx(
+        inputs: Vec<zakura_chain::transparent::Input>,
+        outputs: Vec<zakura_chain::transparent::Output>,
+    ) -> Arc<Transaction> {
+        Arc::new(Transaction::V1 {
+            inputs,
+            outputs,
+            lock_time: zakura_chain::transaction::LockTime::unlocked(),
+        })
+    }
+
+    /// The exact fee counts every input, including one whose spent script is empty,
+    /// and an overspend fails the block.
+    #[test]
+    fn exact_fee_counts_all_inputs() {
+        let mut previous = Map::default();
+        previous.0.insert(
+            ([10; 32], 0),
+            Output {
+                value: 1000,
+                script: vec![0x51],
+            },
+        );
+        previous.0.insert(
+            ([11; 32], 1),
+            Output {
+                value: 2000,
+                script: vec![],
+            },
+        );
+        let t = tx(
+            vec![spend([10; 32], 0), spend([11; 32], 1)],
+            vec![output(2500, &[0x52])],
+        );
+        let read = extract(std::slice::from_ref(&t), &mut previous, 100).unwrap();
+        assert_eq!(read[0].fee, Fee::Exact(500));
+        assert_eq!(read[0].transparent_input_count, 2);
+        assert_eq!(
+            read[0].inputs[1].spent,
+            Output {
+                value: 2000,
+                script: vec![]
+            }
+        );
+        assert_eq!(read[0].inputs[1].input_index, 1);
+        assert_eq!(previous.1, 2);
+        previous.0.insert(
+            ([10; 32], 0),
+            Output {
+                value: 0,
+                script: vec![0x51],
+            },
+        );
+        assert!(extract(&[t], &mut previous, 100).is_err());
+    }
+
+    /// A same-block spend resolves without a lookup; a missing output and a lookup
+    /// failure fail the block; a duplicated input is refused.
+    #[test]
+    fn same_block_spends_resolve_locally_and_missing_outputs_fail() {
+        let funding = tx(vec![spend([1; 32], 0)], vec![output(5000, &[0x76, 0xa9])]);
+        let spender = tx(
+            vec![spend(funding.hash().0, 0)],
+            vec![output(4000, &[0x51])],
+        );
+        let mut previous = Map::default();
+        previous.0.insert(
+            ([1; 32], 0),
+            Output {
+                value: 6000,
+                script: vec![0x53],
+            },
+        );
+        let read = extract(&[funding.clone(), spender.clone()], &mut previous, 7).unwrap();
+        assert_eq!(previous.1, 1, "only the outside parent is looked up");
+        assert_eq!(read[1].inputs[0].spent.script, vec![0x76, 0xa9]);
+        assert_eq!(read[1].fee, Fee::Exact(1000));
+        assert!(matches!(
+            extract(&[spender.clone()], &mut Map::default(), 7),
+            Err(ExtractError::MissingPreviousOutput(_))
+        ));
+        struct Failing;
+        impl PreviousOutputs for Failing {
+            fn previous_output(&mut self, _: [u8; 32], _: u32) -> Result<Option<Output>, BoxError> {
+                Err("node unavailable".into())
+            }
+        }
+        assert!(matches!(
+            extract(&[spender], &mut Failing, 7),
+            Err(ExtractError::Lookup { .. })
+        ));
+        let twice = tx(vec![spend([1; 32], 0), spend([1; 32], 0)], vec![]);
+        assert!(matches!(
+            extract(&[twice], &mut previous, 7),
+            Err(ExtractError::Metadata(_))
+        ));
+    }
+
+    /// The cross-block cache evicts whole transactions by its output budget.
+    #[test]
+    fn the_cache_evicts_whole_transactions_by_output_budget() {
+        let first = tx(
+            vec![spend([1; 32], 0)],
+            (0..4).map(|i| output(i + 1, &[0x51])).collect(),
+        );
+        let second = tx(
+            vec![spend([2; 32], 0)],
+            (0..3).map(|i| output(i + 1, &[0x52])).collect(),
+        );
+        let mut cache = OutputCache::new(5);
+        cache.insert_transaction(&first);
+        let out = OutPoint {
+            hash: first.hash(),
+            index: 3,
+        };
+        assert!(cache.get(&out).is_some());
+        cache.insert_transaction(&second);
+        assert!(cache.get(&out).is_none());
+        assert_eq!(cache.len(), 3);
+    }
+}

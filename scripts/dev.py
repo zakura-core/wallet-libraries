@@ -29,7 +29,7 @@ CONFIGS = {
     "pir-receiver": (["-p", "zakura-pir-receiver"], ["wallet"]),
     "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
     # The server-only workspace, with its own lockfile; see server/Cargo.toml.
-    "server": (["--manifest-path", "server/Cargo.toml", "--workspace"], ["testing"]),
+    "server": (["--manifest-path", "server/Cargo.toml", "--workspace"], ["testing", "rocksdb"]),
 }
 VERIFY = ("zakura-graph", "wallet-lib-modes", "vendor-ancestry")
 
