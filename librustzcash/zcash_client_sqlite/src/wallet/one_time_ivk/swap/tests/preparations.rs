@@ -16,7 +16,7 @@ fn refund(index: u64) -> KeyId {
 /// [`scanned_wallet`] with its receive window's bootstrap lookups answered and one more
 /// block, so each preparation needs a lookup of its own.
 fn fresh_wallet() -> State {
-    let mut st = fresh_wallet();
+    let mut st = scanned_wallet();
     run(&mut st);
     st.generate_and_scan_empty_blocks(1);
     st
