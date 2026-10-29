@@ -4988,3 +4988,38 @@ fn pausing_a_disabled_account_needs_no_write() {
     db.require_one_time_upgrade(account).unwrap();
     read_only(&mut st, false);
 }
+
+/// A wallet-wide history check starts every account's job or none. With one account not
+/// enabled, the batch names it and starts nothing; once both are enabled, both start.
+#[test]
+fn a_batch_history_check_starts_all_jobs_or_none() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let born = st.latest_cached_block().unwrap().chain_state().clone();
+    let birthday = zcash_client_backend::data_api::AccountBirthday::from_parts(born, None);
+    let (other, _) = st
+        .wallet_mut()
+        .db_mut()
+        .create_account("other", &SecretVec::new(vec![9; 32]), &birthday, None)
+        .unwrap();
+    let publication = publication_at(&st, tip(&st).height);
+    let active = |st: &State, account| {
+        status(st.wallet().db(), account)
+            .manual
+            .is_some_and(|m| m.active)
+    };
+    let db = st.wallet_mut().db_mut();
+    let refused = db
+        .check_one_time_history_for(&[account, other], publication)
+        .unwrap();
+    assert_eq!(refused, Some(other));
+    assert!(!active(&st, account) && !active(&st, other));
+    let db = st.wallet_mut().db_mut();
+    db.set_one_time_recovery_enabled(other, true).unwrap();
+    assert_eq!(
+        db.check_one_time_history_for(&[account, other], publication)
+            .unwrap(),
+        None
+    );
+    assert!(active(&st, account) && active(&st, other));
+}

@@ -196,12 +196,51 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
         })
     }
 
+    /// Starts or resumes the history check of every account in `accounts` through one
+    /// captured publication, each up to its automatic receive end, in one transaction. If
+    /// any account refuses, as one not enabled or one whose chain no longer holds the
+    /// publication's end does, none start: this returns that account, and nothing changes.
+    pub fn check_one_time_history_for(
+        &mut self,
+        accounts: &[AccountUuid],
+        publication: RecoveryPublication,
+    ) -> Result<Option<AccountUuid>, SqliteClientError> {
+        let started = self.transactionally(|db| {
+            for account in accounts {
+                if !queue::manual(db.conn.0, db.params, *account, publication, None)
+                    .map_err(Batch::Failed)?
+                {
+                    return Err(Batch::Refused(*account));
+                }
+            }
+            Ok(())
+        });
+        match started {
+            Ok(()) => Ok(None),
+            Err(Batch::Refused(account)) => Ok(Some(account)),
+            Err(Batch::Failed(e)) => Err(e),
+        }
+    }
+
     /// Cancels the manual job while retaining its cursor and automatic filter obligations.
     pub fn cancel_one_time_history(
         &mut self,
         account: AccountUuid,
     ) -> Result<(), SqliteClientError> {
         self.transactionally(|db| queue::cancel_manual(db.conn.0, db.params, account))
+    }
+}
+
+/// Why a batch operation rolled back: an account refused it, or the store failed.
+enum Batch {
+    Refused(AccountUuid),
+    Failed(SqliteClientError),
+}
+
+impl From<rusqlite::Error> for Batch {
+    /// A database failure fails the batch.
+    fn from(e: rusqlite::Error) -> Self {
+        Batch::Failed(e.into())
     }
 }
 

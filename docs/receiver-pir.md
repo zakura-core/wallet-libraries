@@ -184,7 +184,7 @@ honest publisher, in addition to trusting it for complete indexing.
 
 Seed recovery walks receive indexes until four consecutive complete empty histories from activation through a captured frontier. The birthday bounds credited history, not this walk: an authenticated pre-birthday payment marks its index used. A paid key resets the gap only after authentication and inclusion. New lookahead keys get their bootstrap lookup through the already processed frontier in the same transaction. An empty counts with a completed lookup or with filter coverage and nothing left to read, so an account that never swapped finishes the walk with its four bootstrap lookups. Receive issuance reuses the lowest unpaid eligible hole within the four-index window that payments mined on the wallet's chain justify. Refund identities come from authenticated funding memos or locally funded operations, not an index sweep. Recovering funding before the account birthday requires lowering that birthday and rescanning ordinary history.
 
-`check_one_time_history` starts or resumes an explicit history check. An optional exclusive receive bound crosses the normal four-empty stopping point. `cancel_one_time_history` pauses that manual work without losing its cursor or independent positive hints.
+`check_one_time_history` starts or resumes an explicit history check. An optional exclusive receive bound crosses the normal four-empty stopping point. `check_one_time_history_for` starts every listed account's check in one transaction, or none of them if any account refuses, and names that account, so a wallet-wide check never runs for only some accounts. `cancel_one_time_history` pauses that manual work without losing its cursor or independent positive hints.
 
 ### Repeat payments
 
