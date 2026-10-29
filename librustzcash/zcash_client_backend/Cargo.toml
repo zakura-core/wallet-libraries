@@ -49,9 +49,6 @@ nonempty.workspace = true
 rand_core.workspace = true
 
 # - Encodings
-base64.workspace = true
-bech32.workspace = true
-bs58.workspace = true
 postcard = { workspace = true, optional = true }
 
 # - Errors
@@ -119,7 +116,6 @@ document-features.workspace = true
 
 # - Encodings
 byteorder = { workspace = true, optional = true }
-percent-encoding.workspace = true
 
 # - Scanning
 flume.workspace = true
