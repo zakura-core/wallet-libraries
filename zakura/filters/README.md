@@ -8,8 +8,10 @@ chain identities, or publication metadata.
 The writer and bit operations were extracted from rust-bitcoin **0.32.102**
 (`src/bip158.rs`, CC0-1.0), whose attribution to Tamas Blummer's murmel
 implementation is retained in the source. CompactSize follows that version's
-`src/consensus/encode.rs`. SipHash is provided by the pinned `bitcoin_hashes`
-library; no hash implementation is maintained here. Dependency-graph verification
+`src/consensus/encode.rs`. SipHash-2-4 is provided by `siphasher`; no hash
+implementation is maintained here. I/O uses the standard library traits and
+errors, retaining the previous codec's consumption and failure semantics.
+Dependency-graph verification
 uses the exactly pinned Bitcoin implementation as an independent oracle, together
 with the official BIP 158 vectors and the applications' profile comparisons:
 

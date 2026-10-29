@@ -139,7 +139,9 @@ def check_previous_native(directory):
 
 
 def main():
-    legacy_helpers = {"bitcoin", "ipir-sp", "ipir-native-client", "simplepir-kernel"}
+    bitcoin_helpers = {"bitcoin", "bitcoin_hashes", "bitcoin-io", "bitcoin-consensus-encoding",
+                       "bitcoin-internals", "hex-conservative"}
+    legacy_helpers = bitcoin_helpers | {"ipir-sp", "ipir-native-client", "simplepir-kernel"}
     workspace_lock = tomllib.loads((ROOT / "Cargo.lock").read_text())
     retained = legacy_helpers & {package["name"] for package in workspace_lock["package"]}
     if retained:
@@ -176,6 +178,7 @@ def main():
         "zakura-tor-general-addr",
     }
     cases = [
+        ("filter-codec", "zakura/filters", [], bitcoin_helpers, {"siphasher"}),
         ("scanning", "librustzcash/zcash_client_backend", [], {"nanorand", "futures-core", "futures-sink"}, {"flume"}),
         ("async-scanning", "librustzcash/zcash_client_backend", ["sync-decryptor"], {"nanorand"}, {"flume", "futures-core", "futures-sink", "tokio"}),
         ("wallet-sync", "librustzcash/zcash_client_backend", ["sync"], {"futures-macro"}, {"futures-util", "tonic"}),

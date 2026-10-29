@@ -8,13 +8,6 @@ use crate::transparent::filter::error::FilterError;
 use crate::transparent::filter::hash::{BlockHash, FilterKeys, ShardKey};
 use crate::transparent::filter::script::ScriptBytes;
 use crate::transparent::filter::validate::ValidatedFilter;
-use bitcoin_hashes::siphash24;
-
-/// Maps a SipHash output into `[0, nm)` by taking the high 64 bits of the
-/// 128-bit product, as BIP 158 specifies.
-fn map_to_range(hash: u64, nm: u64) -> u64 {
-    ((u128::from(hash) * u128::from(nm)) >> 64) as u64
-}
 
 /// Returns the indices of **every** wallet script that matches the filter.
 ///
@@ -93,8 +86,10 @@ pub fn map_wallet_scripts_keyed(
         .enumerate()
         .filter(|(_, script)| !script.is_empty())
         .map(|(index, script)| {
-            let hash = siphash24::Hash::hash_to_u64_with_keys(k0, k1, script.as_slice());
-            (map_to_range(hash, range), index)
+            (
+                zakura_filters::hash_to_range(k0, k1, range, script.as_slice()),
+                index,
+            )
         })
         .collect();
     mapped.sort_unstable();

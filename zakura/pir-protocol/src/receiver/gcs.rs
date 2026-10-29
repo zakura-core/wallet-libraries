@@ -1,6 +1,5 @@
 //! Validated GCS values shared by Receiver hint formats.
 use super::{Error, Hash, ReceiverBytes};
-use bitcoin_hashes::siphash24;
 use sha2::{Digest, Sha256};
 use std::ops::ControlFlow;
 use zakura_filters::{BitStreamReader, GcsFilterWriter, read_compact_size};
@@ -159,6 +158,5 @@ fn walk(
 
 /// The value `receiver` hashes to in a set of `count` values keyed by `keys`.
 pub(crate) fn value(keys: (u64, u64), count: u64, m: u64, receiver: &ReceiverBytes) -> u64 {
-    let hash = siphash24::Hash::hash_to_u64_with_keys(keys.0, keys.1, receiver);
-    ((u128::from(hash) * u128::from(count * m)) >> 64) as u64
+    zakura_filters::hash_to_range(keys.0, keys.1, count * m, receiver)
 }
