@@ -605,7 +605,11 @@ async fn connect_with(
 /// Completes bounded wallet work through encrypted payment and witness queries.
 async fn drain(st: &mut State, account: AccountUuid, client: &InventoryClient<&Directory>) {
     for _ in 0..256 {
-        let status = st.wallet().db().one_time_recovery(account, NOW).unwrap();
+        let status = st
+            .wallet()
+            .db()
+            .one_time_recovery(account, NOW, None)
+            .unwrap();
         if let Some(work) = status.lookups.first() {
             let page = lookup(client, work).await.unwrap();
             assert!(
@@ -650,7 +654,7 @@ async fn seed_recovery_pages_history_and_stops_at_four_empty_indexes() {
     let status =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
     assert!(status.restore_complete);
     assert_eq!(status.restore_next, 8);
@@ -723,7 +727,7 @@ async fn a_positive_hint_without_payment_settles_with_one_empty_query() {
     let status =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
     assert!(status.lookups.is_empty() && status.witnesses.is_empty());
     assert_eq!(status.restore_next, 4);
@@ -761,7 +765,7 @@ async fn manual_bound_crosses_a_gap() {
         !r.st
             .wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .manual
             .unwrap()
@@ -779,7 +783,7 @@ async fn disabling_fences_a_held_encrypted_response() {
     let work =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .lookups
             .remove(0);
@@ -799,7 +803,7 @@ async fn disabling_fences_a_held_encrypted_response() {
     assert!(
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .lookups
             .is_empty()
@@ -820,7 +824,7 @@ async fn a_forged_payment_is_not_an_empty_answer() {
     let work =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .lookups
             .remove(0);
@@ -834,7 +838,7 @@ async fn a_forged_payment_is_not_an_empty_answer() {
     let status =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
     assert_eq!(status.restore_gap, 0);
     assert_eq!(one_time_value(&r.st), 0);
@@ -852,7 +856,7 @@ async fn a_replaced_session_reads_the_payment_again_for_its_witness() {
     let work =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .lookups
             .into_iter()
@@ -868,7 +872,7 @@ async fn a_replaced_session_reads_the_payment_again_for_its_witness() {
     let status =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
     let request = status.witnesses[0];
     assert_eq!(request.ordinal, 1, "ordinals rank payments by position");
@@ -890,7 +894,7 @@ async fn a_replaced_session_reads_the_payment_again_for_its_witness() {
     let status =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
     assert!(status.witnesses.is_empty(), "the old binding is gone");
     assert!(
@@ -920,7 +924,7 @@ async fn shard_filters_skip_sealed_shards_that_exclude_a_receiver() {
         assert!(
             r.st.wallet()
                 .db()
-                .one_time_recovery(r.account, NOW)
+                .one_time_recovery(r.account, NOW, None)
                 .unwrap()
                 .restore_complete
         );
@@ -1028,7 +1032,7 @@ async fn a_receiver_only_in_the_last_segment_of_an_oversized_shard_is_found() {
     assert!(
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .restore_complete
     );
@@ -1063,14 +1067,14 @@ async fn a_payment_in_a_shard_straddling_the_completion_point_is_found() {
     let status =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
     assert!(status.lookups.is_empty());
     begin(&mut r, &client, true);
     let queued =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
     assert!(
         queued.lookups.iter().all(|w| w.from == completed + 1),
@@ -1095,7 +1099,7 @@ async fn inventory_replacement_between_payment_and_witness_keeps_the_payment_pen
     let status =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
     let key0 = status
         .lookups
@@ -1113,7 +1117,7 @@ async fn inventory_replacement_between_payment_and_witness_keeps_the_payment_pen
     let held =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .lookups
             .into_iter()
@@ -1142,7 +1146,7 @@ async fn inventory_replacement_between_payment_and_witness_keeps_the_payment_pen
     let status =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
     let request = status.witnesses[0];
     assert!(matches!(
@@ -1162,7 +1166,7 @@ async fn inventory_replacement_between_payment_and_witness_keeps_the_payment_pen
     assert!(
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .restore_complete
     );
@@ -1181,7 +1185,7 @@ async fn a_correction_adding_an_omitted_payment_voids_held_empties() {
     let work =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .lookups
             .remove(0);
@@ -1282,7 +1286,7 @@ fn due(
 ) -> zcash_client_backend::data_api::one_time_ivk::restore::LookupWork {
     r.st.wallet()
         .db()
-        .one_time_recovery(r.account, NOW)
+        .one_time_recovery(r.account, NOW, None)
         .unwrap()
         .lookups
         .into_iter()
@@ -1333,7 +1337,7 @@ async fn a_lookup_whose_cursor_record_changed_starts_over() {
     let before =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
 
     r.st.generate_and_scan_empty_blocks(1);
@@ -1357,7 +1361,7 @@ async fn a_lookup_whose_cursor_record_changed_starts_over() {
     let after =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
     assert_eq!(
         (
@@ -1401,7 +1405,7 @@ async fn a_refused_lookup_backs_off_before_its_retry() {
     let due_at = |r: &Restored, now: i64| {
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, now)
+            .one_time_recovery(r.account, now, None)
             .unwrap()
             .lookups
             .iter()
@@ -1413,7 +1417,7 @@ async fn a_refused_lookup_backs_off_before_its_retry() {
     assert_eq!(
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .restore_gap,
         0
@@ -1437,12 +1441,12 @@ async fn a_publication_ahead_of_the_wallet_waits() {
     let client = connect(&directory, ahead).await;
     let db = r.st.wallet_mut().db_mut();
     db.set_one_time_recovery_enabled(r.account, true).unwrap();
-    let before = db.one_time_recovery(r.account, NOW).unwrap();
+    let before = db.one_time_recovery(r.account, NOW, None).unwrap();
     assert!(
         !db.begin_one_time_recovery(r.account, wallet_publication(client.inventory()), true)
             .unwrap()
     );
-    let after = db.one_time_recovery(r.account, NOW).unwrap();
+    let after = db.one_time_recovery(r.account, NOW, None).unwrap();
     assert_eq!(after, before);
     assert!(after.filter_frontier.is_none() && after.witnesses.is_empty());
 }
@@ -1461,7 +1465,7 @@ async fn screening_a_round_traverses_each_filter_once() {
     let works =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .lookups;
     assert!(works.len() > 1);
@@ -1533,7 +1537,7 @@ async fn capped_steps_recover_a_long_history_across_a_restart() {
         let pending =
             r.st.wallet()
                 .db()
-                .one_time_recovery(r.account, NOW)
+                .one_time_recovery(r.account, NOW, None)
                 .unwrap()
                 .lookups
                 .into_iter()

@@ -216,7 +216,7 @@ pub(super) fn answer_prepared_empty(db: &mut Db, account: AccountUuid, purpose: 
     let publication = RecoveryPublication {
         id: [1; 32],
         history_revision: db
-            .one_time_recovery(account, 0)
+            .one_time_recovery(account, 0, None)
             .unwrap()
             .token
             .history_revision,
@@ -249,7 +249,7 @@ pub(super) fn answer_prepared_empty(db: &mut Db, account: AccountUuid, purpose: 
         return;
     };
     let work = LookupWork {
-        token: db.one_time_recovery(account, 0).unwrap().token,
+        token: db.one_time_recovery(account, 0, None).unwrap().token,
         work: DiscoveryWork {
             key: KeyId::new(purpose, u64::from_be_bytes(index.try_into().unwrap())),
             receiver: receiver.try_into().unwrap(),

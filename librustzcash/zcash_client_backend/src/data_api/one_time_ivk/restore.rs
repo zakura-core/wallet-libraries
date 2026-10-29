@@ -340,7 +340,13 @@ pub struct RecoveryStatus {
     /// Recovered payments with their witness, waiting for ordinary sync, or the rescan it
     /// queued, to admit them. The account is not settled while this is nonzero.
     pub awaiting_admission: u32,
+    /// Up to four due lookups, those the given inventory end reaches when one is given.
     pub lookups: Vec<LookupWork>,
+    /// A pending lookup waits out a retry delay.
+    pub waits_for_retry: bool,
+    /// A due lookup's target is past the given inventory end, so it waits for a later
+    /// publication.
+    pub waits_for_publication: bool,
     pub witnesses: Vec<WitnessRequest>,
 }
 

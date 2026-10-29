@@ -266,7 +266,11 @@ fn success_without_refund_retires_an_unpaid_funded_key() {
             .begin_one_time_recovery(account, publication, true)
             .unwrap()
     );
-    let status = st.wallet().db().one_time_recovery(account, now).unwrap();
+    let status = st
+        .wallet()
+        .db()
+        .one_time_recovery(account, now, None)
+        .unwrap();
     // A newer frontier is what makes the next direct check necessary.
     assert!(status.lookups.is_empty());
     st.generate_and_scan_empty_blocks(1);
@@ -531,7 +535,11 @@ fn a_new_account_issues_once_the_index_history_completes() {
             .begin_one_time_recovery(account, publication, true)
             .unwrap()
     );
-    let state = st.wallet().db().one_time_recovery(account, now).unwrap();
+    let state = st
+        .wallet()
+        .db()
+        .one_time_recovery(account, now, None)
+        .unwrap();
     let first = state
         .lookups
         .iter()
@@ -625,7 +633,7 @@ fn filter(st: &mut State, hits: &[KeyId]) {
     let frontier = st
         .wallet()
         .db()
-        .one_time_recovery(account, clock_now())
+        .one_time_recovery(account, clock_now(), None)
         .unwrap()
         .filter_frontier
         .unwrap()
@@ -648,7 +656,7 @@ fn settle(st: &mut State) {
     let revision = st
         .wallet()
         .db()
-        .one_time_recovery(account, clock_now())
+        .one_time_recovery(account, clock_now(), None)
         .unwrap()
         .token
         .history_revision;
@@ -787,7 +795,7 @@ fn a_rewound_reservation_is_released_by_its_queued_recheck() {
     assert!(
         st.wallet()
             .db()
-            .one_time_recovery(account, now)
+            .one_time_recovery(account, now, None)
             .unwrap()
             .restore_complete
     );
@@ -865,7 +873,7 @@ fn assert_entered_with_history(
     let frontier = st
         .wallet()
         .db()
-        .one_time_recovery(account, clock_now())
+        .one_time_recovery(account, clock_now(), None)
         .unwrap()
         .filter_frontier
         .map(|f| f.height);
@@ -901,7 +909,7 @@ fn seeded_reservation_sequences_never_hold_without_work() {
             let has_frontier = st
                 .wallet()
                 .db()
-                .one_time_recovery(account, now)
+                .one_time_recovery(account, now, None)
                 .unwrap()
                 .filter_frontier
                 .is_some();

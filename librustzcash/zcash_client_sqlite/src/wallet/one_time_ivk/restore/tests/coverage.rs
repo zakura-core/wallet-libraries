@@ -1,7 +1,9 @@
 //! Filter coverage: spans, bootstrap lookups, complete checks and their rollback.
 use super::discovery::*;
 use super::*;
-use zcash_client_backend::data_api::one_time_ivk::restore::{FilterOutcome, FilterSpan};
+use zcash_client_backend::data_api::one_time_ivk::restore::{
+    FilterOutcome, FilterSpan, RecoveryStatus,
+};
 
 /// Ironwood activation on the test network, where filter coverage starts.
 fn activation(st: &State) -> BlockHeight {
@@ -230,19 +232,69 @@ fn a_rewind_below_a_pending_target_keeps_it() {
     let target = tip(&st).height;
     recover(st.wallet_mut().db_mut(), account, refund(0), target - 3);
     st.truncate_to_height(target - 2);
-    let work = work_of(&st, refund(0));
-    assert_eq!(work.through, target);
-    let short = publication_at(&st, target - 2);
-    let page = whole(short, vec![]);
-    assert!(
-        !st.wallet_mut()
-            .db_mut()
-            .record_one_time_lookup(account, &work, &page, clock_now())
-            .unwrap()
-    );
+    assert_eq!(work_of(&st, refund(0)).through, target);
+    let short = status_at(&st, account, target - 2);
+    assert!(short.lookups.is_empty() && short.waits_for_publication);
     st.generate_and_scan_empty_blocks(2);
     assert_eq!(run_pir(&mut st, account), 1);
     assert!(status(st.wallet().db(), account).lookups.is_empty());
+}
+
+/// The status read against an inventory ending at `end`.
+fn status_at(st: &State, account: AccountUuid, end: BlockHeight) -> RecoveryStatus {
+    assert_no_stall(st.wallet().db(), account);
+    st.wallet()
+        .db()
+        .one_time_recovery(account, clock_now(), Some(end))
+        .unwrap()
+}
+
+/// I0 to I3 with hits past the tip `end` they were bootstrapped to, so their lookups wait
+/// for a later publication, and I8, after them in queue order, with a lookup through
+/// `end`. Returns the wallet, account and `end`.
+fn four_waiting_and_a_fifth() -> (State, AccountUuid, BlockHeight) {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let end = tip(&st).height;
+    recover(st.wallet_mut().db_mut(), account, key8(), end);
+    st.generate_and_scan_empty_blocks(2);
+    let hit = tip(&st).height;
+    let hits: Vec<_> = (0..4).map(|i| (hit, receive(i))).collect();
+    assert_eq!(advance(&mut st, account, &hits), FilterOutcome::Committed);
+    let unbounded = status(st.wallet().db(), account);
+    let keys: Vec<_> = unbounded.lookups.iter().map(|w| w.work.key).collect();
+    assert_eq!(
+        keys,
+        (0..4).map(receive).collect::<Vec<_>>(),
+        "I8 is hidden"
+    );
+    (st, account, end)
+}
+
+/// Four lookups waiting for a later publication don't hide a fifth the inventory can
+/// answer, and the read says the others wait for a publication.
+#[test]
+fn four_lookups_waiting_on_a_publication_do_not_hide_a_runnable_fifth() {
+    let (st, account, end) = four_waiting_and_a_fifth();
+    let state = status_at(&st, account, end);
+    let keys: Vec<_> = state.lookups.iter().map(|w| w.work.key).collect();
+    assert_eq!(keys, [key8()]);
+    assert!(state.waits_for_publication && !state.waits_for_retry);
+}
+
+/// With the runnable lookup backing off, the read reports the retry delay as well as the
+/// lookups waiting for a publication, so a caller can wait out the backoff first.
+#[test]
+fn a_backoff_plus_waiting_lookups_reports_a_backoff() {
+    let (mut st, account, end) = four_waiting_and_a_fifth();
+    let work = status_at(&st, account, end).lookups[0].clone();
+    st.wallet_mut()
+        .db_mut()
+        .defer_one_time_lookup(account, &work, clock_now())
+        .unwrap();
+    let state = status_at(&st, account, end);
+    assert!(state.lookups.is_empty());
+    assert!(state.waits_for_retry && state.waits_for_publication);
 }
 
 /// I0 was paid before a late restore birthday, and I4 after it.
@@ -1229,7 +1281,7 @@ fn awaiting_admission_counts_a_witnessed_payment_until_it_is_admitted() {
     let waiting = |st: &State, account| {
         st.wallet()
             .db()
-            .one_time_recovery(account, clock_now())
+            .one_time_recovery(account, clock_now(), None)
             .unwrap()
             .awaiting_admission
     };

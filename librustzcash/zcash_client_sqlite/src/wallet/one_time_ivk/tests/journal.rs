@@ -248,7 +248,9 @@ fn a_note_admitted_during_a_batch_is_spent_by_it() {
             let mut db = WalletDb::for_path(path_to_db, network, test_clock(), test_rng()).unwrap();
             db.record_one_time_witness(
                 account,
-                db.one_time_recovery(account, clock_now()).unwrap().token,
+                db.one_time_recovery(account, clock_now(), None)
+                    .unwrap()
+                    .token,
                 request,
                 &answer,
                 clock_now(),

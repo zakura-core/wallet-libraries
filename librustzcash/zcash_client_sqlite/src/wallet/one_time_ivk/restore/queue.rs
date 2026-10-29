@@ -1495,16 +1495,21 @@ fn disabled() -> RecoveryStatus {
         manual: None,
         awaiting_admission: 0,
         lookups: vec![],
+        waits_for_retry: false,
+        waits_for_publication: false,
         witnesses: vec![],
     }
 }
 
 /// Exposes bounded due work. Disabled accounts expose only repair of already-owned receipts.
+/// With `inventory_end`, only lookups whose target it reaches are listed, before the limit,
+/// so lookups waiting for a later publication never hide a runnable one.
 pub(crate) fn status<P: Parameters>(
     conn: &Connection,
     params: &P,
     account: AccountUuid,
     now: i64,
+    inventory_end: Option<BlockHeight>,
 ) -> Result<RecoveryStatus, SqliteClientError> {
     // A pure read: an account without an Orchard key or a progress row is disabled.
     let Some(owner) = one_time_account(conn, params, account)? else {
@@ -1529,28 +1534,53 @@ pub(crate) fn status<P: Parameters>(
             manual: manual_end.map(|end| Ok::<_, rusqlite::Error>(ManualProgress { active: r.get(6)?,
                 refunds_done: r.get::<_, u8>(7)? == 1, next: u64::from_be_bytes(manual_next),
                 receive_end: u64::from_be_bytes(end) })).transpose()?, awaiting_admission: r.get(11)?,
-            lookups: vec![], witnesses: vec![] })
+            lookups: vec![], waits_for_retry: false, waits_for_publication: false, witnesses: vec![] })
     }).optional()? else {
         return Ok(disabled());
     };
-    status.lookups = conn.prepare(&format!("SELECT k.purpose, k.key_index, k.receiver, l.target_height, {PROGRESS}
-        FROM ironwood_one_time_lookups l JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
+    // Pending lookups the account may run, over parameters ?1 to ?4.
+    let pending = format!(
+        "FROM ironwood_one_time_lookups l JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
         WHERE k.account_id = ?1 AND l.target_height IS NOT NULL AND l.reasons & 3 != 0
-            AND (?3 OR {REPAIR_KEY})
-            AND l.read_complete = 0 AND l.next_attempt_at <= ?2 ORDER BY l.next_attempt_at, k.id LIMIT 4"))?
-        .query_and_then(params![owner.0, now, enabled], |r| {
+            AND (?3 OR {REPAIR_KEY}) AND l.read_complete = 0"
+    );
+    let end = inventory_end.map_or(u32::MAX, u32::from);
+    status.lookups = conn
+        .prepare(&format!(
+            "SELECT k.purpose, k.key_index, k.receiver, l.target_height, {PROGRESS}
+        {pending} AND l.next_attempt_at <= ?2 AND l.target_height <= ?4
+        ORDER BY l.next_attempt_at, k.id LIMIT 4"
+        ))?
+        .query_and_then(params![owner.0, now, enabled, end], |r| {
             let (from, cursor) = progress_of(r, 4)?;
             Ok::<_, SqliteClientError>(LookupWork {
-                token, work: DiscoveryWork { key: stored_key_id(r)?,
-                    receiver: r.get::<_, Vec<u8>>(2)?.try_into().map_err(|_| corrupt("invalid receiver"))? },
-                from, through: BlockHeight::from(r.get::<_, u32>(3)?), cursor,
+                token,
+                work: DiscoveryWork {
+                    key: stored_key_id(r)?,
+                    receiver: r
+                        .get::<_, Vec<u8>>(2)?
+                        .try_into()
+                        .map_err(|_| corrupt("invalid receiver"))?,
+                },
+                from,
+                through: BlockHeight::from(r.get::<_, u32>(3)?),
+                cursor,
             })
-        })?.collect::<Result<_, _>>()?;
+        })?
+        .collect::<Result<_, _>>()?;
     if status.upgrade_required {
         // Nothing this client could ask would be answered in a format it reads.
         status.lookups.clear();
         return Ok(status);
     }
+    (status.waits_for_retry, status.waits_for_publication) = conn.query_row(
+        &format!(
+            "SELECT TOTAL(l.next_attempt_at > ?2) > 0,
+            TOTAL(l.next_attempt_at <= ?2 AND l.target_height > ?4) > 0 {pending}"
+        ),
+        params![owner.0, now, enabled, end],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     status.witnesses = conn.prepare(&format!("SELECT k.purpose, k.key_index, p.position, substr(p.encrypted_note, 33, 32),
             p.payments, p.witnesses, p.ordinal
         FROM ironwood_one_time_payment_recovery p JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id

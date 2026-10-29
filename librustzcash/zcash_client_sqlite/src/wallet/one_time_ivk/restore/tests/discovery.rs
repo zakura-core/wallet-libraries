@@ -102,7 +102,7 @@ pub(in crate::wallet::one_time_ivk) fn publication_at(
 /// (see [`assert_no_stall`]).
 pub(in crate::wallet::one_time_ivk) fn status(db: &Db, account: AccountUuid) -> RecoveryStatus {
     assert_no_stall(db, account);
-    db.one_time_recovery(account, clock_now()).unwrap()
+    db.one_time_recovery(account, clock_now(), None).unwrap()
 }
 
 /// The path of the chain's Ironwood leaf at `position` at the cached tip.
@@ -284,7 +284,7 @@ pub(in crate::wallet::one_time_ivk) fn assert_no_stall(db: &Db, account: Account
     assert!(!settled, "a settled request keeps a target nothing clears");
     assert!(!cursor, "a completed read keeps a segment cursor");
     assert!(!unbound, "an unbound candidate has no read to rebind it");
-    let state = db.one_time_recovery(account, i64::MAX).unwrap();
+    let state = db.one_time_recovery(account, i64::MAX, None).unwrap();
     if state.enabled {
         let held: bool = value(
             &db.conn,
@@ -4104,7 +4104,7 @@ fn an_unknown_accounts_recovery_is_an_error() {
     let token = status(st.wallet().db(), st.test_account().unwrap().id()).token;
     let db = st.wallet_mut().db_mut();
     assert!(unknown_account(
-        db.one_time_recovery(unknown, clock_now()).map(drop)
+        db.one_time_recovery(unknown, clock_now(), None).map(drop)
     ));
     assert!(unknown_account(db.one_time_receivers(unknown).map(drop)));
     assert!(unknown_account(
@@ -4855,7 +4855,7 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
         let (_, receivers) = db.one_time_receivers(account).unwrap();
         assert!(receivers.is_empty());
         db.set_one_time_recovery_enabled(account, false).unwrap();
-        let state = db.one_time_recovery(account, clock_now()).unwrap();
+        let state = db.one_time_recovery(account, clock_now(), None).unwrap();
         assert!(!state.enabled && state.lookups.is_empty() && state.witnesses.is_empty());
         assert!(
             !db.begin_one_time_recovery(account, publication, true)
@@ -4867,7 +4867,10 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
         );
         let _ = db.cancel_one_time_history(account);
         db.require_one_time_upgrade(account).unwrap();
-        let token = db.one_time_recovery(account, clock_now()).unwrap().token;
+        let token = db
+            .one_time_recovery(account, clock_now(), None)
+            .unwrap()
+            .token;
         let span = FilterSpan {
             revision: 0,
             from: publication.end.height,
@@ -4926,9 +4929,17 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
     db.set_one_time_recovery_enabled(account, true).unwrap();
-    assert!(db.one_time_recovery(account, clock_now()).unwrap().enabled);
+    assert!(
+        db.one_time_recovery(account, clock_now(), None)
+            .unwrap()
+            .enabled
+    );
     db.set_one_time_recovery_enabled(account, false).unwrap();
-    assert!(!db.one_time_recovery(account, clock_now()).unwrap().enabled);
+    assert!(
+        !db.one_time_recovery(account, clock_now(), None)
+            .unwrap()
+            .enabled
+    );
     assert_eq!(
         db.prepare_receive_reservation(account, clock_now())
             .unwrap()
@@ -4936,7 +4947,11 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
         Err(ReservationPolicy::Disabled)
     );
     db.set_one_time_recovery_enabled(account, true).unwrap();
-    assert!(db.one_time_recovery(account, clock_now()).unwrap().enabled);
+    assert!(
+        db.one_time_recovery(account, clock_now(), None)
+            .unwrap()
+            .enabled
+    );
     assert_ne!(
         db.prepare_receive_reservation(account, clock_now())
             .unwrap()

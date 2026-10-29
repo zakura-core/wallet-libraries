@@ -16,6 +16,8 @@ and this library adheres to Rust's notion of
 - `WalletDb::begin_one_time_recovery` takes `complete` instead of `direct`: a complete check reads every monitored key, paid ones included, over the gap from its coverage, so it finds repeat payments. Direct catch-up, which skipped completed paid keys, is gone.
 - Corrections, reorgs and earlier birthdays also roll back filter coverage. A correction no longer reads every monitored key by PIR: filters or a complete check cover settled history again, and only pending lookups and open reservations are read again directly. A new migration discards existing one-time filter frontiers.
 
+- `WalletDb::one_time_recovery` takes the captured inventory's end. The four listed lookups are then ones that inventory can answer, so lookups waiting for a later publication no longer hide a runnable one.
+
 ### Removed
 
 - `WalletDb::record_one_time_filters`, its per-block identities and 256-block cap, and `WalletDb::one_time_direct_query_count`.

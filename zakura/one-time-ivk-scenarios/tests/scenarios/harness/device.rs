@@ -138,7 +138,7 @@ impl Device {
     /// Reads the durable queue without initiating network traffic.
     pub fn status(&self, chain: &Chain) -> RecoveryStatus {
         self.db
-            .one_time_recovery(self.account, chain.now())
+            .one_time_recovery(self.account, chain.now(), None)
             .unwrap()
     }
 
@@ -187,7 +187,10 @@ impl Device {
         assert!(!settled, "a settled request keeps a target nothing clears");
         assert!(!cursor, "a completed read keeps a segment cursor");
         assert!(!unbound, "an unbound candidate has no read to rebind it");
-        let state = self.db.one_time_recovery(self.account, i64::MAX).unwrap();
+        let state = self
+            .db
+            .one_time_recovery(self.account, i64::MAX, None)
+            .unwrap();
         if state.enabled {
             let held: bool = self
                 .conn()

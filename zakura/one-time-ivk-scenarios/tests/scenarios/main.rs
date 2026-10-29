@@ -126,7 +126,10 @@ async fn hints(device: &mut Device, directory: &Directory) {
     let head = Inventories::block_head(ORIGIN, &directory, &GENESIS)
         .await
         .unwrap();
-    let state = device.db.one_time_recovery(device.account, 0).unwrap();
+    let state = device
+        .db
+        .one_time_recovery(device.account, 0, None)
+        .unwrap();
     let from = state
         .filter_frontier
         .map_or(ACTIVATION, |p| u32::from(p.height) + 1);
@@ -343,7 +346,10 @@ fn multiple_accounts_sync_independently() {
         let directory = Directory::publish(&chain, 0, 0, 256, 0);
         wallet.recover(&chain, &directory).await;
         assert_eq!(wallet.unspent_one_time_value(), 100_000);
-        let second_state = wallet.db.one_time_recovery(second, chain.now()).unwrap();
+        let second_state = wallet
+            .db
+            .one_time_recovery(second, chain.now(), None)
+            .unwrap();
         assert!(!second_state.enabled && second_state.lookups.is_empty());
         wallet
             .db
@@ -359,7 +365,7 @@ fn multiple_accounts_sync_independently() {
         assert_eq!(
             wallet
                 .db
-                .one_time_recovery(first, chain.now())
+                .one_time_recovery(first, chain.now(), None)
                 .unwrap()
                 .restore_next,
             5

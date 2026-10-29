@@ -19,13 +19,22 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// Returns bounded due network work without retaining a database lock across requests.
-    /// Disabled discovery still exposes repair work for already-owned receipts.
+    /// Disabled discovery still exposes repair work for already-owned receipts. With the
+    /// captured inventory's `inventory_end`, the listed lookups are those it can answer,
+    /// and `waits_for_retry` and `waits_for_publication` tell why any others wait.
     pub fn one_time_recovery(
         &self,
         account: AccountUuid,
         now: i64,
+        inventory_end: Option<BlockHeight>,
     ) -> Result<RecoveryStatus, SqliteClientError> {
-        queue::status(self.conn.borrow(), &self.params, account, now)
+        queue::status(
+            self.conn.borrow(),
+            &self.params,
+            account,
+            now,
+            inventory_end,
+        )
     }
 
     /// A counter that goes up in the same transaction as every new recovery obligation of
