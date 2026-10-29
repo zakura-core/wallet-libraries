@@ -1,6 +1,6 @@
 [package]
 name = "zakura-pir-native"
-version = "0.0.1-rc0"
+version = "0.0.1-rc0.1"
 description = "Native two-mask InspiRING primitives shared by Zakura PIR clients"
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +16,7 @@ default = []
 test-server = []
 
 [dependencies]
-ipir-sp = { version = "=0.1.0-rc.6", features = ["native-reinspiring"] }
+ipir-sp = { version = "=0.1.0-rc.6.1", features = ["native-reinspiring"] }
 rand = "0.8"
 rand_chacha.workspace = true
 reinspiring = "=0.1.2"
