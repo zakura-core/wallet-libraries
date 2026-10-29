@@ -1,5 +1,7 @@
 //! Cryptocurrency exchange rate APIs.
 
+use std::{future::Future, pin::Pin};
+
 use futures_util::{future::join_all, join};
 use hyper::StatusCode;
 use rand::{rng, seq::IteratorRandom};
@@ -67,14 +69,46 @@ pub mod exchanges {
 }
 
 /// An exchange that can be queried for ZEC data.
-#[trait_variant::make(Exchange: Send)]
-#[dynosaur::dynosaur(DynExchange = dyn(box) Exchange)]
+#[allow(async_fn_in_trait)]
 pub trait LocalExchange {
     /// Queries data about the USD/ZEC pair.
     ///
     /// The returned bid and ask data must be denominated in USD, i.e. the latest bid and
     /// ask for 1 ZEC.
     async fn query_zec_to_usd(&self, client: &Client) -> Result<ExchangeData, Error>;
+}
+
+/// An exchange whose queries can be sent between threads.
+pub trait Exchange: Send {
+    /// Queries the USD/ZEC bid and ask, each denominated in USD for 1 ZEC.
+    fn query_zec_to_usd(
+        &self,
+        client: &Client,
+    ) -> impl Future<Output = Result<ExchangeData, Error>> + Send;
+}
+
+impl<T: Exchange> LocalExchange for T {
+    async fn query_zec_to_usd(&self, client: &Client) -> Result<ExchangeData, Error> {
+        Exchange::query_zec_to_usd(self, client).await
+    }
+}
+
+// Only the heterogeneous exchange list needs boxed futures. Concrete exchanges
+// continue to return their own future types through the public traits.
+trait ExchangeQuery: Send {
+    fn query<'a>(
+        &'a self,
+        client: &'a Client,
+    ) -> Pin<Box<dyn Future<Output = Result<ExchangeData, Error>> + Send + 'a>>;
+}
+
+impl<T: Exchange> ExchangeQuery for T {
+    fn query<'a>(
+        &'a self,
+        client: &'a Client,
+    ) -> Pin<Box<dyn Future<Output = Result<ExchangeData, Error>> + Send + 'a>> {
+        Box::pin(Exchange::query_zec_to_usd(self, client))
+    }
 }
 
 /// Data queried from an [`Exchange`].
@@ -97,8 +131,8 @@ impl ExchangeData {
 
 /// A set of [`Exchange`]s that can be queried for ZEC data.
 pub struct Exchanges {
-    trusted: Box<DynExchange<'static>>,
-    others: Vec<Box<DynExchange<'static>>>,
+    trusted: Box<dyn ExchangeQuery>,
+    others: Vec<Box<dyn ExchangeQuery>>,
 }
 
 impl Exchanges {
@@ -152,14 +186,14 @@ impl ExchangesBuilder {
     /// obtained via Tor (i.e. no transient failures).
     pub fn new(trusted: impl Exchange + 'static) -> Self {
         Self(Exchanges {
-            trusted: DynExchange::new_box(trusted),
+            trusted: Box::new(trusted),
             others: vec![],
         })
     }
 
     /// Adds another [`Exchange`] as a data source.
     pub fn with(mut self, other: impl Exchange + 'static) -> Self {
-        self.0.others.push(DynExchange::new_box(other));
+        self.0.others.push(Box::new(other));
         self
     }
 
@@ -183,13 +217,8 @@ impl Client {
 
         // Fetch the data in parallel.
         let res = join!(
-            DynExchange::query_zec_to_usd(&exchanges.trusted, self),
-            join_all(
-                exchanges
-                    .others
-                    .iter()
-                    .map(|e| DynExchange::query_zec_to_usd(e, self))
-            )
+            exchanges.trusted.query(self),
+            join_all(exchanges.others.iter().map(|e| e.query(self)))
         );
         trace!(?res, "Data results");
         let (trusted_res, other_res) = res;
@@ -245,5 +274,66 @@ impl Client {
             let median = rates.len() / 2;
             Ok(rates[median])
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use arti_client::{TorClient, config::TorClientConfigBuilder};
+    use tor_rtcompat::PreferredRuntime;
+
+    use super::{Client, Error, Exchange, ExchangeData, Exchanges, LocalExchange};
+
+    struct Quote(u64);
+
+    impl Exchange for Quote {
+        async fn query_zec_to_usd(&self, _: &Client) -> Result<ExchangeData, Error> {
+            tokio::task::yield_now().await;
+            Ok(ExchangeData {
+                bid: self.0.into(),
+                ask: (self.0 + 2).into(),
+            })
+        }
+    }
+
+    struct Unavailable;
+
+    impl Exchange for Unavailable {
+        async fn query_zec_to_usd(&self, _: &Client) -> Result<ExchangeData, Error> {
+            tokio::task::yield_now().await;
+            Err(Error::MissingTorDirectory)
+        }
+    }
+
+    #[tokio::test]
+    async fn exchange_dispatch_preserves_results_and_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = TorClientConfigBuilder::from_directories(
+            directory.path().join("data"),
+            directory.path().join("cache"),
+        )
+        .build()
+        .unwrap();
+        // No bootstrap or network is needed to exercise exchange dispatch.
+        let client = Client {
+            inner: TorClient::with_runtime(PreferredRuntime::current().unwrap())
+                .config(config)
+                .create_unbootstrapped()
+                .unwrap(),
+            timeouts: Default::default(),
+        };
+        let exchanges = Exchanges::builder(Quote(7)).with(Unavailable).build();
+        let quote = exchanges.trusted.query(&client).await.unwrap();
+        assert_eq!(quote.bid, 7.into());
+        assert_eq!(quote.ask, 9.into());
+        assert!(matches!(
+            exchanges.others[0].query(&client).await,
+            Err(Error::MissingTorDirectory)
+        ));
+        let local = LocalExchange::query_zec_to_usd(&Quote(7), &client)
+            .await
+            .unwrap();
+        assert_eq!(local.bid, quote.bid);
+        assert_eq!(local.ask, quote.ask);
     }
 }

@@ -3807,6 +3807,39 @@ pub trait WalletWrite:
         request: UnifiedAddressRequest,
     ) -> Result<Option<UnifiedAddress>, <Self as WalletRead>::Error>;
 
+    /// Generates, persists, and marks as exposed the addresses for the specified account at every
+    /// diversifier index in `range`, in ascending index order.
+    ///
+    /// This is equivalent to calling [`WalletWrite::get_address_for_index`] once per index with the
+    /// same request and collecting the results: the returned vector holds one entry per index at
+    /// which an address conforming to the request exists, and indices at which none exists are
+    /// left out. The default implementation does exactly that. A store should override it so that
+    /// the costs that do not depend on the index - looking up the account, deriving its incoming
+    /// viewing key, reading the chain tip - are paid once for the range rather than once per
+    /// index; a wallet that pre-exposes a deep transparent window on restore calls this with
+    /// chunks of tens of thousands of indices, where those costs otherwise dominate.
+    ///
+    /// The warnings on [`WalletWrite::get_address_for_index`] about transparent receivers beyond
+    /// the wallet's gap limit apply to every index in the range.
+    fn get_addresses_for_index_range(
+        &mut self,
+        account: <Self as WalletRead>::AccountId,
+        range: core::ops::Range<DiversifierIndex>,
+        request: UnifiedAddressRequest,
+    ) -> Result<Vec<(DiversifierIndex, UnifiedAddress)>, <Self as WalletRead>::Error> {
+        let mut addresses = Vec::new();
+        let mut index = range.start;
+        while index < range.end {
+            if let Some(address) = self.get_address_for_index(account, index, request)? {
+                addresses.push((index, address));
+            }
+            if index.increment().is_err() {
+                break;
+            }
+        }
+        Ok(addresses)
+    }
+
     /// Updates the wallet's view of the blockchain.
     ///
     /// This method is used to provide the wallet with information about the state of the
