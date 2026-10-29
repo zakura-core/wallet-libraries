@@ -100,6 +100,7 @@ def main():
         # The receiver evaluator scans with ipir-sp, which brings IPIR's native client.
         ("receiver-evaluator", "zakura/pir-query-server", ["receiver"], wallet_roles - {"ipir-native-client"} | {"zakura-pir-publisher", "zakura-server-chain"}, {"ipir-sp", "simplepir-kernel"}),
         ("filter", "zakura/pir-protocol", ["transparent"], {"bitcoin", "secp256k1", "secp256k1-sys", "zakura-protocol", "zakura-transparent"} | server_roles, {"bitcoin_hashes"}),
+        ("filter-cli", "zakura/pir-client", ["cli"], {"anstream", "anstyle-parse", "colorchoice"}, {"clap"}),
         ("filters", "zakura/filters", [], {"bitcoin", "secp256k1", "secp256k1-sys"}, {"bitcoin_hashes"}),
         ("receiver-formats", "zakura/pir-protocol", ["receiver"], {"bitcoin", "secp256k1", "secp256k1-sys"} | server_roles | wallet_roles, {"zakura-filters", "bitcoin_hashes"}),
         ("receiver-wallet", "zakura/pir-client", ["receiver-wallet"], {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"} | native_evaluators | server_roles, {"zakura-filters", "reinspiring"}),
