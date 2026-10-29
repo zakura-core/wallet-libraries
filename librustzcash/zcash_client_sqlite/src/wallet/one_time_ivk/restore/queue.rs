@@ -1038,20 +1038,6 @@ fn apply_hits<P: Parameters>(
     Ok(())
 }
 
-/// Restarts `owner`'s filter coverage from activation, for its frontier and every key.
-fn restart_coverage(conn: &Connection, owner: i64) -> Result<(), SqliteClientError> {
-    conn.execute(
-        "UPDATE ironwood_one_time_recovery SET filter_height = NULL, filter_hash = NULL,
-         generation = generation + 1 WHERE account_id = ?1",
-        [owner],
-    )?;
-    conn.execute(
-        "UPDATE ironwood_one_time_keys SET covered_height = NULL WHERE account_id = ?1",
-        [owner],
-    )?;
-    Ok(())
-}
-
 /// Commits a filter span matched against the receivers captured with `captured`.
 ///
 /// The span must be final for the wallet: its end is a block the wallet scanned (at or
@@ -1059,9 +1045,9 @@ fn restart_coverage(conn: &Connection, owner: i64) -> Result<(), SqliteClientErr
 /// below the wallet's scanned tip. A wallet block at the end with another hash refuses it.
 /// The span must also continue committed coverage: it starts just past the account's
 /// frontier with that frontier's hash as its parent (any parent at activation, where an
-/// account without a frontier starts), or replays from inside committed coverage, as a
-/// chunk sealed since does, with the wallet's own block before it as its parent. A replay
-/// whose parent the wallet cannot check restarts coverage from activation.
+/// account without a frontier starts), or replays from inside committed coverage, as a page
+/// shared with an account further behind does, with the wallet's own block before it as its
+/// parent. A replay whose parent the wallet does not hold is an error.
 ///
 /// A newer revision applies the correction (see [`correct`]). Committing advances every
 /// monitored key whose coverage reaches the span's start to its end, and a hit past a key's
@@ -1127,8 +1113,9 @@ pub(crate) fn record_filter_span<P: Parameters>(
             Some(own) if own == span.parent => {}
             Some(_) => return Ok(FilterOutcome::Mismatch),
             None => {
-                restart_coverage(conn, owner.0)?;
-                return Ok(FilterOutcome::Restart);
+                return Err(invalid(
+                    "filter replay whose parent the wallet does not hold",
+                ));
             }
         }
     }

@@ -617,9 +617,9 @@ fn a_restore_without_blocks_below_its_birthday_covers_them_with_stable_spans() {
 }
 
 /// A replay starting below the birthday has a parent the wallet does not hold, so it cannot
-/// be checked, and coverage restarts from activation.
+/// be checked. That is an error, and the committed frontier stays.
 #[test]
-fn a_replay_whose_parent_the_wallet_lacks_restarts_coverage() {
+fn a_replay_whose_parent_the_wallet_lacks_is_an_error() {
     let mut st = scanned_wallet();
     st.generate_and_scan_empty_blocks(4);
     let birthday = birthday_after_cache(&st);
@@ -639,13 +639,17 @@ fn a_replay_whose_parent_the_wallet_lacks_restarts_coverage() {
         0,
         &blocks_above(&st, birthday.height() - 3),
     );
-    assert_eq!(
-        record(&mut st, account, &replay, &[]),
-        FilterOutcome::Restart
+    let token = status(st.wallet().db(), account).token;
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_filter_span(account, token, &replay, &[])
+            .is_err()
     );
-    assert_eq!(status(st.wallet().db(), account).filter_frontier, None);
-    let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert!(receivers.iter().all(|r| r.covered == activation(&st) - 1));
+    assert_eq!(
+        status(st.wallet().db(), account).filter_frontier,
+        Some(first.end)
+    );
 }
 
 /// A complete check's lookup is held while a filter span commits past it, then answered.

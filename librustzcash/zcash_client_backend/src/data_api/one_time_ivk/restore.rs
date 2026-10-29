@@ -303,8 +303,8 @@ pub enum FilterOutcome {
     /// The span's end or parent hash disagrees with the wallet's own block or its committed
     /// coverage. Nothing changed.
     Mismatch,
-    /// Coverage restarted from activation, after a history correction or a replay whose
-    /// parent the wallet cannot check. Read the frontier again.
+    /// Coverage restarted from activation after a history correction. Read the frontier
+    /// again.
     Restart,
 }
 
