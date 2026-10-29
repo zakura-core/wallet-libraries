@@ -98,7 +98,7 @@ fn judge(outcome: Result<TxidLookup, TxidError>, pin: &Pin) -> &'static str {
 
 /// Blocking HTTPS transport. Error text stays inside this process.
 struct Http {
-    client: reqwest::blocking::Client,
+    client: ureq::Agent,
     base: Endpoint,
 }
 
@@ -108,16 +108,19 @@ impl TxidTransport for Http {
             .base
             .join(request.path())
             .map_err(|_| TransportError("invalid route".into()))?;
-        let builder = match request.method {
-            Method::Get => self.client.get(url),
-            Method::Post => self
-                .client
-                .post(url)
-                .header("content-type", request.content_type().unwrap_or_default())
-                .body(request.body),
+        let mut builder = ureq::http::Request::builder().uri(url);
+        builder = match request.method {
+            Method::Get => builder.method("GET"),
+            Method::Post => builder
+                .method("POST")
+                .header("content-type", request.content_type().unwrap_or_default()),
         };
-        let response = builder
-            .send()
+        let request = builder
+            .body(request.body)
+            .map_err(|_| TransportError("invalid request".into()))?;
+        let response = self
+            .client
+            .run(request)
             .map_err(|_| TransportError("request failed".into()))?;
         let header = |name: &str| {
             response
@@ -131,10 +134,9 @@ impl TxidTransport for Http {
             header("retry-after"),
             header("x-txid-map-sha256"),
         );
-        let body = response
-            .bytes()
-            .map_err(|_| TransportError("body failed".into()))?
-            .to_vec();
+        let mut body = Vec::new();
+        std::io::Read::read_to_end(&mut response.into_body().into_reader(), &mut body)
+            .map_err(|_| TransportError("body failed".into()))?;
         Ok(TxidReply {
             status,
             retry_after,
@@ -151,13 +153,13 @@ fn probe(args: &Args) -> &'static str {
     else {
         return "oracle_invalid";
     };
-    let Ok(client) = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(args.timeout_seconds))
-        .user_agent("pir-independent-canary")
-        .build()
-    else {
-        return "unavailable";
-    };
+    let client = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(args.timeout_seconds)))
+            .user_agent("pir-independent-canary")
+            .build(),
+    );
     let Ok(base) = Endpoint::parse(&args.url) else {
         return "unavailable";
     };
