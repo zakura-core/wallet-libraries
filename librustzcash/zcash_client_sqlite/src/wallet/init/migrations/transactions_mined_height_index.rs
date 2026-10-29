@@ -9,7 +9,7 @@ use crate::wallet::init::WalletMigrationError;
 use super::transparent_spend_map_prevout_index;
 
 /// The identifier of this migration.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x8e4f1d2b_3a6c_4e7d_b5f9_0c1a2d3e4f56);
+pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xc8583dab_3a2e_4aec_8408_2a11862fd44a);
 
 const DEPENDENCIES: &[Uuid] = &[transparent_spend_map_prevout_index::MIGRATION_ID];
 
