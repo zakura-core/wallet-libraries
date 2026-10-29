@@ -2,7 +2,7 @@
 //! its tag salt, and building the segment's tables from its payments.
 pub use zakura_pir_protocol::receiver::v2::*;
 
-use crate::directory::{Overflow, choice_bits, place};
+use crate::directory::{FixedRows, choice_bits};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use zakura_pir_protocol::directory::{
@@ -15,49 +15,42 @@ use zakura_pir_protocol::receiver::{
 #[cfg(test)]
 mod tests;
 
-/// Fixed-row placement of a segment's tags in insertion order, refusing
-/// overflow. [`Rows::insert`] commits a batch or changes nothing.
+/// A segment's tags in insertion order and their [`FixedRows`] placement.
 #[derive(Clone)]
 struct Rows {
     salts: [Hash; DIRECTORY_CHOICES],
     rows: u64,
     entries: usize,
     tags: Vec<Tag>,
-    assignment: Vec<u32>,
+    placed: FixedRows,
 }
 
 impl Rows {
     /// No tags yet, in `rows` rows of `entries` entries, under `salt`.
     fn new(salt: &Hash, rows: u64, entries: usize) -> Self {
         let salts = bucket_salts(salt);
-        let (tags, assignment) = (Vec::new(), Vec::new());
+        let placed = FixedRows::new(salts, rows, entries * ENTRY_BYTES);
         Self {
             salts,
             rows,
             entries,
-            tags,
-            assignment,
+            tags: Vec::new(),
+            placed,
         }
     }
 
     /// Places `tags` after those already placed, relocating as needed, or
     /// changes nothing and returns false.
     fn insert(&mut self, tags: &[Tag]) -> bool {
-        let all: Vec<Tag> = self.tags.iter().chain(tags).copied().collect();
-        let keys: Vec<&[u8]> = all.iter().map(|tag| &tag[..]).collect();
-        let sizes = vec![ENTRY_BYTES; keys.len()];
-        let capacity = self.entries * ENTRY_BYTES;
-        let Ok((_, assignment)) = place(
-            &self.salts,
-            &keys,
-            &sizes,
-            self.rows,
-            capacity,
-            Overflow::Refuse,
-        ) else {
+        let keys: Vec<&[u8]> = tags.iter().map(|tag| &tag[..]).collect();
+        if self
+            .placed
+            .insert(&keys, &vec![ENTRY_BYTES; keys.len()])
+            .is_err()
+        {
             return false;
-        };
-        (self.tags, self.assignment) = (all, assignment);
+        }
+        self.tags.extend_from_slice(tags);
         true
     }
 }
@@ -105,10 +98,7 @@ impl Projection {
 
     /// Each receiver's tag and directory row, in placement order.
     pub fn placement(&self) -> impl Iterator<Item = (&Tag, u32)> {
-        self.rows
-            .tags
-            .iter()
-            .zip(self.rows.assignment.iter().copied())
+        self.rows.tags.iter().zip(self.rows.placed.assignment())
     }
 
     /// Projects one block: `paid` lists every receiver it pays, in any order
@@ -283,10 +273,11 @@ pub fn build(
 
     let salt = projection.salt;
     let keys: Vec<&[u8]> = projection.rows.tags.iter().map(|tag| &tag[..]).collect();
+    let assignment = projection.rows.placed.assignment();
     let bits = choice_bits(
         &projection.rows.salts,
         &keys,
-        &projection.rows.assignment,
+        &assignment,
         DIRECTORY_ROWS.into(),
     );
     let seeds = candidate_seeds(&salt, seed_block, 0..seed_attempts);

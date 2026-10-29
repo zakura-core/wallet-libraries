@@ -86,9 +86,10 @@ pub fn retry_salt(committed: &Hash, retry: u32, block: &Hash) -> Hash {
     }
 }
 
-/// `receiver`'s tag under a segment's `salt`.
+/// `receiver`'s tag under a segment's `salt`: SHA-256 of the domain, the
+/// salt and the bare 43-byte receiver, truncated.
 pub fn tag(salt: &Hash, receiver: &[u8]) -> Tag {
-    tags::tag(TAG_DOMAIN, salt, receiver)
+    tags::tag(TAG_DOMAIN, salt, &[receiver])
 }
 
 /// The bucket salts of a segment under `salt`; placement and the choice table
