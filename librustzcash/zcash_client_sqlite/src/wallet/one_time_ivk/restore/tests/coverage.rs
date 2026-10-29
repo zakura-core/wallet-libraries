@@ -240,6 +240,29 @@ fn a_rewind_below_a_pending_target_keeps_it() {
     assert!(status(st.wallet().db(), account).lookups.is_empty());
 }
 
+/// A filter hit on a key whose earlier work all drained queues a lookup and raises the
+/// new-work counter in the same commit, so a filter step that runs no lookups still wakes
+/// a round. A span with no hits raises nothing.
+#[test]
+fn a_filter_hit_after_earlier_work_drained_raises_the_counter() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
+    assert_eq!(run_pir(&mut st, account), 4);
+    let work = |st: &State| st.wallet().db().one_time_new_work().unwrap();
+    st.generate_and_scan_empty_blocks(1);
+    let quiet = work(&st);
+    assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
+    assert_eq!(work(&st), quiet);
+    let paid = pay_candidate(&mut st, receive(2));
+    assert_eq!(
+        advance(&mut st, account, &[(paid.height, receive(2))]),
+        FilterOutcome::Committed
+    );
+    assert!(work(&st) > quiet);
+    assert_eq!(due(&st, account), [receive(2)]);
+}
+
 /// The status read against an inventory ending at `end`.
 fn status_at(st: &State, account: AccountUuid, end: BlockHeight) -> RecoveryStatus {
     assert_no_stall(st.wallet().db(), account);

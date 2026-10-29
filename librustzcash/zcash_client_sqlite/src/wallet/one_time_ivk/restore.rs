@@ -38,8 +38,8 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     }
 
     /// A counter that goes up in the same transaction as every new recovery obligation of
-    /// any account: a key registered, refund funding learned from a memo, a repair queued
-    /// or a rescan requested. It is cheap to read, so an app can compare it with the value
+    /// any account: a key registered, refund funding learned from a memo, a filter hit
+    /// queuing a lookup, a repair queued or a rescan requested. It is cheap to read, so an app can compare it with the value
     /// its last round saw and run a round only when it changed.
     pub fn one_time_new_work(&self) -> Result<u64, SqliteClientError> {
         Ok(self.conn.borrow().query_row(

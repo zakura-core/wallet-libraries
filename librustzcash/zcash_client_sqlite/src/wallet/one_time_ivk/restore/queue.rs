@@ -1015,9 +1015,10 @@ fn hit_keys<P: Parameters>(
 }
 
 /// Queues a lookup for each hit at a height past its key's coverage, from just past that
-/// coverage through `through` (see [`cover`]). A hit inside coverage that a pending lookup
-/// still has to read marks that lookup invalidated, so the receiver is not reused before
-/// it settles; one inside history already checked was handled when that history was.
+/// coverage through `through` (see [`cover`]), and raises the new-work counter so a round
+/// runs it. A hit inside coverage that a pending lookup still has to read marks that lookup
+/// invalidated, so the receiver is not reused before it settles; one inside history already
+/// checked was handled when that history was.
 fn apply_hits<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -1026,7 +1027,9 @@ fn apply_hits<P: Parameters>(
 ) -> Result<(), SqliteClientError> {
     for (height, id) in hits {
         if *height > covered(conn, params, *id)? {
-            cover(conn, params, *id, through, AUTOMATIC | INVALIDATED)?;
+            if !cover(conn, params, *id, through, AUTOMATIC | INVALIDATED)? {
+                crate::wallet::one_time_rewind::new_work(conn)?;
+            }
         } else {
             conn.execute(
                 "UPDATE ironwood_one_time_lookups SET reasons = reasons | ?3
