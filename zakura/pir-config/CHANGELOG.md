@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 - 2026-10-24
+## 0.1.0 - 2026-10-26
 
 - Add the wallet PIR configuration profile with required static hash pins,
   network and authentication checks, normalized HTTPS server identities,

@@ -11,6 +11,12 @@ and this library adheres to Rust's notion of
 
 - Storing a received Sapling or Orchard note looks up the note's address row by diversifier index before deriving its unified address, so the derivation runs only when the row is absent. The exposure-height update is unchanged.
 
+## [0.1.0-rc9.5] - 2026-10-26
+
+### Changed
+
+- Use backend `0.1.0-rc9.5`, which skips accounts born after the scanned range, and retain regression coverage for both shielded pools.
+
 ## [0.1.0-rc9.4] - 2026-10-23
 
 ### Changed
