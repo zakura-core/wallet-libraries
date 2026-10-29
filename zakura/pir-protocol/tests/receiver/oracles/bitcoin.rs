@@ -1,19 +1,24 @@
 //! Receiver height-range payload comparison with the pinned Bitcoin codec.
 use sha2::{Digest, Sha256};
-use zakura_pir_protocol::receiver::{ReceiverBytes, blocks::{HeightSet, Range, RANGE_HEADER}};
+use zakura_pir_protocol::receiver::{
+    ReceiverBytes,
+    blocks::{HeightSet, RANGE_HEADER, Range},
+};
 
 const GENESIS: [u8; 32] = [9; 32];
 
 fn receivers(count: u32) -> Vec<ReceiverBytes> {
-    (0..count).map(|i| {
-        let mut receiver = [0; 43];
-        receiver[..4].copy_from_slice(&i.to_le_bytes());
-        receiver
-    }).collect()
+    (0..count)
+        .map(|i| {
+            let mut receiver = [0; 43];
+            receiver[..4].copy_from_slice(&i.to_le_bytes());
+            receiver
+        })
+        .collect()
 }
 
-/// A set's key depends on its height, so the same receivers code differently at another
-/// height, and the wire bytes match an independent BIP 158 writer.
+/// A set's key depends on its height, so the same receivers code differently
+/// at another height. The bytes match an independent BIP 158 writer.
 #[test]
 fn payload_matches_independent_codec() {
     let members = receivers(100);
@@ -49,4 +54,3 @@ fn payload_matches_independent_codec() {
     let hits = range.matches(&GENESIS, &members);
     assert_eq!(hits.len(), members.len());
 }
-
