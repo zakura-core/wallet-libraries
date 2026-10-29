@@ -645,3 +645,20 @@ fn payments_must_match_the_projection() {
     );
     assert!(matches!(built, Err(Error::Malformed)));
 }
+
+/// A build whose seeds all fail is `Error::Choice`, which the publisher
+/// reports as `receiver.choice.failed`, never a table without a choice object.
+#[test]
+fn exhausted_choice_seeds_fail_the_build() {
+    let paid = payments(&[1, 2]);
+    let built = build(
+        &project(&paid),
+        coverage(),
+        &SEED_BLOCK,
+        0,
+        2048,
+        tree(),
+        &paid,
+    );
+    assert!(matches!(built, Err(Error::Choice)));
+}
