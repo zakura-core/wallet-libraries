@@ -145,7 +145,7 @@ getset.workspace = true
 [dev-dependencies]
 ambassador.workspace = true
 assert_matches.workspace = true
-gumdrop = "0.8"
+clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "suggestions"] }
 incrementalmerkletree = { workspace = true, features = ["test-dependencies"] }
 jubjub.workspace = true
 proptest.workspace = true
