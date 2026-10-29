@@ -6,6 +6,27 @@ use bitcoin::{
 use zakura_filters::{BitStreamReader, GcsFilterWriter, read_compact_size, write_compact_size};
 
 #[test]
+fn hash_mapping_matches_upstream_at_boundaries() {
+    let bytes: Vec<_> = (0u8..=255).collect();
+    for (k0, k1) in [
+        (0, 0),
+        (u64::MAX, 17),
+        (0x0706050403020100, 0x0f0e0d0c0b0a0908),
+    ] {
+        for length in (0..=32).chain([63, 64, 65, 255, 256]) {
+            let element = &bytes[..length];
+            let hash = bitcoin::hashes::siphash24::Hash::hash_to_u64_with_keys(k0, k1, element);
+            for range in [0, 1, 2, u64::from(u32::MAX), u64::MAX] {
+                assert_eq!(
+                    zakura_filters::hash_to_range(k0, k1, range, element),
+                    ((u128::from(hash) * u128::from(range)) >> 64) as u64
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn filter_bytes_match_upstream_for_every_application_profile() {
     for count in [0u32, 1, 2, 252, 253, 254, 1000, 65535, 65536] {
         let elements: Vec<_> = (0..count).map(|i| i.to_le_bytes()).collect();
@@ -112,7 +133,9 @@ fn bit_reads_match_upstream_across_boundaries_and_malformed_widths() {
             for width in [0, 1, 7, 8, 9, 32, 63, 64, 65, 0, 1, 64] {
                 assert_eq!(
                     actual.read(width).map_err(|e| e.kind()),
-                    expected.read(width).map_err(|e| e.kind()),
+                    expected
+                        .read(width)
+                        .map_err(|e| std::io::Error::from(e).kind()),
                     "length={length}, width={width}",
                 );
             }

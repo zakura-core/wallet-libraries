@@ -139,7 +139,9 @@ def check_previous_native(directory):
 
 
 def main():
-    legacy_helpers = {"ipir-sp", "ipir-native-client", "simplepir-kernel", "bitcoin"}
+    bitcoin_helpers = {"bitcoin", "bitcoin_hashes", "bitcoin-io", "bitcoin-consensus-encoding",
+                       "bitcoin-internals", "hex-conservative"}
+    legacy_helpers = {"ipir-sp", "ipir-native-client", "simplepir-kernel"} | bitcoin_helpers
     workspace_lock = tomllib.loads((ROOT / "Cargo.lock").read_text())
     retained = legacy_helpers & {package["name"] for package in workspace_lock["package"]}
     if retained:
@@ -159,6 +161,7 @@ def main():
     server_roles = {"zakura-pir-publisher", "zakura-pir-query-server", "zakura-pir-server-core", "zakura-server-chain"}
     wallet_roles = {"ipir-native-client", "zakura-pir-client", "zakura-client-backend", "zakura-client-sqlite", "zakura-protocol", "zakura-transparent", "zakura-orchard"}
     cases = [
+        ("filter-codec", "zakura/filters", [], bitcoin_helpers, {"siphasher"}),
         ("scanning", "librustzcash/zcash_client_backend", [], {"nanorand", "futures-core", "futures-sink"}, {"flume"}),
         ("async-scanning", "librustzcash/zcash_client_backend", ["sync-decryptor"], {"nanorand"}, {"flume", "futures-core", "futures-sink", "tokio"}),
         ("record-types", "zakura/pir-protocol", ["enhance"], endpoint_stack | server_roles | {"http", "bytes", "ipir-native-client", "reinspiring"}, set()),
