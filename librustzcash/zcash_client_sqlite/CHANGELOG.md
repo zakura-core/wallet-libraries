@@ -18,6 +18,10 @@ and this library adheres to Rust's notion of
 - Storing a received transparent output no longer scans `transparent_spend_map`
   to learn whether a wallet transaction already spends it.
 
+### Migrating
+
+No change is required. To benefit, keep one `zcash_client_backend` `ScanningKeyCache` per `WalletDb` file and scan with `scan_cached_blocks_with_cache` instead of `scan_cached_blocks`; see that crate's changelog for when to clear the cache. A wallet that is reopened under a new path, such as after a reset, should start a new cache.
+
 ## [0.1.0-rc9.6] - 2026-10-30
 
 ### Added

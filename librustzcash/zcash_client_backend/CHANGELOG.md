@@ -16,6 +16,21 @@ and this library adheres to Rust's notion of
 
 - `data_api::chain::scan_cached_blocks` is `scan_cached_blocks_with_cache` with a new, empty cache. Building scanning keys now derives each Orchard IVK once for both the Orchard and Ironwood pools.
 
+### Migrating
+
+No change is required: existing code compiles and behaves as before. To stop re-decoding and re-deriving every account's keys on every scan:
+
+- **Callers of `scan_cached_blocks`:** create one `ScanningKeyCache` per wallet, keep it for as long as you keep scanning that wallet, and pass it to `scan_cached_blocks_with_cache` in place of calling `scan_cached_blocks`. The arguments are otherwise the same.
+  - Before each scan the cache checks every account's stored key against the wallet, so account imports, deletions and key changes need no manual invalidation.
+  - Do not share one cache between wallets: the same account identifier in another wallet can name a different key.
+  - The cache holds viewing keys. Drop it or call `ScanningKeyCache::clear` when they should leave memory, for example when the wallet is locked, reset or closed.
+- **`WalletRead` implementors:** nothing to do unless you want unchanged keys to skip decoding as well as derivation. To get that, override `get_unified_full_viewing_key_encodings` to return `Some` map that:
+  - covers exactly the accounts `get_unified_full_viewing_keys` returns;
+  - gives each account an encoding that changes whenever its key changes, such as the string the key is stored as.
+
+  Returning the default `None` stays correct; it only means the keys are read and encoded on every scan.
+- **Wrapper types that forward `WalletRead` to an inner store:** forward `get_unified_full_viewing_key_encodings` too. A wrapper that does not falls back to the default `None`, which stays correct but loses the saving.
+
 ## [0.1.0-rc9.6] - 2026-10-30
 
 ### Added
