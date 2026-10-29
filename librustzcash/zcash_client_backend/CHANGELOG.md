@@ -9,7 +9,7 @@ and this library adheres to Rust's notion of
 
 ### Added
 
-- `data_api::one_time_ivk::restore::{FilterSpan, FilterOutcome, FilterReceiver}` for span-based filter coverage.
+- `data_api::one_time_ivk::restore::{FilterSpan, FilterOutcome}` for span-based filter coverage.
 - `one_time_ivk::restore::RecoveryStatus::awaiting_admission` counts recovered payments waiting for ordinary sync to admit them.
 - `one_time_ivk::restore::RecoveryStatus::{waits_for_retry, waits_for_publication}` say whether a pending lookup waits out a retry delay or for a publication past the inventory end the status was read against.
 

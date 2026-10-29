@@ -4,10 +4,9 @@ use rusqlite::{Connection, OptionalExtension, named_params, params};
 use zcash_client_backend::data_api::scanning::ScanPriority;
 use zcash_client_backend::data_api::{
     one_time_ivk::restore::{
-        DirectoryRecord, DiscoveryWork, FilterOutcome, FilterReceiver, FilterSpan, LookupCursor,
-        LookupPage, LookupWork, ManualProgress, RECEIVE_GAP, RECOVERY_PAGE_LIMIT,
-        RecoveryPublication, RecoveryStatus, RecoveryToken, WitnessAnswer, WitnessRequest,
-        decode_witness_payload,
+        DirectoryRecord, DiscoveryWork, FilterOutcome, FilterSpan, LookupCursor, LookupPage,
+        LookupWork, ManualProgress, RECEIVE_GAP, RECOVERY_PAGE_LIMIT, RecoveryPublication,
+        RecoveryStatus, RecoveryToken, WitnessAnswer, WitnessRequest, decode_witness_payload,
     },
     transparent_ledger::ChainPoint,
 };
@@ -938,34 +937,29 @@ pub(in crate::wallet::one_time_ivk) fn fencing_monitoring<P: Parameters, T>(
     Ok(result)
 }
 
-/// Returns all monitored receivers, each with its filter coverage, and the generation that
-/// makes the set current.
+/// Returns all monitored receivers and the generation that makes the set current.
 pub(crate) fn receivers<P: Parameters>(
     conn: &Connection,
     params: &P,
     account: AccountUuid,
-) -> Result<(RecoveryToken, Vec<FilterReceiver>), SqliteClientError> {
+) -> Result<(RecoveryToken, Vec<DiscoveryWork>), SqliteClientError> {
     let Some(owner) = one_time_account(conn, params, account)? else {
         return Ok((NO_RECOVERY, vec![]));
     };
     let (enabled, token) = token(conn, owner.0)?;
     let work = if enabled {
         conn.prepare(&format!(
-            "SELECT k.purpose, k.key_index, k.receiver, {} FROM ironwood_one_time_keys k
+            "SELECT k.purpose, k.key_index, k.receiver FROM ironwood_one_time_keys k
         WHERE k.account_id = ?1 AND {} ORDER BY k.purpose, k.key_index",
-            covered_sql(activation(params)),
             monitored(params)
         ))?
         .query_and_then([owner.0], |r| {
-            Ok::<_, SqliteClientError>(FilterReceiver {
-                work: DiscoveryWork {
-                    key: stored_key_id(r)?,
-                    receiver: r
-                        .get::<_, Vec<u8>>(2)?
-                        .try_into()
-                        .map_err(|_| corrupt("invalid receiver"))?,
-                },
-                covered: BlockHeight::from(r.get::<_, u32>(3)?),
+            Ok::<_, SqliteClientError>(DiscoveryWork {
+                key: stored_key_id(r)?,
+                receiver: r
+                    .get::<_, Vec<u8>>(2)?
+                    .try_into()
+                    .map_err(|_| corrupt("invalid receiver"))?,
             })
         })?
         .collect::<Result<_, _>>()?

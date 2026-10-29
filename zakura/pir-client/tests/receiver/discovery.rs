@@ -691,7 +691,7 @@ async fn a_positive_hint_without_payment_settles_with_one_empty_query() {
     r.st.generate_and_scan_empty_blocks(1);
     let end = tip(&r.st);
     let (token, receivers) = r.st.wallet().db().one_time_receivers(r.account).unwrap();
-    let receiver = &receivers[0].work;
+    let receiver = &receivers[0];
     // A deliberately overinclusive hint exercises the same path as a GCS false positive.
     let height: u32 = end.height.into();
     let set = HeightSet::build(&GENESIS, height, [&receiver.receiver])

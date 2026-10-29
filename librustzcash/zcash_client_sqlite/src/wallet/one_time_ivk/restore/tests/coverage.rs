@@ -357,7 +357,7 @@ fn a_hit_before_the_birthday_advances_the_window() {
     );
     assert!(marked.is_some());
     let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert!(receivers.iter().any(|r| r.work.key == receive(4)));
+    assert!(receivers.iter().any(|r| r.key == receive(4)));
 }
 
 /// Filters cover history from activation, so a late birthday cannot hide I0's earlier
@@ -474,8 +474,12 @@ fn a_correction_restarts_coverage_from_activation() {
     assert_eq!(state.filter_frontier, None);
     assert_eq!(state.token.history_revision, 1);
     assert!(!state.fresh);
-    let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert!(receivers.iter().all(|r| r.covered == activation(&st) - 1));
+    let reset: bool = value(
+        st.wallet().conn(),
+        "SELECT NOT EXISTS(SELECT 1 FROM ironwood_one_time_keys WHERE covered_height IS NOT NULL)",
+        [],
+    );
+    assert!(reset, "every key's coverage restarts from activation");
     assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
     assert_eq!(
         status(st.wallet().db(), account).filter_frontier,
@@ -557,8 +561,12 @@ fn a_reorg_rolls_back_span_and_key_coverage() {
     st.truncate_to_height(floor);
     let state = status(st.wallet().db(), account);
     assert_eq!(state.filter_frontier.map(|f| f.height), Some(floor));
-    let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert!(receivers.iter().all(|r| r.covered <= floor));
+    let past: bool = value(
+        st.wallet().conn(),
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys WHERE covered_height > ?1)",
+        [u32::from(floor)],
+    );
+    assert!(!past, "no key's coverage stays past the fork");
     st.generate_and_scan_empty_blocks(3);
     assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
 }

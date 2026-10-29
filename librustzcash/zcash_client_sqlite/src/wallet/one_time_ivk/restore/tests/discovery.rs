@@ -2666,8 +2666,8 @@ fn manual_only_receive_keys_stay_out_of_automatic_monitoring() {
     let (token, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
     let receive: Vec<u64> = receivers
         .iter()
-        .filter(|w| w.work.key.purpose() == Purpose::Receive)
-        .map(|w| w.work.key.index())
+        .filter(|w| w.key.purpose() == Purpose::Receive)
+        .map(|w| w.key.index())
         .collect();
     assert_eq!(receive, [0, 1, 2, 3]);
 
@@ -3220,12 +3220,12 @@ fn enrollment_invalidates_a_held_filter_request() {
     ));
     // A filter request for the next blocks captures I0 to I3.
     let (held, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert!(receivers.iter().all(|w| w.work.key != key4));
+    assert!(receivers.iter().all(|w| w.key != key4));
     // I0's proof arrives and enrolls I4.
     let current = publication_at(&st, tip(&st).height);
     drain(&mut st, account, current);
     let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert!(receivers.iter().any(|w| w.work.key == key4));
+    assert!(receivers.iter().any(|w| w.key == key4));
     // Ordinary sync stores I4's first payment, then the held callback returns.
     let synced = tip(&st).height;
     pay_candidate(&mut st, key4);
@@ -3600,8 +3600,8 @@ pub(in crate::wallet::one_time_ivk) fn refunds_watched(
     let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
     receivers
         .iter()
-        .filter(|w| w.work.key.purpose() == Purpose::Refund)
-        .map(|w| w.work.key.index())
+        .filter(|w| w.key.purpose() == Purpose::Refund)
+        .map(|w| w.key.index())
         .collect()
 }
 
@@ -3801,7 +3801,7 @@ fn a_refund_paid_while_its_key_was_retired_is_found_after_a_newer_status() {
     observe(&mut st, Terminal(ReceiptExpectation::None), now + 60);
     let watched = |st: &State| {
         let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-        receivers.iter().any(|w| w.work.key == r0)
+        receivers.iter().any(|w| w.key == r0)
     };
     assert!(!watched(&st), "the no-refund status retires R0");
 
@@ -4228,7 +4228,7 @@ fn a_refund_key_retires_only_once_every_operation_settles() {
     let watched = |st: &State, i: u64| -> bool {
         let account = st.test_account().unwrap().id();
         let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-        receivers.iter().any(|w| w.work.key == refund(i))
+        receivers.iter().any(|w| w.key == refund(i))
     };
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();

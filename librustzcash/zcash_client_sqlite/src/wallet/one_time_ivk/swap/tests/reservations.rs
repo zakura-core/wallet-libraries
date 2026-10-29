@@ -845,7 +845,7 @@ fn assert_entered_with_history(
 ) -> (Vec<KeyId>, Option<BlockHeight>) {
     let account = st.test_account().unwrap().id();
     let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    let after: Vec<KeyId> = receivers.iter().map(|w| w.work.key).collect();
+    let after: Vec<KeyId> = receivers.iter().map(|w| w.key).collect();
     for key in after.iter().filter(|k| !before.contains(k)) {
         let Some(frontier) = frontier else { break };
         let covered: bool = value(
@@ -1392,10 +1392,7 @@ fn a_payment_after_a_silent_quote_is_released_is_still_recovered() {
     assert!(!held(&st, 0));
     store::restore::tests::discovery::pay_candidate(&mut st, key);
     let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert!(
-        receivers.iter().any(|r| r.work.key == key),
-        "still monitored"
-    );
+    assert!(receivers.iter().any(|r| r.key == key), "still monitored");
     catch_up(&mut st);
     assert_eq!(
         store::restore::tests::discovery::one_time_notes(&st),

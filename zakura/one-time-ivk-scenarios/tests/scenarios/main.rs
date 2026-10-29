@@ -137,11 +137,11 @@ async fn hints(device: &mut Device, directory: &Directory) {
     let range = Inventories::block_range(ORIGIN, &directory, &head, from, 256)
         .await
         .unwrap();
-    let bytes: Vec<_> = receivers.iter().map(|r| r.work.receiver).collect();
+    let bytes: Vec<_> = receivers.iter().map(|r| r.receiver).collect();
     let hits: Vec<_> = range
         .matches(&GENESIS, &bytes)
         .into_iter()
-        .map(|(height, index)| (height.into(), receivers[index].work.key))
+        .map(|(height, index)| (height.into(), receivers[index].key))
         .collect();
     let end = range.end();
     let span = FilterSpan {

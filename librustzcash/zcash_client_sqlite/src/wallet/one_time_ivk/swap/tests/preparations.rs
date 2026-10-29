@@ -315,7 +315,7 @@ fn a_prepared_refund_index_paid_after_its_target_is_refused_once_filters_see_it(
     assert_eq!(prepare(&mut st).1, Ok(refund(0)));
     let watched = |st: &State| {
         let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-        receivers.iter().any(|r| r.work.key == refund(0))
+        receivers.iter().any(|r| r.key == refund(0))
     };
     assert!(watched(&st));
     let paid = pay_candidate(&mut st, refund(0));

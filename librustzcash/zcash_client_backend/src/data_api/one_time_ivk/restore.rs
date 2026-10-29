@@ -308,15 +308,6 @@ pub enum FilterOutcome {
     Restart,
 }
 
-/// A monitored receiver and how far filter coverage reaches for it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FilterReceiver {
-    pub work: DiscoveryWork,
-    /// Filters, or a lookup they queued, cover this receiver's history through this height.
-    /// Below the account's frontier, the receiver needs a re-check from the next height.
-    pub covered: BlockHeight,
-}
-
 /// One account's durable progress and a bounded batch of due work.
 /// With discovery disabled, work is restricted to repairing already-owned receipts.
 #[derive(Clone, Debug, PartialEq, Eq)]

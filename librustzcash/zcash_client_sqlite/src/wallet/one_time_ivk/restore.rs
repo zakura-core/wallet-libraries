@@ -12,7 +12,7 @@ use rusqlite::Connection;
 use std::borrow::{Borrow, BorrowMut};
 use zakura_one_time_ivk::KeyId;
 use zcash_client_backend::data_api::one_time_ivk::restore::{
-    FilterOutcome, FilterReceiver, FilterSpan, LookupPage, LookupWork, RecoveryPublication,
+    DiscoveryWork, FilterOutcome, FilterSpan, LookupPage, LookupWork, RecoveryPublication,
     RecoveryStatus, RecoveryToken, WitnessAnswer, WitnessRequest,
 };
 use zcash_protocol::consensus::{BlockHeight, Parameters};
@@ -49,12 +49,12 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         )?)
     }
 
-    /// Captures the monitored receivers for local filter matching, each with how far its
-    /// filter coverage reaches, and the cancellation fence the match commits under.
+    /// Captures the monitored receivers for local filter matching and the cancellation
+    /// fence the match commits under.
     pub fn one_time_receivers(
         &self,
         account: AccountUuid,
-    ) -> Result<(RecoveryToken, Vec<FilterReceiver>), SqliteClientError> {
+    ) -> Result<(RecoveryToken, Vec<DiscoveryWork>), SqliteClientError> {
         queue::receivers(self.conn.borrow(), &self.params, account)
     }
 }
