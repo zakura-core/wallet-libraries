@@ -151,7 +151,6 @@ zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustz
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 incrementalmerkletree = { workspace = true }
 futures = "0.3"
-inspiring = { version = "=0.1.0-rc.3", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2" }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "test-util", "time"] }
 tempfile = "3"
 serde_json = { workspace = true }
