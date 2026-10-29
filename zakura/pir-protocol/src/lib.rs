@@ -1,4 +1,6 @@
 //! Contracts shared by independently compiled PIR roles.
+#[cfg(any(feature = "transparent", feature = "receiver"))]
+pub mod directory;
 #[cfg(feature = "enhance")]
 pub mod enhance;
 #[cfg(feature = "native")]
