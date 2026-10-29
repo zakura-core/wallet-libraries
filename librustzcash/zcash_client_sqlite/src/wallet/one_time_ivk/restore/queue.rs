@@ -1168,7 +1168,7 @@ fn progress<P: Parameters>(
     // ownership remains independent, so a live quote still prevents address recycling, and
     // a promised receipt the chain no longer holds keeps the address out of reuse.
     conn.execute(&format!("UPDATE ironwood_one_time_keys SET used = 0
-        WHERE account_id = ?1 AND prebirthday_height IS NULL AND used = 1
+        WHERE account_id = ?1 AND used = 1
         AND id NOT IN (SELECT k.id FROM ironwood_one_time_keys k WHERE k.account_id = ?1 AND {UNSETTLED})
         AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n JOIN transactions t
             ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = ironwood_one_time_keys.id AND t.mined_height IS NOT NULL)
@@ -1727,14 +1727,22 @@ pub(crate) fn record_lookup<P: Parameters>(
         previous = Some(record);
     }
     let discovery_enabled = token(conn, owner.0)?.0;
+    // The wallet doesn't handle payments before the birthday, so they are passed over
+    // here, before anything is stored for them, while the page still counts as read.
+    let birthday: u32 = conn.query_row(
+        "SELECT birthday_height FROM accounts WHERE id = ?1",
+        [owner.0],
+        |r| r.get(0),
+    )?;
     // A candidate returns a retired key to monitoring, and completed history can end a
     // displaced receipt's repair (see `REPAIR_KEY`), so the page applies inside the fence.
     fencing_monitoring(conn, params, &[owner.0], || {
         if let Some(segment) = page.segment {
             for record in &page.records {
                 let candidate = directory_candidate(&record.payment).expect("validated above");
-                if (discovery_enabled
-                    || repairable(conn, params, account, work.work.key, id, &candidate)?)
+                if u32::from(candidate.height) >= birthday
+                    && (discovery_enabled
+                        || repairable(conn, params, account, work.work.key, id, &candidate)?)
                     && !admitted(conn, id, &candidate)?
                 {
                     queue_payment(

@@ -699,7 +699,9 @@ pub(crate) fn forget_one_time_activation(conn: &rusqlite::Connection) {
     conn.execute_batch(
         "ALTER TABLE ironwood_one_time_recovery DROP COLUMN used;
          ALTER TABLE ironwood_one_time_recovery ADD COLUMN pir_coverage INTEGER NOT NULL
-            DEFAULT 0 CHECK (pir_coverage IN (0, 1));",
+            DEFAULT 0 CHECK (pir_coverage IN (0, 1));
+         ALTER TABLE ironwood_one_time_keys ADD COLUMN prebirthday_height INTEGER
+            CHECK (prebirthday_height BETWEEN 0 AND 4294967295);",
     )
     .unwrap();
     conn.execute(

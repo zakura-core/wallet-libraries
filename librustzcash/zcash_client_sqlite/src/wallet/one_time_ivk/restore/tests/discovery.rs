@@ -4171,47 +4171,57 @@ fn stale_future_and_partial_publications_are_refused() {
     assert!(begin(&mut st, from_activation));
 }
 
-/// A payment before the account's birthday must precede the birthday block's first
-/// Ironwood output. A genuine one marks its key paid before the birthday, untracked like
-/// any note there. A later note a directory claims at a height before the birthday is
-/// refused and dropped, and marks nothing.
+/// A page holding a payment before the birthday and one after stores only the later one,
+/// so the earlier one creates no candidate, witness request or use marker. The page still
+/// counts as read: once the later payment is admitted, the lookup settles without reading
+/// that history again.
 #[test]
-fn a_payment_claimed_before_the_birthday_must_precede_the_birthday_block() {
-    for genuine in [true, false] {
-        let mut st = scanned_wallet();
-        let account = st.test_account().unwrap().id();
-        let mut candidate = pay_candidate(&mut st, key8());
-        st.generate_and_scan_empty_blocks(1);
-        let birthday = if genuine {
-            u32::from(candidate.height) + 1
-        } else {
-            let hash: Vec<u8> = value(
-                st.wallet().conn(),
-                "SELECT hash FROM blocks WHERE height = ?1",
-                [u32::from(candidate.height) - 1],
-            );
-            candidate.height = candidate.height - 1;
-            candidate.block_hash = BlockHash(hash.try_into().unwrap());
-            u32::from(candidate.height) + 1
-        };
-        exec(
-            st.wallet().conn(),
-            "UPDATE accounts SET birthday_height = ?1",
-            [birthday],
-        );
-        let publication = queue_late(&mut st, key8(), &candidate);
-        send_witness(&mut st, key8(), &candidate);
-        drain(&mut st, account, publication);
-        assert!(one_time_notes(&st).is_empty());
-        assert_eq!(candidates(&st), 0);
-        let marked: Option<u32> = value(
-            st.wallet().conn(),
-            "SELECT prebirthday_height FROM ironwood_one_time_keys
-             WHERE purpose = 1 AND key_index = ?1",
-            [key8().index().to_be_bytes()],
-        );
-        assert_eq!(marked, genuine.then_some(birthday), "genuine {genuine}");
-    }
+fn a_page_with_a_payment_before_the_birthday_stores_only_the_later_one() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let early = pay_candidate(&mut st, key8());
+    let late = pay_candidate(&mut st, key8());
+    exec(
+        st.wallet().conn(),
+        "UPDATE accounts SET birthday_height = ?1",
+        [u32::from(late.height)],
+    );
+    recover(st.wallet_mut().db_mut(), account, key8(), early.height);
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, false)
+            .unwrap()
+    );
+    let work = work_of(&st, key8());
+    let records = [&early, &late]
+        .into_iter()
+        .enumerate()
+        .map(|(page, candidate)| DirectoryRecord {
+            receiver: work.work.receiver,
+            page: page as u32,
+            total: 2,
+            payment: directory_answer(candidate),
+            ordinal: page as u32,
+        })
+        .collect();
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, &work, &whole(publication, records), clock_now())
+            .unwrap()
+    );
+    let state = status(st.wallet().db(), account);
+    let reads = |state: &RecoveryStatus| state.lookups.iter().any(|w| w.work.key == key8());
+    assert_eq!(candidates(&st), 1);
+    assert!(state.used && !reads(&state));
+    assert_eq!(state.witnesses.len(), 1);
+    assert_eq!(state.witnesses[0].position, late.position);
+    send_witness(&mut st, key8(), &late);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    let state = status(st.wallet().db(), account);
+    assert!(!reads(&state) && state.witnesses.is_empty());
 }
 
 /// A refund key with several local operations retires only once every one is conclusive,

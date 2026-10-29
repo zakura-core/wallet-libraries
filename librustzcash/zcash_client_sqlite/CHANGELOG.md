@@ -17,6 +17,7 @@ and this library adheres to Rust's notion of
 - Corrections, reorgs and earlier birthdays also roll back filter coverage. A correction no longer reads every monitored key by PIR: filters or a complete check cover settled history again, and only pending lookups and open reservations are read again directly. A new migration discards existing one-time filter frontiers.
 
 - Each account keeps a one-time use marker, reported as `RecoveryStatus::used`. Handing out a receive address or refund key, recording the wallet's own refund funding, storing a payment candidate at or after the birthday, or accepting a refund memo sets it in the same transaction, whether or not recovery is enabled, and its first set raises the new-work counter. Preparing keys doesn't set it, and nothing clears it.
+- One-time recovery ignores payments before the account birthday. A lookup passes over such a record before storing a candidate, so it is neither credited nor counted as use, and no longer marks its key paid or extends the seed walk. The `one_time_activation` migration drops `ironwood_one_time_keys.prebirthday_height`.
 - `WalletDb::check_one_time_history_for` starts the history check of several accounts in one transaction. If any account refuses, none start and the call returns that account.
 - `WalletDb::one_time_recovery` takes the captured inventory's end. The four listed lookups are then ones that inventory can answer, so lookups waiting for a later publication no longer hide a runnable one.
 

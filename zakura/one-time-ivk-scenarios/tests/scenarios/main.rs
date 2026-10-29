@@ -374,7 +374,8 @@ fn multiple_accounts_sync_independently() {
     });
 }
 
-/// Proven prebirthday payments extend seed discovery without credit until the user lowers birthday.
+/// A payment before the birthday is ignored, neither credited nor extending seed discovery,
+/// until the user lowers the birthday.
 #[test]
 fn lowering_birthday_recovers_an_excluded_payment_after_restart() {
     run(async {
@@ -389,7 +390,7 @@ fn lowering_birthday_recovers_an_excluded_payment_after_restart() {
         let directory = Directory::publish(&chain, 0, 0, 256, 0);
         desktop.recover(&chain, &directory).await;
         assert_eq!(desktop.unspent_one_time_value(), 0);
-        assert_eq!(desktop.status(&chain).restore_next, 5);
+        assert_eq!(desktop.status(&chain).restore_next, 4);
         desktop
             .db
             .set_one_time_recovery_enabled(desktop.account, false)
@@ -413,11 +414,11 @@ fn lowering_birthday_recovers_an_excluded_payment_after_restart() {
     });
 }
 
-/// Seed receive discovery checks history from activation, not the birthday: I0 paid in a
-/// sealed shard before the birthday permits I4, which is paid afterwards. A walk limited to
-/// post-birthday history would see I0 to I3 empty and stop before I4.
+/// The documented boundary: the wallet ignores payments before the birthday, so I0 paid in a
+/// sealed shard before it doesn't extend the seed walk, which sees I0 to I3 empty and stops
+/// before I4, paid afterwards. Complete recovery needs a birthday before the first use.
 #[test]
-fn a_pre_birthday_payment_extends_the_seed_walk_across_shards() {
+fn a_pre_birthday_payment_leaves_a_later_i4_unfound() {
     run(async {
         let mut chain = Chain::new();
         let phone = Device::new(&mut chain, [8; 32], ACTIVATION.into());
@@ -430,10 +431,10 @@ fn a_pre_birthday_payment_extends_the_seed_walk_across_shards() {
         desktop.scan(&chain);
         let directory = Directory::publish(&chain, 0, 0, 256, 0);
         desktop.recover(&chain, &directory).await;
-        assert_eq!(desktop.unspent_one_time_value(), 70_000);
+        assert_eq!(desktop.unspent_one_time_value(), 0);
         let status = desktop.status(&chain);
         assert!(status.restore_complete);
-        assert_eq!(status.restore_next, 9);
+        assert_eq!(status.restore_next, 4);
     });
 }
 

@@ -13,7 +13,8 @@ use uuid::Uuid;
 use super::one_time_new_work;
 use crate::wallet::init::WalletMigrationError;
 
-/// Adds `ironwood_one_time_recovery.used` and drops its `pir_coverage`.
+/// Adds `ironwood_one_time_recovery.used`, and drops its `pir_coverage` and
+/// `ironwood_one_time_keys.prebirthday_height`.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x755fb50a_f4e6_4b3e_80f0_8a21829607df);
 
 const DEPENDENCIES: &[Uuid] = &[one_time_new_work::MIGRATION_ID];
@@ -120,7 +121,8 @@ impl RusqliteMigration for Migration {
              -- The first round runs a complete check, which covers keys that waited on the
              -- deleted filter re-check.
              UPDATE ironwood_one_time_recovery SET filter_height = NULL, filter_hash = NULL;
-             ALTER TABLE ironwood_one_time_recovery DROP COLUMN pir_coverage;",
+             ALTER TABLE ironwood_one_time_recovery DROP COLUMN pir_coverage;
+             ALTER TABLE ironwood_one_time_keys DROP COLUMN prebirthday_height;",
         )?;
         Ok(())
     }

@@ -335,42 +335,31 @@ fn late_birthday() -> (State, AccountUuid, PendingPayment, PendingPayment) {
     (st, account, paid0, paid4)
 }
 
-/// A hit below the birthday is checked like any other, and the payment it finds there
-/// slides the receive window, so I4 becomes watched.
+/// The wallet doesn't handle payments before the birthday. I0's payment there is passed
+/// over, so the window never slides to I4 and the later payment to I4 isn't found. This is
+/// the documented boundary: complete recovery needs a birthday before the first use of a
+/// one-time address.
 #[test]
-fn a_hit_before_the_birthday_advances_the_window() {
+fn a_record_below_the_birthday_is_ignored_so_a_later_i4_is_not_found() {
     let (mut st, account, paid0, _) = late_birthday();
     assert_eq!(
         advance(&mut st, account, &[(paid0.height, receive(0))]),
         FilterOutcome::Committed
     );
     run_pir(&mut st, account);
-    assert_eq!(
-        one_time_notes(&st),
-        [(100_000, false)],
-        "only I4's note, after the birthday, is tracked"
-    );
-    let marked: Option<u32> = value(
+    assert!(one_time_notes(&st).is_empty());
+    assert_eq!(candidates(&st), 0);
+    let paid: bool = value(
         st.wallet().conn(),
-        "SELECT prebirthday_height FROM ironwood_one_time_keys WHERE purpose = 1 AND key_index = ?1",
+        "SELECT used FROM ironwood_one_time_keys WHERE purpose = 1 AND key_index = ?1",
         [0u64.to_be_bytes()],
     );
-    assert!(marked.is_some());
+    assert!(!paid, "I0 stays issuable");
     let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert!(receivers.iter().any(|r| r.key == receive(4)));
-}
-
-/// Filters cover history from activation, so a late birthday cannot hide I0's earlier
-/// payment, and the window it opens still finds the later payment to I4.
-#[test]
-fn a_late_birthday_still_finds_a_later_payment_to_i4() {
-    let (mut st, account, paid0, _) = late_birthday();
-    assert_eq!(
-        advance(&mut st, account, &[(paid0.height, receive(0))]),
-        FilterOutcome::Committed
-    );
-    run_pir(&mut st, account);
-    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    assert!(!receivers.iter().any(|r| r.key == receive(4)));
+    let state = status(st.wallet().db(), account);
+    assert!(state.restore_complete && !state.used);
+    assert_eq!(state.restore_next, 4);
 }
 
 /// A match with no payment behind it costs one empty lookup and settles.
@@ -654,14 +643,15 @@ fn restore_at(
 }
 
 /// A restore that never scanned below its birthday covers that history with a span the
-/// reorg limit makes final, and the bootstrap lookups find I0's payment there, which opens
-/// the window, and the later payment to I4. The next span then continues the frontier.
+/// reorg limit makes final. The bootstrap lookups pass over I0's payment there, which the
+/// wallet doesn't handle, and find the later payment to I1. The next span then continues
+/// the frontier.
 #[test]
 fn a_restore_without_blocks_below_its_birthday_covers_them_with_stable_spans() {
     let mut st = scanned_wallet();
     let paid0 = pay_candidate(&mut st, receive(0));
     let birthday = birthday_after_cache(&st);
-    let paid4 = pay_candidate(&mut st, receive(4));
+    let paid1 = pay_candidate(&mut st, receive(1));
     for _ in 0..1_000 {
         st.generate_empty_block();
     }
@@ -692,7 +682,7 @@ fn a_restore_without_blocks_below_its_birthday_covers_them_with_stable_spans() {
         end: *rest.last().unwrap(),
     };
     assert_eq!(
-        record(&mut st, account, &span, &[(paid4.height, receive(4))]),
+        record(&mut st, account, &span, &[(paid1.height, receive(1))]),
         FilterOutcome::Committed
     );
     assert_eq!(run_pir(&mut st, account), 0);

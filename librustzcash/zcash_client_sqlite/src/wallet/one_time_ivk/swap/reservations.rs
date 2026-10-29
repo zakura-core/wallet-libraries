@@ -66,11 +66,11 @@ pub(in crate::wallet::one_time_ivk) fn recovery_end(
     let tip = wallet::chain_tip_height(conn)?.map(u32::from);
     let paid: Option<Vec<u8>> = conn.query_row(
         "SELECT MAX(k.key_index) FROM ironwood_one_time_keys k
-         WHERE k.account_id = :account AND k.purpose = 1 AND (k.prebirthday_height <= :tip
-             OR EXISTS(SELECT 1 FROM ironwood_received_notes n
+         WHERE k.account_id = :account AND k.purpose = 1
+             AND EXISTS(SELECT 1 FROM ironwood_received_notes n
                  JOIN transactions t ON t.id_tx = n.transaction_id
                  JOIN blocks b ON b.height = t.mined_height
-                 WHERE n.one_time_key_id = k.id AND t.mined_height <= :tip))",
+                 WHERE n.one_time_key_id = k.id AND t.mined_height <= :tip)",
         named_params![":account": account, ":tip": tip],
         |r| r.get(0),
     )?;

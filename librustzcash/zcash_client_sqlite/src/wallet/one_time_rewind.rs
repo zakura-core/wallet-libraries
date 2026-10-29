@@ -34,8 +34,8 @@ pub(crate) fn truncate(
     // manual cursors above the floor. A cursor an earlier rewind already reset keeps its
     // captured height, so only one still past its start counts.
     let rolled_back: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys k WHERE k.prebirthday_height > ?1
-                OR k.funding_height > ?1 OR k.covered_height > ?1
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys k WHERE k.funding_height > ?1
+                OR k.covered_height > ?1
                 OR EXISTS(SELECT 1 FROM ironwood_received_notes n
                     JOIN transactions t ON t.id_tx = n.transaction_id
                     WHERE n.one_time_key_id = k.id AND t.mined_height > ?1))
@@ -65,7 +65,7 @@ pub(crate) fn truncate(
     )?;
     conn.execute("INSERT INTO ironwood_one_time_lookups(one_time_key_id, target_height, reasons, start_height)
         SELECT k.id, COALESCE((SELECT MAX(height) FROM blocks), ?1), 5, ?1 + 1 FROM ironwood_one_time_keys k
-        WHERE k.prebirthday_height > ?1 OR EXISTS(SELECT 1 FROM ironwood_received_notes n
+        WHERE EXISTS(SELECT 1 FROM ironwood_received_notes n
             JOIN transactions t ON t.id_tx = n.transaction_id WHERE n.one_time_key_id = k.id AND t.mined_height > ?1)
         ON CONFLICT(one_time_key_id) DO UPDATE SET
             target_height = MAX(COALESCE(target_height, 0), excluded.target_height), reasons = reasons | 5,
@@ -97,10 +97,6 @@ pub(crate) fn truncate(
             WHERE done_height > ?1 OR target_height > ?1 OR checked_height > ?1
                 OR start_height > ?1 + 1 OR inventory IS NOT NULL"
         ),
-        [floor],
-    )?;
-    conn.execute(
-        "UPDATE ironwood_one_time_keys SET prebirthday_height = NULL WHERE prebirthday_height > ?1",
         [floor],
     )?;
     // Filter coverage above the fork read another chain's blocks. Funding above it is no

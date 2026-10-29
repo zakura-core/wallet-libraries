@@ -117,7 +117,17 @@ fn the_markers_first_set_raises_the_counter_and_a_second_does_not() {
 /// Runs the `one_time_activation` upgrade again over the wallet's current one-time state, as
 /// on a wallet that predates it.
 fn upgrade(st: &mut State) {
+    forget(st);
+    migrate(st);
+}
+
+/// Returns the wallet to the schema before `one_time_activation`.
+fn forget(st: &State) {
     crate::wallet::init::migrations::forget_one_time_activation(st.wallet().conn());
+}
+
+/// Applies pending migrations.
+fn migrate(st: &mut State) {
     crate::wallet::init::WalletMigrator::new()
         .init_or_migrate(st.wallet_mut().db_mut())
         .unwrap();
@@ -291,12 +301,13 @@ fn the_upgrade_resets_a_paused_accounts_partial_progress() {
 fn the_upgrade_reissues_indexes_paid_only_before_the_birthday() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
+    forget(&st);
     exec(
         st.wallet().conn(),
         "UPDATE ironwood_one_time_keys SET used = 1, prebirthday_height = 1 WHERE purpose = 1",
         [],
     );
-    upgrade(&mut st);
+    migrate(&mut st);
     let mut key = None;
     for _ in 0..4 {
         match st

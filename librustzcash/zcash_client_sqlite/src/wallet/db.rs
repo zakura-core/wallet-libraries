@@ -539,7 +539,6 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_KEYS: &str = "CREATE TABLE ironwood_one
                 receiver BLOB NOT NULL CHECK (typeof(receiver) = 'blob' AND length(receiver) = 43),
                 funding_height INTEGER CHECK (funding_height BETWEEN 0 AND 4294967295),
                 used INTEGER NOT NULL DEFAULT 0 CHECK (used IN (0, 1)),
-                prebirthday_height INTEGER CHECK (prebirthday_height BETWEEN 0 AND 4294967295),
                 reserved_at INTEGER,
                 released_at INTEGER,
                 reservation_floor INTEGER,

@@ -114,8 +114,8 @@ pub(in crate::wallet::one_time_ivk) fn pending_payment(
 /// Authenticates and queues one candidate idempotently without crediting it. `binding` is
 /// the payment session, its companion witness session and the witness ordinal the candidate
 /// was read under; a candidate still waiting for its witness takes the latest binding, since
-/// only those sessions can answer. A new candidate at or after the birthday sets the
-/// account's use marker (see `queue::mark_used`).
+/// only those sessions can answer. A new candidate sets the account's use marker (see
+/// `queue::mark_used`). Lookups never store one before the birthday.
 pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -177,14 +177,7 @@ pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
             binding.2,
         ],
     )?;
-    let (owner, birthday): (i64, u32) = conn.query_row(
-        "SELECT id, birthday_height FROM accounts WHERE uuid = ?1",
-        [account.0],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    if u32::from(candidate.height) >= birthday {
-        super::queue::mark_used(conn, owner)?;
-    }
+    super::queue::mark_used(conn, wallet::get_account_ref(conn, account)?.0)?;
     Ok(())
 }
 

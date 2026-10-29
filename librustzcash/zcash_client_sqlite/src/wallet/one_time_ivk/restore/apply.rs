@@ -125,25 +125,11 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         Some((note, true)) => Some(note),
         None => None,
     };
-    let birthday: u32 = conn.query_row(
-        "SELECT birthday_height FROM accounts WHERE uuid = ?1",
-        [account.0],
-        |r| r.get(0),
-    )?;
-    // The wallet stores no block before its birthday, so an older note need only precede
-    // the birthday block's first action. Otherwise a later note claimed at an early
-    // height would be marked paid and dropped.
-    let before_birthday = u32::from(candidate.height) < birthday;
-    let block = if before_birthday {
-        birthday
-    } else {
-        u32::from(candidate.height)
-    };
     let Some((end, count)): Option<(u64, u64)> = conn
         .query_row(
             "SELECT ironwood_commitment_tree_size, ironwood_action_count FROM blocks
              WHERE height = ?1",
-            [block],
+            [u32::from(candidate.height)],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?
@@ -151,13 +137,9 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         return Ok(Admission::Waiting);
     };
     let position = u64::from(candidate.position);
-    let placed = end.checked_sub(count).is_some_and(|start| {
-        if before_birthday {
-            position < start
-        } else {
-            start <= position && position < end
-        }
-    });
+    let placed = end
+        .checked_sub(count)
+        .is_some_and(|start| start <= position && position < end);
     if !placed {
         return Ok(Admission::Rejected);
     }
@@ -270,18 +252,6 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     // the candidate stays and is read again for another witness.
     if !recovered.verify_position(position, &path, root.into()) {
         return Ok(Admission::StaleWitness);
-    }
-    // Like any note before the birthday, it is not tracked; marking its key paid keeps
-    // the index from being issued again and moves the recovery bound past it.
-    if before_birthday {
-        conn.execute(
-            "UPDATE ironwood_one_time_keys
-             SET used = 1, prebirthday_height = MIN(COALESCE(prebirthday_height, ?2), ?2) WHERE id = ?1",
-            params![key_ref, birthday],
-        )?;
-        crate::wallet::one_time_ivk::end_fresh(conn, key_ref)?;
-        dequeue()?;
-        return Ok(Admission::Admitted);
     }
     // An unmined transaction is one a rewind or the mempool left: its note may move to a
     // new position, but a rewound one holding no such note is not this one. One with raw
