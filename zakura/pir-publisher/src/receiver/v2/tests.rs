@@ -2,6 +2,7 @@
 //! that defeats every attempt, and agreement however often publication runs.
 use super::*;
 use sha2::{Digest, Sha256};
+use zakura_pir_protocol::directory::choice::SeedPolicy;
 
 fn receiver(i: u32) -> ReceiverBytes {
     let mut r = [0x5a; 43];
@@ -216,4 +217,153 @@ fn publication_cadence_and_restart_agree() {
     assert_eq!(a.directory.choice, b.directory.choice);
     assert_eq!(a.directory.manifest, b.directory.manifest);
     assert_eq!(a.companion.manifest, b.companion.manifest);
+}
+
+/// Three receivers paid once each in one block, projected, with the
+/// segment's coverage and tree.
+fn choice_fixture() -> (Projection, Coverage, Tree, Vec<Paid>) {
+    let coverage = Coverage {
+        genesis: [1; 32],
+        history_revision: 0,
+        start_height: 100,
+        start_parent: [2; 32],
+        start_position: 0,
+        end_height: 100,
+        end_hash: [3; 32],
+        end_position: 10,
+    };
+    let paid: Vec<Paid> = (0..3)
+        .map(|i| {
+            let payment = Payment {
+                height: 100,
+                block_hash: [3; 32],
+                txid: [4; 32],
+                tx_index: 1,
+                action_index: i,
+                position: i.into(),
+                action_nullifier: [5; 32],
+                cmx: [6; 32],
+                ephemeral_key: [7; 32],
+                ciphertext_prefix: [8; 52],
+            };
+            (receiver(i), payment, [0; PAYLOAD_BYTES])
+        })
+        .collect();
+    let mut projection = Projection::new(initial_salt(&coverage.start_parent, 0));
+    let receivers: Vec<_> = paid.iter().map(|p| p.0).collect();
+    projection.project(&receivers, &[3; 32]).unwrap();
+    let tree = Tree {
+        height: 100,
+        hash: [3; 32],
+        size: 10,
+    };
+    (projection, coverage, tree, paid)
+}
+
+/// The seed a built segment's choice object settled on.
+fn settled(segment: &Segment) -> u32 {
+    let table = ChoiceTable::decode(&segment.directory.choice, SeedPolicy::Any).unwrap();
+    table.seed()
+}
+
+/// Through the real build: when the open budget's 64 seeds all fail, the
+/// build is `Error::Choice` after trying exactly those seeds and leaves the
+/// projection as it was. The seal budget goes on to the 65th seed, and a new
+/// tip's seeds recover an open build.
+#[test]
+fn choice_budgets_continue_past_sixty_four_only_at_a_seal() {
+    let (projection, coverage, tree, paid) = choice_fixture();
+    let salt = *projection.salt();
+    let (tip, next) = (block(1), block(2));
+    let open: Vec<u32> = candidate_seeds(&salt, &tip, 0..OPEN_SEED_ATTEMPTS).collect();
+    let failing: HashSet<u32> = open.iter().copied().collect();
+    let placement: Vec<_> = projection.placement().map(|(t, r)| (*t, r)).collect();
+
+    let mut tried = Vec::new();
+    let mut fails = |seed| {
+        tried.push(seed);
+        failing.contains(&seed)
+    };
+    let failed = build_with(
+        &projection,
+        coverage.clone(),
+        &tip,
+        OPEN_SEED_ATTEMPTS,
+        2048,
+        tree,
+        &paid,
+        &mut fails,
+    );
+    assert!(matches!(failed, Err(Error::Choice)));
+    assert_eq!(tried, open);
+    assert_eq!(*projection.salt(), salt);
+    assert_eq!(
+        projection
+            .placement()
+            .map(|(t, r)| (*t, r))
+            .collect::<Vec<_>>(),
+        placement
+    );
+
+    let mut fails = |seed| failing.contains(&seed);
+    let sealed = build_with(
+        &projection,
+        coverage.clone(),
+        &tip,
+        SEAL_SEED_ATTEMPTS,
+        2048,
+        tree,
+        &paid,
+        &mut fails,
+    );
+    let expected = candidate_seeds(&salt, &tip, 0..SEAL_SEED_ATTEMPTS).nth(64);
+    assert_eq!(Some(settled(&sealed.unwrap())), expected);
+
+    let mut fails = |seed| failing.contains(&seed);
+    let recovered = build_with(
+        &projection,
+        coverage,
+        &next,
+        OPEN_SEED_ATTEMPTS,
+        2048,
+        tree,
+        &paid,
+        &mut fails,
+    );
+    let expected =
+        candidate_seeds(&salt, &next, 0..OPEN_SEED_ATTEMPTS).find(|s| !failing.contains(s));
+    assert_eq!(Some(settled(&recovered.unwrap())), expected);
+}
+
+/// A seal whose every seed fails tries each distinct seed of its 2^16
+/// attempts once, skipping repeats, and is `Error::Choice`.
+#[test]
+fn a_fully_exhausted_seal_fails_after_every_distinct_seed() {
+    let (projection, coverage, tree, paid) = choice_fixture();
+    let salt = *projection.salt();
+    // A tip whose 2^16 attempts repeat a seed, so the skip is exercised.
+    let (tip, distinct) = (0..64)
+        .map(block)
+        .find_map(|tip| {
+            let seeds: Vec<u32> = candidate_seeds(&salt, &tip, 0..SEAL_SEED_ATTEMPTS).collect();
+            (seeds.len() < SEAL_SEED_ATTEMPTS as usize).then_some((tip, seeds))
+        })
+        .expect("some tip repeats a seed within 2^16 attempts");
+    let mut tried = Vec::new();
+    let mut fails = |seed| {
+        tried.push(seed);
+        true
+    };
+    let failed = build_with(
+        &projection,
+        coverage,
+        &tip,
+        SEAL_SEED_ATTEMPTS,
+        2048,
+        tree,
+        &paid,
+        &mut fails,
+    );
+    assert!(matches!(failed, Err(Error::Choice)));
+    assert_eq!(tried, distinct);
 }

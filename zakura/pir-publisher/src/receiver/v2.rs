@@ -206,6 +206,32 @@ pub fn build(
     tree: Tree,
     payments: &[Paid],
 ) -> Result<Segment, Error> {
+    let never = &mut |_| false;
+    build_with(
+        projection,
+        coverage,
+        seed_block,
+        seed_attempts,
+        rows,
+        tree,
+        payments,
+        never,
+    )
+}
+
+/// [`build`] with `fails` forcing the seeds it names to fail peeling, which
+/// tests use to exhaust a seed budget.
+#[allow(clippy::too_many_arguments)]
+fn build_with(
+    projection: &Projection,
+    coverage: Coverage,
+    seed_block: &Hash,
+    seed_attempts: u32,
+    rows: u32,
+    tree: Tree,
+    payments: &[Paid],
+    fails: &mut dyn FnMut(u32) -> bool,
+) -> Result<Segment, Error> {
     validate_companion_rows(rows)?;
     let mut by_receiver: BTreeMap<&ReceiverBytes, Vec<&Paid>> = BTreeMap::new();
     for paid in payments {
@@ -280,7 +306,7 @@ pub fn build(
         &assignment,
         DIRECTORY_ROWS.into(),
     );
-    let seeds = candidate_seeds(&salt, seed_block, 0..seed_attempts);
+    let seeds = candidate_seeds(&salt, seed_block, 0..seed_attempts).filter(|seed| !fails(*seed));
     let choice = ChoiceTable::build(CHOICE_DOMAIN, &salt, seeds, &bits)
         .map_err(|_| Error::Choice)?
         .encode();
