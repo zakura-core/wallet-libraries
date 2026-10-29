@@ -196,7 +196,7 @@ fn the_upgrade_marks_each_kind_of_evidence_and_not_preparations() {
     let account = st.test_account().unwrap().id();
     let tip = tip(&st).height;
     let db = st.wallet_mut().db_mut();
-    db.prepare_one_time_keys(account, tip, clock_now()).unwrap();
+    let _ = db.prepare_one_time_keys(account, tip, clock_now()).unwrap();
     pause(&st);
     upgrade(&mut st);
     assert!(!used(&st, account), "prepared keys are not use");
@@ -267,7 +267,6 @@ fn the_upgrade_keeps_a_published_wallets_reservation_monitored() {
 #[test]
 fn the_upgrade_resets_a_paused_accounts_partial_progress() {
     let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
     let id = receive_id(&st, 0);
     exec(
         st.wallet().conn(),
