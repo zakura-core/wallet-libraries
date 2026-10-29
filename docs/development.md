@@ -23,6 +23,7 @@ python3 scripts/dev.py verify
 | --- | --- |
 | `default` | Workspace except the facade, the PIR client and the one-time IVK scenarios; default features |
 | `sync` | Ordinary sync with Orchard and Ironwood enabled |
+| `tor` | Embedded Tor, HTTP deadlines and exchange queries, with TLS lightwalletd |
 | `zewif` | Wallet interchange import and atomic rollback, with the SQLite test fixtures |
 | `orchard` | Backend + SQLite; `orchard,test-dependencies` |
 | `transparent` | Backend + SQLite; `orchard,transparent-inputs,test-dependencies,unstable` |
