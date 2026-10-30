@@ -127,12 +127,12 @@ requirements.
 The implementation uses RustCrypto's `hkdf`, `sha2`, and `slh-dsa` crates. The SLH-DSA
 version matches Common's PQ primitive implementation in [Common PR
 650](https://github.com/zakura-core/common/pull/650) at
-`bf7a07455e5ac9ff41d1366940f5dc03e8868890`. That unpublished API is on Common 5; the
-wallet currently consumes Common 4. Keeping this leaf crate independent avoids a
-workspace-wide dependency migration for the key-only milestone. Transaction integration
-must use Common's agreed digest and execution rules. RustCrypto documents that its SLH-
-DSA implementation has not been independently audited. Review remains required before
-production use.
+`bf7a07455e5ac9ff41d1366940f5dc03e8868890`, which this workspace now pins while Common 5
+is unpublished, so the build carries one copy of the primitive. This crate depends on
+`slh-dsa` directly rather than on Common, so it stays usable without the transaction
+stack. Transaction integration must use Common's agreed digest and execution rules.
+RustCrypto documents that its SLH-DSA implementation has not been independently audited.
+Review remains required before production use.
 
 Owned wallet seed bytes, SLIP-0021 node/root buffers, and derived-material buffers use
 `Zeroizing`; the primitive's `zeroize` feature clears stored secret seeds on drop.

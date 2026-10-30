@@ -77,25 +77,31 @@ path = "zcash_client_sqlite"
 package = "zakura-client-sqlite"
 version = "0.1.0-rc9.6"
 
-# Minimum compatible Common release; Cargo.lock records the tested versions.
-# The upstream dependency key is kept, so crate sources continue to say
-# `orchard::` and `zcash_primitives::` while resolving to the forks.
+# Common release the workspace builds against; Cargo.lock records the tested
+# versions. The upstream dependency key is kept, so crate sources continue to
+# say `orchard::` and `zcash_primitives::` while resolving to the forks.
+#
+# PQ transparent spends need Common 5, which is not published yet. Until it is,
+# every Common crate is pinned to the head of Common PR #650, the revision the
+# Zakura PQ node branch (#1828) also pins. Repin to the crates.io release once
+# Common 5 is published; crates cannot be published from a git pin.
 [rewire]
-bellman = { package = "zakura-bellman", version = "4.0.0" }
-bls12_381 = { package = "zakura-bls12-381", version = "4.0.0" }
-jubjub = { package = "zakura-jubjub", version = "4.0.0" }
-zcash_address = { package = "zakura-address", version = "4.0.0" }
-zcash_protocol = { package = "zakura-protocol", version = "4.0.0" }
-transparent = { package = "zakura-transparent", version = "4.0.0" }
-zip321 = { package = "zakura-zip321", version = "4.0.0" }
-zcash_note_encryption = { package = "zakura-note-encryption", version = "4.0.0" }
-zcash_primitives = { package = "zakura-primitives", version = "4.0.0" }
-zcash_keys = { package = "zakura-keys", version = "4.0.0" }
-zcash_proofs = { package = "zakura-proofs", version = "4.0.0" }
-orchard = { features = ["backend-halo2"], package = "zakura-orchard", version = "4.0.0" }
-sapling = { package = "zakura-sapling-crypto", version = "4.0.0" }
-redjubjub = { package = "zakura-redjubjub", version = "4.0.0" }
-pasta_curves = { package = "zakura-pasta-curves", version = "4.0.0" }
+bellman = { package = "zakura-bellman", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
+bls12_381 = { package = "zakura-bls12-381", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
+jubjub = { package = "zakura-jubjub", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
+zcash_address = { package = "zakura-address", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
+zcash_protocol = { package = "zakura-protocol", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
+transparent = { package = "zakura-transparent", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
+zip321 = { package = "zakura-zip321", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
+zcash_note_encryption = { package = "zakura-note-encryption", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
+zcash_primitives = { package = "zakura-primitives", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
+zcash_keys = { package = "zakura-keys", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
+zcash_proofs = { package = "zakura-proofs", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
+orchard = { features = ["backend-halo2"], package = "zakura-orchard", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
+sapling = { package = "zakura-sapling-crypto", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
+redjubjub = { package = "zakura-redjubjub", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
+pasta_curves = { package = "zakura-pasta-curves", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
+zcash_script = { package = "zakura-zcash-script", version = "=0.0.1", git = "https://github.com/zakura-core/common.git", rev = "bf7a07455e5ac9ff41d1366940f5dc03e8868890" }
 
 # Non-renamed ecosystem crates whose public traits changed with the 1.0 crypto
 # family. The generated workspace keeps upstream's other dependency metadata
@@ -108,7 +114,6 @@ rand_core = "0.10"
 rand_distr = "0.6"
 bip32 = "0.6"
 secp256k1 = "0.33"
-zcash_script = "0.6"
 
 # Wallet-owned packages must never import the Zakura node or wallet-pir,
 # including optional, development, build and target-specific dependencies.
