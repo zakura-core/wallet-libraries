@@ -130,6 +130,9 @@ class PublishingTests(unittest.TestCase):
         })
         self.assertEqual(upstream, sorted(common_prerequisites + [
             ("reinspiring", "0.1.3-rc.1"),
+            ("zakura-arti-client", "0.47.0-zakura.1"),
+            ("zakura-fs-mistrust", "0.16.0-zakura.1"),
+            ("zakura-tor-rtcompat", "0.47.0-zakura.1"),
         ]))
 
     def test_wallet_pir_packages_are_refused_under_any_source(self):

@@ -102,7 +102,7 @@ zcash_proofs = { workspace = true, optional = true }
 #    changes to error handling.
 # Directory downloads retain mandatory deflate/identity support without the
 # optional XZ/Zstandard codecs and their native builds.
-arti-client = { version = "0.35", default-features = false, features = ["rustls", "tokio"], optional = true }
+arti-client = { workspace = true, optional = true }
 fs-mistrust = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true, features = ["client", "http1"] }
 serde_json = { workspace = true, optional = true }
