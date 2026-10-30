@@ -86,7 +86,6 @@ incrementalmerkletree.workspace = true
 shardtree.workspace = true
 
 # - Test dependencies
-ambassador = { workspace = true, optional = true }
 assert_matches = { workspace = true, optional = true }
 pasta_curves = { workspace = true, optional = true }
 proptest = { workspace = true, optional = true }
@@ -141,7 +140,6 @@ webpki-roots = { workspace = true, optional = true }
 getset.workspace = true
 
 [dev-dependencies]
-ambassador.workspace = true
 assert_matches.workspace = true
 gumdrop = "0.8"
 incrementalmerkletree = { workspace = true, features = ["test-dependencies"] }
@@ -271,7 +269,6 @@ tor = [
 ## NOTE: Semver-breaking changes to the APIs exposed by this feature may be
 ## present in any release version, including patch releases.
 test-dependencies = [
-    "dep:ambassador",
     "dep:assert_matches",
     "dep:proptest",
     "dep:jubjub",

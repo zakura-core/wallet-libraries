@@ -91,12 +91,10 @@ rand_distr = { workspace = true, optional = true }
 rand.workspace = true
 zcash_note_encryption = { workspace = true, optional = true }
 
-ambassador = { workspace = true, optional = true }
 tempfile = { version = "3.5.0", optional = true }
 
 [dev-dependencies]
 regex.workspace = true
-ambassador.workspace = true
 assert_matches.workspace = true
 incrementalmerkletree = { workspace = true, features = ["test-dependencies"] }
 incrementalmerkletree-testing.workspace = true
@@ -144,7 +142,6 @@ orchard = [
 
 ## Exposes APIs that are useful for testing, such as `proptest` strategies.
 test-dependencies = [
-    "dep:ambassador",
     "dep:tempfile",
     "incrementalmerkletree/test-dependencies",
     "zcash_primitives/test-dependencies",
