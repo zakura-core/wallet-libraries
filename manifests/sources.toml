@@ -97,6 +97,12 @@ sapling = { package = "zakura-sapling-crypto", version = "4.0.0" }
 redjubjub = { package = "zakura-redjubjub", version = "4.0.0" }
 pasta_curves = { package = "zakura-pasta-curves", version = "4.0.0" }
 
+# Keep the embedded Tor client, filesystem policy and runtime on one fork revision.
+# Disabling the optional directory codecs retains deflate and identity support.
+arti-client = { package = "zakura-arti-client", version = "=0.47.0-zakura.1", git = "https://github.com/zakura-core/arti.git", rev = "d2247ce9177b1c5d65d707ea1b2bca2e51cec90e", remove_features = ["compression"] }
+fs-mistrust = { package = "zakura-fs-mistrust", version = "=0.16.0-zakura.1", git = "https://github.com/zakura-core/arti.git", rev = "d2247ce9177b1c5d65d707ea1b2bca2e51cec90e" }
+tor-rtcompat = { package = "zakura-tor-rtcompat", version = "=0.47.0-zakura.1", git = "https://github.com/zakura-core/arti.git", rev = "d2247ce9177b1c5d65d707ea1b2bca2e51cec90e" }
+
 # Non-renamed ecosystem crates whose public traits changed with the 1.0 crypto
 # family. The generated workspace keeps upstream's other dependency metadata
 # while replacing these version requirements.
