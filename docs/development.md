@@ -162,9 +162,11 @@ checks, and publishes a final `tests` result. The exception is
 `one-time-ivk-scenarios`, which takes about 45 minutes on a hosted runner, so the
 **One-time IVK scenarios** workflow runs it nightly and on demand instead of on
 PRs. Documentation/guidance-only PRs run lightweight checks. Unknown file types conservatively trigger full checks.
-Older revisions of the same PR cancel; main runs remain independent. Compiler
-and configuration specific caches accelerate compilation without retaining the
-fresh external-consumer lockfiles.
+Older runs of the same PR or branch cancel, including superseded main pushes.
+Nightly/manual checks also supersede older runs for the same ref; publishing
+remains serialized without cancellation. Compiler and configuration specific
+caches retain dependency and workspace-crate build outputs, including useful
+outputs from failed checks, without retaining fresh external-consumer lockfiles.
 
 A passing focused check does not prove all privacy, migration, protocol, or
 feature combinations; use their affected lanes and final CI. Keep process-local

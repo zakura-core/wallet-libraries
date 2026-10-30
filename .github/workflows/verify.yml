@@ -9,11 +9,10 @@ on:
 permissions:
   contents: read
 
-# Only older revisions of the same PR are superseded. Every main push gets
-# its own group, including pending pushes.
+# Supersede older runs of the same PR or branch, including main.
 concurrency:
-  group: verify-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: verify-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   prepare:
@@ -79,6 +78,8 @@ jobs:
         if: matrix.check != 'vendor-ancestry'
         with:
           key: repository-${{ matrix.check }}
+          cache-workspace-crates: true
+          cache-on-failure: true
           workspaces: . -> target/dev-lanes
       - run: python3 scripts/dev.py verify --only "${{ matrix.check }}"
 
@@ -100,6 +101,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: tests-${{ matrix.config }}
+          cache-workspace-crates: true
+          cache-on-failure: true
           workspaces: . -> target/dev-lanes
       - run: python3 scripts/dev.py test --config "${{ matrix.config }}"
       - run: git diff --exit-code
@@ -117,6 +120,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: protobuf
+          cache-workspace-crates: true
+          cache-on-failure: true
           workspaces: . -> target/dev-lanes
       - name: Install pinned protoc
         env:
