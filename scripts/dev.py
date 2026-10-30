@@ -19,6 +19,7 @@ CONFIGS = {
     "default": (["--workspace", "--exclude", "zakura-wallet-lib", "--exclude", "zakura-pir-client", "--exclude", "zakura-one-time-ivk-scenarios"], []),
     "zewif": (["-p", "zakura-client-sqlite"], ["zewif", "test-dependencies"]),
     "sync": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "test-dependencies", "zakura-client-backend/sync"]),
+    "tor": (["-p", "zakura-client-backend"], ["tor", "lightwalletd-tonic-tls-webpki-roots", "test-dependencies"]),
     "orchard": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "test-dependencies"]),
     "transparent": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "test-dependencies", "unstable"]),
     "pczt-wallet": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "transparent-inputs", "test-dependencies", "unstable", "zakura-client-sqlite/pczt-tests"]),

@@ -129,9 +129,6 @@ use {std::ops::Range, transparent::keys::NonHardenedChildIndex};
 #[cfg(feature = "zcashd-compat")]
 use zcash_keys::keys::zcashd;
 
-#[cfg(feature = "test-dependencies")]
-use ambassador::delegatable_trait;
-
 #[cfg(any(test, feature = "test-dependencies"))]
 use zcash_protocol::consensus::NetworkUpgrade;
 
@@ -142,8 +139,6 @@ pub mod error;
 pub mod ll;
 pub mod locking;
 pub use locking::OutputLockStore;
-#[cfg(feature = "test-dependencies")]
-pub use locking::ambassador_impl_OutputLockStore;
 pub mod scanning;
 pub mod wallet;
 
@@ -1754,7 +1749,6 @@ pub enum CoinbaseFilter {
 
 /// A trait representing the capability to query a data store for unspent transaction outputs
 /// belonging to a account.
-#[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait InputSource {
     /// The type of errors produced by a wallet backend.
     type Error: Debug;
@@ -2049,7 +2043,6 @@ pub trait InputSource {
 /// This trait defines the read-only portion of the storage interface atop which
 /// higher-level wallet operations are implemented. It serves to allow wallet functions to
 /// be abstracted away from any particular data storage substrate.
-#[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait WalletRead {
     /// The type of errors that may be generated when querying a wallet data store.
     type Error: Debug;
@@ -2495,7 +2488,6 @@ pub trait WalletRead {
 /// These methods expose internal details or unstable interfaces, primarily to enable use
 /// of the [`testing`] framework. They should not be used in production software.
 #[cfg(any(test, feature = "test-dependencies"))]
-#[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait WalletTest: InputSource + WalletRead {
     /// Returns a vector of transaction summaries.
     ///
@@ -3545,7 +3537,6 @@ impl AccountBirthday {
 /// [zcash/librustzcash#1284]: https://github.com/zcash/librustzcash/issues/1284
 /// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
 /// [`bip0039`]: https://crates.io/crates/bip0039
-#[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait WalletWrite:
     WalletRead
     + OutputLockStore<
@@ -3806,6 +3797,39 @@ pub trait WalletWrite:
         diversifier_index: DiversifierIndex,
         request: UnifiedAddressRequest,
     ) -> Result<Option<UnifiedAddress>, <Self as WalletRead>::Error>;
+
+    /// Generates, persists, and marks as exposed the addresses for the specified account at every
+    /// diversifier index in `range`, in ascending index order.
+    ///
+    /// This is equivalent to calling [`WalletWrite::get_address_for_index`] once per index with the
+    /// same request and collecting the results: the returned vector holds one entry per index at
+    /// which an address conforming to the request exists, and indices at which none exists are
+    /// left out. The default implementation does exactly that. A store should override it so that
+    /// the costs that do not depend on the index - looking up the account, deriving its incoming
+    /// viewing key, reading the chain tip - are paid once for the range rather than once per
+    /// index; a wallet that pre-exposes a deep transparent window on restore calls this with
+    /// chunks of tens of thousands of indices, where those costs otherwise dominate.
+    ///
+    /// The warnings on [`WalletWrite::get_address_for_index`] about transparent receivers beyond
+    /// the wallet's gap limit apply to every index in the range.
+    fn get_addresses_for_index_range(
+        &mut self,
+        account: <Self as WalletRead>::AccountId,
+        range: core::ops::Range<DiversifierIndex>,
+        request: UnifiedAddressRequest,
+    ) -> Result<Vec<(DiversifierIndex, UnifiedAddress)>, <Self as WalletRead>::Error> {
+        let mut addresses = Vec::new();
+        let mut index = range.start;
+        while index < range.end {
+            if let Some(address) = self.get_address_for_index(account, index, request)? {
+                addresses.push((index, address));
+            }
+            if index.increment().is_err() {
+                break;
+            }
+        }
+        Ok(addresses)
+    }
 
     /// Updates the wallet's view of the blockchain.
     ///
@@ -4209,7 +4233,6 @@ where
 }
 
 /// This trait describes a capability for manipulating wallet note commitment trees.
-#[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait WalletCommitmentTrees {
     type Error: Debug;
 

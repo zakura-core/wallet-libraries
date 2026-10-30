@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The Receiver evaluator performs its native-ring matrix scan directly, keeping
+  IPIR's server, client and kernel wrappers out of production dependencies. IPIR
+  remains a development dependency for independent comparisons. Wire formats,
+  public setup and responses are unchanged.
+
 ## [0.0.1-rc4] - 2026-10-26
 
 ### Changed
