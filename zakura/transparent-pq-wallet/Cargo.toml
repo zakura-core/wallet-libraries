@@ -18,5 +18,8 @@ zcash_primitives = { workspace = true, features = ["std", "pq", "backend-halo2"]
 zcash_protocol.workspace = true
 zcash_script.workspace = true
 
+[dev-dependencies]
+zcash_protocol = { workspace = true, features = ["local-consensus"] }
+
 [lints]
 workspace = true
