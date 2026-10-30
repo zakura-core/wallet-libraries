@@ -62,18 +62,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ambassador"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e68de4cdc6006162265d0957edb4a860fe4e711b1dc17a5746fd95f952f08285"
-dependencies = [
- "itertools 0.10.5",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
 name = "amplify"
 version = "4.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2739,15 +2727,6 @@ name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
-
-[[package]]
-name = "itertools"
-version = "0.10.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
-dependencies = [
- "either",
-]
 
 [[package]]
 name = "itertools"
@@ -7522,7 +7501,6 @@ dependencies = [
 name = "zakura-client-backend"
 version = "0.1.0-rc9.5"
 dependencies = [
- "ambassador",
  "arti-client",
  "assert_matches",
  "async-trait",
@@ -7598,7 +7576,6 @@ dependencies = [
 name = "zakura-client-sqlite"
 version = "0.1.0-rc9.5"
 dependencies = [
- "ambassador",
  "assert_matches",
  "bech32",
  "bip0039",

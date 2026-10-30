@@ -7,6 +7,10 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Removed
+
+- The `test-dependencies` feature no longer depends on `ambassador`. The wallet data traits are no longer delegatable with it, and the `ambassador_impl_*` delegation macros, including the `data_api::ambassador_impl_OutputLockStore` re-export, are gone. Implement the traits on a wrapper type directly instead.
+
 ## [0.1.0-rc9.5] - 2026-10-26
 
 ### Changed
