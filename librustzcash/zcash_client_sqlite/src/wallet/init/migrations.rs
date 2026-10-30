@@ -57,6 +57,7 @@ mod status_reconfirmation;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
 mod transaction_reconfirmation_receipts;
+mod transactions_mined_height_index;
 mod transparent_activation_schema;
 mod transparent_activity_metadata;
 mod transparent_detail_content_failures;
@@ -179,6 +180,7 @@ pub mod ids {
         support_legacy_sqlite::MIGRATION_ID as SUPPORT_LEGACY_SQLITE,
         support_zcashd_wallet_import::MIGRATION_ID as SUPPORT_ZCASHD_WALLET_IMPORT,
         transaction_reconfirmation_receipts::MIGRATION_ID as TRANSACTION_RECONFIRMATION_RECEIPTS,
+        transactions_mined_height_index::MIGRATION_ID as TRANSACTIONS_MINED_HEIGHT_INDEX,
         transparent_activation_schema::MIGRATION_ID as TRANSPARENT_ACTIVATION_SCHEMA,
         transparent_activity_metadata::MIGRATION_ID as TRANSPARENT_ACTIVITY_METADATA,
         transparent_detail_content_failures::MIGRATION_ID as TRANSPARENT_DETAIL_CONTENT_FAILURES,
@@ -417,6 +419,7 @@ pub(super) fn all_migrations<
         Box::new(v_transactions_pool_crossing::Migration),
         Box::new(zip318_classification::Migration),
         Box::new(v_transactions_zip318_kind::Migration),
+        Box::new(transactions_mined_height_index::Migration),
         Box::new(orchard_ironwood_migration_tables::Migration),
         Box::new(tree_retained_checkpoints::Migration),
         Box::new(note_locking::Migration),
@@ -702,10 +705,7 @@ pub(crate) fn forget_txid_enhancement(conn: &rusqlite::Connection) {
 }
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
-    transparent_detail_content_failures::MIGRATION_ID,
-    one_time_pir::MIGRATION_ID,
-];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transactions_mined_height_index::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -853,6 +853,7 @@ pub(crate) mod tests {
             ids::TRANSPARENT_ACTIVITY_METADATA,
             ids::TRANSPARENT_ACTIVATION_SCHEMA,
             ids::TRANSPARENT_SHARED_DERIVATIONS,
+            ids::TRANSACTIONS_MINED_HEIGHT_INDEX,
             ids::TRANSPARENT_GAP_LIMIT_HANDLING,
             ids::TRANSPARENT_LEDGER_SCHEMA,
             ids::TRANSPARENT_POLICY_GENERATION,
