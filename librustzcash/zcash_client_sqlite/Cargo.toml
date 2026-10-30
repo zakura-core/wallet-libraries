@@ -28,7 +28,6 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 zcash_address.workspace = true
 zcash_client_backend = { workspace = true, features = ["unstable-serialization", "unstable-spanning-tree"] }
-zcash_encoding.workspace = true
 zcash_keys = { workspace = true, features = ["sapling", "zip32-addresses"] }
 zcash_primitives.workspace = true
 zcash_protocol.workspace = true
@@ -52,7 +51,6 @@ tracing.workspace = true
 
 # - Serialization
 bitflags.workspace = true
-byteorder.workspace = true
 hex.workspace = true
 nonempty.workspace = true
 prost.workspace = true
@@ -63,9 +61,6 @@ serde = { workspace = true, optional = true }
 # - Secret management
 secrecy.workspace = true
 subtle.workspace = true
-
-# - Static assertions
-static_assertions.workspace = true
 
 # - Shielded protocols
 orchard = { workspace = true, optional = true }
@@ -89,23 +84,18 @@ uuid = { workspace = true, features = ["v4"] }
 # Dependencies used internally:
 # (Breaking upgrades to these are usually backwards-compatible, but check MSRVs.)
 document-features.workspace = true
-maybe-rayon.workspace = true
 pczt.workspace = true
 zcash_proofs = { workspace = true, optional = true }
 rand_core.workspace = true
-rand_distr.workspace = true
+rand_distr = { workspace = true, optional = true }
 rand.workspace = true
 zcash_note_encryption = { workspace = true, optional = true }
 
-ambassador = { workspace = true, optional = true }
-rand_chacha = { workspace = true, optional = true }
 tempfile = { version = "3.5.0", optional = true }
 
 [dev-dependencies]
 regex.workspace = true
-ambassador.workspace = true
 assert_matches.workspace = true
-bls12_381.workspace = true
 incrementalmerkletree = { workspace = true, features = ["test-dependencies"] }
 incrementalmerkletree-testing.workspace = true
 pasta_curves.workspace = true
@@ -113,7 +103,6 @@ pczt = { workspace = true, features = ["orchard", "tx-extractor"] }
 shardtree = { workspace = true, features = ["legacy-api", "test-dependencies"] }
 orchard = { workspace = true, features = ["test-dependencies"] }
 proptest.workspace = true
-rand_chacha.workspace = true
 rand_core.workspace = true
 secp256k1 = { workspace = true, features = ["rand"] }
 tempfile = "3.5.0"
@@ -130,7 +119,7 @@ zip321 = { workspace = true }
 default = ["multicore"]
 
 ## Enables multithreading support for creating proofs and building subtrees.
-multicore = ["maybe-rayon/threads", "zcash_primitives/multicore"]
+multicore = ["zcash_primitives/multicore"]
 
 ## Enables support for storing data related to the sending and receiving of
 ## Orchard funds, and one-time IVKs (see `wallet::one_time_ivk`).
@@ -153,8 +142,6 @@ orchard = [
 
 ## Exposes APIs that are useful for testing, such as `proptest` strategies.
 test-dependencies = [
-    "dep:ambassador",
-    "dep:rand_chacha",
     "dep:tempfile",
     "incrementalmerkletree/test-dependencies",
     "zcash_primitives/test-dependencies",
@@ -163,6 +150,7 @@ test-dependencies = [
 
 ## Enables receiving transparent funds and sending to transparent recipients
 transparent-inputs = [
+  "dep:rand_distr",
   "dep:bip32",
   "dep:secp256k1",
   "transparent/transparent-inputs",

@@ -7,8 +7,13 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Added
+
+- `WalletDb` implements `WalletWrite::get_addresses_for_index_range`, looking up the account, deriving its incoming viewing key and reading the chain tip once for the whole range. Exposing a deep window of addresses (a transparent recovery window on restore) is about seven times faster than one index at a time.
+
 ### Changed
 
+- `testing::db::TestDb` implements the wallet traits by forwarding every method, including those with default bodies, to its `WalletDb` by hand rather than through `ambassador`, which the `test-dependencies` feature no longer depends on. Its behavior is unchanged.
 - Storing a received Sapling or Orchard note looks up the note's address row by diversifier index before deriving its unified address, so the derivation runs only when the row is absent. The exposure-height update is unchanged.
 
 ## [0.1.0-rc9.5] - 2026-10-26

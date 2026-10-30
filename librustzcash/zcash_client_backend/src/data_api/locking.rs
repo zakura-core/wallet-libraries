@@ -98,9 +98,6 @@ use std::error;
 use std::fmt::{self, Debug, Display};
 use std::hash::Hash;
 
-#[cfg(feature = "test-dependencies")]
-use ambassador::delegatable_trait;
-
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{PoolType, consensus::BlockHeight};
 
@@ -219,7 +216,6 @@ where
 /// delegated, and reasoned about independently of the full wallet-mutation surface.
 ///
 /// [`WalletRead`]: crate::data_api::WalletRead
-#[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait OutputLockStore {
     /// The type of errors produced by the lock store.
     type Error: Debug;
