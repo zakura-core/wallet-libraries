@@ -5,8 +5,6 @@
 //! per-account activation, and history completeness; see
 //! `docs/transparent-pir-wallet-integration.md`.
 
-#[cfg(feature = "test-dependencies")]
-use ambassador::delegatable_trait;
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::value::Zatoshis;
 
@@ -203,7 +201,6 @@ pub struct TransparentLedgerSnapshot<AccountId> {
 ///
 /// Implementations reject unconfigured handles, including for an empty wallet, and must not
 /// fabricate coverage or a spendable private balance from incomplete state.
-#[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait TransparentLedgerRead: WalletRead {
     /// Returns the mode this handle operates under.
     ///
@@ -283,7 +280,6 @@ pub trait TransparentLedgerRead: WalletRead {
 ///
 /// Implementations typically also implement [`WalletWrite`](super::WalletWrite); the write trait
 /// itself only requires the read contract so associated `Error` types stay unambiguous.
-#[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait TransparentLedgerWrite: TransparentLedgerRead {
     /// Durably applies `mode` as the wallet's transparent policy.
     ///

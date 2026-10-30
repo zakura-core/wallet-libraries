@@ -36,14 +36,11 @@ transparent = { workspace = true, optional = true }
 zcash_script = { workspace = true, optional = true }
 
 # - Sapling
-bls12_381 = { workspace = true, optional = true }
 ff = { workspace = true, optional = true }
-jubjub = { workspace = true, optional = true }
 redjubjub = { workspace = true, optional = true }
 sapling = { workspace = true, optional = true }
 
 # - Orchard
-nonempty = { workspace = true, optional = true }
 orchard = { workspace = true, optional = true }
 pasta_curves = { workspace = true, optional = true }
 
@@ -62,9 +59,7 @@ sapling = { workspace = true, features = ["zip32-addresses"] }
 hex.workspace = true
 incrementalmerkletree.workspace = true
 rand_chacha_10 = { package = "rand_chacha", version = "0.10" }
-ripemd.workspace = true
 secp256k1 = { workspace = true, features = ["rand"] }
-sha2.workspace = true
 shardtree.workspace = true
 zcash_primitives = { workspace = true, features = [
     "test-dependencies",
@@ -80,7 +75,6 @@ std = ["document-features"]
 ## Enables functionality that requires Orchard protocol types.
 orchard = [
     "dep:ff",
-    "dep:nonempty",
     "dep:orchard",
     "dep:pasta_curves",
     "dep:zcash_note_encryption",
@@ -88,9 +82,7 @@ orchard = [
 
 ## Enables functionality that requires Sapling protocol types.
 sapling = [
-    "dep:bls12_381",
     "dep:ff",
-    "dep:jubjub",
     "dep:redjubjub",
     "dep:sapling",
     "dep:zcash_note_encryption",

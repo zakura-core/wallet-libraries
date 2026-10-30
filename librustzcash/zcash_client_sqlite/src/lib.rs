@@ -103,7 +103,7 @@ use zcash_keys::{
     address::UnifiedAddress,
     keys::{
         AddressGenerationError::*, ReceiverRequirement, UnifiedAddressRequest,
-        UnifiedFullViewingKey, UnifiedSpendingKey,
+        UnifiedFullViewingKey, UnifiedIncomingViewingKey, UnifiedSpendingKey,
     },
 };
 use zcash_primitives::{
@@ -3094,6 +3094,17 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         self.transactionally(|wdb| wdb.get_address_for_index(account, diversifier_index, request))
     }
 
+    fn get_addresses_for_index_range(
+        &mut self,
+        account: <Self as WalletRead>::AccountId,
+        range: core::ops::Range<DiversifierIndex>,
+        request: UnifiedAddressRequest,
+    ) -> Result<Vec<(DiversifierIndex, UnifiedAddress)>, <Self as WalletRead>::Error> {
+        self.transactionally(|wdb| {
+            wdb.get_addresses_for_index_range(account, range.clone(), request)
+        })
+    }
+
     fn update_chain_tip(
         &mut self,
         tip_height: BlockHeight,
@@ -3309,6 +3320,38 @@ where
 }
 
 impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P, CL, R> {
+    /// Derives the address at `diversifier_index` from `uivk` and records it as exposed at
+    /// `exposed_at`, the shared step of [`WalletWrite::get_address_for_index`] and
+    /// [`WalletWrite::get_addresses_for_index_range`]. Returns `Ok(None)` when no address
+    /// conforming to `request` exists at the index.
+    fn expose_address_at(
+        &mut self,
+        account: &wallet::Account,
+        uivk: &UnifiedIncomingViewingKey,
+        diversifier_index: DiversifierIndex,
+        request: UnifiedAddressRequest,
+        exposed_at: BlockHeight,
+    ) -> Result<Option<UnifiedAddress>, SqliteClientError> {
+        match uivk.address(diversifier_index, request) {
+            Ok(address) => {
+                upsert_address(
+                    self.conn.borrow(),
+                    &self.params,
+                    account.internal_id(),
+                    diversifier_index,
+                    &address,
+                    Some(exposed_at),
+                    true,
+                )?;
+                Ok(Some(address))
+            }
+            #[cfg(feature = "transparent-inputs")]
+            Err(InvalidTransparentChildIndex(_)) => Ok(None),
+            Err(InvalidSaplingDiversifierIndex(_)) => Ok(None),
+            Err(e) => Err(SqliteClientError::AddressGeneration(e)),
+        }
+    }
+
     /// Stores ordinary scan results and reconciles already queued payment candidates.
     fn store_scanned_blocks(
         &mut self,
@@ -3554,30 +3597,48 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         diversifier_index: DiversifierIndex,
         request: UnifiedAddressRequest,
     ) -> Result<Option<UnifiedAddress>, <Self as WalletRead>::Error> {
-        if let Some(account) = self.get_account(account)? {
-            match account.uivk().address(diversifier_index, request) {
-                Ok(address) => {
-                    let chain_tip_height = wallet::chain_tip_height(self.conn.borrow())?;
-                    upsert_address(
-                        self.conn.borrow(),
-                        &self.params,
-                        account.internal_id(),
-                        diversifier_index,
-                        &address,
-                        Some(chain_tip_height.unwrap_or(account.birthday())),
-                        true,
-                    )?;
+        let account = self
+            .get_account(account)?
+            .ok_or(SqliteClientError::AccountUnknown)?;
+        let exposed_at =
+            wallet::chain_tip_height(self.conn.borrow())?.unwrap_or(account.birthday());
+        self.expose_address_at(
+            &account,
+            &account.uivk(),
+            diversifier_index,
+            request,
+            exposed_at,
+        )
+    }
 
-                    Ok(Some(address))
-                }
-                #[cfg(feature = "transparent-inputs")]
-                Err(InvalidTransparentChildIndex(_)) => Ok(None),
-                Err(InvalidSaplingDiversifierIndex(_)) => Ok(None),
-                Err(e) => Err(SqliteClientError::AddressGeneration(e)),
+    fn get_addresses_for_index_range(
+        &mut self,
+        account: <Self as WalletRead>::AccountId,
+        range: core::ops::Range<DiversifierIndex>,
+        request: UnifiedAddressRequest,
+    ) -> Result<Vec<(DiversifierIndex, UnifiedAddress)>, <Self as WalletRead>::Error> {
+        // Everything that does not depend on the index is read once for the range: the account
+        // row (decoding its viewing key), the incoming viewing key derived from it, and the chain
+        // tip the addresses are exposed at. Per index only the derivation and the upsert remain.
+        let account = self
+            .get_account(account)?
+            .ok_or(SqliteClientError::AccountUnknown)?;
+        let uivk = account.uivk();
+        let exposed_at =
+            wallet::chain_tip_height(self.conn.borrow())?.unwrap_or(account.birthday());
+        let mut addresses = Vec::new();
+        let mut index = range.start;
+        while index < range.end {
+            if let Some(address) =
+                self.expose_address_at(&account, &uivk, index, request, exposed_at)?
+            {
+                addresses.push((index, address));
             }
-        } else {
-            Err(SqliteClientError::AccountUnknown)
+            if index.increment().is_err() {
+                break;
+            }
         }
+        Ok(addresses)
     }
 
     fn update_chain_tip(
@@ -5923,6 +5984,162 @@ mod tests {
             .expect("generated a shielded-only address");
         assert_ne!(shielded_only_2, shielded_only);
         assert!(u128::from(di_2) >= u128::from(di_lower) + u128::from(collision_offset));
+    }
+
+    #[test]
+    fn get_addresses_for_index_range_matches_per_index() {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let account = st.test_account().cloned().unwrap();
+        st.wallet_mut()
+            .update_chain_tip(account.birthday().height())
+            .unwrap();
+        let request = UnifiedAddressRequest::AllAvailableKeys;
+        let (lo, hi) = (DiversifierIndex::from(5u32), DiversifierIndex::from(45u32));
+
+        // An index inside the range exposed the one-at-a-time way first: the range must find
+        // the same address there and not report a diversifier-index reuse. (Not every index
+        // has a valid Sapling diversifier, so take the first in the range that does.)
+        let (single_index, single) = {
+            let mut j = DiversifierIndex::from(10u32);
+            loop {
+                if let Some(a) = st
+                    .wallet_mut()
+                    .get_address_for_index(account.id(), j, request)
+                    .unwrap()
+                {
+                    break (j, a);
+                }
+                j.increment().unwrap();
+            }
+        };
+
+        let ranged = st
+            .wallet_mut()
+            .get_addresses_for_index_range(account.id(), lo..hi, request)
+            .unwrap();
+
+        // The same wallet, index by index, must agree exactly (both are idempotent).
+        let mut expected = Vec::new();
+        let mut j = lo;
+        while j < hi {
+            if let Some(a) = st
+                .wallet_mut()
+                .get_address_for_index(account.id(), j, request)
+                .unwrap()
+            {
+                expected.push((j, a));
+            }
+            j.increment().unwrap();
+        }
+        assert_eq!(ranged, expected);
+        assert!(ranged.len() > 1);
+        assert!(
+            ranged
+                .iter()
+                .any(|(j, a)| *j == single_index && *a == single)
+        );
+
+        // Every index in the range is now recorded as exposed at the chain tip.
+        let account_ref = crate::wallet::get_account_ref(st.wallet().conn(), account.id()).unwrap();
+        let exposed: u32 = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM addresses
+                 WHERE account_id = :account_id
+                 AND key_scope = :key_scope
+                 AND exposed_at_height = :height
+                 AND diversifier_index_be >= :lo AND diversifier_index_be < :hi",
+                rusqlite::named_params![
+                    ":account_id": account_ref.0,
+                    ":key_scope": crate::wallet::encoding::KeyScope::EXTERNAL.encode(),
+                    ":height": u32::from(account.birthday().height()),
+                    ":lo": crate::wallet::encoding::encode_diversifier_index_be(lo),
+                    ":hi": crate::wallet::encoding::encode_diversifier_index_be(hi),
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(exposed as usize, ranged.len());
+
+        // A second call over the same range changes nothing and returns the same addresses.
+        let again = st
+            .wallet_mut()
+            .get_addresses_for_index_range(account.id(), lo..hi, request)
+            .unwrap();
+        assert_eq!(again, ranged);
+
+        // An unknown account is an error, as for the single-index method.
+        assert_matches!(
+            st.wallet_mut().get_addresses_for_index_range(
+                AccountUuid(uuid::Uuid::nil()),
+                lo..hi,
+                request
+            ),
+            Err(SqliteClientError::AccountUnknown)
+        );
+    }
+
+    /// Not a correctness test: times exposing a deep window the way a wallet pre-exposing a
+    /// transparent recovery window does (`cargo test ... -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    #[cfg(all(feature = "orchard", feature = "transparent-inputs"))]
+    fn get_addresses_for_index_range_timing() {
+        // The account's default address sits at a small index with every receiver, which this
+        // request's addresses would conflict with, so the window starts past it.
+        const START: u32 = 1_000;
+        const COUNT: u32 = 20_000;
+        let request = UnifiedAddressRequest::unsafe_custom(Require, Omit, Require);
+        let fresh = || {
+            let mut st = TestBuilder::new()
+                .with_data_store_factory(TestDbFactory::default())
+                .with_account_from_sapling_activation(BlockHash([0; 32]))
+                .build();
+            let account = st.test_account().cloned().unwrap();
+            st.wallet_mut()
+                .update_chain_tip(account.birthday().height())
+                .unwrap();
+            (st, account.id())
+        };
+
+        let (mut st, account) = fresh();
+        let t = std::time::Instant::now();
+        st.wallet_mut()
+            .db_mut()
+            .transactionally::<_, _, SqliteClientError>(|wdb| {
+                for i in START..START + COUNT {
+                    wdb.get_address_for_index(account, DiversifierIndex::from(i), request)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let per_index = t.elapsed();
+
+        let (mut st, account) = fresh();
+        let t = std::time::Instant::now();
+        let n = st
+            .wallet_mut()
+            .get_addresses_for_index_range(
+                account,
+                DiversifierIndex::from(START)..DiversifierIndex::from(START + COUNT),
+                request,
+            )
+            .unwrap()
+            .len();
+        let ranged = t.elapsed();
+        assert_eq!(n as u32, COUNT);
+        println!(
+            "expose {COUNT} indices: per index {:.2?} ({:.0}/s), range {:.2?} ({:.0}/s), {:.1}x",
+            per_index,
+            f64::from(COUNT) / per_index.as_secs_f64(),
+            ranged,
+            f64::from(COUNT) / ranged.as_secs_f64(),
+            per_index.as_secs_f64() / ranged.as_secs_f64()
+        );
     }
 
     #[test]
