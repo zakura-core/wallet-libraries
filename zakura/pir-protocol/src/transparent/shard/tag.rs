@@ -6,7 +6,6 @@
 //! what a row stores and what a wallet compares.
 
 use crate::transparent::filter::BlockHash;
-use sha2::{Digest, Sha256};
 
 /// Domain for the per-revision salt. The trailing NUL keeps this input from
 /// being a prefix of another SHA-256 use.
@@ -19,7 +18,7 @@ pub const PAGE_TAG_SALT_DOMAIN: &[u8] = b"transparent-shard-page-tag-salt-v1\0";
 pub const SCRIPT_TAG_DOMAIN: &[u8] = b"transparent-shard-script-tag-v2\0";
 
 /// Bytes stored in place of a raw script.
-pub const SCRIPT_TAG_BYTES: usize = 14;
+pub const SCRIPT_TAG_BYTES: usize = crate::directory::tag::TAG_BYTES;
 
 /// Counters tried before publication fails.
 ///
@@ -34,12 +33,12 @@ pub const MAX_TAG_SALT_COUNTER: u32 = 8;
 /// The wallet recomputes this from the manifest and never accepts a salt
 /// supplied separately.
 pub fn tag_salt(shard_id: u64, terminal: &BlockHash, counter: u32) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(TAG_SALT_DOMAIN);
-    hasher.update(shard_id.to_le_bytes());
-    hasher.update(terminal.internal_bytes());
-    hasher.update(counter.to_le_bytes());
-    hasher.finalize().into()
+    let parts: [&[u8]; 3] = [
+        &shard_id.to_le_bytes(),
+        terminal.internal_bytes(),
+        &counter.to_le_bytes(),
+    ];
+    crate::directory::tag::salt(TAG_SALT_DOMAIN, &parts)
 }
 
 /// The salt for one page shard of a directory shard.
@@ -56,26 +55,20 @@ pub fn page_tag_salt(
     terminal: &BlockHash,
     counter: u32,
 ) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(PAGE_TAG_SALT_DOMAIN);
-    hasher.update(shard_id.to_le_bytes());
-    hasher.update(child.to_le_bytes());
-    hasher.update(end_height.to_le_bytes());
-    hasher.update(terminal.internal_bytes());
-    hasher.update(counter.to_le_bytes());
-    hasher.finalize().into()
+    let parts: [&[u8]; 5] = [
+        &shard_id.to_le_bytes(),
+        &child.to_le_bytes(),
+        &end_height.to_le_bytes(),
+        terminal.internal_bytes(),
+        &counter.to_le_bytes(),
+    ];
+    crate::directory::tag::salt(PAGE_TAG_SALT_DOMAIN, &parts)
 }
 
-/// The 14-byte tag of one raw script under `salt`.
+/// The 14-byte tag of one raw script under `salt`, after its `u16` length.
 pub fn script_tag(salt: &[u8; 32], script: &[u8]) -> [u8; SCRIPT_TAG_BYTES] {
-    let mut hasher = Sha256::new();
-    hasher.update(SCRIPT_TAG_DOMAIN);
-    hasher.update(salt);
     let length = u16::try_from(script.len()).expect("a tagged script is at most MAX_SCRIPT_BYTES");
-    hasher.update(length.to_le_bytes());
-    hasher.update(script);
-    let digest = hasher.finalize();
-    digest[..SCRIPT_TAG_BYTES].try_into().expect("14 bytes")
+    crate::directory::tag::tag(SCRIPT_TAG_DOMAIN, salt, &[&length.to_le_bytes(), script])
 }
 
 /// The counter whose tags are unique, and the salt at that counter.
@@ -118,25 +111,12 @@ fn resolve_salt(
     shard_id: u64,
     salt_at: impl Fn(u32) -> [u8; 32],
     scripts: &[&[u8]],
-    mut tag_of: impl FnMut(&[u8; 32], &[u8]) -> [u8; SCRIPT_TAG_BYTES],
+    tag_of: impl FnMut(&[u8; 32], &[u8]) -> [u8; SCRIPT_TAG_BYTES],
 ) -> Result<(u32, [u8; 32]), String> {
-    for counter in 0..=MAX_TAG_SALT_COUNTER {
-        let salt = salt_at(counter);
-        let mut seen = std::collections::HashSet::with_capacity(scripts.len());
-        let mut collision = false;
-        for script in scripts {
-            if !seen.insert(tag_of(&salt, script)) {
-                collision = true;
-                break;
-            }
-        }
-        if !collision {
-            return Ok((counter, salt));
-        }
-    }
-    Err(format!(
-        "tag salt counter exceeded {MAX_TAG_SALT_COUNTER} for shard {shard_id}"
-    ))
+    crate::directory::tag::resolve_salt(0..=MAX_TAG_SALT_COUNTER, salt_at, scripts, tag_of)
+        .ok_or_else(|| {
+            format!("tag salt counter exceeded {MAX_TAG_SALT_COUNTER} for shard {shard_id}")
+        })
 }
 
 #[cfg(test)]
@@ -204,5 +184,67 @@ mod tests {
         let wallet = script_tag(&tag_salt(9, &hash, 0), script);
         let foreign = script_tag(&tag_salt(9, &hash, 1), script);
         assert_ne!(wallet, foreign);
+    }
+
+    /// A resolver whose tags collide under every counter below `last`.
+    fn collide_below(
+        last: u32,
+        salt_at: impl Fn(u32) -> [u8; 32],
+    ) -> impl FnMut(&[u8; 32], &[u8]) -> [u8; SCRIPT_TAG_BYTES] {
+        move |salt, script| {
+            if (0..last).any(|counter| *salt == salt_at(counter)) {
+                [0; SCRIPT_TAG_BYTES]
+            } else {
+                script_tag(salt, script)
+            }
+        }
+    }
+
+    /// Salts and a tag at nonzero counters, pinned at the commit before tag
+    /// resolution was shared, then success at the last counter and
+    /// exhaustion after it, for directory and page salts.
+    #[test]
+    fn nonzero_counters_match_the_pinned_bytes() {
+        let hash = terminal(5);
+        let last_salt = tag_salt(3, &hash, MAX_TAG_SALT_COUNTER);
+        let pinned = [
+            hex::encode(tag_salt(3, &hash, 1)),
+            hex::encode(last_salt),
+            hex::encode(page_tag_salt(3, 2, 700, &hash, 1)),
+            hex::encode(page_tag_salt(3, 2, 700, &hash, MAX_TAG_SALT_COUNTER)),
+            hex::encode(script_tag(&last_salt, b"\x76\xa9pinned")),
+        ];
+        assert_eq!(
+            pinned,
+            [
+                "b5470d910aa9312842563e986aaf9b0845b320dee382e8f42d0919bf8a09da82",
+                "5dc2ed6f7fb122cad44e2d742de0fcf226526d4e02b31a7a9544384770dcdc7a",
+                "716ca18209b5c30b6c6b817d2e82cd49d0c24401ce6aebef19b48bb3dcba5ae7",
+                "9165c85112b4bfdcdd16ef6afae9976383c06da3db61add967d0686304c2a424",
+                "b6e5123d22ec57c860a1897b7ba1",
+            ]
+        );
+
+        let scripts: [&[u8]; 2] = [b"one", b"two"];
+        let directory = |counter| tag_salt(3, &hash, counter);
+        let page = |counter| page_tag_salt(3, 2, 700, &hash, counter);
+        let last = MAX_TAG_SALT_COUNTER;
+        assert_eq!(
+            resolve_tag_salt(3, &hash, &scripts, collide_below(last, directory)),
+            Ok((last, directory(last)))
+        );
+        assert_eq!(
+            resolve_page_tag_salt(3, 2, 700, &hash, &scripts, collide_below(last, page)),
+            Ok((last, page(last)))
+        );
+        let exhausted = Err(format!("tag salt counter exceeded {last} for shard 3"));
+        assert_eq!(
+            resolve_tag_salt(3, &hash, &scripts, collide_below(last + 1, directory)),
+            exhausted
+        );
+        assert_eq!(
+            resolve_page_tag_salt(3, 2, 700, &hash, &scripts, collide_below(last + 1, page)),
+            exhausted
+        );
     }
 }

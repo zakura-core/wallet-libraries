@@ -7,31 +7,18 @@
 //! so the wallet evaluates it locally and sends exactly one directory query per
 //! matched script, whatever the script.
 //!
-//! The structure is an xor retrieval table: three positions per key, drawn from
-//! three equal segments of a bit array, whose xor is the key's bit. It stores
-//! about 1.23 bits per key and nothing else: no key, no fingerprint, no row. It
-//! is not a membership test. A script that was never placed evaluates to an
-//! arbitrary bit, and the exact script comparison against the returned row is
-//! what settles absence, as it does for the two-query lookup.
-//!
-//! The table is a deterministic function of the shard id and the set of
-//! `(script, bit)` pairs, so two operators with the same journal publish the
-//! same bytes.
+//! This is the shared [`crate::directory::choice`] table keyed by the shard id
+//! and the raw script, under seeds `0..MAX_SEEDS`.
 
-pub const DIRECTORY_CHOICES: usize = 2;
-
-use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+pub use crate::directory::bucket::{DIRECTORY_CHOICES, bucket_for, candidates};
+use crate::directory::choice::{self as shared, SeedPolicy};
+pub use crate::directory::choice::{
+    CHOICE_HEADER_BYTES, CHOICE_VERSION, ChoiceError, MAX_KEYS, segment_length,
+};
 
 /// Hash domain for choice positions. Distinct from the bucket salt's, so the
 /// positions carry no relation to the candidate rows they select between.
 const DOMAIN: &[u8] = b"zcash-transparent-range-v1/directory-choice\0";
-
-/// The only encoding version this build reads or writes.
-pub const CHOICE_VERSION: u8 = 1;
-
-/// Version, seed, key count and segment length.
-pub const CHOICE_HEADER_BYTES: usize = 1 + 4 + 4 + 4;
 
 /// Seeds tried before construction is called a failure.
 ///
@@ -39,57 +26,9 @@ pub const CHOICE_HEADER_BYTES: usize = 1 + 4 + 4 + 4;
 /// rare and a run of failures means the input is not a set of distinct keys.
 pub const MAX_SEEDS: u32 = 64;
 
-/// Keys a table may index. Far above any shard; a bound on what a decoder will
-/// allocate for, not a capacity target.
-pub const MAX_KEYS: u32 = 1 << 24;
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum ChoiceError {
-    #[error("script {0} appears twice")]
-    Duplicate(String),
-    #[error("{keys} keys exceed the {MAX_KEYS}-key bound")]
-    TooManyKeys { keys: usize },
-    #[error("no seed below {MAX_SEEDS} peels {keys} keys")]
-    Unpeelable { keys: usize },
-    #[error("malformed choice table: {0}")]
-    Malformed(String),
-}
-
 /// A published choice table.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ChoiceTable {
-    seed: u32,
-    keys: u32,
-    segment: u32,
-    bits: Vec<u8>,
-}
-
-/// Segment length for `keys` keys: three segments over `1.23 * keys + 32`
-/// positions, the xor-filter sizing, and at least one position each so that an
-/// empty table still evaluates.
-pub fn segment_length(keys: u32) -> u32 {
-    let capacity = (u64::from(keys) * 123).div_ceil(100) + 32;
-    capacity.div_ceil(3).max(1) as u32
-}
-
-fn bit_bytes(segment: u32) -> usize {
-    (3 * segment as usize).div_ceil(8)
-}
-
-/// The three positions a script takes under `seed`, one per segment.
-fn positions(shard_id: u64, seed: u32, segment: u32, script: &[u8]) -> [usize; 3] {
-    let mut hasher = Sha256::new();
-    hasher.update(DOMAIN);
-    hasher.update(shard_id.to_le_bytes());
-    hasher.update(seed.to_le_bytes());
-    hasher.update((script.len() as u32).to_le_bytes());
-    hasher.update(script);
-    let digest = hasher.finalize();
-    std::array::from_fn(|i| {
-        let word = u64::from_le_bytes(digest[i * 8..i * 8 + 8].try_into().expect("8 bytes"));
-        i * segment as usize + (word % u64::from(segment)) as usize
-    })
-}
+pub struct ChoiceTable(shared::ChoiceTable);
 
 impl ChoiceTable {
     /// Builds the table for `entries`, each a script and the candidate index
@@ -99,208 +38,51 @@ impl ChoiceTable {
     /// sorted first, so the peeling order and therefore the bytes depend only
     /// on the set.
     pub fn build(shard_id: u64, entries: &[(&[u8], u8)]) -> Result<Self, ChoiceError> {
-        if entries.len() > MAX_KEYS as usize {
-            return Err(ChoiceError::TooManyKeys {
-                keys: entries.len(),
-            });
-        }
-        let mut sorted: BTreeMap<&[u8], u8> = BTreeMap::new();
-        for (script, bit) in entries {
-            if sorted.insert(script, bit & 1).is_some() {
-                return Err(ChoiceError::Duplicate(hex::encode(script)));
-            }
-        }
-        let keys = sorted.len() as u32;
-        let segment = segment_length(keys);
-        let slots = 3 * segment as usize;
-        let sorted: Vec<(&[u8], u8)> = sorted.into_iter().collect();
-
-        for seed in 0..MAX_SEEDS {
-            let hashed: Vec<[usize; 3]> = sorted
-                .iter()
-                .map(|(script, _)| positions(shard_id, seed, segment, script))
-                .collect();
-            let Some(order) = peel(&hashed, slots) else {
-                continue;
-            };
-            // Assign in reverse peeling order: each key's free position is set
-            // last among the keys touching it, so its xor comes out right.
-            let mut array = vec![0u8; slots];
-            for &(key, free) in order.iter().rev() {
-                let [a, b, c] = hashed[key];
-                array[free] = 0;
-                array[free] = sorted[key].1 ^ array[a] ^ array[b] ^ array[c];
-            }
-            let mut bits = vec![0u8; bit_bytes(segment)];
-            for (i, bit) in array.iter().enumerate() {
-                bits[i / 8] |= bit << (i % 8);
-            }
-            return Ok(Self {
-                seed,
-                keys,
-                segment,
-                bits,
-            });
-        }
-        Err(ChoiceError::Unpeelable {
-            keys: keys as usize,
-        })
+        shared::ChoiceTable::build(DOMAIN, &shard_id.to_le_bytes(), 0..MAX_SEEDS, entries).map(Self)
     }
 
-    /// The candidate index for `script`: 0 or 1.
-    ///
-    /// Defined for every script. For a script the table was not built over the
-    /// answer is arbitrary but in range, so a caller can always form exactly
-    /// one query.
+    /// The candidate index for `script`: 0 or 1. See
+    /// [`shared::ChoiceTable::choice`].
     pub fn choice(&self, shard_id: u64, script: &[u8]) -> usize {
-        positions(shard_id, self.seed, self.segment, script)
-            .iter()
-            .fold(0u8, |acc, &at| acc ^ ((self.bits[at / 8] >> (at % 8)) & 1)) as usize
+        self.0.choice(DOMAIN, &shard_id.to_le_bytes(), script)
     }
 
     /// Keys the table was built over.
     pub fn keys(&self) -> u32 {
-        self.keys
+        self.0.keys()
     }
 
     /// The seed construction settled on.
     pub fn seed(&self) -> u32 {
-        self.seed
+        self.0.seed()
     }
 
     /// The published bytes.
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(CHOICE_HEADER_BYTES + self.bits.len());
-        out.push(CHOICE_VERSION);
-        out.extend_from_slice(&self.seed.to_le_bytes());
-        out.extend_from_slice(&self.keys.to_le_bytes());
-        out.extend_from_slice(&self.segment.to_le_bytes());
-        out.extend_from_slice(&self.bits);
-        out
+        self.0.encode()
     }
 
     /// Reads published bytes, refusing anything [`encode`](Self::encode) would
-    /// not have produced.
-    ///
-    /// Every field is checked before any position is computed from it: the
-    /// segment length must be the one the key count implies, the length must be
-    /// exact, and padding bits must be zero. Nothing is indexed until this
-    /// returns.
+    /// not have produced, including a seed of [`MAX_SEEDS`] or more.
     pub fn decode(bytes: &[u8]) -> Result<Self, ChoiceError> {
-        let malformed = |why: String| ChoiceError::Malformed(why);
-        if bytes.len() < CHOICE_HEADER_BYTES {
-            return Err(malformed(format!(
-                "{} bytes is shorter than a header",
-                bytes.len()
-            )));
-        }
-        if bytes[0] != CHOICE_VERSION {
-            return Err(malformed(format!("version {}", bytes[0])));
-        }
-        let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"));
-        let (seed, keys, segment) = (word(1), word(5), word(9));
-        if seed >= MAX_SEEDS {
-            return Err(malformed(format!("seed {seed}")));
-        }
-        if keys > MAX_KEYS {
-            return Err(malformed(format!("{keys} keys")));
-        }
-        if segment != segment_length(keys) {
-            return Err(malformed(format!(
-                "segment {segment} where {keys} keys imply {}",
-                segment_length(keys)
-            )));
-        }
-        let expected = CHOICE_HEADER_BYTES + bit_bytes(segment);
-        if bytes.len() != expected {
-            return Err(malformed(format!(
-                "{} bytes where the header implies {expected}",
-                bytes.len()
-            )));
-        }
-        let bits = bytes[CHOICE_HEADER_BYTES..].to_vec();
-        let used = 3 * segment as usize;
-        if !used.is_multiple_of(8) && bits[bits.len() - 1] >> (used % 8) != 0 {
-            return Err(malformed("nonzero padding bits".into()));
-        }
-        Ok(Self {
-            seed,
-            keys,
-            segment,
-            bits,
-        })
+        shared::ChoiceTable::decode(bytes, SeedPolicy::Below(MAX_SEEDS)).map(Self)
     }
-}
-
-/// Peels the 3-hypergraph of `hashed` over `slots` positions.
-///
-/// Returns each key with the position it was peeled from, in peeling order, or
-/// `None` if a core remains. Deterministic: positions are scanned in index order
-/// and the stack is processed last in, first out.
-fn peel(hashed: &[[usize; 3]], slots: usize) -> Option<Vec<(usize, usize)>> {
-    let mut count = vec![0u32; slots];
-    let mut xor = vec![0usize; slots];
-    for (key, positions) in hashed.iter().enumerate() {
-        for &at in positions {
-            count[at] += 1;
-            xor[at] ^= key;
-        }
-    }
-    let mut stack: Vec<usize> = (0..slots).filter(|&at| count[at] == 1).collect();
-    let mut order = Vec::with_capacity(hashed.len());
-    while let Some(at) = stack.pop() {
-        if count[at] != 1 {
-            continue;
-        }
-        let key = xor[at];
-        order.push((key, at));
-        for &other in &hashed[key] {
-            count[other] -= 1;
-            xor[other] ^= key;
-            if count[other] == 1 {
-                stack.push(other);
-            }
-        }
-    }
-    (order.len() == hashed.len()).then_some(order)
 }
 
 /// Both candidate rows for a script in this shard.
 pub fn candidate_rows(shard_id: u64, script: &[u8], rows: u64) -> [u64; DIRECTORY_CHOICES] {
     candidates(&bucket_salts(shard_id), script, rows)
 }
-/// Derives one of a shard's independently salted bucket keys.
+/// A shard's bucket salts, for deriving many scripts' candidate rows.
 ///
 /// Salting per shard means the same script lands in different rows in different
 /// shards, so an observer who learns one shard's row for a script learns
 /// nothing about where it sits in any other.
-fn bucket_salt(shard_id: u64, choice: usize) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"zcash-transparent-range-v1/directory-bucket\0");
-    hasher.update(shard_id.to_le_bytes());
-    hasher.update((choice as u32).to_le_bytes());
-    hasher.finalize().into()
-}
-/// A shard's bucket salts, for deriving many scripts' candidate rows.
 pub fn bucket_salts(shard_id: u64) -> [[u8; 32]; DIRECTORY_CHOICES] {
-    std::array::from_fn(|choice| bucket_salt(shard_id, choice))
-}
-/// [`candidate_rows`] under salts already derived for the shard.
-pub fn candidates(
-    salts: &[[u8; 32]; DIRECTORY_CHOICES],
-    script: &[u8],
-    rows: u64,
-) -> [u64; DIRECTORY_CHOICES] {
-    std::array::from_fn(|choice| bucket_for(&salts[choice], script, rows))
-}
-/// The row a script hashes to under one salt.
-pub fn bucket_for(salt: &[u8; 32], script: &[u8], rows: u64) -> u64 {
-    let mut hasher = Sha256::new();
-    hasher.update(salt);
-    hasher.update((script.len() as u32).to_le_bytes());
-    hasher.update(script);
-    let digest = hasher.finalize();
-    u64::from_le_bytes(digest[..8].try_into().expect("8 bytes")) % rows
+    crate::directory::bucket::bucket_salts(
+        b"zcash-transparent-range-v1/directory-bucket\0",
+        &shard_id.to_le_bytes(),
+    )
 }
 
 #[cfg(test)]
