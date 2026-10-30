@@ -1,0 +1,17 @@
+[package]
+name = "transparent-pq-pool"
+version = "0.1.0"
+description = "PQ transparent address pool: issuance window, replenishment and restore"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+# Follows the unpublished key derivation it depends on.
+publish = false
+
+[dependencies]
+transparent-pq-keys = { path = "../transparent-pq-keys" }
+
+[lints]
+workspace = true

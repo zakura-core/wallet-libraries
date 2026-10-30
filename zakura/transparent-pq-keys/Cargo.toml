@@ -1,13 +1,13 @@
 [package]
 name = "transparent-pq-keys"
 version = "0.1.0"
-description = "Experimental deterministic SLH-DSA transparent wallet key lifecycle"
+description = "Deterministic SLH-DSA transparent wallet key lifecycle"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
-# The derivation is versioned for reproducible experiments, not released wallet use.
+# The derivation is versioned and not yet released for wallet use.
 publish = false
 
 [dependencies]

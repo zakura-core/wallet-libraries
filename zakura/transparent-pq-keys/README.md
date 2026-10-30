@@ -2,7 +2,7 @@
 
 `transparent-pq-keys` implements the first wallet milestone: deterministic private
 derivation of distinct SLH-DSA-SHA2-128f and SLH-DSA-SHA2-192s key pairs, public-key
-export, signing, verification, and seed-based recovery. It is unpublished, experimental,
+export, signing, verification, and seed-based recovery. It is unpublished
 and not connected to address issuance or transaction signing. It does not enable PQ
 funds.
 
@@ -39,15 +39,15 @@ PK.seed = material[2*n..3*n]
 ```
 
 Version 2 replaces the unreleased version 1 derivation and rejects old recovery
-encodings. Existing experimental keys change. There is no implicit configuration:
-origins and public-key imports require an explicit parameter set.
+encodings. Version 2 does not reproduce version 1 keys. There is no implicit
+configuration: origins and public-key imports require an explicit parameter set.
 
 SLIP-0021 gives Ledger applications a supported OS derivation operation without access
 to the wallet seed. The construction is intended for portable recovery; version 2
 firmware alignment has not been verified. Passphrase processing belongs to the caller's
 seed format; this crate consumes the resulting seed bytes. The purpose label is this
 design's identifier, not a registered SLIP assignment. The versioned purpose root
-separates this derivation from earlier experiments.
+separates this derivation from version 1.
 
 The root is spending authority, not an extended public key. It must stay inside the
 signer. SLIP-0021 does not enable watch-only child derivation. This crate does not
@@ -158,6 +158,8 @@ and regeneration are in [tests/vectors/README.md](tests/vectors/README.md).
 Tests use public synthetic or published vector material only. They run offline without
 OpenSSL. Regenerating reference vectors requires OpenSSL 3.5 or newer.
 
-This milestone leaves address/script formats, watch-only provisioning, batch
-replenishment, multisig coordination, PCZT, transaction transport, fee policy,
-activation, and public derivation extensions to later work.
+Index allocation, batch replenishment and restore discovery are in
+[`transparent-pq-pool`](../transparent-pq-pool/README.md). This milestone leaves
+address/script formats, watch-only descriptor formats, multisig coordination, PCZT,
+transaction transport, fee policy, activation, and public derivation extensions to
+later work.

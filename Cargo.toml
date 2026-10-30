@@ -27,6 +27,7 @@ members = [
     "zakura/service-config",
     "zakura/pir-config",
     "zakura/transparent-pq-keys",
+    "zakura/transparent-pq-pool",
 ]
 
 resolver = "2"

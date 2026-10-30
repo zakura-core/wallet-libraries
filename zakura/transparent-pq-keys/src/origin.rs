@@ -1,6 +1,6 @@
 use crate::{Error, ParameterSet};
 
-/// The implemented experimental derivation version.
+/// The implemented derivation version.
 pub const DERIVATION_VERSION: u8 = 2;
 /// Version, parameter set, network, big-endian account, branch, and big-endian index.
 pub const ORIGIN_BYTES: usize = 12;

@@ -1,6 +1,6 @@
 //! Deterministic, privately derived SLH-DSA-SHA2-128f and SHA2-192s wallet keys.
 //!
-//! This unpublished experiment implements the key lifecycle only. It does not
+//! This unpublished crate implements the key lifecycle only. It does not
 //! issue addresses, allocate indices, count signatures, or authorize transactions.
 //! The caller preserves the seed and [`KeyOrigin`] and owns those wallet policies.
 //! The exact derivation and security assumptions are specified in the crate README.
