@@ -53,6 +53,7 @@ python3 scripts/dev.py verify
 | `pir-config` | Wallet PIR config profile (schema, normalized server identity, explicit server selection) and its `wallet-pir-config` CLI |
 | `transparent-pq-keys` | Deterministic SLH-DSA keys, signing, public export and recovery; independent reference vectors |
 | `transparent-pq-pool` | PQ address pool: issuance within the discovery window, replenishment from a key source, restore discovery and the signature warning threshold |
+| `transparent-pq-wallet` | PQ P2SH addresses, the software signer and signed spends with fresh PQ change, verified with Common's PQ rules |
 | `one-time-ivk-scenarios` | PIR-only wallet scenarios with an independent chain oracle (see its README). CI runs it nightly, not on PRs |
 
 `default` builds the backend and SQLite crates without Orchard or transparent

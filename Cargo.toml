@@ -28,6 +28,7 @@ members = [
     "zakura/pir-config",
     "zakura/transparent-pq-keys",
     "zakura/transparent-pq-pool",
+    "zakura/transparent-pq-wallet",
 ]
 
 resolver = "2"

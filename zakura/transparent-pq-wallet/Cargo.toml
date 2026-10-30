@@ -1,0 +1,22 @@
+[package]
+name = "transparent-pq-wallet"
+version = "0.1.0"
+description = "PQ transparent P2SH addresses and signed spends with fresh PQ change"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+# Builds on the unpublished key derivation and the git-pinned Common PQ rules.
+publish = false
+
+[dependencies]
+transparent = { workspace = true, features = ["std", "pq"] }
+transparent-pq-keys = { path = "../transparent-pq-keys" }
+transparent-pq-pool = { path = "../transparent-pq-pool" }
+zcash_primitives = { workspace = true, features = ["std", "pq", "backend-halo2"] }
+zcash_protocol.workspace = true
+zcash_script.workspace = true
+
+[lints]
+workspace = true
