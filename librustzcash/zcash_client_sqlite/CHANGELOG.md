@@ -7,6 +7,14 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Added
+
+- `WalletDb` implements `WalletWrite::get_addresses_for_index_range`, looking up the account, deriving its incoming viewing key and reading the chain tip once for the whole range. Exposing a deep window of addresses (a transparent recovery window on restore) is about seven times faster than one index at a time.
+
+### Changed
+
+- `testing::db::TestDb` implements the wallet traits by forwarding every method, including those with default bodies, to its `WalletDb` by hand rather than through `ambassador`, which the `test-dependencies` feature no longer depends on. Its behavior is unchanged.
+
 ### Fixed
 
 - `WalletWrite::store_decrypted_tx` no longer re-reads and re-parses every fee-less transaction that spent any wallet transparent output on each call. The search for transactions spending the stored transaction's outputs correlated with that transaction only in the `ON` clause of a `LEFT OUTER JOIN`, which filtered nothing; it now returns only the transactions that spend an output of the stored transaction.

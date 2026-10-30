@@ -4,8 +4,6 @@
 //! reject stale responses after reorgs. Note plaintext is authenticated, but schema
 //! v11 transaction metadata (shape, fee, expiry) is trusted indexer data, not cryptographic evidence.
 
-#[cfg(feature = "test-dependencies")]
-use ambassador::delegatable_trait;
 use incrementalmerkletree::Position;
 use zcash_primitives::block::BlockHash;
 use zcash_primitives::transaction::TxId;
@@ -269,7 +267,6 @@ pub enum EnhancePirBatchResult {
 }
 
 /// Application read interface for private enhancement.
-#[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait EnhancePirRead: WalletRead {
     /// Returns every pending payload-retrieval obligation, each routed to a single transport,
     /// from one consistent wallet-state snapshot.

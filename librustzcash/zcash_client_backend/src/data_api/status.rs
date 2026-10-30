@@ -1,7 +1,5 @@
 //! Routed status obligations, independent of payload enhancement.
 use super::WalletRead;
-#[cfg(feature = "test-dependencies")]
-use ambassador::delegatable_trait;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 
@@ -80,7 +78,6 @@ impl PrivateTransactionStatusRequest {
 /// of enhancement policy. A snapshot contains each actionable obligation at most once.
 /// The caller supplies the height through which a particular absence decision needs coverage;
 /// this decision horizon is not durable transaction evidence.
-#[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait TransactionStatusRead: WalletRead {
     /// Returns each currently actionable status obligation once, with its selected route.
     /// Stores may retain expired obligations as dormant work that becomes eligible after
@@ -96,7 +93,6 @@ pub trait TransactionStatusRead: WalletRead {
 
 /// Records evidence established by local transaction construction, independently of payload
 /// ingestion. This is for durable outboxes that store signed bytes outside the wallet database.
-#[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait TransactionStatusWrite: TransactionStatusRead {
     /// Records a conservative earliest inclusion height for a transaction created locally.
     /// The caller must establish this from original construction context, never a later retry,
