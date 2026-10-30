@@ -63,20 +63,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "amplify"
-version = "4.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f7fb4ac7c881e54a8e7015e399b6112a2a5bc958b6c89ac510840ff20273b31"
-dependencies = [
- "amplify_derive",
- "amplify_num",
- "ascii",
- "getrandom 0.2.17",
- "getrandom 0.3.4",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "amplify_derive"
 version = "4.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -89,15 +75,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "amplify_num"
-version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afed304556696656d2d71495e1e5f2c4b524a3fb6eb0f2f3778ffc482a40b8a8"
-dependencies = [
- "wasm-bindgen",
-]
-
-[[package]]
 name = "amplify_syn"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -106,15 +83,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "android_system_properties"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc"
-dependencies = [
- "libc",
 ]
 
 [[package]]
@@ -134,12 +102,6 @@ name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
-
-[[package]]
-name = "ascii"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
 
 [[package]]
 name = "asn1-rs"
@@ -689,10 +651,8 @@ version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
- "iana-time-zone",
  "num-traits",
  "serde",
- "windows-link",
 ]
 
 [[package]]
@@ -818,21 +778,6 @@ checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
 dependencies = [
  "unicode-segmentation",
 ]
-
-[[package]]
-name = "cookie-factory"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9885fa71e26b8ab7855e2ec7cae6e9b380edff76cd052e07c683a0319d51b3a2"
-dependencies = [
- "futures",
-]
-
-[[package]]
-name = "core-foundation-sys"
-version = "0.8.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "corez"
@@ -1010,16 +955,6 @@ dependencies = [
 
 [[package]]
 name = "darling"
-version = "0.21.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cdf337090841a411e2a7f3deb9187445851f91b309c0c0a29e05f74a00a48c0"
-dependencies = [
- "darling_core 0.21.3",
- "darling_macro 0.21.3",
-]
-
-[[package]]
-name = "darling"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed17f5901b6630b993ca003def43f2f8ef4014fc13b047b57aad617ff32bc2ec"
@@ -1044,19 +979,6 @@ dependencies = [
 
 [[package]]
 name = "darling_core"
-version = "0.21.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1247195ecd7e3c85f83c8d2a366e4210d588e802133e1e355180a9870b517ea4"
-dependencies = [
- "fnv",
- "ident_case",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "darling_core"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6837e2cf7485aaae18f86181d2f0e9a7ed297a025e220aeabf63fdebd3a2ddff"
@@ -1077,17 +999,6 @@ dependencies = [
  "darling_core 0.14.4",
  "quote",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "darling_macro"
-version = "0.21.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d38308df82d1080de0afee5d069fa14b0326a88c14f15c5ccda35b4a6c414c81"
-dependencies = [
- "darling_core 0.21.3",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -1156,7 +1067,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07da5016415d5a3c4dd39b11ed26f915f52fc4e0dc197d87908bc916e51bc1a6"
 dependencies = [
  "asn1-rs",
- "cookie-factory",
  "displaydoc",
  "nom",
  "num-traits",
@@ -1168,9 +1078,6 @@ name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
-dependencies = [
- "serde_core",
-]
 
 [[package]]
 name = "derive-deftly"
@@ -1449,27 +1356,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa18ce2bc66555b3218614519ac839ddb759a7d6720732f979ef8d13be147ecd"
 dependencies = [
  "once_cell",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "enumset"
-version = "1.1.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e6bd2d7c76d078cd7a460fa169f778c42c026fe16d90e37d7a45d37181bdce5"
-dependencies = [
- "enumset_derive",
-]
-
-[[package]]
-name = "enumset_derive"
-version = "0.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f60587c2044cabd91c4d4c73e3912e9f1ea7d76905f31c7eec51869305dae044"
-dependencies = [
- "darling 0.21.3",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -2235,30 +2121,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "iana-time-zone"
-version = "0.1.65"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e31bc9ad994ba00e440a8aa5c9ef0ec67d5cb5e5cb0cc7f8b744a35b389cc470"
-dependencies = [
- "android_system_properties",
- "core-foundation-sys",
- "iana-time-zone-haiku",
- "js-sys",
- "log",
- "wasm-bindgen",
- "windows-core",
-]
-
-[[package]]
-name = "iana-time-zone-haiku"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "icu_collections"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2417,7 +2279,6 @@ checksum = "bd070e393353796e801d209ad339e89596eb4c8d430d18ede6a1cced8fafbd99"
 dependencies = [
  "autocfg",
  "hashbrown 0.12.3",
- "serde",
 ]
 
 [[package]]
@@ -2428,8 +2289,6 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -2563,12 +2422,9 @@ dependencies = [
  "defmt",
  "jiff-core",
  "jiff-static",
- "jiff-tzdb-platform",
- "log",
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-link",
 ]
 
 [[package]]
@@ -2591,21 +2447,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "jiff-tzdb"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "142bd39932ad231f10513df9ab62661fead8719872150b7ad02a2df79f4e141e"
-
-[[package]]
-name = "jiff-tzdb-platform"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "875a5a69ac2bab1a891711cf5eccbec1ce0341ea805560dcd90b7a2e925132e8"
-dependencies = [
- "jiff-tzdb",
 ]
 
 [[package]]
@@ -2931,28 +2772,6 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
  "libm",
-]
-
-[[package]]
-name = "num_enum"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d0bca838442ec211fa11de3a8b0e0e8f3a4522575b5c4c06ed722e005036f26"
-dependencies = [
- "num_enum_derive",
- "rustversion",
-]
-
-[[package]]
-name = "num_enum_derive"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
-dependencies = [
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -3811,26 +3630,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ref-cast"
-version = "1.0.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e440fb4e4b4147295338efb76001ab9e4efc0e5839df2c47fc5ac2381d365c3"
-dependencies = [
- "ref-cast-impl",
-]
-
-[[package]]
-name = "ref-cast-impl"
-version = "1.0.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92ecd8964f8453721699a1ed72037b0db49ce2f5a5138486ee89bed6f67cdf3a"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.6",
-]
-
-[[package]]
 name = "regex"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4167,30 +3966,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "schemars"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cd191f9397d57d581cddd31014772520aa448f65ef991055d7f61582c65165f"
-dependencies = [
- "dyn-clone",
- "ref-cast",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "schemars"
-version = "1.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "687274d293b6cdc6e73e0fee520bf2049650090d7164f87672d212a3c530cf4a"
-dependencies = [
- "dyn-clone",
- "ref-cast",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "schemerz"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4373,11 +4148,7 @@ dependencies = [
  "bs58",
  "chrono",
  "hex",
- "indexmap 1.9.3",
- "indexmap 2.14.2",
  "jiff",
- "schemars 0.9.0",
- "schemars 1.2.2",
  "serde_core",
  "serde_json",
  "serde_with_macros",
@@ -4861,7 +4632,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "abc840c238154d58f9e86b2792261edfde565a17696e1cda1a449de27979801a"
 dependencies = [
  "displaydoc",
- "serde_core",
  "zerovec",
 ]
 
@@ -5495,63 +5265,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "windows-core"
-version = "0.62.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
-dependencies = [
- "windows-implement",
- "windows-interface",
- "windows-link",
- "windows-result",
- "windows-strings",
-]
-
-[[package]]
-name = "windows-implement"
-version = "0.60.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "windows-interface"
-version = "0.59.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
-
-[[package]]
-name = "windows-result"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
-dependencies = [
- "windows-link",
-]
-
-[[package]]
-name = "windows-strings"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091"
-dependencies = [
- "windows-link",
-]
 
 [[package]]
 name = "windows-sys"
@@ -5800,7 +5517,7 @@ dependencies = [
 [[package]]
 name = "zakura-arti-client"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "async-trait",
  "cfg-if",
@@ -5881,7 +5598,7 @@ dependencies = [
 [[package]]
 name = "zakura-caret"
 version = "0.11.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 
 [[package]]
 name = "zakura-client-backend"
@@ -6030,7 +5747,7 @@ dependencies = [
 [[package]]
 name = "zakura-fs-mistrust"
 version = "0.16.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "derive_builder_fork_arti",
  "dirs",
@@ -6046,7 +5763,7 @@ dependencies = [
 [[package]]
 name = "zakura-fslock-guard"
 version = "0.9.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "libc",
  "thiserror 2.0.21",
@@ -6202,7 +5919,7 @@ dependencies = [
 [[package]]
 name = "zakura-oneshot-fused-workaround"
 version = "0.8.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "futures",
 ]
@@ -6523,7 +6240,7 @@ dependencies = [
 [[package]]
 name = "zakura-retry-error"
 version = "0.14.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "humantime",
  "web-time",
@@ -6532,7 +6249,7 @@ dependencies = [
 [[package]]
 name = "zakura-safelog"
 version = "0.10.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "derive_more",
  "educe",
@@ -6576,7 +6293,7 @@ dependencies = [
 [[package]]
 name = "zakura-saturating-time"
 version = "0.5.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "zakura-web-time-compat",
 ]
@@ -6607,7 +6324,7 @@ dependencies = [
 [[package]]
 name = "zakura-slotmap-careful"
 version = "0.9.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "paste",
  "serde",
@@ -6618,7 +6335,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-async-utils"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "cfg-if",
  "derive-deftly",
@@ -6643,7 +6360,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-basic-utils"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "derive-deftly",
  "derive_more",
@@ -6668,7 +6385,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-bytes"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "bytes",
  "derive-deftly",
@@ -6685,9 +6402,9 @@ dependencies = [
 [[package]]
 name = "zakura-tor-cell"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
- "amplify",
+ "amplify_derive",
  "bitflags 2.13.2",
  "bytes",
  "derive-deftly",
@@ -6715,7 +6432,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-cert"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "derive_builder_fork_arti",
  "derive_more",
@@ -6732,7 +6449,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-chanmgr"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -6773,7 +6490,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-checkable"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "humantime",
  "itertools 0.15.0",
@@ -6786,9 +6503,9 @@ dependencies = [
 [[package]]
 name = "zakura-tor-circmgr"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
- "amplify",
+ "amplify_derive",
  "async-trait",
  "cfg-if",
  "derive-deftly",
@@ -6806,7 +6523,6 @@ dependencies = [
  "serde",
  "thiserror 2.0.21",
  "tracing",
- "void",
  "weak-table",
  "zakura-oneshot-fused-workaround",
  "zakura-retry-error",
@@ -6835,7 +6551,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-config"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "derive-deftly",
  "derive_builder_fork_arti",
@@ -6859,7 +6575,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-config-path"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "directories",
  "serde",
@@ -6872,7 +6588,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-consdiff"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "derive_more",
  "digest 0.10.7",
@@ -6888,7 +6604,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-dirclient"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "async-compression",
  "base64ct",
@@ -6915,7 +6631,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-dircommon"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "base64ct",
  "derive-deftly",
@@ -6935,7 +6651,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-dirmgr"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -6991,7 +6707,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-error"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "derive_more",
  "futures",
@@ -7008,7 +6724,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-general-addr"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "derive_more",
  "thiserror 2.0.21",
@@ -7018,9 +6734,9 @@ dependencies = [
 [[package]]
 name = "zakura-tor-guardmgr"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
- "amplify",
+ "amplify_derive",
  "base64ct",
  "derive-deftly",
  "derive_builder_fork_arti",
@@ -7031,7 +6747,6 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "itertools 0.15.0",
- "num_enum",
  "pin-project",
  "postage",
  "rand 0.10.3",
@@ -7061,7 +6776,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-hsclient"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "async-trait",
  "cfg-if",
@@ -7106,7 +6821,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-hscrypto"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "data-encoding",
  "derive-deftly",
@@ -7136,7 +6851,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-key-forge"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "derive-deftly",
  "derive_more",
@@ -7157,9 +6872,9 @@ dependencies = [
 [[package]]
 name = "zakura-tor-keymgr"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
- "amplify",
+ "amplify_derive",
  "arrayvec",
  "cfg-if",
  "data-encoding",
@@ -7198,7 +6913,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-linkspec"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "base64ct",
  "by_address",
@@ -7224,7 +6939,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-llcrypto"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "aes",
  "base64ct",
@@ -7266,7 +6981,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-log-ratelim"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "futures",
  "humantime",
@@ -7281,7 +6996,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-memquota"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "cfg-if",
  "derive-deftly",
@@ -7313,7 +7028,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-memquota-cost"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "derive-deftly",
  "itertools 0.15.0",
@@ -7324,7 +7039,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-netdir"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "async-trait",
  "bitflags 2.13.2",
@@ -7334,7 +7049,6 @@ dependencies = [
  "hex",
  "humantime",
  "itertools 0.15.0",
- "num_enum",
  "rand 0.10.3",
  "serde",
  "strum 0.28.0",
@@ -7356,9 +7070,10 @@ dependencies = [
 [[package]]
 name = "zakura-tor-netdoc"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
- "amplify",
+ "amplify_derive",
+ "arrayvec",
  "base64ct",
  "cipher 0.5.2",
  "derive-deftly",
@@ -7366,7 +7081,6 @@ dependencies = [
  "derive_more",
  "digest 0.10.7",
  "educe",
- "enumset",
  "extend",
  "hex",
  "hostname-validator",
@@ -7387,7 +7101,6 @@ dependencies = [
  "subtle",
  "thiserror 2.0.21",
  "time",
- "tinystr",
  "void",
  "zakura-saturating-time",
  "zakura-tor-basic-utils",
@@ -7408,7 +7121,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-persist"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "derive-deftly",
  "derive_more",
@@ -7435,10 +7148,10 @@ dependencies = [
 [[package]]
 name = "zakura-tor-proto"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "aes",
- "amplify",
+ "amplify_derive",
  "async-trait",
  "asynchronous-codec",
  "bitvec",
@@ -7502,7 +7215,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-protover"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "derive-deftly",
  "derive_more",
@@ -7518,7 +7231,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-relay-selection"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "rand 0.10.3",
  "serde",
@@ -7531,9 +7244,9 @@ dependencies = [
 [[package]]
 name = "zakura-tor-rtcompat"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
- "amplify",
+ "amplify_derive",
  "async-trait",
  "async_executors",
  "asynchronous-codec",
@@ -7567,7 +7280,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-socksproto"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "derive-deftly",
  "educe",
@@ -7582,7 +7295,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-units"
 version = "0.47.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "derive-deftly",
  "derive_more",
@@ -7669,7 +7382,7 @@ dependencies = [
 [[package]]
 name = "zakura-web-time-compat"
 version = "0.3.0-zakura.1"
-source = "git+https://github.com/zakura-core/arti.git?rev=25178808ce10c78eeb6971c8d82c0e3ee2ac5329#25178808ce10c78eeb6971c8d82c0e3ee2ac5329"
+source = "git+https://github.com/zakura-core/arti.git?rev=b6e645728460cd2ba03a0cd2e77e351583ff945a#b6e645728460cd2ba03a0cd2e77e351583ff945a"
 dependencies = [
  "web-time",
 ]
@@ -8049,7 +7762,6 @@ version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f58a2799cfe9a1670c7ea8edbd52ef8edb93cb37a7f83bf31ba9e35d9dae6a40"
 dependencies = [
- "serde",
  "yoke",
  "zerofrom",
  "zerovec-derive",
