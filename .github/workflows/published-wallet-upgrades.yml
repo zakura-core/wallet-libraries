@@ -20,8 +20,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: published-wallet-upgrades-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: published-wallet-upgrades-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   upgrades:
@@ -37,5 +37,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: published-wallet-upgrades
+          cache-workspace-crates: true
+          cache-on-failure: true
           workspaces: . -> target/published-wallet-upgrades
       - run: python3 scripts/check-published-wallet-upgrades.py --target-dir "${{ github.workspace }}/target/published-wallet-upgrades"

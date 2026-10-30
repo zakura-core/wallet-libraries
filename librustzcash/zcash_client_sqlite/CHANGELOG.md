@@ -9,11 +9,13 @@ and this library adheres to Rust's notion of
 
 ### Added
 
+- `WalletDb` implements `WalletWrite::get_addresses_for_index_range`, looking up the account, deriving its incoming viewing key and reading the chain tip once for the whole range. Exposing a deep window of addresses (a transparent recovery window on restore) is about seven times faster than one index at a time.
 - Migration `transactions_mined_height_index` adds an index on `transactions.mined_height`.
 - Migration `transparent_spend_map_prevout_index` indexes `transparent_spend_map` by `(prevout_txid, prevout_output_index)`.
 
 ### Changed
 
+- `testing::db::TestDb` implements the wallet traits by forwarding every method, including those with default bodies, to its `WalletDb` by hand rather than through `ambassador`, which the `test-dependencies` feature no longer depends on. Its behavior is unchanged.
 - Storing a scanned block no longer scans the whole `transactions` table to attach transactions first learned from a transparent UTXO query to their block; the lookup uses the new index.
 - Storing a received transparent output no longer scans `transparent_spend_map` to learn whether a wallet transaction already spends it.
 
