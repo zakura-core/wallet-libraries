@@ -85,11 +85,15 @@ def main():
     server_roles = {"zakura-pir-publisher", "zakura-pir-query-server", "zakura-pir-server-core", "zakura-server-chain"}
     wallet_roles = {"ipir-native-client", "zakura-pir-client", "zakura-client-backend", "zakura-client-sqlite", "zakura-protocol", "zakura-transparent", "zakura-orchard"}
     cases = [
+        ("scanning", "librustzcash/zcash_client_backend", [], {"nanorand", "futures-core", "futures-sink"}, {"flume"}),
+        ("async-scanning", "librustzcash/zcash_client_backend", ["sync-decryptor"], {"nanorand"}, {"flume", "futures-core", "futures-sink", "tokio"}),
         ("record-types", "zakura/pir-protocol", ["enhance"], endpoint_stack | server_roles | {"http", "bytes", "ipir-native-client", "reinspiring"}, set()),
         ("endpoint", "zakura/pir-protocol", ["http-endpoint"], endpoint_stack | server_roles, {"http"}),
         ("recovery-types", "zakura/pir-protocol", ["transparent-inputs"], recovery_forbidden | server_roles, {"zakura-protocol"}),
         ("recovery", "zakura/pir-client", ["recovery"], recovery_forbidden | endpoint_stack | server_roles | native_evaluators, {"zakura-pir-protocol"}),
-        ("wallet", "librustzcash/zcash_client_sqlite", ["orchard", "transparent-inputs"], {"prost-build", "tonic-prost-build", "which", "regex", "regex-automata", "regex-syntax"} | pczt_macros, set()),
+        ("sqlite-default", "librustzcash/zcash_client_sqlite", [], {"rand_distr"}, set()),
+        ("tor", "librustzcash/zcash_client_backend", ["tor"], {"dynosaur", "dynosaur_derive", "trait-variant"}, {"arti-client", "rust_decimal"}),
+        ("wallet", "librustzcash/zcash_client_sqlite", ["orchard", "transparent-inputs"], {"prost-build", "tonic-prost-build", "which", "regex", "regex-automata", "regex-syntax"} | pczt_macros, {"rand_distr"}),
         ("pczt", "librustzcash/pczt", [], pczt_macros, {"serde_with"}),
         ("pir", "zakura/pir-client", ["native"], native_evaluators | server_roles | {"sha1"}, {"reinspiring"}),
         ("status-policy", "zakura/pir-client", ["status"], recovery_forbidden | server_roles | native_evaluators | {"tonic", "tonic-prost", "tokio", "hyper", "hyper-util", "h2"}, {"zakura-protocol"}),
@@ -97,6 +101,7 @@ def main():
         # The receiver evaluator scans with ipir-sp, which brings IPIR's native client.
         ("receiver-evaluator", "zakura/pir-query-server", ["receiver"], wallet_roles - {"ipir-native-client"} | {"zakura-pir-publisher", "zakura-server-chain"}, {"ipir-sp", "simplepir-kernel"}),
         ("filter", "zakura/pir-protocol", ["transparent"], {"bitcoin", "secp256k1", "secp256k1-sys", "zakura-protocol", "zakura-transparent"} | server_roles, {"bitcoin_hashes"}),
+        ("filter-cli", "zakura/pir-client", ["cli"], {"anstream", "anstyle-parse", "colorchoice"}, {"clap"}),
         ("filters", "zakura/filters", [], {"bitcoin", "secp256k1", "secp256k1-sys"}, {"bitcoin_hashes"}),
         ("receiver-formats", "zakura/pir-protocol", ["receiver"], {"bitcoin", "secp256k1", "secp256k1-sys"} | server_roles | wallet_roles, {"zakura-filters", "bitcoin_hashes"}),
         ("receiver-wallet", "zakura/pir-client", ["receiver-wallet"], {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"} | native_evaluators | server_roles, {"zakura-filters", "reinspiring"}),
@@ -137,6 +142,14 @@ def main():
                 (Path(temporary) / name / "src/main.rs").write_text(source)
                 subprocess.run(
                     ["cargo", "run", "--locked", "--quiet", "--manifest-path",
+                     str(Path(temporary) / name / "Cargo.toml")], check=True,
+                )
+            if name == "async-scanning":
+                (Path(temporary) / name / "src/lib.rs").write_text(
+                    "pub use subject::sync::decryptor;\n"
+                )
+                subprocess.run(
+                    ["cargo", "check", "--locked", "--quiet", "--manifest-path",
                      str(Path(temporary) / name / "Cargo.toml")], check=True,
                 )
             if name == "status-policy":

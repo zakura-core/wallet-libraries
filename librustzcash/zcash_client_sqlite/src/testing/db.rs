@@ -814,6 +814,16 @@ impl WalletWrite for TestDb {
             .get_address_for_index(account, diversifier_index, request)
     }
 
+    fn get_addresses_for_index_range(
+        &mut self,
+        account: <Self as WalletRead>::AccountId,
+        range: core::ops::Range<DiversifierIndex>,
+        request: UnifiedAddressRequest,
+    ) -> Result<Vec<(DiversifierIndex, UnifiedAddress)>, <Self as WalletRead>::Error> {
+        self.wallet_db
+            .get_addresses_for_index_range(account, range, request)
+    }
+
     fn update_chain_tip(
         &mut self,
         tip_height: BlockHeight,
