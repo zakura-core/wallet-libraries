@@ -1,9 +1,9 @@
-use crate::Error;
+use crate::{Error, ParameterSet};
 
 /// The implemented experimental derivation version.
-pub const DERIVATION_VERSION: u8 = 1;
-/// Version, network, big-endian account, branch, and big-endian index.
-pub const ORIGIN_BYTES: usize = 11;
+pub const DERIVATION_VERSION: u8 = 2;
+/// Version, parameter set, network, big-endian account, branch, and big-endian index.
+pub const ORIGIN_BYTES: usize = 12;
 
 /// Independent wallet derivation namespaces, not consensus activation selectors.
 ///
@@ -35,6 +35,7 @@ pub enum Branch {
 /// Reusing an origin with the same seed intentionally recovers the same key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct KeyOrigin {
+    parameters: ParameterSet,
     network: Network,
     account: u32,
     branch: Branch,
@@ -42,9 +43,16 @@ pub struct KeyOrigin {
 }
 
 impl KeyOrigin {
-    /// Identifies a key under derivation version 1 without allocating its index.
-    pub fn new(network: Network, account: u32, branch: Branch, index: u32) -> Self {
+    /// Identifies a key under derivation version 2 without allocating its index.
+    pub fn new(
+        parameters: ParameterSet,
+        network: Network,
+        account: u32,
+        branch: Branch,
+        index: u32,
+    ) -> Self {
         Self {
+            parameters,
             network,
             account,
             branch,
@@ -55,6 +63,11 @@ impl KeyOrigin {
     /// The derivation version that must be retained with a backup.
     pub fn version(self) -> u8 {
         DERIVATION_VERSION
+    }
+
+    /// The configuration required to recover and use this key.
+    pub fn parameters(self) -> ParameterSet {
+        self.parameters
     }
 
     /// The wallet's network namespace.
@@ -84,17 +97,18 @@ impl KeyOrigin {
     pub fn to_bytes(self) -> [u8; ORIGIN_BYTES] {
         let mut encoded = [0; ORIGIN_BYTES];
         encoded[0] = DERIVATION_VERSION;
-        encoded[1] = match self.network {
+        encoded[1] = self.parameters as u8;
+        encoded[2] = match self.network {
             Network::Mainnet => 0,
             Network::Testnet => 1,
             Network::Regtest => 2,
         };
-        encoded[2..6].copy_from_slice(&self.account.to_be_bytes());
-        encoded[6] = match self.branch {
+        encoded[3..7].copy_from_slice(&self.account.to_be_bytes());
+        encoded[7] = match self.branch {
             Branch::Receive => 0,
             Branch::Change => 1,
         };
-        encoded[7..11].copy_from_slice(&self.index.to_be_bytes());
+        encoded[8..12].copy_from_slice(&self.index.to_be_bytes());
         encoded
     }
 
@@ -106,22 +120,28 @@ impl KeyOrigin {
         if encoded[0] != DERIVATION_VERSION {
             return Err(Error::UnsupportedVersion(encoded[0]));
         }
-        let network = match encoded[1] {
+        let parameters = match encoded[1] {
+            1 => ParameterSet::Sha2_128f,
+            2 => ParameterSet::Sha2_192s,
+            other => return Err(Error::UnsupportedParameterSet(other)),
+        };
+        let network = match encoded[2] {
             0 => Network::Mainnet,
             1 => Network::Testnet,
             2 => Network::Regtest,
             other => return Err(Error::UnsupportedNetwork(other)),
         };
-        let branch = match encoded[6] {
+        let branch = match encoded[7] {
             0 => Branch::Receive,
             1 => Branch::Change,
             other => return Err(Error::UnsupportedBranch(other)),
         };
         Ok(Self {
+            parameters,
             network,
-            account: u32::from_be_bytes([encoded[2], encoded[3], encoded[4], encoded[5]]),
+            account: u32::from_be_bytes([encoded[3], encoded[4], encoded[5], encoded[6]]),
             branch,
-            index: u32::from_be_bytes([encoded[7], encoded[8], encoded[9], encoded[10]]),
+            index: u32::from_be_bytes([encoded[8], encoded[9], encoded[10], encoded[11]]),
         })
     }
 }

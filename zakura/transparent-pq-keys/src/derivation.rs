@@ -7,12 +7,8 @@ use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::{DerivedSigningKey, Error, KeyOrigin};
 
-/// Separates this wallet derivation from all other uses of the same wallet seed.
-const DERIVATION_SALT: &[u8] = b"Zcash/PQWallet/SLH-DSA-SHA2-192s/v1";
-/// First-level SLIP-0021 purpose shared with the firmware implementations.
-const ROOT_LABEL: &[u8] = b"Zcash/TransparentPQ/v1";
-/// Three distinct 24-byte inputs to SLH-DSA key generation.
-pub(crate) const KEY_MATERIAL_BYTES: usize = 72;
+/// First-level SLIP-0021 purpose shared with future firmware implementations.
+const ROOT_LABEL: &[u8] = b"Zcash/TransparentPQ/v2";
 
 /// Secret recovery material for every PQ key derived by this wallet.
 ///
@@ -58,13 +54,13 @@ impl WalletSeed {
         DerivedSigningKey::from_material(origin, &material)
     }
 
-    fn key_material(&self, origin: KeyOrigin) -> Zeroizing<[u8; KEY_MATERIAL_BYTES]> {
+    fn key_material(&self, origin: KeyOrigin) -> Zeroizing<Vec<u8>> {
         let root = slip21_root(&self.0);
-        let derivation = Hkdf::<Sha512>::new(Some(DERIVATION_SALT), &*root);
-        let mut material = Zeroizing::new([0; KEY_MATERIAL_BYTES]);
+        let derivation = Hkdf::<Sha512>::new(Some(origin.parameters().salt()), &*root);
+        let mut material = Zeroizing::new(alloc::vec![0; 3 * origin.parameters().seed_bytes()]);
         derivation
-            .expand(&origin.to_bytes(), &mut *material)
-            .expect("72 bytes is below HKDF-SHA-512's 16320-byte output limit");
+            .expand(&origin.to_bytes(), &mut material)
+            .expect("material length is below HKDF-SHA-512's 16320-byte output limit");
         material
     }
 }
@@ -95,54 +91,32 @@ mod tests {
 
     #[test]
     fn derivation_matches_independent_openssl_vectors() {
-        let vectors: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/vectors/derivation.json")).unwrap();
-        for vector in vectors["vectors"].as_array().unwrap() {
-            let seed =
-                WalletSeed::from_bytes(&hex::decode(vector["seed"].as_str().unwrap()).unwrap())
-                    .unwrap();
-            let origin =
-                KeyOrigin::from_bytes(&hex::decode(vector["origin"].as_str().unwrap()).unwrap())
-                    .unwrap();
-            let expected = hex::decode(vector["material"].as_str().unwrap()).unwrap();
-            use sha2::{Digest, Sha256};
-            assert_eq!(
-                hex::encode(Sha256::digest(*slip21_root(&seed.0))),
-                vector["root_hash"]
-            );
-            assert_eq!(
-                &seed.key_material(origin)[..],
-                expected,
-                "{}",
-                vector["name"]
-            );
-        }
-    }
-
-    #[test]
-    fn derivation_matches_keystone_and_ledger_public_vectors() {
-        use sha2::{Digest, Sha256};
-        let vectors: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/vectors/firmware.json")).unwrap();
-        for vector in vectors["vectors"].as_array().unwrap() {
-            let seed =
-                WalletSeed::from_bytes(&hex::decode(vector["seed"].as_str().unwrap()).unwrap())
-                    .unwrap();
-            let origin =
-                KeyOrigin::from_bytes(&hex::decode(vector["origin"].as_str().unwrap()).unwrap())
-                    .unwrap();
-            assert_eq!(
-                hex::encode(Sha256::digest(*slip21_root(&seed.0))),
-                vector["root_hash"]
-            );
-            assert_eq!(
-                hex::encode(Sha256::digest(*seed.key_material(origin))),
-                vector["material_hash"]
-            );
-            assert_eq!(
-                hex::encode(seed.derive_key(origin).public_key().to_bytes()),
-                vector["public_key"]
-            );
+        for encoded in [
+            include_str!("../tests/vectors/derivation_128f.json"),
+            include_str!("../tests/vectors/derivation_192s.json"),
+        ] {
+            let vectors: serde_json::Value = serde_json::from_str(encoded).unwrap();
+            for vector in vectors["vectors"].as_array().unwrap() {
+                let seed =
+                    WalletSeed::from_bytes(&hex::decode(vector["seed"].as_str().unwrap()).unwrap())
+                        .unwrap();
+                let origin = KeyOrigin::from_bytes(
+                    &hex::decode(vector["origin"].as_str().unwrap()).unwrap(),
+                )
+                .unwrap();
+                let expected = hex::decode(vector["material"].as_str().unwrap()).unwrap();
+                use sha2::{Digest, Sha256};
+                assert_eq!(
+                    hex::encode(Sha256::digest(*slip21_root(&seed.0))),
+                    vector["root_hash"]
+                );
+                assert_eq!(
+                    &seed.key_material(origin)[..],
+                    expected,
+                    "{}",
+                    vector["name"]
+                );
+            }
         }
     }
 }

@@ -10,13 +10,15 @@ pub enum Error {
     InvalidOriginLength(usize),
     /// The origin uses an unimplemented derivation version.
     UnsupportedVersion(u8),
+    /// The origin uses an unsupported configuration code.
+    UnsupportedParameterSet(u8),
     /// The origin uses an unassigned network code.
     UnsupportedNetwork(u8),
     /// The origin uses an unassigned receiving/change branch code.
     UnsupportedBranch(u8),
-    /// A public key must contain exactly [`crate::PUBLIC_KEY_BYTES`] bytes.
+    /// A public key must have the selected configuration's exact length.
     InvalidPublicKeyLength(usize),
-    /// A signature must contain exactly [`crate::SIGNATURE_BYTES`] bytes.
+    /// A signature must have the selected configuration's exact length.
     InvalidSignatureLength(usize),
     /// A Pure SLH-DSA context cannot exceed 255 bytes.
     ContextTooLong(usize),
@@ -31,6 +33,9 @@ impl fmt::Display for Error {
                 write!(f, "wallet seed length {length} is outside 32..=64 bytes")
             }
             Self::InvalidOriginLength(length) => write!(f, "invalid key origin length: {length}"),
+            Self::UnsupportedParameterSet(code) => {
+                write!(f, "unsupported PQ parameter set: {code}")
+            }
             Self::UnsupportedVersion(version) => {
                 write!(f, "unsupported PQ derivation version: {version}")
             }
