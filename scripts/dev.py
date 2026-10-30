@@ -52,6 +52,8 @@ CONFIGS = {
     "service-config": (["-p", "zakura-service-config"], []),
     # Wallet PIR config profile and its validation CLI.
     "pir-config": (["-p", "zakura-pir-config"], []),
+    # Unpublished deterministic PQ key lifecycle, without transaction integration.
+    "transparent-pq-keys": (["-p", "transparent-pq-keys"], []),
     # Role lanes cover formats and server-only helpers independently.
     "pir-protocol": (["-p", "zakura-pir-protocol"], ["enhance", "status", "transparent-inputs", "receiver-crypto", "native", "http-endpoint"]),
     "pir-server": (["-p", "zakura-pir-server-core", "-p", "zakura-pir-publisher", "-p", "zakura-pir-query-server"], ["enhance", "status", "transparent", "receiver", "receiver-crypto"]),

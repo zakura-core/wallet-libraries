@@ -1,0 +1,132 @@
+{
+  "label": "Zcash/TransparentPQ/v1",
+  "salt": "Zcash/PQWallet/SLH-DSA-SHA2-192s/v1",
+  "vectors": [
+    {
+      "name": "default_main",
+      "seed_case": "default",
+      "seed": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "origin": "0100000000000000000000",
+      "root_hash": "1164457902f43c7989ec8924b85802ceb86340700d6a76254321dd9797d419c6",
+      "material_hash": "4ae97f7b936cf0ea2c3362a1777733847b839c889054dea94b8394560321b65e",
+      "public_key": "1d464feca0dfb6b2f037ba3e5833fb2c7d3bcfdd981a9c0c6920f71bafe182ecf290a2668448c646601013a592162002"
+    },
+    {
+      "name": "default_index",
+      "seed_case": "default",
+      "seed": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "origin": "0100000000000000000001",
+      "root_hash": "1164457902f43c7989ec8924b85802ceb86340700d6a76254321dd9797d419c6",
+      "material_hash": "3ac9c6f9173922cc3d13dd9528096a227eb60796b513a93dc837aef436e4341c",
+      "public_key": "befda62a611d6753e4d7df9a06e368deac94eca6730a4a319890bfaeea5ddf6aa003722f01da9e58f5b14b793e0a0c36"
+    },
+    {
+      "name": "default_change",
+      "seed_case": "default",
+      "seed": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "origin": "0100000000000100000000",
+      "root_hash": "1164457902f43c7989ec8924b85802ceb86340700d6a76254321dd9797d419c6",
+      "material_hash": "0623badb066f40b41f54c83b31cf468ecb380bc2666a73fe3ed1a2693812968c",
+      "public_key": "90008afcffb97a9036940addb62b8a61c43072149a348856fcc51b8bffc8e0a6246defdb03cd45e53c258ff3bfbfefbe"
+    },
+    {
+      "name": "default_account",
+      "seed_case": "default",
+      "seed": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "origin": "0100000000010000000000",
+      "root_hash": "1164457902f43c7989ec8924b85802ceb86340700d6a76254321dd9797d419c6",
+      "material_hash": "d5dd666e989c76e296e7de2aa6b5257d489172950884bc62ce34bff24fd2ebef",
+      "public_key": "4f0534c4f5e7dfc4148e33d0a7e307e7002cfe485529c516006259cfdb599cb7516410b577d2714f754af1fb8c7caef7"
+    },
+    {
+      "name": "default_testnet",
+      "seed_case": "default",
+      "seed": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "origin": "0101000000000000000000",
+      "root_hash": "1164457902f43c7989ec8924b85802ceb86340700d6a76254321dd9797d419c6",
+      "material_hash": "45b5d52bdc63ccd81e39bcfac178f5df3877b92416f76ad3b99a0bb302dfd1db",
+      "public_key": "f9b5556c0bad5266918f0ca3536c2f8ca3b2b62df67d379834691cf8782d1f22990c6adb42cb38ef0aefa1956ec172b3"
+    },
+    {
+      "name": "default_regtest",
+      "seed_case": "default",
+      "seed": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "origin": "0102000000000000000000",
+      "root_hash": "1164457902f43c7989ec8924b85802ceb86340700d6a76254321dd9797d419c6",
+      "material_hash": "5690c4b34f3844017465e87d5934b63a6df481f008b45102aca72c2e567296c2",
+      "public_key": "8cb1d74c5c99384ffd70cc31fe6706d2b245f5d65d248993332516a5031787e3e6a0d0c0e7ea13e70f7065e2f1556120"
+    },
+    {
+      "name": "default_maximum",
+      "seed_case": "default",
+      "seed": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "origin": "0102ffffffff01ffffffff",
+      "root_hash": "1164457902f43c7989ec8924b85802ceb86340700d6a76254321dd9797d419c6",
+      "material_hash": "618d65dce79aa9160fac9a81863d5a19d437360b248270f2b9ff423b5c9225b9",
+      "public_key": "ad8048d329b58523a7ec3c94ba223e6d6188b8ddb541bcf401ffa85c3ece3aabcecd81b038a23e10b2d11b22e49339a3"
+    },
+    {
+      "name": "passphrase_main",
+      "seed_case": "passphrase",
+      "seed": "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04",
+      "origin": "0100000000000000000000",
+      "root_hash": "de8e32c7ed953f64c46f67662b7a10a3a0381af8f5919673c1148eb6810a1c0e",
+      "material_hash": "33280cdb9bd57e79b620f5a1d1f2ad36ceaf1179cf2e539b7ae6533926faad69",
+      "public_key": "c9cdb8fad24846cb8068e6d9bfbf103d96fca8c63831cfa3f66df41b90dddc73e14abeef800ff9093623d9418f1e25d5"
+    },
+    {
+      "name": "passphrase_index",
+      "seed_case": "passphrase",
+      "seed": "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04",
+      "origin": "0100000000000000000001",
+      "root_hash": "de8e32c7ed953f64c46f67662b7a10a3a0381af8f5919673c1148eb6810a1c0e",
+      "material_hash": "90adf3b374596c11bd3dd394f29696ad43f88a24f586235959544c85dd783349",
+      "public_key": "21987668425a0ffa6a66d6ebb8fb567f10decb7a01e546851ecea0b4be3079a7b8e5c325dfd623b7eb47ef563374f181"
+    },
+    {
+      "name": "passphrase_change",
+      "seed_case": "passphrase",
+      "seed": "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04",
+      "origin": "0100000000000100000000",
+      "root_hash": "de8e32c7ed953f64c46f67662b7a10a3a0381af8f5919673c1148eb6810a1c0e",
+      "material_hash": "c3af04e34112b88d03f5a17d734b5109c36bdafd8c3cc95f235f82ac1b52d9d1",
+      "public_key": "e36a320994ef16554ec1b332fb2a53657a6b0245aa0a12106050a018ba088f350f1f8f5b2ddb6c9c0b62f14ee34a85c3"
+    },
+    {
+      "name": "passphrase_account",
+      "seed_case": "passphrase",
+      "seed": "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04",
+      "origin": "0100000000010000000000",
+      "root_hash": "de8e32c7ed953f64c46f67662b7a10a3a0381af8f5919673c1148eb6810a1c0e",
+      "material_hash": "76b718a8489cb3047418a3d30aa84a6a13660c394efc09b73b518ae2db16f71e",
+      "public_key": "345b5ff96d331772826ef370887787eb63c000a66847dea9bb71a6d6bd782c0a5bbbb3c7ab137eae4e29b48e2a2dfdc3"
+    },
+    {
+      "name": "passphrase_testnet",
+      "seed_case": "passphrase",
+      "seed": "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04",
+      "origin": "0101000000000000000000",
+      "root_hash": "de8e32c7ed953f64c46f67662b7a10a3a0381af8f5919673c1148eb6810a1c0e",
+      "material_hash": "aec3f0077f52ab2b399704fb7aa9155bdcc0572f64b9724ff7de96bbf7671fcb",
+      "public_key": "f4b26d348348e2ac7108253727a48e52868eae427c67f35f6ace747750a75afd323f73fea0a6b03f4296b076441d8cd2"
+    },
+    {
+      "name": "passphrase_regtest",
+      "seed_case": "passphrase",
+      "seed": "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04",
+      "origin": "0102000000000000000000",
+      "root_hash": "de8e32c7ed953f64c46f67662b7a10a3a0381af8f5919673c1148eb6810a1c0e",
+      "material_hash": "37d4b2d22f39db1ce646c045a996f91108b7adb82b9fc77f965b1d1d8ae9ea2c",
+      "public_key": "cae71bdcd39f8ec607868192c54373302a9d9141d6b4e55e3dbe7fb4f866934749f7d06ff1e7d2d4cc9a23395332e94e"
+    },
+    {
+      "name": "passphrase_maximum",
+      "seed_case": "passphrase",
+      "seed": "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04",
+      "origin": "0102ffffffff01ffffffff",
+      "root_hash": "de8e32c7ed953f64c46f67662b7a10a3a0381af8f5919673c1148eb6810a1c0e",
+      "material_hash": "38ad4d4b7d59dd06854bee2f385a51175f38d14b38f62992bc3df2a8793c350e",
+      "public_key": "7da330704ff853195936e6c989d66b8e325b50e5bc36e08040918c51abab6d4e718658398e2cbf26f53565b8909295f2"
+    }
+  ]
+}

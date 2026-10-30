@@ -51,6 +51,7 @@ python3 scripts/dev.py verify
 | `transaction-wire` | Unpublished borrowed transaction wire reader, with the typed decoders as dev-only differential oracles |
 | `service-config` | Transport-free static/dynamic service config resolution: hash pins, mirrors and pluggable attestation |
 | `pir-config` | Wallet PIR config profile (schema, normalized server identity, explicit server selection) and its `wallet-pir-config` CLI |
+| `transparent-pq-keys` | Experimental deterministic SLH-DSA keys, signing, public export and recovery; independent reference vectors |
 | `one-time-ivk-scenarios` | PIR-only wallet scenarios with an independent chain oracle (see its README). CI runs it nightly, not on PRs |
 
 `default` builds the backend and SQLite crates without Orchard or transparent
