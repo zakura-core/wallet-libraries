@@ -1,8 +1,9 @@
 //! Private receiver lookups over caller-owned transports.
 //!
-//! Encrypted row retrieval returns candidates for wallet validation, not chain proofs:
-//! records from `InventoryClient::page` and payloads from `InventoryClient::witness` are
-//! untrusted bytes, which the wallet checks cryptographically before use. Rolling block
+//! Encrypted row retrieval returns candidates for wallet validation, not chain proofs: a
+//! lookup reads one directory row per segment and, on a hit, one companion row per record,
+//! and the records and witness payloads it returns are untrusted bytes, which the wallet
+//! checks cryptographically before use. Rolling block
 //! GCS hints and sealed shard filters are optional bandwidth optimizations. Matches
 //! trigger PIR rather than compact scanning. PIR hides the queried address, but query
 //! timing is visible. All returned payments require wallet authentication, inclusion
@@ -18,9 +19,9 @@ mod descriptor_cache;
 mod discovery;
 pub mod transport;
 
-pub use client::{Client, Query, WitnessClient, WitnessQuery};
+pub use client::{Client, Query};
 #[cfg(feature = "receiver-wallet")]
-pub use discovery::{FILTER_STEP_LIMIT, lookup, lookup_pages, publication, screen, witness};
+pub use discovery::{FILTER_STEP_LIMIT, Pace, lookup, lookup_with, publication, screen};
 
 /// Zcash mainnet's genesis block hash, in internal byte order, which its directory
 /// publications commit to.

@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Breaking: Receiver lookups read the directory and companion tables. A step
+  sends one directory query per segment, for the row the segment's choice
+  object names, and on a hit whose last payment is at or past
+  `max(from, birthday)` one companion query per record, each record with its
+  witness payload. `receiver::lookup_with` takes a `Pace` with a record cap
+  and transport retries that encrypt afresh, and replaces `lookup_pages`. A
+  step resuming mid-segment reads the receiver's entry again. A failed request
+  fails the whole step. `receiver::Client` is one table's session,
+  and `InventoryClient::{open, choice, query}` fetch setups and choice objects
+  (`/receiver/v1/choice/{digest}`, kept within `with_choice_budget`) and send
+  queries.
+- Breaking: `receiver::{WitnessClient, WitnessQuery, witness, lookup_pages}`,
+  `transport::Segment` and `InventoryClient::{segment, page, witness,
+  find_segment}` are removed.
+- Breaking: `Inventories::block_range` replaces `Inventories::block_batch` and
+  reads sparse height-keyed ranges from
+  `/receiver/v1/block-filters/{revision}/{from}/{limit}`.
+
 ## [0.0.1-rc4] - 2026-10-26
 
 ### Changed

@@ -1,20 +1,21 @@
 //! Receiver discovery over a caller-supplied, bounded transport.
 //!
-//! Routes never name a receiver: inventory heads and chunks, shard filters (addressed by
-//! digest) and PIR setup are public, and payment and witness rows are selected inside PIR.
+//! Routes never name a receiver: inventory heads and chunks, shard filters and choice
+//! objects (both addressed by digest) and PIR setup are public, and directory and companion
+//! rows are selected inside PIR.
 use super::{
-    Client, Hash, RawRecord, ReceiverBytes, WitnessClient,
+    Client, Directory, Hash, ReceiverBytes, Session, Table, decode_choice,
     descriptor_cache::DescriptorCache,
     inventory::{Capture, Head, Inventory, MAX_CAPTURE_BYTES, MAX_CHUNK_BYTES},
     native::{public_bytes, response_bytes},
-    session::{Error, MAX_MANIFEST_BYTES, Publication},
+    session::{Error, MAX_MANIFEST_BYTES},
     shards::ShardFilter,
-    witness::PAYLOAD_BYTES,
 };
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
+use zakura_pir_protocol::directory::choice::ChoiceTable;
 use zakura_pir_protocol::endpoint::{Endpoint, PirProduct};
 
 /// The URL of one receiver operation, such as `/inventory`, below the configured server
@@ -52,50 +53,6 @@ pub trait DescriptorStore {
     fn load(&self) -> Option<Vec<u8>>;
     /// Replaces the saved value. A failed save may be dropped.
     fn save(&self, value: &[u8]);
-}
-
-/// One segment's payment and companion witness PIR sessions.
-pub struct Segment {
-    publication: Publication,
-    client: Client,
-    witnesses: WitnessClient,
-}
-
-impl Segment {
-    /// Downloads both sessions' public setup and checks it against their digests.
-    async fn connect<T: Transport>(
-        origin: &str,
-        http: &T,
-        publication: Publication,
-    ) -> Result<Self, Error> {
-        publication.validate()?;
-        let payments = &publication.payments;
-        let public = http
-            .get(
-                &receiver_url(origin, &format!("/public/{}", hex::encode(payments.id()?)))?,
-                public_bytes(payments.directory.rows)?,
-            )
-            .await?;
-        let client = Client::new(payments.clone(), &public)?;
-        let witness = &publication.witnesses;
-        let public = http
-            .get(
-                &receiver_url(origin, &format!("/public/{}", hex::encode(witness.id()?)))?,
-                public_bytes(witness.table.rows)?,
-            )
-            .await?;
-        let witnesses = WitnessClient::new(witness.clone(), &public)?;
-        Ok(Self {
-            publication,
-            client,
-            witnesses,
-        })
-    }
-
-    /// The payment and witness sessions.
-    pub fn publication(&self) -> &Publication {
-        &self.publication
-    }
 }
 
 /// Why a capture failed: a check of a saved descriptor, or of data this capture fetched.
@@ -156,8 +113,8 @@ impl Inventories {
     }
 
     /// [`Self::capture`], reusing settled shard descriptors from `store` for whole chunks
-    /// and downloading only the rest: new shards, sealed shards whose witnesses are still
-    /// provisional, and the recent tier. The result is proved complete against the head
+    /// and downloading only the rest: new shards, sealed shards whose companion payloads are
+    /// still provisional, and the recent tier. The result is proved complete against the head
     /// exactly as a full capture is. If it fails, the capture is repeated without the cache.
     /// Either way the verified inventory's settled descriptors replace the saved value.
     pub async fn capture_cached<T: Transport, S: DescriptorStore>(
@@ -248,7 +205,7 @@ impl Inventories {
         })
     }
 
-    /// Downloads rolling-hint availability without opening or waiting for a PIR session.
+    /// Downloads which block hints the server holds, without opening a PIR session.
     pub async fn block_head<T: Transport>(
         origin: &str,
         http: &T,
@@ -265,44 +222,47 @@ impl Inventories {
         Ok(head)
     }
 
-    /// Fetches a bounded prefix for one captured head. Errors never mean an empty range.
-    /// The wallet must verify returned block hashes against its own chain before advancing.
-    pub async fn block_batch<T: Transport>(
+    /// Fetches up to `limit` heights of hints from `from` for one captured head. The server
+    /// stops at [`super::blocks::MAX_RANGE_BYTES`], so a dense gap takes more than one request:
+    /// continue after the returned range's end. Errors never mean an empty range.
+    pub async fn block_range<T: Transport>(
         origin: &str,
         http: &T,
         head: &super::blocks::Head,
         from: u32,
         limit: u32,
-    ) -> Result<super::blocks::Batch, Error> {
-        head.check_request(from, limit)?;
+    ) -> Result<super::blocks::Range, Error> {
+        head.check_range(from, limit)?;
         let bytes = http
             .get(
                 &receiver_url(
                     origin,
                     &format!("/block-filters/{}/{from}/{limit}", head.revision),
                 )?,
-                super::blocks::MAX_BATCH_BYTES,
+                super::blocks::MAX_RANGE_BYTES,
             )
             .await?;
-        let batch = super::blocks::Batch::decode(&bytes)?;
-        batch.check(head, from, limit)?;
-        Ok(batch)
+        let range = super::blocks::Range::decode(&bytes)?;
+        range.check(head, from, limit)?;
+        Ok(range)
     }
 }
 
-/// Lookups against one captured inventory. Segment sessions open lazily and shard filters
-/// are fetched on demand, each kept within its own byte budget; neither request names a
-/// receiver. Reconnect with a new
-/// capture for a replacement inventory: a cursor from one never applies to another.
+/// Lookups against one captured inventory. Sessions' public setup and choice objects are
+/// fetched on demand and shard filters likewise, each kept within its own byte budget and
+/// checked against its digest; no request names a receiver. Reconnect with a new capture
+/// for a replacement inventory: a cursor resumes there only under the directory session it
+/// binds.
 pub struct InventoryClient<T> {
     origin: String,
     http: T,
     inventory: Inventory,
     filters: bool,
-    segments: Mutex<Lru<(u32, u32), Segment>>,
+    /// Verified public setup by session ID.
+    setups: Mutex<Lru<Hash, Vec<u8>>>,
+    /// Choice object bytes by digest, decoded against each directory that uses them.
+    choices: Mutex<Lru<Hash, Vec<u8>>>,
     filter_cache: Mutex<Lru<u32, ShardFilter>>,
-    /// Each segment's coordinates by its payment session, built once per capture.
-    sessions: HashMap<Hash, (u32, u32)>,
     /// Filter answers by shard and receiver, so a filter is traversed once per batch.
     screened: Mutex<HashMap<(u32, ReceiverBytes), bool>>,
     traversals: std::sync::atomic::AtomicU64,
@@ -313,9 +273,10 @@ const SCREENED_ANSWERS: usize = 1 << 20;
 
 /// Default bound on the encoded shard filters one client keeps in memory.
 pub const FILTER_CACHE_BYTES: usize = 64 * 1024 * 1024;
-/// Default bound on the public setup one client keeps for opened segment sessions. Each
-/// segment keeps two setups of 14,848 bytes, so this holds about 560 segments.
+/// Default bound on the public setup one client keeps for opened sessions.
 pub const SEGMENT_CACHE_BYTES: usize = 16 * 1024 * 1024;
+/// Default bound on the choice objects one client keeps, each at most about 50 KB.
+pub const CHOICE_CACHE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Values kept within a byte budget, least recently used evicted first. An evicted value is
 /// rebuilt by its caller when next needed; holders of an evicted value keep it alive.
@@ -371,24 +332,15 @@ impl<T: Transport> InventoryClient<T> {
     /// [`Inventory::accept`]. With `filters`, sealed shards' filters may stand in for PIR
     /// when they exclude a receiver; without, every required segment is read blind.
     pub fn new(origin: &str, http: T, inventory: Inventory, filters: bool) -> Self {
-        let mut sessions = HashMap::new();
-        for shard in inventory.shards() {
-            for (segment, publication) in shard.segments.iter().enumerate() {
-                // Capture validated every session, so each has an identity.
-                if let Ok(id) = publication.payments.id() {
-                    sessions.entry(id).or_insert((shard.index, segment as u32));
-                }
-            }
-        }
         Self {
-            sessions,
             screened: Mutex::new(HashMap::new()),
             traversals: Default::default(),
             origin: origin.to_owned(),
             http,
             inventory,
             filters,
-            segments: Mutex::new(Lru::new(SEGMENT_CACHE_BYTES)),
+            setups: Mutex::new(Lru::new(SEGMENT_CACHE_BYTES)),
+            choices: Mutex::new(Lru::new(CHOICE_CACHE_BYTES)),
             filter_cache: Mutex::new(Lru::new(FILTER_CACHE_BYTES)),
         }
     }
@@ -400,10 +352,17 @@ impl<T: Transport> InventoryClient<T> {
         self
     }
 
-    /// Keeps at most `bytes` of opened segment sessions' public setup instead of
-    /// [`SEGMENT_CACHE_BYTES`]; evicted sessions are opened again when needed.
+    /// Keeps at most `bytes` of opened sessions' public setup instead of
+    /// [`SEGMENT_CACHE_BYTES`]; evicted setups are fetched again when needed.
     pub fn with_segment_budget(self, bytes: usize) -> Self {
-        *self.segments.lock().unwrap() = Lru::new(bytes);
+        *self.setups.lock().unwrap() = Lru::new(bytes);
+        self
+    }
+
+    /// Keeps at most `bytes` of choice objects instead of [`CHOICE_CACHE_BYTES`]; evicted
+    /// objects are fetched again when needed.
+    pub fn with_choice_budget(self, bytes: usize) -> Self {
+        *self.choices.lock().unwrap() = Lru::new(bytes);
         self
     }
 
@@ -417,25 +376,71 @@ impl<T: Transport> InventoryClient<T> {
         self.filters
     }
 
-    /// Segment `segment` of shard `shard`, connecting its sessions on first use.
-    pub async fn segment(&self, shard: u32, segment: u32) -> Result<Arc<Segment>, Error> {
-        if let Some(found) = self.segments.lock().unwrap().get((shard, segment)) {
-            return Ok(found);
-        }
-        let publication = self
-            .inventory
-            .shards()
-            .get(shard as usize)
-            .and_then(|s| s.segments.get(segment as usize))
-            .ok_or(Error::Malformed)?
-            .clone();
-        let connected = Arc::new(Segment::connect(&self.origin, &self.http, publication).await?);
-        let size = connected.client.retained_bytes() + connected.witnesses.retained_bytes();
-        self.segments
+    /// `session`'s PIR client, downloading its public setup on first use (one GET of
+    /// `/public/{session}`) and checking it against the session's digest.
+    pub async fn open<M: Table + Clone>(&self, session: &Session<M>) -> Result<Client<M>, Error> {
+        let id = session.id()?;
+        let cached = self.setups.lock().unwrap().get(id);
+        let public = match cached {
+            Some(public) => public,
+            None => Arc::new(
+                self.http
+                    .get(
+                        &receiver_url(&self.origin, &format!("/public/{}", hex::encode(id)))?,
+                        public_bytes(),
+                    )
+                    .await?,
+            ),
+        };
+        let client = Client::new(session.clone(), public.clone())?;
+        self.setups
             .lock()
             .unwrap()
-            .insert((shard, segment), connected.clone(), size);
-        Ok(connected)
+            .insert(id, public.clone(), public.len());
+        Ok(client)
+    }
+
+    /// `directory`'s choice object, downloading it on first use (one GET of
+    /// `/choice/{digest}`). Every use, a cached one included, refuses an object whose
+    /// digest, length or key count differs from `directory`'s reference.
+    pub async fn choice(&self, directory: &Directory) -> Result<ChoiceTable, Error> {
+        let reference = &directory.choice;
+        let cached = self.choices.lock().unwrap().get(reference.digest);
+        let bytes = match cached {
+            Some(bytes) => bytes,
+            None => Arc::new(
+                self.http
+                    .get(
+                        &receiver_url(
+                            &self.origin,
+                            &format!("/choice/{}", hex::encode(reference.digest)),
+                        )?,
+                        reference.bytes as usize,
+                    )
+                    .await?,
+            ),
+        };
+        let table = decode_choice(directory, &bytes)?;
+        self.choices
+            .lock()
+            .unwrap()
+            .insert(reference.digest, bytes.clone(), bytes.len());
+        Ok(table)
+    }
+
+    /// Reads row `row` of `client`'s table over PIR: one freshly encrypted query, whose row
+    /// is hidden in its encryption. The row is untrusted.
+    pub async fn query<M: Table>(&self, client: &Client<M>, row: u32) -> Result<Vec<u8>, Error> {
+        let query = client.prepare(row)?;
+        let body = self
+            .http
+            .post(
+                &receiver_url(&self.origin, "/query")?,
+                query.body().to_vec(),
+                response_bytes(),
+            )
+            .await?;
+        client.decode(query, &body)
     }
 
     /// Shard `shard`'s validated filter, or `None` when it has none or it could not be
@@ -516,51 +521,5 @@ impl<T: Transport> InventoryClient<T> {
     /// How many filter traversals [`Self::screen`] has made.
     pub fn filter_traversals(&self) -> u64 {
         self.traversals.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Reads page `page` of `receiver`'s history in one segment over PIR: one query, whose
-    /// row choice is hidden in its encryption. Absence is `None` only on page zero; a
-    /// missing later page is an error. The record is checked structurally only.
-    pub async fn page(
-        &self,
-        segment: &Segment,
-        receiver: ReceiverBytes,
-        page: u32,
-    ) -> Result<Option<RawRecord>, Error> {
-        let query = segment.client.prepare(receiver, page)?;
-        let body = self
-            .http
-            .post(
-                &receiver_url(&self.origin, "/query")?,
-                query.body().to_vec(),
-                response_bytes(segment.client.manifest().directory.rows)?,
-            )
-            .await?;
-        segment.client.decode(query, &body)
-    }
-
-    /// The segment whose payment session is `payments`, if this inventory holds it: the
-    /// first in chain order, found in the index built at construction.
-    pub fn find_segment(&self, payments: &Hash) -> Option<(u32, u32)> {
-        self.sessions.get(payments).copied()
-    }
-
-    /// Reads the companion witness payload for `ordinal` in one segment over PIR. The
-    /// ordinal must come from that segment's payment records. The payload is unchecked.
-    pub async fn witness(
-        &self,
-        segment: &Segment,
-        ordinal: u32,
-    ) -> Result<[u8; PAYLOAD_BYTES], Error> {
-        let query = segment.witnesses.prepare(ordinal)?;
-        let body = self
-            .http
-            .post(
-                &receiver_url(&self.origin, "/query")?,
-                query.body().to_vec(),
-                response_bytes(segment.witnesses.manifest().table.rows)?,
-            )
-            .await?;
-        segment.witnesses.decode(query, &body)
     }
 }

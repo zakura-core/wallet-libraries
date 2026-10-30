@@ -60,6 +60,11 @@ impl Filter {
             .collect()
     }
 
+    /// Whether the set holds no values.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
     /// Returns the canonical encoded set.
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
@@ -90,8 +95,33 @@ pub(crate) fn visit(
     p: u8,
     m: u64,
     max: u64,
-    mut each: impl FnMut(u64) -> ControlFlow<()>,
+    each: impl FnMut(u64) -> ControlFlow<()>,
 ) -> Result<u64, Error> {
+    let (count, rest) = walk(bytes, p, m, max, each)?;
+    if rest.is_some_and(|rest| !rest.is_empty()) {
+        return Err(Error::Malformed);
+    }
+    Ok(count)
+}
+
+/// Splits the one encoded set at the front of `bytes` from whatever follows it, validating
+/// every bit and the padding as [`visit`] does. Sets are self-delimiting, so a stream of
+/// them needs no length prefixes.
+pub(crate) fn split(bytes: &[u8], p: u8, m: u64, max: u64) -> Result<(&[u8], &[u8]), Error> {
+    let (_, rest) = walk(bytes, p, m, max, |_| ControlFlow::Continue(()))?;
+    let rest = rest.expect("a walk that never breaks reads the whole set");
+    Ok(bytes.split_at(bytes.len() - rest.len()))
+}
+
+/// Decodes the set at the front of `bytes` as [`visit`] describes, returning the count and
+/// the bytes after its padding, or `None` for them when `each` broke early.
+fn walk(
+    bytes: &[u8],
+    p: u8,
+    m: u64,
+    max: u64,
+    mut each: impl FnMut(u64) -> ControlFlow<()>,
+) -> Result<(u64, Option<&[u8]>), Error> {
     let mut rest = bytes;
     let count = read_compact_size(&mut rest).map_err(|_| Error::Malformed)?;
     // Each value takes at least `P + 1` bits; bound the count before reading.
@@ -117,17 +147,14 @@ pub(crate) fn visit(
             .ok_or(Error::Malformed)?;
         if each(value).is_break() {
             // The caller needs no later value; the rest of the set stays unchecked.
-            return Ok(count);
+            return Ok((count, None));
         }
     }
     let padding = ((8 - used % 8) % 8) as u8;
     if padding > 0 && read(padding)? != 0 {
         return Err(Error::Malformed);
     }
-    if !rest.is_empty() {
-        return Err(Error::Malformed);
-    }
-    Ok(count)
+    Ok((count, Some(rest)))
 }
 
 /// The value `receiver` hashes to in a set of `count` values keyed by `keys`.

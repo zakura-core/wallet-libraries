@@ -33,7 +33,8 @@ pub enum ReservationPolicy {
     /// Ordinary history must catch up before allocating another refund index.
     FundingHistory,
     /// Automatic discovery has not finished checking the next receive address's history,
-    /// which a restored seed may already have paid. Run recovery, then ask again.
+    /// which a restored seed may already have paid, or filters have not been read to within
+    /// 10 blocks of the chain tip. Run recovery, then ask again.
     ReceiveHistory,
 }
 
@@ -83,7 +84,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
 
     /// Resumes a live draft or recycles the lowest unpaid eligible receive index.
     /// Payment evidence alone extends the four-index window. A new index is issued only
-    /// once its own automatic history lookup completed, never waiting on other indexes.
+    /// once its own automatic history lookup completed, never waiting on other indexes, and
+    /// the account's filter marker is within 10 blocks of the chain tip. Otherwise this
+    /// returns `ReceiveHistory`, and the caller runs recovery (see `RecoveryStatus::round_due`).
     pub fn prepare_receive_reservation(
         &mut self,
         account: AccountUuid,
@@ -168,7 +171,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
 }
 
 /// SQL condition on `ironwood_one_time_keys k`: local receive reservation ownership.
-const RESERVED: &str = "(k.reserved_at IS NOT NULL AND k.released_at IS NULL)";
+pub(in crate::wallet::one_time_ivk) const RESERVED: &str =
+    "(k.reserved_at IS NOT NULL AND k.released_at IS NULL)";
 
 /// Reads the durable toggle inside the same transaction as the issuance mutation. An
 /// account that never enabled recovery has no progress row and is disabled. One without an

@@ -6,25 +6,24 @@
 use orchard::keys::{FullViewingKey, Scope};
 use std::sync::Mutex;
 use zakura_pir_client::receiver::{
-    RawRecord,
+    Companion, Coverage as SegmentCoverage, Directory as DirectoryTable, Pace, Publication,
+    RawRecord, Tree,
     crypto::{Payment, Receiver, Record},
+    initial_salt,
     inventory::{FilterRef, Inventory, Shard},
-    lookup, lookup_pages, publication as wallet_publication,
-    session::{Error as DirectoryError, MIN_ROWS, Publication},
+    lookup, lookup_with, publication as wallet_publication,
+    session::Error as DirectoryError,
     shards::{Coverage, ShardFilter},
-    snapshot::{Manifest, PROFILE, Snapshot},
     transport::{Inventories, InventoryClient, Transport},
-    witness,
 };
 use zakura_pir_publisher::receiver::{
-    snapshot::{SnapshotPublisherExt, assign_ordinals},
-    witness::{TablePublisherExt, payloads},
+    OPEN_SEED_ATTEMPTS, Paid, Projection, build, query_rows, witness::payloads,
 };
-use zakura_pir_query_server::receiver::server::{Server, WitnessServer};
+use zakura_pir_query_server::receiver::server::Server;
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _,
     chain::BlockSource as _,
-    one_time_ivk::restore::RECOVERY_PAGE_LIMIT,
+    one_time_ivk::restore::{FilterOutcome, FilterSpan, RECOVERY_PAGE_LIMIT},
     testing::{AddressType, IronwoodFvk, TestBuilder, TestRng, TestState},
     transparent_ledger::ChainPoint,
 };
@@ -258,9 +257,9 @@ fn block_at(st: &State, height: BlockHeight) -> ([u8; 32], u64) {
 }
 
 /// Publishes `records`, the chain's indexed Ironwood outputs, as contiguous shards following
-/// `plans` with the production snapshot, witness, filter and inventory builders. Every
-/// witness table is built at the last shard's end. `segment_of` picks a record's segment
-/// within its shard; pages are segment-local.
+/// `plans` with the production segment, payload, filter and inventory builders. Every
+/// companion is built at the last shard's end. `segment_of` picks a record's segment within
+/// its shard; pages are segment-local.
 fn publish_with(
     st: &State,
     records: &[Record],
@@ -293,78 +292,78 @@ fn publish_revision(
         })
         .unwrap();
     let (last_hash, last_size) = block_at(st, last);
+    let tree = Tree {
+        height: last.into(),
+        hash: last_hash,
+        size: last_size,
+    };
     let mut routes = Routes::default();
     let mut shards = vec![];
     let (mut start, mut parent, mut position) = (ACTIVATION, [0; 32], 0);
     for plan in plans {
         let (end_hash, end_position) = block_at(st, plan.end);
+        let coverage = SegmentCoverage {
+            genesis: GENESIS,
+            history_revision: revision,
+            start_height: start,
+            start_parent: parent,
+            start_position: position,
+            end_height: plan.end.into(),
+            end_hash,
+            end_position,
+        };
         let mut segments = vec![];
         let in_shard: Vec<_> = records
             .iter()
             .filter(|r| (start..=u32::from(plan.end)).contains(&r.payment.height))
             .collect();
         for index in 0..plan.segments {
-            let mut raw: Vec<RawRecord> = vec![];
-            for record in in_shard
+            let mut paid: Vec<Paid> = in_shard
                 .iter()
                 .filter(|r| segment_of(r) % plan.segments == index)
-            {
-                let mut r = RawRecord::decode(&record.encode().unwrap())
-                    .unwrap()
+                .map(|r| {
+                    let raw = RawRecord::decode(&r.encode().unwrap()).unwrap().unwrap();
+                    (raw.receiver, raw.payment, [0; 512])
+                })
+                .collect();
+            let positions: Vec<_> = paid.iter().map(|p| p.1.position).collect();
+            let built = payloads(&commitments[..last_size as usize], &positions).unwrap();
+            for (p, payload) in paid.iter_mut().zip(built) {
+                p.2 = payload;
+            }
+            let mut projection = Projection::new(initial_salt(&parent, index as u32));
+            let mut heights: Vec<_> = paid.iter().map(|p| p.1.height).collect();
+            heights.dedup();
+            for height in heights {
+                let block: Vec<_> = paid.iter().filter(|p| p.1.height == height).collect();
+                let receivers: Vec<_> = block.iter().map(|p| p.0).collect();
+                projection
+                    .project(&receivers, &block[0].1.block_hash)
                     .unwrap();
-                r.page = raw.iter().filter(|o| o.receiver == r.receiver).count() as u32;
-                raw.push(r);
             }
-            for i in 0..raw.len() {
-                let receiver = raw[i].receiver;
-                raw[i].total = raw.iter().filter(|o| o.receiver == receiver).count() as u32;
-            }
-            assign_ordinals(&mut raw);
-            let snapshot = Snapshot::build(
-                Manifest {
-                    profile: PROFILE.into(),
-                    history_revision: revision,
-                    genesis: GENESIS,
-                    start_height: start,
-                    start_parent: parent,
-                    start_position: position,
-                    end_height: plan.end.into(),
-                    end_hash,
-                    end_position,
-                    rows: MIN_ROWS,
-                    salt: [5 + index as u8; 32],
-                    records: 0,
-                    data_sha256: [0; 32],
-                },
-                &raw,
+            let rows = query_rows(paid.len() as u32);
+            let segment = build(
+                &projection,
+                coverage.clone(),
+                &end_hash,
+                OPEN_SEED_ATTEMPTS,
+                rows,
+                tree,
+                &paid,
             )
             .unwrap();
-            let mut positions: Vec<_> = raw.iter().map(|r| r.payment.position).collect();
-            positions.sort_unstable();
-            let table = witness::Table::build(
-                witness::Manifest {
-                    profile: witness::PROFILE.into(),
-                    genesis: GENESIS,
-                    history_revision: revision,
-                    payments: snapshot.manifest.revision().unwrap(),
-                    payloads: 0,
-                    rows: MIN_ROWS,
-                    tree_height: last.into(),
-                    tree_hash: last_hash,
-                    tree_size: last_size,
-                    data_sha256: [0; 32],
-                },
-                &payloads(&commitments[..last_size as usize], &positions).unwrap(),
-            )
-            .unwrap();
-            let payments = Server::new(snapshot).unwrap();
-            let witnesses = WitnessServer::new(table, &payments).unwrap();
+            let manifest = segment.directory.manifest.clone();
+            routes
+                .choices
+                .push((manifest.choice.digest, segment.directory.choice.clone()));
+            let (directory, entries) = Server::directory(segment.directory).unwrap();
+            let companion = Server::companion(segment.companion, &manifest, &entries).unwrap();
             segments.push(Publication {
-                payments: payments.manifest().clone(),
-                witnesses: witnesses.manifest().clone(),
+                directory: directory.session().clone(),
+                companion: companion.session().clone(),
             });
-            routes.payments.push(payments);
-            routes.witnesses.push(witnesses);
+            routes.directories.push(directory);
+            routes.companions.push(companion);
         }
         let coverage = Coverage {
             start_height: start,
@@ -407,13 +406,15 @@ fn publish_revision(
 }
 
 /// One inventory's receiver routes, answered as the receiver service answers them: its
-/// head and chunks, shard filters by digest, session setup and real PIR evaluation of each
-/// encrypted payment or witness query. A session it does not serve is gone (410).
+/// head and chunks, shard filters and choice objects by digest, session setup and real PIR
+/// evaluation of each encrypted directory or companion query. A session it does not serve
+/// is gone (410).
 #[derive(Default)]
 struct Routes {
     inventory: Option<Inventory>,
-    payments: Vec<Server>,
-    witnesses: Vec<WitnessServer>,
+    directories: Vec<Server<DirectoryTable>>,
+    companions: Vec<Server<Companion>>,
+    choices: Vec<([u8; 32], Vec<u8>)>,
     filters: Vec<([u8; 32], Vec<u8>)>,
 }
 
@@ -423,16 +424,15 @@ impl Routes {
         let route = path.strip_prefix("/receiver/v1/").unwrap_or(path);
         let inventory = self.inventory.as_ref().unwrap();
         if (method, route) == ("POST", "query") {
-            let session = body.get(4..36);
-            let response = if let Some(w) =
-                self.witnesses.iter().find(|w| session == Some(&w.id()[..]))
-            {
-                w.respond(body)
-            } else if let Some(p) = self.payments.iter().find(|p| session == Some(&p.id()[..])) {
-                p.respond(body)
-            } else {
-                Err(DirectoryError::Revision)
-            };
+            let id = body.get(4..36);
+            let response =
+                if let Some(d) = self.directories.iter().find(|d| id == Some(&d.id()[..])) {
+                    d.respond(body)
+                } else if let Some(c) = self.companions.iter().find(|c| id == Some(&c.id()[..])) {
+                    c.respond(body)
+                } else {
+                    Err(DirectoryError::Revision)
+                };
             return match response {
                 Ok(response) => (200, response),
                 Err(DirectoryError::Revision) => (410, Vec::new()),
@@ -447,6 +447,12 @@ impl Routes {
             return (200, serde_json::to_vec(inventory.head()).unwrap());
         }
         let parts: Vec<_> = route.split('/').collect();
+        let by_digest = |objects: &[([u8; 32], Vec<u8>)], digest: &str| {
+            objects
+                .iter()
+                .find(|(d, _)| hex::encode(d) == digest)
+                .map_or((404, Vec::new()), |(_, f)| (200, f.clone()))
+        };
         match parts.as_slice() {
             ["inventory", id, chunk] => {
                 if *id != hex::encode(inventory.head().inventory) {
@@ -458,24 +464,15 @@ impl Routes {
                     None => (404, Vec::new()),
                 }
             }
-            ["shard-filters", digest] => self
-                .filters
-                .iter()
-                .find(|(d, _)| hex::encode(d) == *digest)
-                .map_or((404, Vec::new()), |(_, f)| (200, f.clone())),
+            ["shard-filters", digest] => by_digest(&self.filters, digest),
+            ["choice", digest] => by_digest(&self.choices, digest),
             ["public", id] => {
-                let public = self
-                    .payments
-                    .iter()
-                    .find(|p| hex::encode(p.id()) == *id)
-                    .map(|p| p.public())
-                    .or_else(|| {
-                        self.witnesses
-                            .iter()
-                            .find(|w| hex::encode(w.id()) == *id)
-                            .map(|w| w.public())
-                    });
-                public.map_or((410, Vec::new()), |p| (200, p.to_vec()))
+                let directory = self.directories.iter().find(|d| hex::encode(d.id()) == *id);
+                let companion = self.companions.iter().find(|c| hex::encode(c.id()) == *id);
+                directory
+                    .map(|d| d.public())
+                    .or(companion.map(|c| c.public()))
+                    .map_or((410, Vec::new()), |p| (200, p.to_vec()))
             }
             _ => (404, Vec::new()),
         }
@@ -569,7 +566,7 @@ impl Transport for Directory {
     }
 }
 
-/// The encrypted queries `directory` has served, payment and witness alike.
+/// The encrypted queries `directory` has served, directory and companion alike.
 fn lookups(directory: &Directory) -> usize {
     let requests = directory.requests();
     requests
@@ -602,37 +599,40 @@ async fn connect_with(
     InventoryClient::new(&directory.origin, directory, inventory, filters)
 }
 
-/// Completes bounded wallet work through encrypted payment and witness queries.
+/// Completes bounded wallet work through encrypted directory and companion queries.
 async fn drain(st: &mut State, account: AccountUuid, client: &InventoryClient<&Directory>) {
     for _ in 0..256 {
-        let status = st.wallet().db().one_time_recovery(account, NOW).unwrap();
-        if let Some(work) = status.lookups.first() {
-            let page = lookup(client, work).await.unwrap();
-            assert!(
-                st.wallet_mut()
-                    .db_mut()
-                    .record_one_time_lookup(account, work, &page, NOW)
-                    .unwrap()
-            );
-        } else if let Some(request) = status.witnesses.first() {
-            let answer = witness(client, request).await.unwrap();
-            assert!(
-                st.wallet_mut()
-                    .db_mut()
-                    .record_one_time_witness(account, status.token, *request, &answer, NOW)
-                    .unwrap()
-            );
-        } else {
+        let status = st
+            .wallet()
+            .db()
+            .one_time_recovery(account, NOW, None)
+            .unwrap();
+        let Some(work) = status.lookups.first() else {
             return;
-        }
+        };
+        let page = read_step(client, work).await;
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .record_one_time_lookup(account, work, &page, NOW)
+                .unwrap()
+        );
     }
     panic!("bounded fixture did not settle");
+}
+
+/// The page one default-paced step reads for `work`, which must succeed.
+async fn read_step(
+    client: &InventoryClient<&Directory>,
+    work: &zcash_client_backend::data_api::one_time_ivk::restore::LookupWork,
+) -> zcash_client_backend::data_api::one_time_ivk::restore::LookupPage {
+    lookup(client, work).await.unwrap()
 }
 
 /// Starts recovery without retaining a database handle across network work.
 fn begin(r: &mut Restored, client: &InventoryClient<&Directory>, direct: bool) {
     let db = r.st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(r.account, true).unwrap();
+    db.enable_one_time_recovery(r.account).unwrap();
     assert!(
         db.begin_one_time_recovery(r.account, wallet_publication(client.inventory()), direct)
             .unwrap()
@@ -650,13 +650,14 @@ async fn seed_recovery_pages_history_and_stops_at_four_empty_indexes() {
     let status =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
     assert!(status.restore_complete);
     assert_eq!(status.restore_next, 8);
     assert_eq!(one_time_value(&r.st), 3 * VALUE);
-    // Nine payment pages, then one witness query for each of the three payments.
-    assert_eq!(lookups(&directory), 12);
+    // One directory query for each of the eight keys, then one companion query for each of
+    // the three payments.
+    assert_eq!(lookups(&directory), 11);
     let queries = lookups(&directory);
     begin(&mut r, &client, true);
     drain(&mut r.st, r.account, &client).await;
@@ -677,7 +678,7 @@ async fn seed_recovery_pages_history_and_stops_at_four_empty_indexes() {
 /// A positive hint without a payment needs one empty PIR answer and cannot advance issuance.
 #[tokio::test]
 async fn a_positive_hint_without_payment_settles_with_one_empty_query() {
-    use zakura_pir_client::receiver::blocks::{Batch, BlockFilter, BlockId};
+    use zakura_pir_client::receiver::blocks::{HeightSet, Range};
     let mut r = restored(&[]);
     let initial = serve(&r.st, &[], r.through);
     let client = connect(&initial, r.through).await;
@@ -689,27 +690,33 @@ async fn a_positive_hint_without_payment_settles_with_one_empty_query() {
     let (token, receivers) = r.st.wallet().db().one_time_receivers(r.account).unwrap();
     let receiver = &receivers[0];
     // A deliberately overinclusive hint exercises the same path as a GCS false positive.
-    let filter = BlockFilter::build(
-        &GENESIS,
-        BlockId {
-            height: end.height.into(),
-            hash: end.hash.0,
-        },
-        r.through.hash.0,
-        [&receiver.receiver],
-    )
-    .unwrap();
-    let bytes = Batch::new(GENESIS, 0, vec![filter])
+    let height: u32 = end.height.into();
+    let set = HeightSet::build(&GENESIS, height, [&receiver.receiver])
+        .unwrap()
+        .unwrap();
+    let bytes = Range::new(0, height, 1, r.through.hash.0, end.hash.0, vec![set])
         .unwrap()
         .encode()
         .unwrap();
-    let batch = Batch::decode(&bytes).unwrap();
-    assert_eq!(batch.matches(0, &[receiver.receiver]).unwrap(), [true]);
-    assert!(
+    let range = Range::decode(&bytes).unwrap();
+    assert_eq!(range.matches(&GENESIS, &[receiver.receiver]), [(height, 0)]);
+    let span = FilterSpan {
+        revision: 0,
+        from: range.from().into(),
+        parent: BlockHash(range.parent()),
+        end,
+    };
+    let hits: Vec<_> = range
+        .matches(&GENESIS, &[receiver.receiver])
+        .into_iter()
+        .map(|(height, _)| (height.into(), receiver.key))
+        .collect();
+    assert_eq!(
         r.st.wallet_mut()
             .db_mut()
-            .record_one_time_filters(r.account, token, 0, &[end], &[receiver.key])
-            .unwrap()
+            .record_one_time_filter_span(r.account, token, &span, &hits)
+            .unwrap(),
+        FilterOutcome::Committed
     );
     let directory = serve(&r.st, &[], end);
     let client = connect(&directory, end).await;
@@ -717,9 +724,9 @@ async fn a_positive_hint_without_payment_settles_with_one_empty_query() {
     let status =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
-    assert!(status.lookups.is_empty() && status.witnesses.is_empty());
+    assert!(status.lookups.is_empty());
     assert_eq!(status.restore_next, 4);
     assert_eq!(one_time_value(&r.st), 0);
     assert_eq!(lookups(&directory), 1);
@@ -755,7 +762,7 @@ async fn manual_bound_crosses_a_gap() {
         !r.st
             .wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .manual
             .unwrap()
@@ -763,9 +770,10 @@ async fn manual_bound_crosses_a_gap() {
     );
 }
 
-/// A response obtained before disabling the feature cannot import funds or finish a lookup.
+/// A response obtained before the account's generation moved, here by cancelling a history
+/// check, cannot import funds or finish a lookup.
 #[tokio::test]
-async fn disabling_fences_a_held_encrypted_response() {
+async fn a_generation_change_fences_a_held_encrypted_response() {
     let mut r = restored(&[0]);
     let directory = serve(&r.st, &r.records, r.through);
     let client = connect(&directory, r.through).await;
@@ -773,14 +781,14 @@ async fn disabling_fences_a_held_encrypted_response() {
     let work =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .lookups
             .remove(0);
-    let page = lookup(&client, &work).await.unwrap();
+    let page = read_step(&client, &work).await;
     r.st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(r.account, false)
+        .cancel_one_time_history(r.account)
         .unwrap();
     assert!(
         !r.st
@@ -790,14 +798,6 @@ async fn disabling_fences_a_held_encrypted_response() {
             .unwrap()
     );
     assert_eq!(one_time_value(&r.st), 0);
-    assert!(
-        r.st.wallet()
-            .db()
-            .one_time_recovery(r.account, NOW)
-            .unwrap()
-            .lookups
-            .is_empty()
-    );
     begin(&mut r, &client, true);
     drain(&mut r.st, r.account, &client).await;
     assert_eq!(one_time_value(&r.st), VALUE);
@@ -814,11 +814,11 @@ async fn a_forged_payment_is_not_an_empty_answer() {
     let work =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .lookups
             .remove(0);
-    let page = lookup(&client, &work).await.unwrap();
+    let page = read_step(&client, &work).await;
     assert!(
         r.st.wallet_mut()
             .db_mut()
@@ -828,73 +828,11 @@ async fn a_forged_payment_is_not_an_empty_answer() {
     let status =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
     assert_eq!(status.restore_gap, 0);
     assert_eq!(one_time_value(&r.st), 0);
     assert_eq!(status.lookups[0], work);
-}
-
-/// A candidate read under a replaced session never reinterprets its ordinal in the new
-/// session's witness table: it is read again there, then admitted.
-#[tokio::test]
-async fn a_replaced_session_reads_the_payment_again_for_its_witness() {
-    let mut r = restored(&[2, 0]);
-    let old = serve(&r.st, &r.records, r.through);
-    let client = connect(&old, r.through).await;
-    begin(&mut r, &client, true);
-    let work =
-        r.st.wallet()
-            .db()
-            .one_time_recovery(r.account, NOW)
-            .unwrap()
-            .lookups
-            .into_iter()
-            .find(|w| w.work.key == KeyId::new(Purpose::Receive, 0))
-            .unwrap();
-    let page = lookup(&client, &work).await.unwrap();
-    assert!(
-        r.st.wallet_mut()
-            .db_mut()
-            .record_one_time_lookup(r.account, &work, &page, NOW)
-            .unwrap()
-    );
-    let status =
-        r.st.wallet()
-            .db()
-            .one_time_recovery(r.account, NOW)
-            .unwrap();
-    let request = status.witnesses[0];
-    assert_eq!(request.ordinal, 1, "ordinals rank payments by position");
-    // A later publication covers one more block; its payment session differs.
-    r.st.generate_and_scan_empty_blocks(1);
-    let end = tip(&r.st);
-    let directory = serve(&r.st, &r.records, end);
-    let current = connect(&directory, end).await;
-    assert!(matches!(
-        witness(&current, &request).await,
-        Err(DirectoryError::Revision)
-    ));
-    assert!(
-        r.st.wallet_mut()
-            .db_mut()
-            .refresh_one_time_witness(r.account, status.token, request)
-            .unwrap()
-    );
-    let status =
-        r.st.wallet()
-            .db()
-            .one_time_recovery(r.account, NOW)
-            .unwrap();
-    assert!(status.witnesses.is_empty(), "the old binding is gone");
-    assert!(
-        status
-            .lookups
-            .iter()
-            .any(|w| w.work.key == KeyId::new(Purpose::Receive, 0) && w.cursor.is_none())
-    );
-    drain(&mut r.st, r.account, &current).await;
-    assert_eq!(one_time_value(&r.st), 2 * VALUE);
 }
 
 /// Validated shard filters stand in for PIR on sealed shards that exclude a receiver,
@@ -914,12 +852,12 @@ async fn shard_filters_skip_sealed_shards_that_exclude_a_receiver() {
         assert!(
             r.st.wallet()
                 .db()
-                .one_time_recovery(r.account, NOW)
+                .one_time_recovery(r.account, NOW, None)
                 .unwrap()
                 .restore_complete
         );
-        // I0 reads both shards and its witness. I1 to I4 skip the sealed shard by filter,
-        // or read it blind.
+        // I0 reads both directories and its record. I1 to I4 skip the sealed shard by
+        // filter, or read its directory blind.
         let expected = if filters { 2 + 4 + 1 } else { 2 * 5 + 1 };
         assert_eq!(lookups(&directory), expected, "filters: {filters}");
         let fetched = directory
@@ -932,7 +870,8 @@ async fn shard_filters_skip_sealed_shards_that_exclude_a_receiver() {
 }
 
 /// A server base with a path keeps it for every receiver request: the inventory head and
-/// chunks, shard filters, both sessions' public setup, and payment and witness queries.
+/// chunks, shard filters, choice objects, both sessions' public setup, and directory and
+/// companion queries.
 #[tokio::test]
 async fn a_server_base_path_is_kept_for_every_receiver_request() {
     let mut r = restored(&[0]);
@@ -953,6 +892,7 @@ async fn a_server_base_path_is_kept_for_every_receiver_request() {
         "GET /receiver/v1/inventory",
         "GET /receiver/v1/inventory/",
         "GET /receiver/v1/shard-filters/",
+        "GET /receiver/v1/choice/",
         "GET /receiver/v1/public/",
         "POST /receiver/v1/query",
     ] {
@@ -1022,7 +962,7 @@ async fn a_receiver_only_in_the_last_segment_of_an_oversized_shard_is_found() {
     assert!(
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .restore_complete
     );
@@ -1057,14 +997,14 @@ async fn a_payment_in_a_shard_straddling_the_completion_point_is_found() {
     let status =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
     assert!(status.lookups.is_empty());
     begin(&mut r, &client, true);
     let queued =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
     assert!(
         queued.lookups.iter().all(|w| w.from == completed + 1),
@@ -1072,16 +1012,16 @@ async fn a_payment_in_a_shard_straddling_the_completion_point_is_found() {
     );
     drain(&mut r.st, r.account, &client).await;
     assert_eq!(one_time_value(&r.st), VALUE);
-    // I0 reads the straddling shard, the recent tier and its witness; I1 to I3 only the
-    // recent tier. I4 joins the window once the payment is mined and reads the recent tier.
+    // I0 reads the straddling shard's directory and record and the recent tier's
+    // directory; I1 to I3 only the recent tier's. I4 joins the window once the payment is mined and reads the recent tier.
     assert_eq!(lookups(&directory), 3 + 4);
 }
 
-/// An inventory replaced between reading a payment and reading its witness: the old
-/// sessions are gone, so neither a held lookup nor the witness completes anything. The
-/// candidate stays pending and is read again in the new inventory's sealed segment.
+/// An inventory replaced partway through a round: the old sessions are gone, so a held
+/// lookup fails with a revision error and nothing is recorded. The new inventory's sealed
+/// segments then yield every payment.
 #[tokio::test]
-async fn inventory_replacement_between_payment_and_witness_keeps_the_payment_pending() {
+async fn inventory_replacement_mid_round_records_nothing() {
     let mut r = restored(&[1, 0]);
     let directory = serve(&r.st, &r.records, r.through);
     let old = connect(&directory, r.through).await;
@@ -1089,7 +1029,7 @@ async fn inventory_replacement_between_payment_and_witness_keeps_the_payment_pen
     let status =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
     let key0 = status
         .lookups
@@ -1097,7 +1037,7 @@ async fn inventory_replacement_between_payment_and_witness_keeps_the_payment_pen
         .find(|w| w.work.key == KeyId::new(Purpose::Receive, 0))
         .unwrap()
         .clone();
-    let page = lookup(&old, &key0).await.unwrap();
+    let page = read_step(&old, &key0).await;
     assert!(
         r.st.wallet_mut()
             .db_mut()
@@ -1107,7 +1047,7 @@ async fn inventory_replacement_between_payment_and_witness_keeps_the_payment_pen
     let held =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .lookups
             .into_iter()
@@ -1133,30 +1073,14 @@ async fn inventory_replacement_between_payment_and_witness_keeps_the_payment_pen
         lookup(&old, &held).await,
         Err(DirectoryError::Revision)
     ));
-    let status =
-        r.st.wallet()
-            .db()
-            .one_time_recovery(r.account, NOW)
-            .unwrap();
-    let request = status.witnesses[0];
-    assert!(matches!(
-        witness(&old, &request).await,
-        Err(DirectoryError::Revision)
-    ));
-    assert_eq!(one_time_value(&r.st), 0);
-    assert!(
-        r.st.wallet_mut()
-            .db_mut()
-            .refresh_one_time_witness(r.account, status.token, request)
-            .unwrap()
-    );
+    assert_eq!(one_time_value(&r.st), VALUE);
     let current = connect(&directory, r.through).await;
     drain(&mut r.st, r.account, &current).await;
     assert_eq!(one_time_value(&r.st), 2 * VALUE);
     assert!(
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .restore_complete
     );
@@ -1175,14 +1099,14 @@ async fn a_correction_adding_an_omitted_payment_voids_held_empties() {
     let work =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .lookups
             .remove(0);
     let mut held = vec![];
     let mut step = work.clone();
     loop {
-        let page = lookup(&client, &step).await.unwrap();
+        let page = read_step(&client, &step).await;
         let next = page.next.clone();
         held.push(page);
         match next {
@@ -1251,7 +1175,7 @@ async fn a_blind_restore_reopens_segments_beyond_the_session_budget() {
         Plan::recent(r.through.height),
     ];
     let directory = Directory::new(publish_with(&r.st, &r.records, &plans, &|_| 0));
-    let one_segment = 2 * zakura_pir_client::receiver::native::public_bytes(MIN_ROWS).unwrap();
+    let one_segment = 2 * zakura_pir_client::receiver::native::public_bytes();
     let client = connect_with(&directory, r.through, false)
         .await
         .with_segment_budget(one_segment);
@@ -1276,7 +1200,7 @@ fn due(
 ) -> zcash_client_backend::data_api::one_time_ivk::restore::LookupWork {
     r.st.wallet()
         .db()
-        .one_time_recovery(r.account, NOW)
+        .one_time_recovery(r.account, NOW, None)
         .unwrap()
         .lookups
         .into_iter()
@@ -1284,29 +1208,31 @@ fn due(
         .unwrap()
 }
 
-/// A lookup resumed from a cursor its inventory no longer serves starts over. An incomplete
-/// inventory listed key 0's payment B as its first page, and the wallet saved a cursor
-/// after it. The replacement inventory lists the earlier payment A first and B second. The
-/// saved cursor names the old inventory, so the lookup reads the key's history again from
-/// its start without counting the mismatch as empty history or moving completion progress,
-/// and finds both payments.
+/// A lookup resumed from a cursor whose directory session the inventory no longer serves
+/// starts over. An incomplete directory listed key 0's payment B as its first page, and
+/// the wallet saved a cursor after it. The replacement lists the earlier payment A first
+/// and B second. The saved cursor names the old inventory, so the lookup reads the
+/// key's history again from its start without counting the mismatch as empty history or
+/// moving completion progress, and finds both payments.
 #[tokio::test]
 async fn a_lookup_whose_cursor_record_changed_starts_over() {
-    use zcash_client_backend::data_api::one_time_ivk::restore::{LookupCursor, LookupPage};
+    use zcash_client_backend::data_api::one_time_ivk::restore::{
+        LookupCursor, LookupPage, LookupRecord,
+    };
     let mut r = restored(&[0, 0]);
     let directory = serve(&r.st, &r.records, r.through);
     let old = connect(&directory, r.through).await;
     begin(&mut r, &old, true);
     let key = KeyId::new(Purpose::Receive, 0);
     let work = due(&r, key);
-    let read = lookup(&old, &work).await.unwrap();
-    let mut second = r.records[1].clone();
-    second.page = 0;
-    let first = RawRecord::decode(&second.encode().unwrap())
-        .unwrap()
-        .unwrap();
+    let read = read_step(&old, &work).await;
+    let mut first = read.records[1].record.clone();
+    (first.page, first.ordinal) = (0, read.records[0].record.ordinal);
     let incomplete = LookupPage {
-        records: vec![first.clone()],
+        records: vec![LookupRecord {
+            record: first.clone(),
+            payload: read.records[1].payload,
+        }],
         checked_through: None,
         next: Some(LookupCursor {
             inventory: read.publication.id,
@@ -1327,7 +1253,7 @@ async fn a_lookup_whose_cursor_record_changed_starts_over() {
     let before =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
 
     r.st.generate_and_scan_empty_blocks(1);
@@ -1339,7 +1265,7 @@ async fn a_lookup_whose_cursor_record_changed_starts_over() {
         &|_| 0,
     ));
     let current = connect(&directory, end).await;
-    let page = lookup(&current, &resumed).await.unwrap();
+    let page = read_step(&current, &resumed).await;
     assert_eq!(page.records.len(), 2);
     assert!(page.complete());
     assert!(
@@ -1351,20 +1277,12 @@ async fn a_lookup_whose_cursor_record_changed_starts_over() {
     let after =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap();
-    assert_eq!(
-        (
-            after.restore_next,
-            after.restore_gap,
-            after.restore_complete
-        ),
-        (
-            before.restore_next,
-            before.restore_gap,
-            before.restore_complete
-        )
-    );
+    // Both payments arrive with their payloads, so key 0 counts as paid, never empty.
+    assert_eq!(one_time_value(&r.st), 2 * VALUE);
+    assert_eq!(after.restore_next, before.restore_next + 1);
+    assert_eq!((after.restore_gap, before.restore_gap), (0, 0));
     begin(&mut r, &current, true);
     drain(&mut r.st, r.account, &current).await;
     assert_eq!(one_time_value(&r.st), 2 * VALUE);
@@ -1381,7 +1299,7 @@ async fn a_refused_lookup_backs_off_before_its_retry() {
     begin(&mut r, &client, true);
     let key = KeyId::new(Purpose::Receive, 0);
     let work = due(&r, key);
-    let page = lookup(&client, &work).await.unwrap();
+    let page = read_step(&client, &work).await;
     assert!(
         r.st.wallet_mut()
             .db_mut()
@@ -1395,7 +1313,7 @@ async fn a_refused_lookup_backs_off_before_its_retry() {
     let due_at = |r: &Restored, now: i64| {
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, now)
+            .one_time_recovery(r.account, now, None)
             .unwrap()
             .lookups
             .iter()
@@ -1407,7 +1325,7 @@ async fn a_refused_lookup_backs_off_before_its_retry() {
     assert_eq!(
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .restore_gap,
         0
@@ -1430,15 +1348,15 @@ async fn a_publication_ahead_of_the_wallet_waits() {
     let directory = serve(&r.st, &r.records, ahead);
     let client = connect(&directory, ahead).await;
     let db = r.st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(r.account, true).unwrap();
-    let before = db.one_time_recovery(r.account, NOW).unwrap();
+    db.enable_one_time_recovery(r.account).unwrap();
+    let before = db.one_time_recovery(r.account, NOW, None).unwrap();
     assert!(
         !db.begin_one_time_recovery(r.account, wallet_publication(client.inventory()), true)
             .unwrap()
     );
-    let after = db.one_time_recovery(r.account, NOW).unwrap();
+    let after = db.one_time_recovery(r.account, NOW, None).unwrap();
     assert_eq!(after, before);
-    assert!(after.filter_frontier.is_none() && after.witnesses.is_empty());
+    assert!(after.filter_frontier.is_none());
 }
 
 /// Screening a round's due lookups together traverses each sealed shard's filter once
@@ -1455,14 +1373,14 @@ async fn screening_a_round_traverses_each_filter_once() {
     let works =
         r.st.wallet()
             .db()
-            .one_time_recovery(r.account, NOW)
+            .one_time_recovery(r.account, NOW, None)
             .unwrap()
             .lookups;
     assert!(works.len() > 1);
     zakura_pir_client::receiver::screen(&client, &works).await;
     assert_eq!(client.filter_traversals(), 1);
     for work in &works {
-        lookup(&client, work).await.unwrap();
+        read_step(&client, work).await;
     }
     assert_eq!(client.filter_traversals(), 1);
     drain(&mut r.st, r.account, &client).await;
@@ -1483,7 +1401,8 @@ fn reopen(st: &mut State) {
 /// across capped steps. The first step stops mid-segment, the wallet restarts from what it
 /// recorded, and each later step resumes after the last page the previous one read. A cap
 /// above [`RECOVERY_PAGE_LIMIT`] reads that many, and an uncapped step finishes the
-/// segment. Every page is queried once and every payment is credited once.
+/// segment. Every page is queried once, each step after one directory query, and every
+/// payment is credited once.
 #[tokio::test]
 async fn capped_steps_recover_a_long_history_across_a_restart() {
     use std::num::NonZeroUsize;
@@ -1514,10 +1433,10 @@ async fn capped_steps_recover_a_long_history_across_a_restart() {
         );
         let queries = lookups(directory);
         let page = match cap {
-            Some(cap) => lookup_pages(client, &work, cap).await.unwrap(),
-            None => lookup(client, &work).await.unwrap(),
+            Some(records) => lookup_with(client, &work, Pace { records }).await.unwrap(),
+            None => read_step(client, &work).await,
         };
-        assert_eq!(lookups(directory) - queries, page.records.len());
+        assert_eq!(lookups(directory) - queries, page.records.len() + 1);
         assert!(
             r.st.wallet_mut()
                 .db_mut()
@@ -1527,13 +1446,13 @@ async fn capped_steps_recover_a_long_history_across_a_restart() {
         let pending =
             r.st.wallet()
                 .db()
-                .one_time_recovery(r.account, NOW)
+                .one_time_recovery(r.account, NOW, None)
                 .unwrap()
                 .lookups
                 .into_iter()
                 .find(|work| work.work.key == key);
         assert_eq!(pending.and_then(|work| work.cursor), page.next);
-        read.extend(page.records.iter().cloned());
+        read.extend(page.records.iter().map(|r| r.record.clone()));
         page
     }
 

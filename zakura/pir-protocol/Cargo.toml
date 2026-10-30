@@ -76,8 +76,8 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 
 [[test]]
-name = "receiver_block_batches"
-path = "tests/receiver/block_batches.rs"
+name = "receiver_block_ranges"
+path = "tests/receiver/block_ranges.rs"
 required-features = ["receiver"]
 
 [[test]]

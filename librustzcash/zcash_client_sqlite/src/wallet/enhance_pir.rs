@@ -1331,6 +1331,7 @@ pub(crate) fn apply<P: Parameters>(
         return store_unsupported_details(
             tx,
             tpir_session,
+            params,
             tx_ref,
             route,
             has_transparent_outputs,
@@ -1402,6 +1403,8 @@ pub(crate) fn apply<P: Parameters>(
             "DELETE FROM ironwood_memo_retrieval_queue WHERE received_note_id = :id",
             named_params![":id": note_id],
         )?;
+        // A refund memo names a key that recovery must watch.
+        accept_memos(tx, params, tx_ref)?;
     }
     let result = match outgoing {
         IronwoodOutgoingResult::NotRequested => EnhancePirStoreResult::Stored,
@@ -1471,9 +1474,10 @@ pub(crate) fn apply<P: Parameters>(
 /// response for it lands in this function again. The marker stays when every memo is known:
 /// its transparent details remain unsupported, and history keeps reporting them as pending.
 #[allow(clippy::too_many_arguments)]
-fn store_unsupported_details(
+fn store_unsupported_details<P: Parameters>(
     tx: &Transaction<'_>,
     tpir_session: &TransparentSession,
+    params: &P,
     tx_ref: crate::TxRef,
     route: i64,
     has_transparent_outputs: bool,
@@ -1550,6 +1554,8 @@ fn store_unsupported_details(
             "DELETE FROM ironwood_memo_retrieval_queue WHERE received_note_id = :id",
             named_params![":id": note_id],
         )?;
+        // A refund memo names a key that recovery must watch.
+        accept_memos(tx, params, tx_ref)?;
     }
     tx.execute(
         "DELETE FROM ironwood_enhance_metadata_queue WHERE transaction_id = ?",
@@ -1559,6 +1565,21 @@ fn store_unsupported_details(
         require_private_details_unsupported(tx, tpir_session, tx_ref)?;
     }
     Ok(EnhancePirStoreResult::PrivateDetailsUnsupported)
+}
+
+/// Accepts a refund memo just stored on transaction `tx_ref`, if the transaction is mined
+/// (see `one_time_ivk::restore::recovery::accept_mined_memos`).
+fn accept_memos<P: Parameters>(
+    tx: &rusqlite::Transaction<'_>,
+    params: &P,
+    tx_ref: crate::TxRef,
+) -> Result<(), SqliteClientError> {
+    let txid: [u8; 32] = tx.query_row(
+        "SELECT txid FROM transactions WHERE id_tx = ?1",
+        [tx_ref.0],
+        |r| r.get(0),
+    )?;
+    super::one_time_ivk::restore::recovery::accept_mined_memos(tx, params, [txid])
 }
 
 #[cfg(test)]

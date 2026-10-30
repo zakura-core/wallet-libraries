@@ -1,5 +1,6 @@
-//! Receiver publication construction: payment row placement and companion witness
-//! tables. Formats, sessions and inventories are shared with the other roles.
+//! Receiver publication construction: segment tables and companion witness payloads.
+//! Formats, sessions and inventories are shared with the other roles.
 pub use zakura_pir_protocol::receiver::*;
-pub mod snapshot;
+mod segment;
+pub use segment::*;
 pub mod witness;

@@ -1,10 +1,8 @@
-//! Fixtures for the receiver client tests: the payment fixtures of `zakura-pir-publisher`'s
-//! `tests/receiver/common/mod.rs`, kept inside this package so a published crate's tests
-//! build on their own. Change both together.
+//! Fixtures for the receiver client tests.
 #![allow(dead_code)]
 use zakura_pir_client::receiver::{
-    Payment, RawRecord, ReceiverBytes,
-    snapshot::{Manifest, PROFILE},
+    ChoiceRef, Companion, Coverage, Directory, Publication, ReceiverBytes, SCHEMA, Session, Table,
+    Tree, choice_bytes, query_rows,
 };
 
 /// The Orchard receiver that the Action in `zakura-pir-protocol`'s
@@ -18,54 +16,40 @@ pub fn receiver() -> ReceiverBytes {
     hex::decode(RECEIVER_HEX).unwrap().try_into().unwrap()
 }
 
-/// A publication with `rows` rows covering heights 100 to 101 and positions 200 to 300.
-pub fn manifest(rows: u32) -> Manifest {
-    Manifest {
-        profile: PROFILE.into(),
-        history_revision: 0,
-        genesis: [1; 32],
-        start_height: 100,
-        start_parent: [2; 32],
-        start_position: 200,
-        end_height: 101,
-        end_hash: [3; 32],
-        end_position: 300,
-        rows,
+/// The sessions of an empty segment over `coverage`, its companion built at `tree`. Public
+/// setup digests are placeholders: an inventory binds session IDs, not evaluation.
+pub fn empty_segment(coverage: Coverage, tree: Tree) -> Publication {
+    let directory = Directory {
+        schema: SCHEMA.into(),
+        coverage: coverage.clone(),
         salt: [4; 32],
-        records: 0,
-        data_sha256: [0; 32],
-    }
-}
-
-/// Page `page` of `total` payments to [`receiver`], in the last block of [`manifest`].
-pub fn record(page: u32, total: u32) -> RawRecord {
-    RawRecord {
-        receiver: receiver(),
-        page,
-        total,
-        payment: Payment {
-            height: 101,
-            block_hash: [3; 32],
-            txid: [page as u8; 32],
-            tx_index: page + 1,
-            action_index: 0,
-            position: 200 + u64::from(page),
-            action_nullifier: [5; 32],
-            cmx: [6; 32],
-            ephemeral_key: [7; 32],
-            ciphertext_prefix: [8; 52],
+        entries: 0,
+        payments: 0,
+        choice: ChoiceRef {
+            digest: [5; 32],
+            bytes: choice_bytes(0) as u32,
+            keys: 0,
         },
-        ordinal: page,
+        data_sha256: [0; 32],
+    };
+    let companion = Companion {
+        schema: SCHEMA.into(),
+        coverage,
+        directory: directory.revision().unwrap(),
+        rows: query_rows(0),
+        query_rows: query_rows(0),
+        payments: 0,
+        tree,
+        data_sha256: [0; 32],
+    };
+    Publication {
+        directory: Session {
+            manifest: directory,
+            public_digest: [7; 32],
+        },
+        companion: Session {
+            manifest: companion,
+            public_digest: [8; 32],
+        },
     }
-}
-
-/// The Ironwood receiver at external index zero of the spending key whose bytes are all
-/// `seed`, for seeds 1 to 4, pinned in `fixtures/receivers.json`.
-pub fn seeded_receiver(seed: u8) -> ReceiverBytes {
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/receivers.json")).unwrap();
-    hex::decode(fixture["seeds"][seed.to_string()].as_str().unwrap())
-        .unwrap()
-        .try_into()
-        .unwrap()
 }

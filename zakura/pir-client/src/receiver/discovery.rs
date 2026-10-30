@@ -1,14 +1,18 @@
 //! Bounded network steps. Wallet queue mutations happen after these futures complete.
 use super::{
+    Entry, Publication, RawRecord, check_next, choose_row,
     crypto::Receiver,
     inventory::Inventory,
+    lookup_entry, lookup_slot,
     session::Error as DirectoryError,
-    transport::{InventoryClient, Segment, Transport},
+    slot_row, tag,
+    transport::{InventoryClient, Transport},
+    wire::PAYLOAD_BYTES,
 };
 use core::num::NonZeroUsize;
 use zcash_client_backend::data_api::one_time_ivk::restore::{
-    LookupCursor, LookupPage, LookupWork, PublicationEnd, RECOVERY_PAGE_LIMIT, RecoveryPublication,
-    SegmentRef, StepShard, WitnessAnswer, WitnessRequest,
+    LookupCursor, LookupPage, LookupRecord, LookupWork, PublicationEnd, RECOVERY_PAGE_LIMIT,
+    RecoveryPublication, SegmentRef, StepShard,
 };
 use zcash_protocol::consensus::BlockHeight;
 
@@ -26,9 +30,6 @@ fn checked(error: super::crypto::Error) -> DirectoryError {
 /// Most shards one step may cover through negative filters before returning.
 pub const FILTER_STEP_LIMIT: usize = 256;
 
-/// The pages [`lookup`] reads per step.
-const PAGE_LIMIT: NonZeroUsize = NonZeroUsize::new(RECOVERY_PAGE_LIMIT).unwrap();
-
 /// The wallet's view of a captured inventory: its identity and locally checkable frontier.
 /// The caller must still check network and activation coverage when capturing it.
 pub fn publication(inventory: &Inventory) -> RecoveryPublication {
@@ -45,32 +46,75 @@ pub fn publication(inventory: &Inventory) -> RecoveryPublication {
     }
 }
 
-/// Covers at most one bounded step of a request's required shards, with no database
-/// handle or wallet lock. Every shard reaching `work.from` through the inventory's end is
-/// required, including one that straddles it. A sealed shard whose validated filter excludes the receiver is covered
-/// without PIR; any other required shard, including the recent tier and a shard whose
-/// filter is missing, malformed or matching, is read in every segment through its final
-/// page. A cursor from another inventory is never reinterpreted: the step starts again
-/// from `work.from`. A step reads at most [`RECOVERY_PAGE_LIMIT`] pages; [`lookup_pages`]
-/// takes a smaller cap.
+/// How one step may spend requests.
+pub struct Pace {
+    /// Most records the step reads, capped at [`RECOVERY_PAGE_LIMIT`]. A small cap lets a
+    /// slow transport finish and record a step within its time budget.
+    pub records: NonZeroUsize,
+}
+
+/// The receiver's entry in one segment: one directory query, for the row its choice
+/// object names. `None` means the segment pays no receiver with its tag.
+async fn read_entry<T: Transport>(
+    client: &InventoryClient<T>,
+    segment: &Publication,
+    receiver: &[u8; 43],
+) -> Result<Option<Entry>, DirectoryError> {
+    let directory = &segment.directory;
+    let tag = tag(&directory.manifest.salt, receiver);
+    let choice = client.choice(&directory.manifest).await?;
+    let session = client.open(directory).await?;
+    let row = choose_row(&directory.manifest.salt, &choice, &tag);
+    let bytes = client.query(&session, row).await?;
+    Ok(lookup_entry(&directory.manifest, &bytes, &tag)?)
+}
+
+/// The record and payload in companion slot `slot`, checked against `entry`: one companion
+/// query naming that slot's row.
+async fn read_slot<T: Transport>(
+    client: &InventoryClient<T>,
+    segment: &Publication,
+    entry: &Entry,
+    slot: u32,
+) -> Result<(RawRecord, [u8; PAYLOAD_BYTES]), DirectoryError> {
+    let session = client.open(&segment.companion).await?;
+    let bytes = client.query(&session, slot_row(slot)).await?;
+    let (d, c) = (&segment.directory.manifest, &segment.companion.manifest);
+    Ok(lookup_slot(d, c, entry, slot, &bytes)?)
+}
+
+/// [`lookup_with`] at the default pace: up to [`RECOVERY_PAGE_LIMIT`] records.
 pub async fn lookup<T: Transport>(
     client: &InventoryClient<T>,
     work: &LookupWork,
 ) -> Result<LookupPage, DirectoryError> {
-    lookup_pages(client, work, PAGE_LIMIT).await
+    let records = NonZeroUsize::new(RECOVERY_PAGE_LIMIT).expect("nonzero");
+    lookup_with(client, work, Pace { records }).await
 }
 
-/// [`lookup`], reading at most `max_pages` pages (one PIR query each) from the segment,
-/// capped at [`RECOVERY_PAGE_LIMIT`]. A step that stops before the segment's final page
-/// returns a cursor after its last record, which the wallet records and the next step
-/// resumes from. A small cap lets a slow transport finish and record a step within its
-/// time budget.
-pub async fn lookup_pages<T: Transport>(
+/// Covers at most one bounded step of a request's required shards, with no database handle
+/// or wallet lock. Every shard reaching `work.from` through the inventory's end is
+/// required, including one that straddles it. A sealed shard whose validated filter
+/// excludes the receiver is covered without PIR. Any other required shard, including the
+/// recent tier and a shard whose filter is missing, malformed or matching, is read in every
+/// segment: one directory query, then, on a hit whose last payment is at or past
+/// `max(work.from, work.birthday)`, one companion query per record. A hit below that is a
+/// miss, read with no companion query. A cursor from another inventory is never
+/// reinterpreted: the step starts again from `work.from`. A step resuming after a record
+/// reads the receiver's entry again before its next records.
+///
+/// A step reads at most `pace.records` records and returns a cursor after its last one,
+/// which the wallet records and the next step resumes from. It is all or nothing: each
+/// request is sent once, and a failed request or data that fails a check, including a
+/// record for another receiver at the queried tag, fails the step with an error and
+/// nothing to record. Callers retry whole steps. [`DirectoryError::Revision`], HTTP 410,
+/// means a session is gone: capture the inventory again.
+pub async fn lookup_with<T: Transport>(
     client: &InventoryClient<T>,
     work: &LookupWork,
-    max_pages: NonZeroUsize,
+    pace: Pace,
 ) -> Result<LookupPage, DirectoryError> {
-    let max_pages = max_pages.get().min(RECOVERY_PAGE_LIMIT) as u32;
+    let limit = pace.records.get().min(RECOVERY_PAGE_LIMIT) as u32;
     let inventory = client.inventory();
     let publication = publication(inventory);
     if publication.history_revision != work.token.history_revision
@@ -81,22 +125,17 @@ pub async fn lookup_pages<T: Transport>(
     let receiver = *Receiver::from_bytes(work.work.receiver)
         .map_err(checked)?
         .as_bytes();
+    let floor = u32::from(work.from.max(work.birthday));
     let shards = inventory.shards();
     let (mut shard, segment, last) = match &work.cursor {
-        Some(cursor) if cursor.inventory == publication.id => {
-            (cursor.shard, cursor.segment, cursor.last.clone())
-        }
+        Some(c) if c.inventory == publication.id => (c.shard, c.segment, c.last.clone()),
         _ => {
-            let from = u32::from(work.from);
-            let first = shards.partition_point(|s| s.end_height < from);
-            (
-                u32::try_from(first).map_err(|_| DirectoryError::Malformed)?,
-                0,
-                None,
-            )
+            let first = shards.partition_point(|s| s.end_height < u32::from(work.from));
+            let first = u32::try_from(first).map_err(|_| DirectoryError::Malformed)?;
+            (first, 0, None)
         }
     };
-    let mut result = LookupPage {
+    let mut page = LookupPage {
         publication,
         inventory_shards: u32::try_from(shards.len()).map_err(|_| DirectoryError::Malformed)?,
         shards: vec![],
@@ -105,8 +144,8 @@ pub async fn lookup_pages<T: Transport>(
         checked_through: None,
         next: None,
     };
-    let cursor = |shard, segment, last| {
-        Some(LookupCursor {
+    let cursor = |shard: u32, segment, last| {
+        shards.get(shard as usize).map(|_| LookupCursor {
             inventory: publication.id,
             shard,
             segment,
@@ -116,7 +155,7 @@ pub async fn lookup_pages<T: Transport>(
     let mut filtered = 0;
     loop {
         let Some(descriptor) = shards.get(shard as usize) else {
-            return checked_step(result, work);
+            return checked_step(page, work);
         };
         let visited = StepShard {
             index: shard,
@@ -135,42 +174,77 @@ pub async fn lookup_pages<T: Transport>(
                 .await
                 .is_some_and(|found| !found[0])
         {
-            result.shards.push(StepShard {
+            page.shards.push(StepShard {
                 excluded: true,
                 ..visited
             });
-            result.checked_through = Some(BlockHeight::from(descriptor.end_height));
+            page.checked_through = Some(BlockHeight::from(descriptor.end_height));
             shard += 1;
             filtered += 1;
             if filtered == FILTER_STEP_LIMIT {
-                result.next = shards
-                    .get(shard as usize)
-                    .and_then(|_| cursor(shard, 0, None));
-                return checked_step(result, work);
+                page.next = cursor(shard, 0, None);
+                return checked_step(page, work);
             }
             continue;
         }
-        result.shards.push(visited);
-        let connected = client.segment(shard, segment).await?;
-        result.segment = Some(SegmentRef {
+        let read = descriptor
+            .segments
+            .get(segment as usize)
+            .ok_or(DirectoryError::Malformed)?;
+        let entry = read_entry(client, read, &receiver).await?;
+        let entry = match &last {
+            // The same inventory serves the same entry, which must hold the pages left.
+            Some(prior) => Some(
+                entry
+                    .filter(|e| u32::from(e.count) == prior.total && prior.page + 1 < prior.total)
+                    .ok_or(DirectoryError::Malformed)?,
+            ),
+            None => entry.filter(|e| descriptor.start_height.saturating_add(e.last) >= floor),
+        };
+        let tree = read.companion.manifest.tree;
+        page.shards.push(visited);
+        page.segment = Some(SegmentRef {
             shard,
             segment,
-            payments: connected.publication().payments.id()?,
-            witnesses: connected.publication().witnesses.id()?,
+            directory: read.directory.id()?,
+            companion: read.companion.id()?,
+            tree: PublicationEnd {
+                height: BlockHeight::from(tree.height),
+                hash: tree.hash,
+                tree_size: tree.size,
+            },
         });
-        let finished =
-            read_segment(client, &connected, receiver, last, max_pages, &mut result).await?;
-        result.next = if !finished {
-            cursor(shard, segment, result.records.last().cloned())
+        let mut previous = last;
+        if let Some(entry) = &entry {
+            let start = previous.as_ref().map_or(0, |r| r.page + 1);
+            for p in start..(start + limit).min(u32::from(entry.count)) {
+                let slot = entry.first + p;
+                let (record, payload) = read_slot(client, read, entry, slot).await?;
+                // A tag hit for another receiver is a bad pointer, never a miss.
+                if record.receiver != receiver {
+                    return Err(DirectoryError::Malformed);
+                }
+                if let Some(previous) = &previous {
+                    check_next(previous, &record)?;
+                }
+                previous = Some(record.clone());
+                page.records.push(LookupRecord { record, payload });
+            }
+        }
+        let finished = entry.is_none_or(|e| {
+            previous
+                .as_ref()
+                .is_some_and(|r| r.page + 1 == u32::from(e.count))
+        });
+        page.next = if !finished {
+            cursor(shard, segment, previous)
         } else if (segment as usize) + 1 < descriptor.segments.len() {
             cursor(shard, segment + 1, None)
         } else {
-            result.checked_through = Some(BlockHeight::from(descriptor.end_height));
-            shards
-                .get(shard as usize + 1)
-                .and_then(|_| cursor(shard + 1, 0, None))
+            page.checked_through = Some(BlockHeight::from(descriptor.end_height));
+            cursor(shard + 1, 0, None)
         };
-        return checked_step(result, work);
+        return checked_step(page, work);
     }
 }
 
@@ -183,12 +257,11 @@ pub async fn screen<T: Transport>(client: &InventoryClient<T>, works: &[LookupWo
         return;
     }
     let inventory = client.inventory();
-    let id = inventory.head().inventory;
     let shards = inventory.shards();
     let mut wanted: std::collections::BTreeMap<u32, Vec<[u8; 43]>> = Default::default();
     for work in works {
         let first = match &work.cursor {
-            Some(c) if c.inventory == id => {
+            Some(c) if c.inventory == inventory.head().inventory => {
                 if c.segment != 0 || c.last.is_some() {
                     c.shard + 1
                 } else {
@@ -223,70 +296,4 @@ fn checked_step(page: LookupPage, work: &LookupWork) -> Result<LookupPage, Direc
     } else {
         Err(DirectoryError::Malformed)
     }
-}
-
-/// Reads up to `pages` consecutive pages of `receiver` in one segment after `last`,
-/// appending them to `result`. True once the segment's final page (or an empty history)
-/// has been read.
-async fn read_segment<T: Transport>(
-    client: &InventoryClient<T>,
-    segment: &Segment,
-    receiver: [u8; 43],
-    last: Option<super::RawRecord>,
-    pages: u32,
-    result: &mut LookupPage,
-) -> Result<bool, DirectoryError> {
-    let start = match &last {
-        Some(saved) if saved.page.checked_add(1) == Some(saved.total) => return Ok(true),
-        Some(saved) => saved.page + 1,
-        None => 0,
-    };
-    for offset in 0..pages {
-        let page = start.checked_add(offset).ok_or(DirectoryError::Malformed)?;
-        let Some(record) = client.page(segment, receiver, page).await? else {
-            if page != 0 {
-                return Err(DirectoryError::Malformed);
-            }
-            return Ok(true);
-        };
-        if let Some(previous) = result.records.last().or(last.as_ref()) {
-            super::snapshot::check_next(previous, &record)?;
-        }
-        let finished = record.page.checked_add(1) == Some(record.total);
-        result.records.push(record);
-        if finished {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// Reads one candidate's companion witness payload with one PIR query, with no database
-/// handle or wallet lock. A request whose payment and witness sessions this inventory does
-/// not hold together is [`DirectoryError::Revision`]: the wallet must re-read the payment
-/// under this inventory
-/// (see `refresh_one_time_witness`) rather than reinterpret its ordinal.
-pub async fn witness<T: Transport>(
-    client: &InventoryClient<T>,
-    request: &WitnessRequest,
-) -> Result<WitnessAnswer, DirectoryError> {
-    let (shard, segment) = client
-        .find_segment(&request.payments)
-        .ok_or(DirectoryError::Revision)?;
-    let connected = client.segment(shard, segment).await?;
-    let witnesses = &connected.publication().witnesses;
-    if witnesses.id()? != request.witnesses {
-        return Err(DirectoryError::Revision);
-    }
-    let table = &witnesses.table;
-    Ok(WitnessAnswer {
-        payments: request.payments,
-        revision: witnesses.id()?,
-        context: PublicationEnd {
-            height: table.tree_height.into(),
-            hash: table.tree_hash,
-            tree_size: table.tree_size,
-        },
-        payload: client.witness(&connected, request.ordinal).await?,
-    })
 }

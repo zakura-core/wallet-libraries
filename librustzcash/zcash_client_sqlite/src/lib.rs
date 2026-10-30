@@ -3386,6 +3386,13 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             .collect();
         #[cfg(feature = "orchard")]
         let journal = wallet::one_time_ivk::journal::collect(&blocks);
+        // A refund memo stored before its block, or mined again by a reorg's replacement
+        // chain, is accepted once these blocks are stored.
+        #[cfg(feature = "orchard")]
+        let mined: Vec<[u8; 32]> = blocks
+            .iter()
+            .flat_map(|block| block.transactions().iter().map(|tx| *tx.txid().as_ref()))
+            .collect();
 
         ll::wallet::put_blocks::<_, SqliteClientError, commitment_tree::Error>(
             self,
@@ -3414,6 +3421,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
                 self.conn.0,
                 &self.params,
                 &sessions,
+                &mined,
                 wallet::one_time_ivk::unix_now(&self.clock),
             )?;
         }
@@ -3738,6 +3746,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
                 )?;
             }
         }
+        #[cfg(feature = "orchard")]
+        let txid = d_tx.tx().txid();
         store_decrypted_tx(
             self,
             &self.params.clone(),
@@ -3745,7 +3755,15 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             self.gap_limits,
             chain_tip,
             d_tx,
-        )
+        )?;
+        // A memo enhancement retrieved after its block may name a refund key.
+        #[cfg(feature = "orchard")]
+        wallet::one_time_ivk::restore::recovery::accept_mined_memos(
+            self.conn.0,
+            &self.params,
+            [*txid.as_ref()],
+        )?;
+        Ok(())
     }
 
     fn set_tx_trust(
@@ -3792,6 +3810,12 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
                 self.conn.0,
                 &self.params,
                 sent_tx.tx(),
+            )?;
+            #[cfg(feature = "orchard")]
+            wallet::one_time_ivk::restore::recovery::accept_mined_memos(
+                self.conn.0,
+                &self.params,
+                [*sent_tx.tx().txid().as_ref()],
             )?;
         }
         Ok(())

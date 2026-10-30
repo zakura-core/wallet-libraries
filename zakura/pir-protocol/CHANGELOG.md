@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Breaking: Receiver's tables are replaced by a directory and a companion per
+  segment: a 2,048-row P8 directory of 22-byte tag entries, a companion of
+  801-byte record-and-payload slots with a trimmed `query_rows` prefix, a
+  required choice object bound by digest, length and key count, and the
+  segment `Publication` with its whole-segment checks. Salts retry per forcing
+  block and choice seeds are drawn from a block hash. `receiver::native` is
+  the P8 profile and its message sizes, and `inventory::Shard::segments` holds
+  the new publications.
+
+- Receiver block hints are sparse and keyed by height. `blocks::Range`
+  (`IWRANGE2`) carries the parent and end hashes and one `HeightSet` per block
+  that pays a receiver, so an empty block costs nothing. A set's key comes from
+  the network and height alone, so a wallet can match history below its
+  birthday. One range covers up to `MAX_RANGE_BLOCKS` heights within
+  `MAX_RANGE_BYTES`. `blocks::Head` advertises the first served height and the tip,
+  and a range starts exactly at the requested height.
+  `Range::raw_sets` and `Range::write` let a server join stored ranges from
+  their encoded sets, which `HeightSet::bytes` also gives, without decoding them.
+- Breaking: `blocks::BlockFilter`, `blocks::Batch` (`IWBATCH1`),
+  `MAX_BLOCKS`, `MAX_BATCH_BYTES` and `Head::check_request` are removed.
+
+### Removed
+
+- `receiver::{snapshot, witness}`, the P16 receiver profile,
+  `session::{Manifest, WitnessManifest, Publication, PROTOCOL, MAGIC,
+  validate_rows, MIN_ROWS, MAX_ROWS}` and `receiver::Error::MissingPage`. The
+  witness payload codec stays in `receiver::wire`.
+
 ## [0.0.1-rc4] - 2026-10-26
 
 ### Added

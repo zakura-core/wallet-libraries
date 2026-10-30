@@ -537,7 +537,6 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_KEYS: &str = "CREATE TABLE ironwood_one
                 receiver BLOB NOT NULL CHECK (typeof(receiver) = 'blob' AND length(receiver) = 43),
                 funding_height INTEGER CHECK (funding_height BETWEEN 0 AND 4294967295),
                 used INTEGER NOT NULL DEFAULT 0 CHECK (used IN (0, 1)),
-                prebirthday_height INTEGER CHECK (prebirthday_height BETWEEN 0 AND 4294967295),
                 reserved_at INTEGER,
                 released_at INTEGER,
                 reservation_floor INTEGER,
@@ -1985,7 +1984,9 @@ CREATE TABLE ironwood_enhance_metadata_queue (
     CHECK (compact_bound = 0 OR commitment_tree_position IS NOT NULL)
 )";
 
-/// Durable private receiver payment recovery.
+/// Durable private receiver payment recovery. A candidate's binding is the directory and
+/// companion sessions and the ordinal it was read under, with its witness payload and the
+/// companion tree that payload was built at.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_PAYMENT_RECOVERY: &str = "CREATE TABLE ironwood_one_time_payment_recovery (
                 one_time_key_id INTEGER NOT NULL REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
                 txid BLOB NOT NULL CHECK (length(txid) = 32),
@@ -1995,17 +1996,17 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_PAYMENT_RECOVERY: &str = "CREATE TABLE 
                 tx_index INTEGER NOT NULL CHECK (tx_index BETWEEN 0 AND 65535),
                 position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 4294967295),
                 encrypted_note BLOB NOT NULL CHECK (length(encrypted_note) = 148),
-                payments BLOB CHECK (length(payments) = 32),
-                witnesses BLOB CHECK (length(witnesses) = 32),
+                directory BLOB CHECK (length(directory) = 32),
+                companion BLOB CHECK (length(companion) = 32),
                 ordinal INTEGER CHECK (ordinal BETWEEN 0 AND 4294967295),
                 witness BLOB CHECK (length(witness) = 512),
                 witness_height INTEGER CHECK (witness_height BETWEEN 0 AND 4294967295),
                 witness_hash BLOB CHECK (length(witness_hash) = 32),
                 witness_size INTEGER CHECK (witness_size BETWEEN 0 AND 4294967296),
                 PRIMARY KEY (txid, action_index),
-                CHECK ((payments IS NULL) = (ordinal IS NULL)
-                    AND (payments IS NULL) = (witnesses IS NULL)),
-                CHECK ((witness IS NULL OR payments IS NOT NULL)
+                CHECK ((directory IS NULL) = (ordinal IS NULL)
+                    AND (directory IS NULL) = (companion IS NULL)),
+                CHECK ((witness IS NULL OR directory IS NOT NULL)
                     AND (witness IS NULL) = (witness_height IS NULL)
                     AND (witness IS NULL) = (witness_hash IS NULL)
                     AND (witness IS NULL) = (witness_size IS NULL))
@@ -2217,7 +2218,11 @@ CREATE TABLE transparent_tx_display_outputs (
 )"#;
 
 /// Account cancellation, restore and manual progress. `receive_end` is the exclusive end of
-/// receive indexes enrolled for automatic discovery. It never shrinks.
+/// receive indexes enrolled for automatic discovery. It never shrinks. `filter_height` and
+/// `filter_hash` are the account marker, the block through which filters were read (see
+/// `restore::queue::record_filter_span`); unset, filters start at activation. `used` is the
+/// use marker: evidence the account used one-time addresses (see `restore::queue::mark_used`).
+/// It is never cleared.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str = "CREATE TABLE ironwood_one_time_recovery (
                 account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
                 enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
@@ -2226,7 +2231,6 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str = "CREATE TABLE ironwood
                     CHECK (length(history_revision) = 8),
                 filter_height INTEGER CHECK (filter_height BETWEEN 0 AND 4294967295),
                 filter_hash BLOB CHECK (length(filter_hash) = 32),
-                skipped_height INTEGER CHECK (skipped_height BETWEEN 0 AND 4294967295),
                 restore_height INTEGER CHECK (restore_height BETWEEN 0 AND 4294967295),
                 restore_next BLOB NOT NULL DEFAULT X'0000000000000000' CHECK (length(restore_next) = 8),
                 restore_gap INTEGER NOT NULL DEFAULT 0 CHECK (restore_gap BETWEEN 0 AND 4),
@@ -2238,5 +2242,6 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_RECOVERY: &str = "CREATE TABLE ironwood
                 manual_height INTEGER CHECK (manual_height BETWEEN 0 AND 4294967295),
                 receive_end BLOB NOT NULL DEFAULT X'0000000000000000' CHECK (length(receive_end) = 8),
                 upgrade_required INTEGER NOT NULL DEFAULT 0 CHECK (upgrade_required IN (0, 1)),
+                used INTEGER NOT NULL DEFAULT 0 CHECK (used IN (0, 1)),
                 CHECK ((filter_height IS NULL) = (filter_hash IS NULL))
             )";
