@@ -1723,6 +1723,35 @@ pub(crate) fn reset<P: Parameters>(
     correct(conn, params, owner.0, current.history_revision, height)
 }
 
+/// Starts a history check of `account` that reads every watched address again from its
+/// history start, after voiding its history results (see [`reset`]), or resumes an
+/// unfinished one, which voided them when it started, with the history it has kept since.
+pub(crate) fn recheck<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    account: AccountUuid,
+    publication: RecoveryPublication,
+) -> Result<bool, SqliteClientError> {
+    let unfinished = match one_time_account(conn, params, account)? {
+        Some(owner) => conn
+            .query_row(
+                &format!(
+                    "SELECT {MANUAL_UNFINISHED} FROM ironwood_one_time_recovery
+                     WHERE account_id = ?1"
+                ),
+                [owner.0],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false),
+        None => false,
+    };
+    if !unfinished {
+        reset(conn, params, account)?;
+    }
+    manual(conn, params, account, publication, None)
+}
+
 /// Backs off a failed request without counting it as an empty or completed history.
 pub(crate) fn defer<P: Parameters>(
     conn: &Connection,

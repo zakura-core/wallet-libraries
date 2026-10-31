@@ -1147,3 +1147,83 @@ fn receive_hand_out_checks_the_marker_against_the_live_tip() {
     assert_eq!(prepare(&mut st, saved), Ok(receive(0)));
     assert_eq!(prepare(&mut st, live), Ok(receive(0)));
 }
+
+/// A wallet-wide history check forgets each account's history in the transaction that
+/// starts it. Account A holds a found payment waiting for admission, and account B saved a
+/// newer history revision than the publication, so B refuses it: nothing starts, and A's
+/// payment and history are as they were. Once B accepts, both start, and A's new check
+/// reads its history again from the start.
+#[test]
+fn a_refused_history_check_leaves_every_account_unchanged() {
+    let (mut st, _) = waiting_witness_in(scanned_wallet());
+    let account = st.test_account().unwrap().id();
+    let born = st.latest_cached_block().unwrap().chain_state().clone();
+    let birthday = zcash_client_backend::data_api::AccountBirthday::from_parts(born, None);
+    let db = st.wallet_mut().db_mut();
+    let (other, _) = db
+        .create_account("other", &SecretVec::new(vec![9; 32]), &birthday, None)
+        .unwrap();
+    db.enable_one_time_recovery(other).unwrap();
+    let revise = |st: &State, revision: u64| {
+        exec(
+            st.wallet().conn(),
+            "UPDATE ironwood_one_time_recovery SET history_revision = ?1
+             WHERE account_id = (SELECT id FROM accounts WHERE uuid = ?2)",
+            rusqlite::params![revision.to_be_bytes(), other.0],
+        );
+    };
+    revise(&st, 1);
+    let snapshot = |st: &State| {
+        let lookups: Vec<(i64, Option<u32>, u8, Option<u32>, Option<u32>, bool)> = rows(
+            st.wallet().conn(),
+            "SELECT one_time_key_id, target_height, reasons, done_height, done_from,
+                read_complete FROM ironwood_one_time_lookups ORDER BY one_time_key_id",
+            [],
+        );
+        (status(st.wallet().db(), account), candidates(st), lookups)
+    };
+    let before = snapshot(&st);
+    assert_eq!((before.0.awaiting_admission, before.1), (1, 1));
+    let publication = publication_at(&st, tip(&st).height);
+    let refused = st
+        .wallet_mut()
+        .db_mut()
+        .recheck_one_time_history_for(&[account, other], publication)
+        .unwrap();
+    assert_eq!(refused, Some(other));
+    assert_eq!(snapshot(&st), before);
+    revise(&st, 0);
+    let started = st
+        .wallet_mut()
+        .db_mut()
+        .recheck_one_time_history_for(&[account, other], publication)
+        .unwrap();
+    assert_eq!(started, None);
+    let after = status(st.wallet().db(), account);
+    assert!(after.manual.is_some_and(|m| m.active));
+    assert_eq!((after.awaiting_admission, candidates(&st)), (0, 0));
+}
+
+/// An unfinished history check resumes with the history it kept: rechecking doesn't forget
+/// the payment it found.
+#[test]
+fn rechecking_resumes_an_unfinished_history_check() {
+    let (mut st, _) = waiting_witness_in(scanned_wallet());
+    let account = st.test_account().unwrap().id();
+    let publication = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.check_one_time_history(account, publication, None)
+            .unwrap()
+    );
+    db.cancel_one_time_history(account).unwrap();
+    assert_eq!(
+        db.recheck_one_time_history_for(&[account], publication)
+            .unwrap(),
+        None
+    );
+    assert_eq!(candidates(&st), 1);
+    let state = status(st.wallet().db(), account);
+    assert!(state.manual.is_some_and(|m| m.active));
+    assert_eq!(state.awaiting_admission, 1);
+}

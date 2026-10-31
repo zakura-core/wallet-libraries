@@ -40,6 +40,12 @@ and this library adheres to Rust's notion of
   address needs the account's filter marker within 10 blocks of the newer of
   that tip and the saved chain tip, so a wallet no longer has to save the live
   tip with `update_chain_tip` first. Resuming a live draft is unchanged.
+- `WalletDb::recheck_one_time_history_for` replaces
+  `WalletDb::check_one_time_history_for`. Each account's new history check
+  first forgets its history results, as `reset_one_time_history` does, in the
+  same transaction that starts the batch, so an account refusing the
+  publication rolls back every reset too. An account whose check is unfinished
+  resumes it with the history it kept.
 
 ## [0.1.0-rc9.6] - 2026-10-30
 

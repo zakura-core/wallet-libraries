@@ -4745,14 +4745,14 @@ fn a_batch_history_check_starts_all_jobs_or_none() {
     };
     let db = st.wallet_mut().db_mut();
     let refused = db
-        .check_one_time_history_for(&[account, other], publication)
+        .recheck_one_time_history_for(&[account, other], publication)
         .unwrap();
     assert_eq!(refused, Some(other));
     assert!(!active(&st, account) && !active(&st, other));
     let db = st.wallet_mut().db_mut();
     db.enable_one_time_recovery(other).unwrap();
     assert_eq!(
-        db.check_one_time_history_for(&[account, other], publication)
+        db.recheck_one_time_history_for(&[account, other], publication)
             .unwrap(),
         None
     );

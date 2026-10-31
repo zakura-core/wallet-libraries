@@ -178,17 +178,21 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     }
 
     /// Starts or resumes the history check of every account in `accounts` through one
-    /// captured publication, each up to its automatic receive end, in one transaction. If
-    /// any account refuses, as one not enabled or one whose chain no longer holds the
-    /// publication's end does, none start: this returns that account, and nothing changes.
-    pub fn check_one_time_history_for(
+    /// captured publication, each up to its automatic receive end, in one transaction. A
+    /// new check first forgets the account's history results, as
+    /// [`Self::reset_one_time_history`] does, so it reads every watched address again from
+    /// its history start rather than trusting earlier answers. An unfinished check resumes
+    /// with the history it kept. If any account refuses, as one not enabled or one whose
+    /// chain no longer holds the publication's end does, none start and nothing is reset:
+    /// this returns that account, and nothing changes.
+    pub fn recheck_one_time_history_for(
         &mut self,
         accounts: &[AccountUuid],
         publication: RecoveryPublication,
     ) -> Result<Option<AccountUuid>, SqliteClientError> {
         let started = self.transactionally(|db| {
             for account in accounts {
-                if !queue::manual(db.conn.0, db.params, *account, publication, None)
+                if !queue::recheck(db.conn.0, db.params, *account, publication)
                     .map_err(Batch::Failed)?
                 {
                     return Err(Batch::Refused(*account));
