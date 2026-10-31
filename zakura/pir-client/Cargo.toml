@@ -123,7 +123,8 @@ zcash_primitives = { workspace = true, optional = true }
 zcash_protocol = { workspace = true, optional = true }
 orchard = { workspace = true, optional = true, features = ["zip32-addresses"] }
 zcash_note_encryption = { workspace = true, optional = true }
-futures-util = { version = "0.3", optional = true }
+# Stream unfolding and collection do not need procedural async macros.
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"], optional = true }
 base64 = { version = "0.22", optional = true }
 hex = { version = "0.4", optional = true }
 rand = { version = "0.8", optional = true }

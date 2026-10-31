@@ -79,7 +79,8 @@ secp256k1 = { workspace = true, optional = true }
 
 # - Sync engine
 async-trait = { version = "0.1", optional = true }
-futures-util = { version = "0.3", optional = true }
+# Only Tor's exchange joins need the procedural async macros.
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"], optional = true }
 
 # - Note commitment trees
 incrementalmerkletree.workspace = true
@@ -250,6 +251,7 @@ tor = [
     "arti-client/onion-service-client",
     "dep:fs-mistrust",
     "dep:futures-util",
+    "futures-util/async-await-macro",
     "dep:http-body-util",
     "dep:hyper",
     "dep:hyper-util",
