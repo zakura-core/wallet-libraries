@@ -139,21 +139,23 @@ fn admitted(
 /// its reasons (callers whose event invalidates settled history add [`INVALIDATED`]):
 /// checked progress, any cursor and a completion reaching that height are void.
 /// `bad_answer_at`, the time an answer proved bad, backs the next attempt off as a failed
-/// one (see [`backoff`]). Without it, the lookup is due at once.
+/// one (see [`backoff`]), unless the lookup already waits past then, so several bad answers
+/// from one read count once. Without it, the lookup is due at once.
 fn rewind_lookup(
     conn: &Connection,
     key: i64,
     height: u32,
     bad_answer_at: Option<i64>,
 ) -> Result<(), SqliteClientError> {
-    let (reasons, attempts): (Option<u8>, u32) = conn
+    let (reasons, attempts, waits): (Option<u8>, u32, i64) = conn
         .query_row(
-            "SELECT reasons, attempts FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+            "SELECT reasons, attempts, next_attempt_at FROM ironwood_one_time_lookups
+             WHERE one_time_key_id = ?1",
             [key],
-            |r| Ok((Some(r.get(0)?), r.get(1)?)),
+            |r| Ok((Some(r.get(0)?), r.get(1)?, r.get(2)?)),
         )
         .optional()?
-        .unwrap_or((None, 0));
+        .unwrap_or((None, 0, 0));
     enqueue(
         conn,
         key,
@@ -161,12 +163,14 @@ fn rewind_lookup(
         height,
         reasons.filter(|r| *r & 3 != 0).unwrap_or(AUTOMATIC),
     )?;
-    let (attempts, retry_at) = bad_answer_at.map_or((0, 0), |now| {
-        (
+    let (attempts, retry_at) = match bad_answer_at {
+        None => (0, 0),
+        Some(now) if waits > now => (attempts, waits),
+        Some(now) => (
             attempts.saturating_add(1).min(30),
             now.saturating_add(backoff(attempts)),
-        )
-    });
+        ),
+    };
     conn.execute(
         &format!(
             "UPDATE ironwood_one_time_lookups SET start_height = MIN(start_height, ?2),
@@ -183,9 +187,10 @@ fn rewind_lookup(
 }
 
 /// Seconds a lookup waits after a failure when `attempts` earlier failures, transport or bad
-/// answer, count against its obligation: a minute, doubling up to twelve hours. Reading a
-/// page doesn't clear the count, so a directory that keeps serving a bad answer backs off.
-/// A new or raised obligation and a history check clear it.
+/// answer, count against its obligation: a minute, doubling up to twelve hours. A page read
+/// clears the count only when its admission found no bad answer for the key (see
+/// [`record_lookup`]), so a directory that keeps serving one backs off. A new or raised
+/// obligation and a history check also clear it.
 fn backoff(attempts: u32) -> i64 {
     (60i64 << attempts.min(10)).min(43_200)
 }
@@ -1690,6 +1695,12 @@ pub(crate) fn record_lookup<P: Parameters>(
         Ok(())
     })?;
     admit(conn, params, sessions, account, now)?;
+    // A read whose answers all held clears earlier failures; a bad one left a retry time.
+    conn.execute(
+        "UPDATE ironwood_one_time_lookups SET attempts = 0
+         WHERE one_time_key_id = ?1 AND next_attempt_at <= ?2",
+        params![id, now],
+    )?;
     progress(conn, params, account)?;
     Ok(true)
 }
