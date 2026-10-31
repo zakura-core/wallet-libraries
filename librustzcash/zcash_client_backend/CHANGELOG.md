@@ -9,6 +9,11 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- The embedded Tor configuration no longer implicitly enables an unused
+  persistent onion-key store. Ordinary Tor and onion connections are retained.
+  Applications using restricted onion services with keys in that store must
+  explicitly enable `keymgr` on the same Arti package and source revision.
+
 - The `tor` feature uses Zakura's embedded Arti 0.47 fork. The `DormantMode`
   re-export, `Error::Tor` payload and its `From` conversion now use
   `zakura-arti-client` types. The permission-builder closures accepted by
