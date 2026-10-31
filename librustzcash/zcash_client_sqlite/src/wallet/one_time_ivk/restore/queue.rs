@@ -644,8 +644,8 @@ fn complete_marker(
 /// after it, so a fresh account's first address doesn't wait for the publication to reach
 /// the wallet's tip. Only a monitored receive key with no reservation, operation, receipt
 /// or candidate qualifies, whose lookup is purely automatic with no progress. Any other
-/// obligation, such as a hit, a correction, a manual check, a refund or an index exposed
-/// after the marker, keeps its target.
+/// obligation, such as history a hit, correction or rewind invalidated, a manual check, a
+/// refund or an index exposed after the marker, keeps its target.
 fn first_bootstraps(conn: &Connection, owner: i64, end: u32) -> Result<bool, SqliteClientError> {
     let lowered = conn.execute(
         &format!(

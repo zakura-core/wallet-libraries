@@ -1069,3 +1069,52 @@ fn a_first_recovery_issues_within_ten_blocks_of_the_newest_tip() {
         assert_eq!(reserve_receive(&mut st, account), (receive(0), 0));
     }
 }
+
+/// A correction or a server reset before an account's first accepted publication leaves
+/// nothing checked, so its untouched bootstraps still read only through that publication.
+/// The hit the voided filters found keeps its target, so the obligations those events
+/// carry are kept.
+#[test]
+fn a_reset_before_the_first_publication_keeps_its_obligations() {
+    let mut st = restored_wallet();
+    st.generate_and_scan_empty_blocks(4);
+    let account = st.test_account().unwrap().id();
+    let tip_height = tip(&st).height;
+    st.wallet_mut()
+        .db_mut()
+        .enable_one_time_recovery(account)
+        .unwrap();
+    assert_eq!(
+        advance(&mut st, account, &[(tip_height, receive(1))]),
+        FilterOutcome::Committed
+    );
+    let corrected = span_over(st.wallet().db(), 1, &blocks_above(&st, activation(&st) - 1));
+    assert_eq!(
+        record(&mut st, account, &corrected, &[]),
+        FilterOutcome::Restart
+    );
+    st.wallet_mut()
+        .db_mut()
+        .reset_one_time_history(account)
+        .unwrap();
+    let publication = RecoveryPublication {
+        history_revision: 1,
+        ..publication_at(&st, tip_height - 2)
+    };
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, false)
+            .unwrap()
+    );
+    let end = publication.end.height;
+    assert_eq!(work_of(&st, receive(1)).through, tip_height);
+    let state = status_at(&st, account, end);
+    assert_eq!(state.filter_frontier.map(|f| f.height), Some(end));
+    let runnable: Vec<_> = state
+        .lookups
+        .iter()
+        .map(|w| (w.work.key, w.through))
+        .collect();
+    assert_eq!(runnable, [0, 2, 3].map(|i| (receive(i), end)));
+}
