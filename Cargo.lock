@@ -810,14 +810,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "17933e749f2502cfcd1c27519292fbbea22e8fc64ce680e863f855e8cd8cce23"
 dependencies = [
  "heck",
- "indexmap 1.9.3",
- "itertools 0.10.5",
+ "indexmap",
+ "itertools 0.15.0",
  "proc-macro-crate",
  "proc-macro2",
  "quote",
  "sha3",
- "strum 0.27.2",
- "syn 2.0.119",
+ "strum",
+ "syn 3.0.6",
  "unicode-ident",
  "void",
 ]
@@ -1382,7 +1382,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "http",
- "indexmap 2.14.2",
+ "indexmap",
  "slab",
  "tokio",
  "tokio-util",
@@ -1436,19 +1436,13 @@ dependencies = [
  "ff",
  "group",
  "halo2_legacy_pdqsort",
- "indexmap 2.14.2",
+ "indexmap",
  "maybe-rayon",
  "pasta_curves",
  "rand 0.10.3",
  "rand_core 0.10.1",
  "tracing",
 ]
-
-[[package]]
-name = "hashbrown"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
 
 [[package]]
 name = "hashbrown"
@@ -1824,16 +1818,6 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "1.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd070e393353796e801d209ad339e89596eb4c8d430d18ede6a1cced8fafbd99"
-dependencies = [
- "autocfg",
- "hashbrown 0.12.3",
-]
-
-[[package]]
-name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
@@ -1878,15 +1862,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37209be0ad225457e63814401415e748e2453a5297f9b637338f5fb8afa4ec00"
 dependencies = [
  "ipnet",
-]
-
-[[package]]
-name = "itertools"
-version = "0.10.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
-dependencies = [
- "either",
 ]
 
 [[package]]
@@ -2438,7 +2413,7 @@ checksum = "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455"
 dependencies = [
  "fixedbitset",
  "hashbrown 0.15.5",
- "indexmap 2.14.2",
+ "indexmap",
 ]
 
 [[package]]
@@ -3281,7 +3256,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85a66556ccb695e22d08620703a9526806e533de0094fe993896932592ba3a6c"
 dependencies = [
  "daggy",
- "indexmap 2.14.2",
+ "indexmap",
  "log",
  "thiserror 2.0.21",
  "uuid",
@@ -3612,32 +3587,11 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "strum"
-version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
-dependencies = [
- "strum_macros 0.27.2",
-]
-
-[[package]]
-name = "strum"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
 dependencies = [
- "strum_macros 0.28.0",
-]
-
-[[package]]
-name = "strum_macros"
-version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
+ "strum_macros",
 ]
 
 [[package]]
@@ -3894,7 +3848,7 @@ version = "0.25.15+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1340ea94a5856333492c9064b02c778b191dd2c853778d9609debdcdfea3a614"
 dependencies = [
- "indexmap 2.14.2",
+ "indexmap",
  "toml_datetime",
  "toml_parser",
  "winnow",
@@ -3986,7 +3940,7 @@ checksum = "ebe5ef63511595f1344e2d5cfa636d973292adc0eec1f0ad45fae9f0851ab1d4"
 dependencies = [
  "futures-core",
  "futures-util",
- "indexmap 2.14.2",
+ "indexmap",
  "pin-project-lite",
  "slab",
  "sync_wrapper",
@@ -5587,7 +5541,7 @@ dependencies = [
  "paste",
  "serde",
  "serde-value",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.21",
  "tracing",
  "void",
@@ -5695,7 +5649,7 @@ dependencies = [
  "serde_json",
  "signature",
  "static_assertions",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.21",
  "time",
  "tracing",
@@ -5732,7 +5686,7 @@ dependencies = [
  "humantime",
  "paste",
  "static_assertions",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.21",
  "tracing",
  "void",
@@ -5756,7 +5710,7 @@ dependencies = [
  "pin-project",
  "rand 0.10.3",
  "serde",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.21",
  "tracing",
  "zakura-safelog",
@@ -5791,7 +5745,7 @@ dependencies = [
  "futures",
  "itertools 0.15.0",
  "rand 0.10.3",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.21",
  "tracing",
  "zakura-safelog",
@@ -5859,7 +5813,7 @@ dependencies = [
  "hex",
  "itertools 0.15.0",
  "serde",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.21",
  "zakura-caret",
  "zakura-safelog",
@@ -5985,7 +5939,7 @@ dependencies = [
  "itertools 0.15.0",
  "rand 0.10.3",
  "serde",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.21",
  "time",
  "tracing",
@@ -6027,7 +5981,7 @@ dependencies = [
  "serde",
  "signature",
  "smallvec",
- "strum 0.28.0",
+ "strum",
  "subtle",
  "thiserror 2.0.21",
  "time",
@@ -6103,7 +6057,7 @@ dependencies = [
  "rand_core 0.10.1",
  "smallvec",
  "static_assertions",
- "strum 0.28.0",
+ "strum",
  "subtle",
  "thiserror 2.0.21",
  "tokio",
