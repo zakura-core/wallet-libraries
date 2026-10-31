@@ -46,6 +46,9 @@ and this library adheres to Rust's notion of
   same transaction that starts the batch, so an account refusing the
   publication rolls back every reset too. An account whose check is unfinished
   resumes it with the history it kept.
+- Consolidation's additional Ironwood candidates stop rebuilding one-time-key
+  notes once they hold their half of the limit, so a proposal costs about its
+  limit rather than every unspent one-time-key note. The selection is unchanged.
 
 ## [0.1.0-rc9.6] - 2026-10-30
 
