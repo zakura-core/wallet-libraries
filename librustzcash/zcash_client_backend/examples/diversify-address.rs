@@ -1,4 +1,4 @@
-use gumdrop::Options;
+use clap::Parser;
 use sapling::zip32::ExtendedFullViewingKey;
 use zcash_keys::encoding::{decode_extended_full_viewing_key, encode_payment_address};
 use zcash_protocol::constants::{mainnet, testnet};
@@ -23,28 +23,25 @@ fn encode_diversifier_index(di: &DiversifierIndex) -> u128 {
     (*di).into()
 }
 
-#[derive(Debug, Options)]
+#[derive(Debug, Parser)]
+#[command(name = "diversify-address")]
 struct MyOptions {
-    #[options(help = "Print this help message and exit.")]
-    help: bool,
-
-    #[options(
-        free,
+    #[arg(
         help = "The Sapling viewing key to generate diversified addresses from",
-        parse(try_from_str = "parse_viewing_key")
+        value_parser = parse_viewing_key
     )]
     viewing_key: Option<(ExtendedFullViewingKey, bool)>,
 
-    #[options(
-        free,
+    #[arg(
         help = "The index of the diversified address to generate (default 0). Some indices don't have a corresponding address.",
-        parse(try_from_str = "parse_diversifier_index")
+        default_value = "0",
+        value_parser = parse_diversifier_index
     )]
     diversifier_index: DiversifierIndex,
 }
 
 fn main() {
-    let opts = MyOptions::parse_args_default_or_exit();
+    let opts = MyOptions::parse();
 
     let (extfvk, is_mainnet) = if let Some(res) = opts.viewing_key {
         res
