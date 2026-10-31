@@ -133,11 +133,10 @@ class DependencyBoundaryTests(unittest.TestCase):
 
     def test_fresh_component_and_facade_consumers_are_checked(self):
         consumers = self.run_probes()
-        self.assertEqual(set(consumers), {"wallet", "facade-default", "facade-zakura", "facade-lrz"})
+        self.assertEqual(set(consumers), {"wallet", "facade-default", "facade-zakura"})
         self.assertNotIn("default-features", consumers["facade-default"])
-        for mode in ("zakura", "lrz"):
-            self.assertIn(f'features = ["{mode}"]', consumers["facade-" + mode])
-            self.assertIn("default-features = false", consumers["facade-" + mode])
+        self.assertIn('features = ["zakura"]', consumers["facade-zakura"])
+        self.assertIn("default-features = false", consumers["facade-zakura"])
         for name in consumers:
             for ownership in (False, True):
                 with self.subTest(consumer=name, ownership=ownership), self.assertRaises(SystemExit):
