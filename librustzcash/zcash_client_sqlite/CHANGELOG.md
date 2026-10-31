@@ -14,11 +14,10 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
-- Use `schemerz` 0.3 and `schemerz-rusqlite` 0.371 for wallet migrations,
-  sharing the dependency family required by the LRZ facade. Applications naming
-  migration errors or implementing external migrations must use these versions
-  for `MigratorError` and `RusqliteMigration` respectively. Migration UUIDs and
-  the database schema are unchanged.
+- Use `schemerz` 0.3 and `schemerz-rusqlite` 0.371 for wallet migrations.
+  Applications naming migration errors or implementing external migrations must
+  use these versions for `MigratorError` and `RusqliteMigration` respectively.
+  Migration UUIDs and the database schema are unchanged.
 
 - Storing a received transparent output no longer scans `transparent_spend_map`
   to learn whether a wallet transaction already spends it.
