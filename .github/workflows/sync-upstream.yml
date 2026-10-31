@@ -104,7 +104,7 @@ jobs:
         if: steps.sync.outputs.conflicts != 'true'
         run: ./scripts/verify-zakura-graph.sh
 
-      - name: Verify both facade backends
+      - name: Verify the Zakura facade
         if: steps.sync.outputs.conflicts != 'true'
         run: ./scripts/verify-wallet-lib-modes.sh
 
