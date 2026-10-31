@@ -611,6 +611,13 @@ mod tests {
             .with_block_cache(testing::BlockCache::new())
             .with_account_from_sapling_activation(BlockHash([0; 32]))
             .build();
+        // Keep the test wrapper on SQLite's stored-encoding fast path.
+        assert!(
+            st.wallet()
+                .get_unified_full_viewing_key_encodings()
+                .unwrap()
+                .is_some()
+        );
         let fvk_a = SaplingPoolTester::test_account_fvk(&st);
         let usk_b =
             UnifiedSpendingKey::from_seed(st.network(), &[7; 32], zip32::AccountId::ZERO).unwrap();
