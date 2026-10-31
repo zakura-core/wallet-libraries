@@ -100,7 +100,7 @@ zcash_proofs = { workspace = true, optional = true }
 #    changes to error handling.
 # Directory downloads retain mandatory deflate/identity support without the
 # optional XZ/Zstandard codecs and their native builds.
-arti-client = { version = "0.35", default-features = false, features = ["rustls", "tokio"], optional = true }
+arti-client = { workspace = true, optional = true }
 fs-mistrust = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true, features = ["client", "http1"] }
 serde_json = { workspace = true, optional = true }
@@ -133,7 +133,8 @@ hyper-util = { workspace = true, optional = true }
 rand = { workspace = true, features = ["sys_rng", "thread_rng"] }
 rand_08 = { package = "rand", version = "0.8", optional = true }
 serde = { workspace = true, optional = true }
-tokio-rustls = { workspace = true, optional = true }
+# Arti leaves provider selection to its caller; retain the wallet's Ring backend.
+tokio-rustls = { workspace = true, features = ["ring"], optional = true }
 webpki-roots = { workspace = true, optional = true }
 
 # Dependencies used internally:
