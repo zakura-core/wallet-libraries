@@ -11,11 +11,16 @@ and this library adheres to Rust's notion of
 
 - Migration `transparent_spend_map_prevout_index` indexes `transparent_spend_map`
   by `(prevout_txid, prevout_output_index)`.
+- `WalletDb` implements `WalletRead::get_unified_full_viewing_key_encodings` with the stored encodings, so a `zcash_client_backend` `ScanningKeyCache` decodes an account's viewing key only when it is new or has changed.
 
 ### Changed
 
 - Storing a received transparent output no longer scans `transparent_spend_map`
   to learn whether a wallet transaction already spends it.
+
+### Migrating
+
+No change is required. To benefit, keep one `zcash_client_backend` `ScanningKeyCache` per `WalletDb` file and scan with `scan_cached_blocks_with_cache` instead of `scan_cached_blocks`; see that crate's changelog for when to clear the cache. A wallet that is reopened under a new path, such as after a reset, should start a new cache.
 
 ## [0.1.0-rc9.6] - 2026-10-30
 

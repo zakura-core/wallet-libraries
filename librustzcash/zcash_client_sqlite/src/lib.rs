@@ -1735,6 +1735,12 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         wallet::get_unified_full_viewing_keys(self.conn.borrow(), &self.params)
     }
 
+    fn get_unified_full_viewing_key_encodings(
+        &self,
+    ) -> Result<Option<HashMap<Self::AccountId, String>>, Self::Error> {
+        wallet::get_unified_full_viewing_key_encodings(self.conn.borrow()).map(Some)
+    }
+
     fn get_memo(&self, note_id: NoteId) -> Result<Option<Memo>, Self::Error> {
         let sent_memo = wallet::get_sent_memo(self.conn.borrow(), note_id)?;
         if sent_memo.is_some() {

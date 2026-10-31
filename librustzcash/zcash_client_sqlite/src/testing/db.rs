@@ -518,6 +518,12 @@ impl WalletRead for TestDb {
         self.wallet_db.get_unified_full_viewing_keys()
     }
 
+    fn get_unified_full_viewing_key_encodings(
+        &self,
+    ) -> Result<Option<HashMap<Self::AccountId, String>>, Self::Error> {
+        self.wallet_db.get_unified_full_viewing_key_encodings()
+    }
+
     fn get_memo(&self, note_id: NoteId) -> Result<Option<Memo>, Self::Error> {
         self.wallet_db.get_memo(note_id)
     }

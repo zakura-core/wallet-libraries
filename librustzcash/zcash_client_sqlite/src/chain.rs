@@ -593,6 +593,65 @@ mod tests {
         testing::pool::scan_cached_blocks_detects_spends_out_of_order::<OrchardPoolTester>()
     }
 
+    /// A scanning key cache kept across scans finds the notes of an account imported
+    /// between them, and stops scanning for an account deleted between them.
+    #[test]
+    fn scanning_key_cache_follows_account_changes() {
+        use zcash_client_backend::data_api::{
+            Account as _, AccountBirthday, AccountPurpose, WalletRead, WalletWrite,
+            chain::ScanningKeyCache,
+            testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+        };
+        use zcash_keys::keys::UnifiedSpendingKey;
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(testing::db::TestDbFactory::default())
+            .with_block_cache(testing::BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        // Keep the test wrapper on SQLite's stored-encoding fast path.
+        assert!(
+            st.wallet()
+                .get_unified_full_viewing_key_encodings()
+                .unwrap()
+                .is_some()
+        );
+        let fvk_a = SaplingPoolTester::test_account_fvk(&st);
+        let usk_b =
+            UnifiedSpendingKey::from_seed(st.network(), &[7; 32], zip32::AccountId::ZERO).unwrap();
+        let fvk_b = SaplingPoolTester::sk_to_fvk(SaplingPoolTester::usk_to_sk(&usk_b));
+        let value = Zatoshis::const_from_u64(5);
+        let mut cache = ScanningKeyCache::new();
+
+        let (h1, _, _) = st.generate_next_block(&fvk_a, AddressType::DefaultExternal, value);
+        let summary = st.scan_cached_blocks_with_cache(h1, 1, &mut cache);
+        assert_eq!(summary.received_sapling_note_count(), 1);
+
+        let birthday = AccountBirthday::from_sapling_activation(st.network(), BlockHash([0; 32]));
+        let account_b = st
+            .wallet_mut()
+            .import_account_ufvk(
+                "B",
+                &usk_b.to_unified_full_viewing_key(),
+                &birthday,
+                AccountPurpose::ViewOnly,
+                None,
+            )
+            .unwrap()
+            .id();
+        let (h2, _, _) = st.generate_next_block(&fvk_b, AddressType::DefaultExternal, value);
+        let summary = st.scan_cached_blocks_with_cache(h2, 1, &mut cache);
+        assert_eq!(summary.received_sapling_note_count(), 1);
+
+        st.wallet_mut().delete_account(account_b).unwrap();
+        assert!(st.wallet().get_account(account_b).unwrap().is_none());
+        let (h3, _, _) = st.generate_next_block(&fvk_b, AddressType::DefaultExternal, value);
+        let summary = st.scan_cached_blocks_with_cache(h3, 1, &mut cache);
+        assert_eq!(summary.received_sapling_note_count(), 0);
+    }
+
     /// Ordinary sync proceeds even when receiver recovery has pending network work.
     #[test]
     fn private_receiver_work_never_blocks_ordinary_sync() {

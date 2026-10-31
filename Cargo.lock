@@ -7459,6 +7459,7 @@ dependencies = [
  "zakura-zip321",
  "zcash_encoding 0.4.0",
  "zcash_script",
+ "zeroize",
  "zip32 0.2.1",
 ]
 

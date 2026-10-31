@@ -87,7 +87,10 @@ use super::{
     SentTransaction, TransactionDataRequest, TransactionStatus, WalletCommitmentTrees, WalletRead,
     WalletSummary, WalletTest, WalletWrite, Zip32Derivation,
     anchor_retention::AnchorRetentionInterval,
-    chain::{BlockSource, ChainState, CommitmentTreeRoot, ScanSummary, scan_cached_blocks},
+    chain::{
+        BlockSource, ChainState, CommitmentTreeRoot, ScanSummary, ScanningKeyCache,
+        scan_cached_blocks, scan_cached_blocks_with_cache,
+    },
     enhance_pir::EnhancePirRead,
     error::Error,
     scanning::{ScanPriority, ScanRange},
@@ -1163,6 +1166,31 @@ where
             &prior_cached_block.chain_state,
             limit,
         )
+    }
+
+    /// Invokes [`scan_cached_blocks_with_cache`] with the given arguments, expecting success.
+    pub fn scan_cached_blocks_with_cache(
+        &mut self,
+        from_height: BlockHeight,
+        limit: usize,
+        cache: &mut ScanningKeyCache<<DbT as WalletRead>::AccountId>,
+    ) -> ScanSummary {
+        let prior_cached_block = self
+            .latest_cached_block_below_height(from_height)
+            .cloned()
+            .unwrap_or_else(|| CachedBlock::none(from_height - 1));
+
+        let result = scan_cached_blocks_with_cache(
+            &self.network,
+            self.cache.block_source(),
+            &mut self.wallet_data,
+            from_height,
+            &prior_cached_block.chain_state,
+            limit,
+            cache,
+        );
+        assert_matches!(result, Ok(_));
+        result.unwrap()
     }
 
     /// Invokes [`decrypt_cached_blocks`] with the given arguments, expecting success.
