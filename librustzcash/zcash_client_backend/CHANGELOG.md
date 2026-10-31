@@ -9,10 +9,15 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
-- The embedded Tor configuration no longer implicitly enables an unused
-  persistent onion-key store. Ordinary Tor and onion connections are retained.
-  Applications using restricted onion services with keys in that store must
+- The `tor` feature pins the streamlined embedded Arti snapshot `e5193a0b`.
+  Embedded bootstrap, Tokio/Rustls/Ring, ordinary Tor and onion connections,
+  directory/storage builders, and permission policy are retained. Applications
+  using restricted onion services with persistent authentication keys must
   explicitly enable `keymgr` on the same Arti package and source revision.
+  The fork removes unused hosting, RPC, bridge/transport management,
+  configuration-file loading, alternative TLS/runtime backends, and obsolete
+  helper packages; its per-crate `semver.md` files inventory dependency API
+  changes. Wallet-owned Rust declarations and signatures are unchanged.
 
 - The `tor` feature uses Zakura's embedded Arti 0.47 fork. The `DormantMode`
   re-export, `Error::Tor` payload and its `From` conversion now use

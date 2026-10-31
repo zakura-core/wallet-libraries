@@ -160,6 +160,22 @@ def main():
     native_evaluators = {"ipir-native-client", "ipir-sp", "simplepir-kernel", "clap", "env_logger"}
     server_roles = {"zakura-pir-publisher", "zakura-pir-query-server", "zakura-pir-server-core", "zakura-server-chain"}
     wallet_roles = {"ipir-native-client", "zakura-pir-client", "zakura-client-backend", "zakura-client-sqlite", "zakura-protocol", "zakura-transparent", "zakura-orchard"}
+    # The embedded client uses Tokio/Rustls and Rust configuration builders.
+    # Keep removed backends, macro providers and helper packages out of its
+    # production graph, even when another workspace member still needs them.
+    unused_tor_dependencies = {
+        "async_executors", "async-std", "async-native-tls", "smol",
+        "native-tls", "openssl", "openssl-sys", "openssl-probe",
+        "derive_builder_fork_arti", "derive_builder_core_fork_arti",
+        "derive_builder_macro_fork_arti", "darling", "darling_core",
+        "darling_macro", "serde_with", "serde_with_macros", "enum_dispatch",
+        "dirs", "der-parser", "asn1-rs", "asn1-rs-derive", "asn1-rs-impl",
+        "notify", "notify-debouncer-full", "postage", "num_enum",
+        "num_enum_derive", "enumset", "enumset_derive",
+        "zakura-fslock-guard", "zakura-oneshot-fused-workaround",
+        "zakura-retry-error", "zakura-saturating-time", "zakura-tor-keymgr",
+        "zakura-tor-hsservice", "zakura-tor-ptmgr", "zakura-tor-rpcbase",
+    }
     cases = [
         ("scanning", "librustzcash/zcash_client_backend", [], {"nanorand", "futures-core", "futures-sink"}, {"flume"}),
         ("async-scanning", "librustzcash/zcash_client_backend", ["sync-decryptor"], {"nanorand"}, {"flume", "futures-core", "futures-sink", "tokio"}),
@@ -169,7 +185,7 @@ def main():
         ("recovery-types", "zakura/pir-protocol", ["transparent-inputs"], recovery_forbidden | server_roles, {"zakura-protocol"}),
         ("recovery", "zakura/pir-client", ["recovery"], recovery_forbidden | endpoint_stack | server_roles | native_evaluators, {"zakura-pir-protocol"}),
         ("sqlite-default", "librustzcash/zcash_client_sqlite", [], {"rand_distr"}, set()),
-        ("tor", "librustzcash/zcash_client_backend", ["tor"], {"dynosaur", "dynosaur_derive", "trait-variant", "liblzma", "liblzma-sys", "zstd", "zstd-safe", "zstd-sys", "jobserver", "arti-client", "fs-mistrust", "tor-rtcompat", "sysinfo", "criterion-cycles-per-byte", "url", "idna", "idna_adapter", "icu_normalizer", "icu_provider", "figment", "toml", "serde_ignored", "pear", "uncased", "zakura-tor-key-forge", "ssh-key-fork-arti", "ssh-cipher-fork-arti", "ssh-encoding-fork-arti", "p256", "p384", "p521"}, {"zakura-arti-client", "zakura-fs-mistrust", "zakura-tor-rtcompat", "rust_decimal", "flate2", "miniz_oxide", "zakura-tor-hsclient", "ring"}),
+        ("tor", "librustzcash/zcash_client_backend", ["tor"], {"dynosaur", "dynosaur_derive", "trait-variant", "liblzma", "liblzma-sys", "zstd", "zstd-safe", "zstd-sys", "jobserver", "arti-client", "fs-mistrust", "tor-rtcompat", "sysinfo", "criterion-cycles-per-byte", "url", "idna", "idna_adapter", "icu_normalizer", "icu_provider", "figment", "toml", "serde_ignored", "pear", "uncased", "zakura-tor-key-forge", "ssh-key-fork-arti", "ssh-cipher-fork-arti", "ssh-encoding-fork-arti", "p256", "p384", "p521"} | unused_tor_dependencies, {"zakura-arti-client", "zakura-fs-mistrust", "zakura-tor-rtcompat", "rust_decimal", "flate2", "miniz_oxide", "zakura-tor-hsclient", "ring"}),
         ("wallet", "librustzcash/zcash_client_sqlite", ["orchard", "transparent-inputs"], {"prost-build", "tonic-prost-build", "which", "regex", "regex-automata", "regex-syntax"} | pczt_macros, {"rand_distr"}),
         ("pczt", "librustzcash/pczt", [], pczt_macros, {"serde_with"}),
         ("pir", "zakura/pir-client", ["native"], native_evaluators | server_roles | {"sha1"}, {"reinspiring"}),

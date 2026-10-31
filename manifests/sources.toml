@@ -99,9 +99,9 @@ pasta_curves = { package = "zakura-pasta-curves", version = "4.0.0" }
 
 # Keep the embedded Tor client, filesystem policy and runtime on one fork revision.
 # Disabling the optional directory codecs retains deflate and identity support.
-arti-client = { package = "zakura-arti-client", version = "=0.47.0-zakura.1", git = "file:///private/tmp/arti-wallet-20261101-v6-namespaced", rev = "e5193a0bf520d6a33f882f80e9f0ccb43b248ebd", remove_features = ["compression"] }
-fs-mistrust = { package = "zakura-fs-mistrust", version = "=0.16.0-zakura.1", git = "file:///private/tmp/arti-wallet-20261101-v6-namespaced", rev = "e5193a0bf520d6a33f882f80e9f0ccb43b248ebd" }
-tor-rtcompat = { package = "zakura-tor-rtcompat", version = "=0.47.0-zakura.1", git = "file:///private/tmp/arti-wallet-20261101-v6-namespaced", rev = "e5193a0bf520d6a33f882f80e9f0ccb43b248ebd" }
+arti-client = { package = "zakura-arti-client", version = "=0.47.0-zakura.1", git = "https://github.com/zakura-core/arti.git", rev = "e5193a0bf520d6a33f882f80e9f0ccb43b248ebd", remove_features = ["compression"] }
+fs-mistrust = { package = "zakura-fs-mistrust", version = "=0.16.0-zakura.1", git = "https://github.com/zakura-core/arti.git", rev = "e5193a0bf520d6a33f882f80e9f0ccb43b248ebd" }
+tor-rtcompat = { package = "zakura-tor-rtcompat", version = "=0.47.0-zakura.1", git = "https://github.com/zakura-core/arti.git", rev = "e5193a0bf520d6a33f882f80e9f0ccb43b248ebd" }
 
 # Non-renamed ecosystem crates whose public traits changed with the 1.0 crypto
 # family. The generated workspace keeps upstream's other dependency metadata
