@@ -190,11 +190,13 @@ wallet_pir_packages = [
   "witness-types",
 ]
 
-# Crate names that must never appear in a built graph: the crates.io originals
-# of everything `libraries` forks. Any one of them means an edge escaped the
-# rewiring, and two copies of a type that looks identical are not the same type.
+# Crates.io originals of the Common and wallet-layer forks must never enter a
+# built graph. Two copies of a type that looks identical are not the same type.
 [graph]
 forbidden = [
+  "pczt",
+  "zcash_client_backend",
+  "zcash_client_sqlite",
   "orchard",
   "equihash",
   "sapling-crypto",
