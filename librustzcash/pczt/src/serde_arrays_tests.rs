@@ -3,21 +3,49 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 use serde::{Deserialize, Serialize};
 
+const ARRAY_LEN: usize = 64;
+
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct Fixture {
-    #[serde(with = "serde_with::As::<[serde_with::Same; 64]>")]
-    array: [u8; 64],
-    #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 32]>>")]
+    #[serde(
+        serialize_with = "crate::serde_arrays::serialize",
+        deserialize_with = "crate::serde_arrays::deserialize"
+    )]
+    array: [u8; ARRAY_LEN],
+    #[serde(
+        default,
+        serialize_with = "crate::serde_arrays::serialize_option",
+        deserialize_with = "crate::serde_arrays::deserialize_option"
+    )]
     optional_32: Option<[u8; 32]>,
-    #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 43]>>")]
+    #[serde(
+        default,
+        serialize_with = "crate::serde_arrays::serialize_option",
+        deserialize_with = "crate::serde_arrays::deserialize_option"
+    )]
     optional_43: Option<[u8; 43]>,
-    #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 64]>>")]
+    #[serde(
+        default,
+        serialize_with = "crate::serde_arrays::serialize_option",
+        deserialize_with = "crate::serde_arrays::deserialize_option"
+    )]
     optional_64: Option<[u8; 64]>,
-    #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 96]>>")]
+    #[serde(
+        default,
+        serialize_with = "crate::serde_arrays::serialize_option",
+        deserialize_with = "crate::serde_arrays::deserialize_option"
+    )]
     optional_96: Option<[u8; 96]>,
-    #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 192]>>")]
+    #[serde(
+        default,
+        serialize_with = "crate::serde_arrays::serialize_option",
+        deserialize_with = "crate::serde_arrays::deserialize_option"
+    )]
     optional_192: Option<[u8; 192]>,
-    #[serde(with = "serde_with::As::<BTreeMap<[serde_with::Same; 33], serde_with::Same>>")]
+    #[serde(
+        serialize_with = "crate::serde_arrays::serialize_map",
+        deserialize_with = "crate::serde_arrays::deserialize_map"
+    )]
     map: BTreeMap<[u8; 33], Vec<u8>>,
 }
 
@@ -86,13 +114,16 @@ fn truncated_arrays_and_map_entries_are_rejected() {
 #[test]
 fn an_invalid_option_discriminant_is_rejected() {
     let mut invalid = POPULATED.to_vec();
-    invalid[64] = 2;
+    invalid[ARRAY_LEN] = 2;
     assert!(postcard::from_bytes::<Fixture>(&invalid).is_err());
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct MapFixture {
-    #[serde(with = "serde_with::As::<BTreeMap<[serde_with::Same; 33], serde_with::Same>>")]
+    #[serde(
+        serialize_with = "crate::serde_arrays::serialize_map",
+        deserialize_with = "crate::serde_arrays::deserialize_map"
+    )]
     map: BTreeMap<[u8; 33], Vec<u8>>,
 }
 
@@ -106,4 +137,19 @@ fn duplicate_map_keys_retain_the_last_value() {
     }
     let decoded = postcard::from_bytes::<MapFixture>(&encoded).unwrap();
     assert_eq!(decoded.map, BTreeMap::from([([7; 33], vec![2])]));
+}
+
+#[test]
+fn array_length_and_byte_range_are_checked() {
+    use serde::de::value::{Error, SeqDeserializer};
+
+    fn decode<const N: usize>(values: &[u16]) -> Result<[u8; N], Error> {
+        crate::serde_arrays::deserialize(SeqDeserializer::new(values.iter().copied()))
+    }
+
+    assert_eq!(decode::<0>(&[]).unwrap(), []);
+    assert_eq!(decode::<3>(&[0, 128, 255]).unwrap(), [0, 128, 255]);
+    assert!(decode::<3>(&[0, 128]).is_err());
+    assert!(decode::<3>(&[0, 128, 255, 1]).is_err());
+    assert!(decode::<3>(&[0, 128, 256]).is_err());
 }

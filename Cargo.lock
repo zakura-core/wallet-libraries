@@ -7767,7 +7767,6 @@ dependencies = [
  "rand_core 0.10.1",
  "secp256k1 0.33.1",
  "serde",
- "serde_with",
  "shardtree 0.7.1",
  "zakura-note-encryption",
  "zakura-orchard",

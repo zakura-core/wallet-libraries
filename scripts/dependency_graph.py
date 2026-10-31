@@ -110,7 +110,7 @@ def main():
         ("sqlite-default", "librustzcash/zcash_client_sqlite", [], {"rand_distr"}, set()),
         ("tor", "librustzcash/zcash_client_backend", ["tor"], {"dynosaur", "dynosaur_derive", "trait-variant"}, {"arti-client", "rust_decimal"}),
         ("wallet", "librustzcash/zcash_client_sqlite", ["orchard", "transparent-inputs"], {"prost-build", "tonic-prost-build", "which", "regex", "regex-automata", "regex-syntax"} | pczt_macros, {"rand_distr"}),
-        ("pczt", "librustzcash/pczt", [], pczt_macros, {"serde_with"}),
+        ("pczt", "librustzcash/pczt", [], pczt_macros | {"serde_with"}, set()),
         ("pir", "zakura/pir-client", ["native"], native_evaluators | server_roles | {"sha1"}, {"reinspiring"}),
         ("status-policy", "zakura/pir-client", ["status"], recovery_forbidden | server_roles | native_evaluators | {"tonic", "tonic-prost", "tokio", "hyper", "hyper-util", "h2"}, {"zakura-protocol"}),
         ("status-lightwalletd", "zakura/pir-client", ["lightwalletd"], server_roles | {"httpdate"}, {"zakura-client-backend", "tonic", "tokio"}),
