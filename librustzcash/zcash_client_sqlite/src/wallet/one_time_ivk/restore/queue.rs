@@ -138,20 +138,22 @@ fn admitted(
 /// Makes `key`'s lookup read its history again from the shard holding `height`, keeping
 /// its reasons (callers whose event invalidates settled history add [`INVALIDATED`]):
 /// checked progress, any cursor and a completion reaching that height are void.
-/// `retry_at` delays the next attempt.
+/// `bad_answer_at`, the time an answer proved bad, backs the next attempt off as a failed
+/// one (see [`backoff`]). Without it, the lookup is due at once.
 fn rewind_lookup(
     conn: &Connection,
     key: i64,
     height: u32,
-    retry_at: i64,
+    bad_answer_at: Option<i64>,
 ) -> Result<(), SqliteClientError> {
-    let reasons: Option<u8> = conn
+    let (reasons, attempts): (Option<u8>, u32) = conn
         .query_row(
-            "SELECT reasons FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
+            "SELECT reasons, attempts FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
             [key],
-            |r| r.get(0),
+            |r| Ok((Some(r.get(0)?), r.get(1)?)),
         )
-        .optional()?;
+        .optional()?
+        .unwrap_or((None, 0));
     enqueue(
         conn,
         key,
@@ -159,6 +161,12 @@ fn rewind_lookup(
         height,
         reasons.filter(|r| *r & 3 != 0).unwrap_or(AUTOMATIC),
     )?;
+    let (attempts, retry_at) = bad_answer_at.map_or((0, 0), |now| {
+        (
+            attempts.saturating_add(1).min(30),
+            now.saturating_add(backoff(attempts)),
+        )
+    });
     conn.execute(
         &format!(
             "UPDATE ironwood_one_time_lookups SET start_height = MIN(start_height, ?2),
@@ -166,12 +174,20 @@ fn rewind_lookup(
             done_from = CASE WHEN done_height >= ?2 AND NOT done_from < ?2 THEN NULL ELSE done_from END,
             done_height = CASE WHEN done_height >= ?2
                 THEN CASE WHEN done_from < ?2 THEN ?2 - 1 ELSE NULL END ELSE done_height END,
-            {CURSOR_RESET}, read_complete = 0, attempts = 0, next_attempt_at = ?3
+            {CURSOR_RESET}, read_complete = 0, attempts = ?4, next_attempt_at = ?3
             WHERE one_time_key_id = ?1"
         ),
-        params![key, height, retry_at],
+        params![key, height, retry_at, attempts],
     )?;
     Ok(())
+}
+
+/// Seconds a lookup waits after a failure when `attempts` earlier failures, transport or bad
+/// answer, count against its obligation: a minute, doubling up to twelve hours. Reading a
+/// page doesn't clear the count, so a directory that keeps serving a bad answer backs off.
+/// A new or raised obligation and a history check clear it.
+fn backoff(attempts: u32) -> i64 {
+    (60i64 << attempts.min(10)).min(43_200)
 }
 
 /// Reads again, for a fresh payload, the history of each payment candidate whose witness a
@@ -191,7 +207,7 @@ pub(crate) fn refresh_rewound_witnesses(
         })?
         .collect::<Result<_, _>>()?;
     for (key, txid, action, height) in rewound {
-        refresh_witness(conn, key, txid, action, height.into(), 0)?;
+        refresh_witness(conn, key, txid, action, height.into(), None)?;
     }
     Ok(())
 }
@@ -208,14 +224,15 @@ fn invalidate(conn: &Connection, key: i64) -> Result<(), SqliteClientError> {
 /// Drops a candidate's session binding and witness payload and reads its key's history
 /// again, so the current companion supplies a fresh payload. The candidate stays pending,
 /// never an empty answer. The lookup keeps its reasons, so a refresh never turns
-/// manual-only work automatic. `retry_at` backs off a payload the wallet found unusable.
+/// manual-only work automatic. `bad_answer_at` backs off a payload the wallet found
+/// unusable (see [`rewind_lookup`]).
 fn refresh_witness(
     conn: &Connection,
     key: i64,
     txid: TxId,
     action: u32,
     height: BlockHeight,
-    retry_at: i64,
+    bad_answer_at: Option<i64>,
 ) -> Result<(), SqliteClientError> {
     conn.execute(
         "UPDATE ironwood_one_time_payment_recovery SET directory = NULL, ordinal = NULL,
@@ -223,7 +240,7 @@ fn refresh_witness(
         witness_size = NULL WHERE txid = ?1 AND action_index = ?2",
         params![txid.as_ref(), action],
     )?;
-    rewind_lookup(conn, key, u32::from(height), retry_at)?;
+    rewind_lookup(conn, key, u32::from(height), bad_answer_at)?;
     Ok(())
 }
 
@@ -1633,7 +1650,7 @@ pub(crate) fn record_lookup<P: Parameters>(
             conn.execute(
                 "UPDATE ironwood_one_time_lookups SET checked_height = COALESCE(?2, checked_height),
                 inventory = ?3, shard = ?4, segment = ?5, last_record = ?6,
-                attempts = 0, next_attempt_at = 0 WHERE one_time_key_id = ?1",
+                next_attempt_at = 0 WHERE one_time_key_id = ?1",
                 params![
                     id,
                     page.checked_through.map(u32::from),
@@ -1653,7 +1670,7 @@ pub(crate) fn record_lookup<P: Parameters>(
             conn.execute(
                 &format!(
                     "UPDATE ironwood_one_time_lookups SET checked_height = ?2, {CURSOR_RESET},
-                    read_complete = ?3, done_height = ?2, done_from = ?4, attempts = 0,
+                    read_complete = ?3, done_height = ?2, done_from = ?4,
                     next_attempt_at = 0 WHERE one_time_key_id = ?1"
                 ),
                 params![id, end, end >= target, joined],
@@ -1667,7 +1684,7 @@ pub(crate) fn record_lookup<P: Parameters>(
                 |r| r.get(0),
             )?;
             if let Some(height) = unbound {
-                rewind_lookup(conn, id, height, now.saturating_add(60))?;
+                rewind_lookup(conn, id, height, Some(now))?;
             }
         }
         Ok(())
@@ -1786,9 +1803,8 @@ pub(crate) fn defer<P: Parameters>(
     if progress? != (work.from, work.cursor.clone()) {
         return Ok(());
     }
-    let delay = (60i64 << attempts.min(10)).min(43_200);
     conn.execute("UPDATE ironwood_one_time_lookups SET attempts = MIN(attempts + 1, 30), next_attempt_at = ?2 WHERE one_time_key_id = ?1",
-        params![id, now.saturating_add(delay)])?;
+        params![id, now.saturating_add(backoff(attempts))])?;
     Ok(())
 }
 
@@ -1931,7 +1947,7 @@ fn dispute_raw_receipts(
         // same raw bytes stored again carry no new evidence, so a repair already under way
         // keeps its progress.
         if new {
-            rewind_lookup(conn, key, activation, 0)?;
+            rewind_lookup(conn, key, activation, None)?;
             invalidate(conn, key)?;
             queue_history(conn, owner, key, activation)?;
             crate::wallet::one_time_rewind::queue_invalidated(conn, None)?;
@@ -2049,14 +2065,9 @@ fn admit_waiting<P: Parameters>(
         match admission {
             Admission::Admitted | Admission::Waiting => {}
             Admission::Uncovered => rescan_uncovered(conn, owner, candidate.height, through)?,
-            Admission::StaleWitness => refresh_witness(
-                conn,
-                id,
-                txid,
-                action,
-                candidate.height,
-                now.saturating_add(60),
-            )?,
+            Admission::StaleWitness => {
+                refresh_witness(conn, id, txid, action, candidate.height, Some(now))?
+            }
             Admission::Rejected => {
                 conn.execute(
                     "DELETE FROM ironwood_one_time_payment_recovery
@@ -2066,7 +2077,7 @@ fn admit_waiting<P: Parameters>(
                 // Its pages were already read past it, so the coverage that read claimed
                 // must be undone before the key can complete. The refused claim's height is
                 // unauthenticated, so the key's history is read again from activation.
-                rewind_lookup(conn, id, activation(params), now.saturating_add(60))?;
+                rewind_lookup(conn, id, activation(params), Some(now))?;
                 invalidate(conn, id)?;
                 crate::wallet::one_time_rewind::queue_invalidated(conn, None)?;
             }

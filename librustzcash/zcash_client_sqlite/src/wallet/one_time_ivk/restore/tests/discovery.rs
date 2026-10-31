@@ -1878,6 +1878,60 @@ fn a_rejection_after_the_final_segment_rereads_the_payment() {
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
+/// A directory that keeps serving a claim the wallet's chain checks reject backs the key's
+/// lookup off, doubling from a minute, rather than reading its history again every minute.
+/// A history check makes it due at once, and a correct answer then recovers the payment.
+#[test]
+fn a_repeatedly_rejected_claim_backs_off_until_a_history_check() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    foreign_blocks(&mut st, 2);
+    recover(st.wallet_mut().db_mut(), account, key8(), candidate.height);
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, false)
+            .unwrap()
+    );
+    let now = clock_now();
+    let id = key_ref(&st.wallet().db().conn, account, key8()).unwrap();
+    let retry = |st: &State| -> (u32, i64) {
+        row(
+            st.wallet().conn(),
+            "SELECT attempts, next_attempt_at FROM ironwood_one_time_lookups
+             WHERE one_time_key_id = ?1",
+            [id],
+        )
+    };
+    let mut delays = vec![];
+    for _ in 0..3 {
+        retry_now(&st);
+        let work = work_of(&st, key8());
+        let mut records = history(work.work.receiver, &[&candidate]);
+        records[0].payment.position += 1;
+        let page = whole_at(&st, publication, records, publication.end);
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .record_one_time_lookup(account, &work, &page, now)
+                .unwrap()
+        );
+        delays.push(retry(&st).1 - now);
+    }
+    assert_eq!(delays, [60, 120, 240]);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, publication, None)
+            .unwrap()
+    );
+    assert_eq!(retry(&st), (0, 0));
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
 /// After a finished seed walk completed I0 empty, a live hit queues I0 only from the next
 /// block. A correction then voids the old negatives on the non-direct route, so I0's active
 /// request must cover its whole history again and find the payment the old generation

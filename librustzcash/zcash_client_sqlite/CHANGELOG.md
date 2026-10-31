@@ -49,6 +49,10 @@ and this library adheres to Rust's notion of
 - Consolidation's additional Ironwood candidates stop rebuilding one-time-key
   notes once they hold their half of the limit, so a proposal costs about its
   limit rather than every unspent one-time-key note. The selection is unchanged.
+- A one-time payment whose witness payload is unusable, or whose claim fails the
+  wallet's chain checks, now backs its key's lookup off with the doubling delay
+  `defer_one_time_lookup` uses instead of retrying every 60 seconds, and a page
+  read no longer resets that count. A history check still makes it due at once.
 
 ## [0.1.0-rc9.6] - 2026-10-30
 
