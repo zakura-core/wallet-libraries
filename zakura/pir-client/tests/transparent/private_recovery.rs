@@ -40,8 +40,9 @@ use zcash_client_backend::data_api::{
     chain::ChainState,
     testing::{InitialChainState, TestBuilder, TestState},
     transparent_ledger::{
-        AccountLifecycle, CommitRejection, ForgottenTransparentLedger, RecoveryRevision,
-        StaleCommit, TransparentAddressWatchSet, TransparentAuthority, TransparentLedgerCommit,
+        AccountLifecycle, CandidateBlocker, CommitRejection, ForgottenTransparentLedger,
+        RecoveryRevision, StaleCommit, TransparentAddressWatchSet, TransparentAuthority,
+        TransparentLedgerCommit,
         TransparentLedgerMode::{self, PrivateRequired},
         TransparentLedgerRead as _, TransparentLedgerWrite as _, WatchOrigin,
     },
@@ -388,6 +389,22 @@ impl Fixture {
         let map = fixture::publish(&dir, shards, seal, |at| self.block(at), recuts);
         self.url = Some(self.server.serve(&dir));
         map
+    }
+
+    /// Mines and scans the next block. When `shards`' tail (its last shard) ended at the old
+    /// tip, it is republished through the new one as its next revision, as a publisher that
+    /// keeps up does; a tail that was behind stays behind. Window growth a sync left is
+    /// watched from here. Settling a replaced tail needs trusted settlement.
+    fn next_block(&mut self, shards: &mut [ShardSpec]) {
+        let tip = self.tip();
+        self.scan_to(tip + 1);
+        let tail = shards.last_mut().expect("a tail");
+        assert!(!tail.sealed);
+        if tail.end == tip {
+            tail.end = tip + 1;
+            tail.revision += 1;
+            self.publish(shards, SEAL);
+        }
     }
 
     /// Removes the companion's database, as when an application loses it.
@@ -1015,10 +1032,14 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
 
     // Untrusted: the commits are observed, never trusted, and the account stays
     // an isolated candidate. Its last external address received, so its window
-    // grew and the next sync recovered the new addresses too.
+    // grew. A second sync at the same tip, as a lag or capacity retry allows,
+    // watches the same addresses: the grown ones wait for the next block.
     f.publish(&lifecycle(&owned, t1, 0, false), SEAL);
-    let (observed, syncs) = f.sync_until_complete(3);
-    assert_eq!(syncs, 2);
+    assert!(f.drive().grew);
+    let watched = f.watched.clone();
+    let observed = f.drive();
+    assert!(!observed.new_work);
+    assert_eq!(f.watched, watched);
     assert_eq!(observed.batch.state, BatchState::Ready);
     assert_eq!(observed.batch.progress.outcome, Outcome::Complete);
     assert_eq!(observed.batch.progress.covered_through, t1);
@@ -1027,7 +1048,10 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
             .db()
             .transparent_candidate_recovery(f.account)
             .unwrap();
-    assert_eq!(candidate.blockers, vec![]);
+    assert_eq!(
+        candidate.blockers,
+        vec![CandidateBlocker::IncompleteCoverage]
+    );
     // e0, below the birthday, is not among them.
     let received: BTreeSet<_> = candidate
         .receives
@@ -1059,13 +1083,18 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     );
     assert!(catalog.iter().all(|row| row.2));
 
-    // Trusted: the same publication qualifies every revision, and activation
-    // grants private authority over exactly r2.
+    // Trusted, at the next block: the publication, its tail extended, qualifies
+    // every revision, the pass covers the grown addresses, and activation grants
+    // private authority over exactly r2.
     f.trust_service();
+    let mut shards = lifecycle(&owned, t1, 0, false);
+    f.next_block(&mut shards);
     let trusted = f.drive();
     assert_eq!(trusted.batch.state, BatchState::Ready);
+    assert!(!trusted.new_work);
+    assert_ne!(f.watched, watched);
     let first_tail = tail_revision(&trusted.batch);
-    assert_eq!(first_tail.lineage, 1);
+    assert_eq!(first_tail.lineage, 2);
     assert_eq!(f.count("tpir_qualified_revisions"), 3);
     f.activate();
     assert_eq!(f.watch().lifecycle, AccountLifecycle::Active);
@@ -1081,12 +1110,12 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
             AuthorityRefusal::Pending { accounts }
         )) if accounts == vec![f.account]
     ));
-    let moved_map = f.publish(&lifecycle(&owned, t2, 1, false), SEAL);
+    let moved_map = f.publish(&lifecycle(&owned, t2, 2, false), SEAL);
     let moved = f.drive();
     assert_eq!(moved.batch.state, BatchState::Ready);
     assert_eq!(moved.batch.progress.outcome, Outcome::Complete);
     let second_tail = tail_revision(&moved.batch);
-    assert_eq!(second_tail.lineage, 2);
+    assert_eq!(second_tail.lineage, 3);
     assert_eq!(second_tail.source, first_tail.source);
     assert_eq!(f.coverage_of(&first_tail), 0);
     assert!(f.coverage_of(&second_tail) > 0);
@@ -1128,12 +1157,12 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     assert_ne!(f.authority(), TransparentAuthority::Private);
 
     // Catch-up, through a reopened companion. A replayed pass changes nothing.
-    f.publish(&lifecycle(&owned, t3, 2, false), SEAL);
+    f.publish(&lifecycle(&owned, t3, 3, false), SEAL);
     f.open();
     let caught_up = f.drive();
     assert_eq!(caught_up.batch.progress.outcome, Outcome::Complete);
     let third_tail = tail_revision(&caught_up.batch);
-    assert_eq!(third_tail.lineage, 3);
+    assert_eq!(third_tail.lineage, 4);
     assert_eq!(f.authority(), TransparentAuthority::Private);
     let production = f.dump(false);
     let replay = f.pass().unwrap();
@@ -1304,8 +1333,9 @@ fn dump_tables(conn: &Connection, keep: impl Fn(&str) -> bool) -> Vec<(String, V
 
 /// A service that forges a receive at the last address of the wallet's restore window
 /// learns nothing from the sync it answers: the wallet sends the same requests as it
-/// does to a service without the receive, and covers the grown window only at the next
-/// sync. The restore window itself is fixed, whatever the replies hold.
+/// does to a service without the receive, including in a second sync at the same tip,
+/// and covers the grown window only at the next block. The restore window itself is
+/// fixed, whatever the replies hold.
 ///
 /// Both services hold one receive for that address in S1, which straddles the
 /// birthday, so its filter matches and its directory row is read alike. The forged
@@ -1340,10 +1370,10 @@ fn forged_receive_does_not_start_another_pass(publication_behind: bool) {
         let seen = f.server.requests().len();
         let pass = f.drive();
         let requests = transcript(&f, seen);
-        (f, pass, requests)
+        (f, pass, requests, shards)
     };
-    let (mut forged, forged_pass, forged_requests) = sync(true);
-    let (honest, honest_pass, honest_requests) = sync(false);
+    let (mut forged, forged_pass, forged_requests, mut shards) = sync(true);
+    let (mut honest, honest_pass, honest_requests, _) = sync(false);
 
     // One pass each, and the service sees the same requests.
     assert_eq!(forged_pass.step, Step::Done(Some(retry)));
@@ -1352,8 +1382,9 @@ fn forged_receive_does_not_start_another_pass(publication_behind: bool) {
     assert_eq!(forged_requests, honest_requests);
 
     // The forged receive at the last address grows the forged wallet's window by a
-    // whole gap, which only its next sync covers; the honest window stays the restore
-    // window, which the first sync covered.
+    // whole gap, but at this tip it watches the honest wallet's window: a second
+    // sync here, as a lag or capacity retry allows, sends the honest wallet's
+    // requests again.
     let window = |f: &Fixture| -> BTreeSet<_> {
         f.watch()
             .addresses
@@ -1362,13 +1393,31 @@ fn forged_receive_does_not_start_another_pass(publication_behind: bool) {
             .map(|watched| watched.address)
             .collect()
     };
-    let (forged_window, honest_window) = (window(&forged), window(&honest));
+    let honest_window = window(&honest);
+    assert_eq!(window(&forged), honest_window);
     assert!(
         honest_window
             .iter()
             .all(|address| honest.watched.contains(&pubkey_hash(*address)))
     );
-    let grown: BTreeSet<_> = forged_window.difference(&honest_window).copied().collect();
+    let (forged_seen, honest_seen) = (
+        forged.server.requests().len(),
+        honest.server.requests().len(),
+    );
+    let (forged_again, honest_again) = (forged.drive(), honest.drive());
+    assert_eq!(forged_again.step, honest_again.step);
+    assert_eq!(
+        transcript(&forged, forged_seen),
+        transcript(&honest, honest_seen)
+    );
+
+    // Only the next block watches the grown window, which that sync covers.
+    forged.trust_service();
+    forged.next_block(&mut shards);
+    let grown: BTreeSet<_> = window(&forged)
+        .difference(&honest_window)
+        .copied()
+        .collect();
     assert!(!grown.is_empty());
     assert!(
         grown
@@ -1380,7 +1429,8 @@ fn forged_receive_does_not_start_another_pass(publication_behind: bool) {
     assert!(forged.server.requests().len() > seen);
     assert_eq!(next.step, Step::Done(Some(retry)));
     assert!(!next.new_work);
-    assert_eq!(next.report.progress.covered_through, t1);
+    let covered = if publication_behind { t1 } else { t1 + 1 };
+    assert_eq!(next.report.progress.covered_through, covered);
     assert!(
         grown
             .iter()
@@ -1540,8 +1590,20 @@ fn restore(indices: &[u32], trusted: bool) -> (Fixture, usize) {
     if trusted {
         f.trust_service();
     }
-    let (last, syncs) = f.sync_until_complete(8);
-    assert_eq!(last.report.progress.covered_through, t1);
+    // A sync that grew the window leaves the grown addresses to the next block.
+    let mut syncs = 0;
+    let last = loop {
+        syncs += 1;
+        assert!(syncs <= 8, "recovery did not complete within 8 syncs");
+        let pass = f.drive();
+        if pass.step == Step::Done(Some(Retry::Complete)) && !pass.new_work {
+            break pass;
+        }
+        if pass.grew {
+            f.next_block(&mut shards);
+        }
+    };
+    assert_eq!(last.report.progress.covered_through, f.tip());
     let received =
         f.st.wallet()
             .db()
@@ -1563,13 +1625,16 @@ fn a_restore_inside_the_restore_window_takes_one_sync() {
     assert_eq!(syncs, 1);
 }
 
-/// Past the restore window, the window grows one gap per sync: a receive at 45 grows it
-/// to 56, one at 52 to 63, and one at 60 to 71, which the fourth sync covers.
+/// Past the restore window, the window grows one gap per block: a receive at 45 grows it
+/// to 56, one at 52 to 63, and one at 60 to 71, which the fourth sync, three blocks
+/// later, covers. Each block's tail replaces the last, which trusted settlement
+/// reconciles.
 #[test]
 fn a_restore_past_the_restore_window_takes_one_sync_per_window_step() {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
-    let (_, syncs) = restore(&[0, 45, 52, 60], false);
+    let (f, syncs) = restore(&[0, 45, 52, 60], true);
     assert_eq!(syncs, 4);
+    assert_eq!(f.tip(), H0 + 649 + 3);
 }
 
 /// The restore window is for candidates only: once the account is active, its watch

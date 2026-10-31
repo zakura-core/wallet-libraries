@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `transparent::ApplyStats::window_grew` means grown addresses are recovered at
+  the next target; the SQLite store watches window growth from that target.
+
 ## [0.0.1-rc5] - 2026-10-30
 
 ### Changed
