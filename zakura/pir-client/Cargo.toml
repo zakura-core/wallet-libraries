@@ -9,7 +9,7 @@ repository.workspace = true
 
 [features]
 # Product and capability features are explicit; no product is enabled by default.
-cli = ["dep:zakura-pir-publisher", "transparent", "reqwest", "dep:clap"]
+cli = ["dep:zakura-pir-publisher", "transparent", "reqwest"]
 default = []
 native = [
     "dep:zakura-pir-protocol",
@@ -115,7 +115,6 @@ testing = [
 
 [dependencies]
 # Keep parsing, help and suggestions without the terminal-color stack.
-clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "suggestions"], optional = true }
 zakura-pir-publisher = { path = "../pir-publisher", version = "=0.0.1-rc5", optional = true }
 zakura-pir-query-server = { path = "../pir-query-server", version = "=0.0.1-rc5", optional = true, features = ["testing"] }
 zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc5", optional = true }
@@ -169,7 +168,6 @@ rand_chacha = { workspace = true }
 flate2 = "1"
 orchard = { workspace = true }
 zcash_primitives = { workspace = true }
-clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "suggestions"] }
 zakura-pir-query-server = { path = "../pir-query-server", version = "=0.0.1-rc5", features = ["transparent", "enhance", "status", "receiver", "testing"] }
 zakura-pir-publisher = { path = "../pir-publisher", version = "=0.0.1-rc5", features = ["transparent", "enhance", "status", "receiver-crypto"] }
 zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc5", features = ["transparent"] }
@@ -306,6 +304,7 @@ required-features = ["transparent", "recovery"]
 name = "transparent_txid_client_txid-quality-canary"
 path = "examples/transparent_txid_client/txid-quality-canary.rs"
 required-features = ["transparent", "testing"]
+test = true
 
 [[example]]
 name = "transaction_status_private-source"
