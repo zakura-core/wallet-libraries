@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the wallet-lib facade in every base/Orchard mode and prove each build
-# reaches exactly one stack.
-#
-# The facade is the only crate here whose features are mutually exclusive, so it
-# is excluded from the whole-workspace check and verified by this script
-# instead. Both directions matter: a Zakura build that pulls a crates.io
-# original, and an upstream build that pulls a `zakura-*` fork, are the same
-# bug — two families of the same types in one binary — seen from either side.
+# Verify the supported facade selections and their fresh consumer graphs.
+# Only the Zakura family is supported, including the complete Orchard capability
+# set and compatible Common requirements on the promised minimum Rust version.
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$repo_root/manifests/sources.toml"
@@ -88,9 +83,6 @@ if grep -Eq "$forbidden" <<<"$default_tree"; then
   exit 1
 fi
 
-check_mode lrz "^zakura-" \
-  "a Zakura fork entered the upstream build:"
-
 check_mode zakura "$forbidden" \
   "a crates.io original entered the Zakura build:"
 
@@ -104,10 +96,6 @@ from pathlib import Path
 probe_root = Path(os.environ["WALLET_LIB_PROBE_ROOT"])
 wallet_lib = Path(os.environ["WALLET_LIB_REPO_ROOT"]) / "wallet-lib"
 dependencies = {
-    "lrz": (
-        f'zakura-wallet-lib = {{ path = "{wallet_lib}", '
-        'default-features = false, features = ["lrz"] }'
-    ),
     "zakura": (
         f'zakura-wallet-lib = {{ path = "{wallet_lib}", '
         'default-features = false, features = ["zakura"] }'
@@ -130,11 +118,12 @@ edition = "2021"
 """
     )
     (consumer / "src" / "main.rs").write_text(
+        'pub use zakura_wallet_lib::{client_backend, client_sqlite, keys, orchard, pczt, primitives};\n'
         'fn main() { println!("{}", zakura_wallet_lib::BACKEND); }\n'
     )
 PY
 
-for consumer in lrz zakura zakura-default; do
+for consumer in zakura zakura-default; do
   cargo metadata --manifest-path "$probe_root/$consumer/Cargo.toml" \
     --format-version 1 > "$probe_root/$consumer/metadata.json"
 done
@@ -150,7 +139,7 @@ probe_root, source_manifest = Path(sys.argv[1]), Path(sys.argv[2])
 with source_manifest.open("rb") as manifest_file:
     upstream_names = set(tomllib.load(manifest_file)["graph"]["forbidden"])
 
-for consumer in ("lrz", "zakura", "zakura-default"):
+for consumer in ("zakura", "zakura-default"):
     root = probe_root / consumer
     metadata = json.loads((root / "metadata.json").read_text())
     packages_by_id = {
@@ -168,25 +157,11 @@ for consumer in ("lrz", "zakura", "zakura-default"):
         )
     )
 
-    if consumer == "lrz":
-        allowed = {"zakura-wallet-lib"}
-        checks = {
-            "metadata packages": {
-                name for name in package_names if name.startswith("zakura-")
-            } - allowed,
-            "resolved nodes": {
-                name for name in resolved_names if name.startswith("zakura-")
-            } - allowed,
-            "lockfile": {
-                name for name in lock_names if name.startswith("zakura-")
-            } - allowed,
-        }
-    else:
-        checks = {
-            "metadata packages": package_names & upstream_names,
-            "resolved nodes": resolved_names & upstream_names,
-            "lockfile": lock_names & upstream_names,
-        }
+    checks = {
+        "metadata packages": package_names & upstream_names,
+        "resolved nodes": resolved_names & upstream_names,
+        "lockfile": lock_names & upstream_names,
+    }
 
     failures = {label: names for label, names in checks.items() if names}
     if consumer == "zakura":
@@ -203,34 +178,30 @@ for consumer in ("lrz", "zakura", "zakura-default"):
     if failures:
         for label, names in failures.items():
             print(
-                f"{consumer} {label} contains the other backend: "
+                f"{consumer} {label} contains an upstream original: "
                 + " ".join(sorted(names)),
                 file=sys.stderr,
             )
         raise SystemExit(1)
 
 print(
-    "verified: external LRZ metadata/lock contains no Zakura forks, "
-    "and external Zakura metadata/lock contains no LRZ originals"
+    "verified: default and explicit Zakura metadata/lock contain no upstream originals"
 )
 PY
 
-[[ "$(cargo run --quiet --manifest-path "$probe_root/lrz/Cargo.toml")" == "lrz" ]]
 [[ "$(cargo run --quiet --manifest-path "$probe_root/zakura/Cargo.toml")" == "zakura" ]]
 [[ "$(cargo run --quiet --manifest-path "$probe_root/zakura-default/Cargo.toml")" == "zakura" ]]
 
-# Neither backend selected must fail loudly rather than build an empty facade.
+# Disabling the required capability feature must not build an empty facade.
 if cargo check --manifest-path "$repo_root/Cargo.toml" \
-  --package "$facade" --no-default-features --locked 2>/dev/null; then
-  echo "selecting no backend must not compile" >&2
+  --package "$facade" --no-default-features --locked \
+  2>"$probe_root/feature-off.stderr"; then
+  echo "disabling the Zakura feature must not compile" >&2
   exit 1
 fi
-
-# Both backends at once is what an LRZ consumer that forgot `default-features =
-# false` produces; it must fail rather than resolve two stacks.
-if cargo check --manifest-path "$repo_root/Cargo.toml" \
-  --package "$facade" --features lrz,zakura --locked 2>/dev/null; then
-  echo "selecting both backends must not compile" >&2
+if ! grep -Fq 'enable the `zakura` feature when disabling default features' \
+  "$probe_root/feature-off.stderr"; then
+  cat "$probe_root/feature-off.stderr" >&2
   exit 1
 fi
 
@@ -315,6 +286,5 @@ PY
 
 cargo +1.97 check --manifest-path "$consumer/Cargo.toml" --locked
 
-echo "verified: Zakura is the clean default, each explicit backend resolves"
-echo "to exactly one stack, a fresh Rust 1.97 consumer resolves compatible Common packages, and"
-echo "neither no-backend nor both-backends compiles"
+echo "verified: default and explicit Zakura resolve to one stack; a fresh Rust 1.97"
+echo "consumer resolves compatible Common packages; the required feature is enforced"

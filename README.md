@@ -44,7 +44,7 @@ Three directories:
 
 ```text
 librustzcash/   forked upstream crates   edited directly; upstream arrives as merges
-wallet-lib/     the backend selector     hand-written
+wallet-lib/     the wallet facade     hand-written
 zakura/         new Zakura work          hand-written; includes Enhance PIR
 ```
 
@@ -109,38 +109,30 @@ original of a forked crate is present, and no vendored crate appears twice.
 Compiling alone would not prove this — an edge that escapes the rewiring builds
 fine here and fails later where the two type families meet.
 
-## Selecting a backend
+## The wallet facade
 
-`wallet-lib/` holds `zakura-wallet-lib`, which exists for code that has to build
-for **both** Gemini and Vizor from one source tree — `zcash_voting` and the vote
-commitment tree. It re-exports one family under stable names:
+`wallet-lib/` holds `zakura-wallet-lib`, which re-exports the Zakura wallet
+packages under stable import names:
 
 ```rust
 use zakura_wallet_lib::{client_backend, orchard};
 ```
 
 ```toml
-# Vizor: complete Zakura capability set, the default
+# Complete Zakura capability set, including Orchard.
 zakura-wallet-lib = "0.1.0-rc9.6"
 
-# Gemini: equivalent upstream LRZ capability set
-zakura-wallet-lib = { version = "0.1.0-rc9.6", default-features = false, features = ["lrz"] }
+# Equivalent explicit selection when disabling defaults.
+zakura-wallet-lib = { version = "0.1.0-rc9.6", default-features = false, features = ["zakura"] }
 ```
 
-The two features are mutually exclusive. Cargo features are additive and there
-is no way to enable a dependency when a feature is *off*, so the upstream
-family needs its own named feature rather than being the implicit
-`not(zakura)` case. Because `zakura` is the default, selecting `lrz` requires
-`default-features = false`. Enabling both, or neither, is a compile error.
+The default `zakura` feature enables the complete capability set used by
+`zcash_voting`. Building without it is an error.
+`scripts/verify-wallet-lib-modes.sh` checks default and explicit selections,
+fresh consumer metadata and lockfiles, the public imports and the promised
+Rust version. Upstream originals of the forked packages must remain absent.
 
-`scripts/verify-wallet-lib-modes.sh` builds it each way and fails if a crate from
-the other family appears, if disabled packages leak into an external
-consumer's lockfile or Cargo metadata, or if the mutually-exclusive rules stop
-holding. `zakura` and `lrz` are the only feature flags; each enables Orchard
-and the complete capability set required by `zcash_voting`.
-
-An end consumer that builds for exactly one stack does not need this crate at
-all — it declares the packages it wants directly, as below.
+Applications can also depend on the required Zakura packages directly.
 
 ## Consume from a wallet
 
@@ -199,8 +191,7 @@ them does not become a pull request.
 
 The **Sync upstream releases** workflow runs daily. It lists the upstream tags,
 keeps those matching `tag_pattern` in `manifests/sources.toml` — the
-`zcash_client_sqlite` release train, which is how `zcash_voting` selects its LRZ
-version — and compares the highest semantic version against the current pin.
+`zcash_client_sqlite` release train — and compares the highest semantic version against the current pin.
 `allow_prerelease` decides whether a prerelease may be proposed automatically.
 
 A newer release is synced, verified, and raised as a pull request on the
@@ -224,7 +215,7 @@ that may open pull requests makes `verify.yml` run on the branch as well.
 
 ```text
 librustzcash/           forked wallet-layer crates, edited directly
-wallet-lib/             zakura-wallet-lib, the backend selector
+wallet-lib/             zakura-wallet-lib, the wallet facade
 zakura/                 new Zakura work
 Cargo.toml              workspace manifest (generated)
 manifests/sources.toml  layout, upstream pin, crate list, rewiring rules

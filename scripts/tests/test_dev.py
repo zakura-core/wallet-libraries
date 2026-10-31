@@ -129,9 +129,11 @@ class WorkflowTests(unittest.TestCase):
             args = execute.call_args.args[0]
             self.assertEqual((args.command, args.filter, args.config, args.package), ("test", "transparent_ledger", "transparent", ["zakura-client-sqlite"]))
 
-    def test_facade_requires_explicit_verification(self):
-        with self.assertRaisesRegex(ValueError, "exclusive backends"):
-            dev.cargo_args(argparse.Namespace(package=["zakura-wallet-lib"], config="default"))
+    def test_facade_can_be_selected_explicitly(self):
+        self.assertEqual(
+            dev.cargo_args(argparse.Namespace(package=["zakura-wallet-lib"], config="default")),
+            ["-p", "zakura-wallet-lib"],
+        )
 
 
 if __name__ == "__main__":

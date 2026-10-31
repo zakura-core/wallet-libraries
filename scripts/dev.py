@@ -15,7 +15,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = {
-    # Wallet defaults exclude application adapters and the mutually exclusive facade.
+    # Keep the complete facade capabilities from masking feature-off wallet tests.
     "default": (["--workspace", "--exclude", "zakura-wallet-lib", "--exclude", "zakura-pir-client", "--exclude", "zakura-one-time-ivk-scenarios"], []),
     "zewif": (["-p", "zakura-client-sqlite"], ["zewif", "test-dependencies"]),
     "sync": (["-p", "zakura-client-backend", "-p", "zakura-client-sqlite"], ["orchard", "test-dependencies", "zakura-client-backend/sync"]),
@@ -132,8 +132,6 @@ def cargo_args(args) -> list[str]:
     if args.package:
         manifest = packages[:2] if packages[:1] == ["--manifest-path"] else []
         packages = manifest + [item for p in args.package for item in ("-p", p)]
-        if "zakura-wallet-lib" in args.package:
-            raise ValueError("the facade has exclusive backends; use verify --only wallet-lib-modes")
     return packages + (["--features", ",".join(features)] if features else [])
 
 

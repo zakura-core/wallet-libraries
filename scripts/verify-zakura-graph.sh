@@ -14,27 +14,8 @@ manifest="$repo_root/manifests/sources.toml"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/target/verify-zakura-graph}"
 
-# The facade is excluded here and checked by verify-wallet-lib-modes.sh:
-# its backend features are mutually exclusive, so `--all-features` cannot build
-# it, and its optional upstream dependencies would appear in this graph.
-# The facade's package name, read through the directory the manifest names.
-facade="$(python3 - "$manifest" "$repo_root" <<'PY'
-import sys
-import tomllib
-from pathlib import Path
-
-manifest_path, repo_root = Path(sys.argv[1]), Path(sys.argv[2])
-
-with manifest_path.open("rb") as manifest_file:
-    directory = tomllib.load(manifest_file)["layout"]["facade"]
-
-with (repo_root / directory / "Cargo.toml").open("rb") as facade_manifest:
-    print(tomllib.load(facade_manifest)["package"]["name"])
-PY
-)"
-
 cargo check --manifest-path "$repo_root/Cargo.toml" \
-  --workspace --exclude "$facade" --all-targets --all-features --locked
+  --workspace --all-targets --all-features --locked
 
 # No development lane builds the PIR client library alone: its product tests
 # serve shards or directories in process, so the `default` lane leaves it out.
@@ -61,11 +42,9 @@ expected_packages = {
     crate.get("package", crate["path"]) for crate in manifest["crate"]
 }
 # Hand-written members are roots too, so a new dependency family cannot enter
-# through them unchecked. The facade is left out, as above.
+# through them unchecked, including the wallet facade.
 extra_packages = set()
 for directory in manifest["layout"]["extra_members"]:
-    if directory == manifest["layout"]["facade"]:
-        continue
     with (Path(sys.argv[3]) / directory / "Cargo.toml").open("rb") as member:
         extra_packages.add(tomllib.load(member)["package"]["name"])
 
