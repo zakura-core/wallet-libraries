@@ -14,6 +14,10 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- Generating the crate's feature table now requires the optional
+  `document-features` feature. Ordinary builds omit the documentation macro;
+  docs.rs continues to include the table.
+
 - Use `schemerz` 0.3 and `schemerz-rusqlite` 0.371 for wallet migrations,
   sharing the dependency family required by the LRZ facade. Applications naming
   migration errors or implementing external migrations must use these versions
