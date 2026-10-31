@@ -114,7 +114,7 @@ rand_distr = "0.6"
 bip32 = "0.6"
 secp256k1 = "0.33"
 zcash_script = "0.6"
-# Share the released migration graph family already required by the LRZ facade.
+# Use the released migration graph family for the wallet migration APIs.
 schemerz = "0.3"
 schemerz-rusqlite = "0.371"
 
