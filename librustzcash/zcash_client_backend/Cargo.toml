@@ -145,7 +145,6 @@ getset.workspace = true
 
 [dev-dependencies]
 assert_matches.workspace = true
-clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "suggestions"] }
 incrementalmerkletree = { workspace = true, features = ["test-dependencies"] }
 jubjub.workspace = true
 proptest.workspace = true
@@ -160,6 +159,10 @@ zcash_keys = { workspace = true, features = ["test-dependencies"] }
 zcash_primitives = { workspace = true, features = ["test-dependencies"] }
 zcash_proofs.workspace = true
 zcash_protocol = { workspace = true, features = ["local-consensus", "test-dependencies"] }
+
+[[example]]
+name = "diversify-address"
+test = true
 
 [features]
 default = ["time/default"]
@@ -250,6 +253,13 @@ sync-decryptor = [
 ## Exposes a Tor client for hiding a wallet's IP address while performing certain wallet
 ## operations.
 tor = [
+    "tor-client",
+    "dep:rust_decimal",
+]
+
+## Exposes the Tor client and generic HTTP APIs without exchange-rate helpers.
+## The `tor` feature additionally includes cryptocurrency exchange-rate queries.
+tor-client = [
     "dep:arti-client",
     "arti-client/onion-service-client",
     "dep:fs-mistrust",
@@ -258,7 +268,6 @@ tor = [
     "dep:http-body-util",
     "dep:hyper",
     "dep:hyper-util",
-    "dep:rust_decimal",
     "dep:serde",
     "dep:serde_json",
     "dep:tokio",

@@ -7,6 +7,12 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Added
+
+- Add the `tor-client` feature for generic Tor client and HTTP APIs without
+  exchange-rate helpers. The existing `tor` feature continues to enable the
+  full Tor API, including cryptocurrency exchange-rate queries.
+
 ### Changed
 
 - Generating the crate's feature table now requires the optional

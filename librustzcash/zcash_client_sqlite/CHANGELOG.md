@@ -20,11 +20,10 @@ and this library adheres to Rust's notion of
   `document-features` feature. Ordinary builds omit the documentation macro;
   docs.rs continues to include the table.
 
-- Use `schemerz` 0.3 and `schemerz-rusqlite` 0.371 for wallet migrations,
-  sharing the dependency family required by the LRZ facade. Applications naming
-  migration errors or implementing external migrations must use these versions
-  for `MigratorError` and `RusqliteMigration` respectively. Migration UUIDs and
-  the database schema are unchanged.
+- Use `schemerz` 0.3 and `schemerz-rusqlite` 0.371 for wallet migrations.
+  Applications naming migration errors or implementing external migrations must
+  use these versions for `MigratorError` and `RusqliteMigration` respectively.
+  Migration UUIDs and the database schema are unchanged.
 
 - Storing a scanned block uses the new index to attach transactions first learned
   from a transparent UTXO query, avoiding a scan of the whole transactions table.

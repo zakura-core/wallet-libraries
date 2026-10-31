@@ -9,7 +9,7 @@ repository.workspace = true
 
 [features]
 # Product and capability features are explicit; no product is enabled by default.
-cli = ["dep:zakura-pir-publisher", "transparent", "reqwest", "dep:clap"]
+cli = ["dep:zakura-pir-publisher", "transparent", "reqwest"]
 default = []
 native = [
     "dep:zakura-pir-protocol",
@@ -93,7 +93,8 @@ receiver-wallet = [
     "zakura-pir-protocol/receiver-crypto",
     "zcash_client_backend/orchard",
 ]
-reqwest = ["dep:reqwest"]
+# Retained feature name for the reference blocking HTTP adapters.
+reqwest = ["dep:ureq"]
 lightwalletd = [
     "status",
     "dep:zcash_client_backend",
@@ -114,7 +115,6 @@ testing = [
 
 [dependencies]
 # Keep parsing, help and suggestions without the terminal-color stack.
-clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "suggestions"], optional = true }
 zakura-pir-publisher = { path = "../pir-publisher", version = "=0.0.1-rc5", optional = true }
 zakura-pir-query-server = { path = "../pir-query-server", version = "=0.0.1-rc5", optional = true, features = ["testing"] }
 zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc5", optional = true }
@@ -139,7 +139,7 @@ zcash_client_sqlite = { version = "0.1.0-rc9.6", path = "../../librustzcash/zcas
 transparent = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 same-file = { version = "1.0.6", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
+ureq = { version = "3.5", default-features = false, features = ["rustls"], optional = true }
 # In-process fixtures only need the shared HTTP message types.
 http = { version = "1", optional = true }
 # The public status source consumes caller-owned channels, without a server.
@@ -148,6 +148,7 @@ tokio = { workspace = true, optional = true, features = ["macros", "time"] }
 zakura-pir-protocol = { path = "../pir-protocol", version = "=0.0.1-rc5", optional = true }
 
 [dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 zcash_client_sqlite = { package = "zakura-client-sqlite", path = "../../librustzcash/zcash_client_sqlite", version = "0.1.0-rc9.6", features = ["orchard", "test-dependencies", "transparent-inputs", "unstable"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 incrementalmerkletree = { workspace = true }
@@ -156,7 +157,7 @@ tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "tes
 tempfile = "3"
 serde_json = { workspace = true }
 zcash_keys = { workspace = true, features = ["transparent-inputs"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
 axum = { version = "0.7", default-features = false, features = ["http1", "tokio"] }
 regex = { workspace = true, features = ["std"] }
 tower = { version = "0.5", features = ["util"] }
@@ -167,7 +168,6 @@ rand_chacha = { workspace = true }
 flate2 = "1"
 orchard = { workspace = true }
 zcash_primitives = { workspace = true }
-clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "suggestions"] }
 zakura-pir-query-server = { path = "../pir-query-server", version = "=0.0.1-rc5", features = ["transparent", "enhance", "status", "receiver", "testing"] }
 zakura-pir-publisher = { path = "../pir-publisher", version = "=0.0.1-rc5", features = ["transparent", "enhance", "status", "receiver-crypto"] }
 zakura-pir-server-core = { path = "../pir-server-core", version = "=0.0.1-rc5", features = ["transparent"] }
@@ -304,6 +304,7 @@ required-features = ["transparent", "recovery"]
 name = "transparent_txid_client_txid-quality-canary"
 path = "examples/transparent_txid_client/txid-quality-canary.rs"
 required-features = ["transparent", "testing"]
+test = true
 
 [[example]]
 name = "transaction_status_private-source"

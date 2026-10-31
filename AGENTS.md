@@ -22,8 +22,8 @@ instructions still apply; do not duplicate them here.
   the config repository's CI. Same transport-free boundary.
 - Node chain readers live in wallet-pir; never add node or wallet-pir packages
   to this repository's dependency graph.
-- `wallet-lib/`: package `zakura-wallet-lib`; its `zakura` and `lrz` backends
-  are mutually exclusive. Never run workspace `--all-features` on the facade.
+- `wallet-lib/`: package `zakura-wallet-lib`; exposes the Zakura wallet family.
+  Keep default and explicit `zakura` feature selections compatible.
 
 Vendored Rust sources are edited directly; upstream updates merge through the
 vendor branch. Root `Cargo.toml` is generated: change `manifests/sources.toml`

@@ -2,6 +2,7 @@ name: Verify wallet libraries
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, closed]
   push:
     branches: [main]
   workflow_dispatch:
@@ -9,13 +10,15 @@ on:
 permissions:
   contents: read
 
-# Supersede older runs of the same PR or branch, including main.
+# Supersede older runs of the same PR or branch, including main. Closed PRs
+# retain their numeric group even when their ref changes to the base branch.
 concurrency:
-  group: verify-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: verify-${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.number || github.run_id) || github.ref }}
   cancel-in-progress: true
 
 jobs:
   prepare:
+    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -30,6 +33,7 @@ jobs:
         run: python3 scripts/ci.py "$BASE_SHA" >> "$GITHUB_OUTPUT"
 
   lightweight:
+    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -141,7 +145,7 @@ jobs:
       - run: git diff --exit-code
 
   tests:
-    if: ${{ always() && !cancelled() }}
+    if: ${{ always() && !cancelled() && github.event.action != 'closed' }}
     needs: [prepare, lightweight, repository-checks, test-configurations, protobuf]
     runs-on: ubuntu-latest
     timeout-minutes: 5
