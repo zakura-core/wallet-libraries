@@ -1,21 +1,18 @@
 # `zakura-wallet-lib`
 
-Selects the complete Zakura wallet stack by default and re-exports the selected
-family under stable names. Crates that must build both for Gemini and for Vizor
-depend on this instead of naming either family directly.
+Re-exports the Zakura wallet stack under stable names: `client_backend`,
+`client_sqlite`, `keys`, `orchard`, `pczt` and `primitives`.
 
-`zakura` and `lrz` select a backend. Each includes Orchard. The Zakura backend
-uses the Common 4 protocol-port revision pinned in its manifest; its Orchard
-proof implementation uses the explicit Halo 2 backend. Common 4 no longer
-exposes the `unstable-voting-circuits` feature that the upstream backend enables. Applications that use Enhance PIR
-depend directly on `zakura-client-backend`/`zakura-client-sqlite` with Orchard
-storage enabled and on `zakura-pir-client` with its `enhance` and `wallet` features; this facade does not
-expose the client.
-Keeping the two dependency
-graphs explicit avoids weak cross-family references, so Cargo does not retain
-the disabled family in downstream lockfiles and metadata.
+The default `zakura` feature includes Orchard, the explicit Halo 2 proof
+backend, wallet storage, lightwalletd transport and PCZT signing/finalization.
+Consumers disabling default features must explicitly enable `zakura`.
+The Common family uses compatible version requirements so consumers can select
+compatible updates.
 
-The name is reserved on crates.io as `zakura-wallet-lib`.
+Applications using Enhance PIR depend directly on `zakura-client-backend` and
+`zakura-client-sqlite` with Orchard storage enabled, plus `zakura-pir-client`
+with its `enhance` and `wallet` features. This facade does not expose that client.
 
-See `src/lib.rs` for the selection rules and the guarantees this crate does and
-does not provide.
+The name is reserved on crates.io as `zakura-wallet-lib`. See `src/lib.rs` for
+examples and `scripts/verify-wallet-lib-modes.sh` for fresh consumer and MSRV
+checks.

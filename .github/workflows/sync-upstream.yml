@@ -104,7 +104,7 @@ jobs:
         if: steps.sync.outputs.conflicts != 'true'
         run: ./scripts/verify-zakura-graph.sh
 
-      - name: Verify both facade backends
+      - name: Verify the Zakura facade
         if: steps.sync.outputs.conflicts != 'true'
         run: ./scripts/verify-wallet-lib-modes.sh
 
@@ -132,7 +132,7 @@ jobs:
             - the whole workspace checks with all targets and all features;
             - no crates.io original of a `zakura-*` fork entered the graph;
             - every vendored crate resolves to exactly one copy;
-            - the facade still builds against both backends.
+            - the facade retains its Zakura exports and fresh-consumer MSRV support.
 
             Run:
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

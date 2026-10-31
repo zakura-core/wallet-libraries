@@ -1,10 +1,11 @@
 //! Recovery storage: watched addresses, events, coverage, pending pages, recovery suspension,
 //! qualification, and activation.
 //!
-//! A candidate account's writes touch only `tpir_*` recovery tables. They never change the LRZ
-//! outputs, spends, locks, addresses, or transactions that balances, input selection,
-//! receiving-address allocation, and history read, and the ledger never reads those back as
-//! evidence. Activation and an active account's commits also project events into those tables.
+//! A candidate account's writes touch only `tpir_*` recovery tables. They never
+//! change the wallet's outputs, spends, locks, addresses, or transactions that
+//! balances, input selection, receiving-address allocation, and history read,
+//! and the ledger never reads those back as evidence. Activation and an active
+//! account's commits also project events into those tables.
 //!
 //! Rewinds and policy transitions maintain recovery state in every build, because another
 //! build may have written it. A build refuses both when the wallet requires a newer reader.

@@ -126,7 +126,6 @@ def main():
             ("wallet", f'zakura-pir-protocol = {{ path = "{ROOT / "zakura/pir-protocol"}", features = ["receiver-crypto"] }}'),
             ("facade-default", f'zakura-wallet-lib = {{ path = "{ROOT / "wallet-lib"}" }}'),
             ("facade-zakura", f'zakura-wallet-lib = {{ path = "{ROOT / "wallet-lib"}", default-features = false, features = ["zakura"] }}'),
-            ("facade-lrz", f'zakura-wallet-lib = {{ path = "{ROOT / "wallet-lib"}", default-features = false, features = ["lrz"] }}'),
         ):
             consumer = Path(temporary) / kind
             (consumer / "src").mkdir(parents=True)
