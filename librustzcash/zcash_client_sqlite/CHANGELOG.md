@@ -35,6 +35,11 @@ and this library adheres to Rust's notion of
   marker there, even without `complete`. Turning one-time recovery on no longer
   makes the first receive address wait for the Receiver publication to reach
   the wallet's tip. Every other lookup target is unchanged.
+- `WalletDb::prepare_receive_reservation` takes a `tip: BlockHeight` argument,
+  the caller's live chain tip, as `reserve_refund_key` does. A new receive
+  address needs the account's filter marker within 10 blocks of the newer of
+  that tip and the saved chain tip, so a wallet no longer has to save the live
+  tip with `update_chain_tip` first. Resuming a live draft is unchanged.
 
 ## [0.1.0-rc9.6] - 2026-10-30
 

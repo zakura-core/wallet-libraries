@@ -666,10 +666,11 @@ async fn seed_recovery_pages_history_and_stops_at_four_empty_indexes() {
         queries,
         "same frontier is not queried twice"
     );
+    let height = tip(&r.st).height;
     let next =
         r.st.wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(r.account, NOW)
+            .prepare_receive_reservation(r.account, NOW, height)
             .unwrap()
             .unwrap();
     assert_eq!(next.key_id().index(), 1, "the lowest unpaid hole is reused");
@@ -732,10 +733,11 @@ async fn a_positive_hint_without_payment_settles_with_one_empty_query() {
     assert_eq!(lookups(&directory), 1);
     drain(&mut r.st, r.account, &client).await;
     assert_eq!(lookups(&directory), 1, "the empty answer settles the hint");
+    let height = tip(&r.st).height;
     let next =
         r.st.wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(r.account, NOW)
+            .prepare_receive_reservation(r.account, NOW, height)
             .unwrap()
             .unwrap();
     assert_eq!(next.key_id().index(), 0);

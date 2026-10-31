@@ -1,7 +1,7 @@
 //! Incoming reservations, which live on their key's row, and their quote operations.
 use rusqlite::{Connection, OptionalExtension, named_params, params};
 use zakura_one_time_ivk::swap::Observation;
-use zcash_protocol::consensus::Parameters;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{RESERVED, ReservationPolicy, lifecycle::record};
 use crate::wallet::one_time_ivk::restore::queue::{RECEIVE_PENDING, mark_used};
@@ -364,12 +364,14 @@ pub(in crate::wallet::one_time_ivk) fn record_status<P: Parameters>(
     Ok(!operations.is_empty())
 }
 
-/// Resumes a live draft or reserves the lowest unpaid hole inside the mined window.
+/// Resumes a live draft or reserves the lowest unpaid hole inside the mined window, whose
+/// marker must be within 10 blocks of the newer of `tip` and the saved chain tip.
 pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     now: i64,
+    tip: BlockHeight,
 ) -> Result<Result<OneTimeKey, ReservationPolicy>, SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
     let end = recovery_end(conn, owner.0)?;
@@ -433,11 +435,8 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
         [owner.0],
         |r| r.get(0),
     )?;
-    let tip = wallet::chain_tip_height(conn)?.map(u32::from);
-    if !marker
-        .zip(tip)
-        .is_some_and(|(m, t)| t.saturating_sub(m) <= 10)
-    {
+    let tip = u32::from(tip.max(wallet::chain_tip_height(conn)?.unwrap_or(tip)));
+    if !marker.is_some_and(|m| tip.saturating_sub(m) <= 10) {
         return Ok(Err(ReservationPolicy::ReceiveHistory));
     }
     mark_used(conn, owner.0)?;

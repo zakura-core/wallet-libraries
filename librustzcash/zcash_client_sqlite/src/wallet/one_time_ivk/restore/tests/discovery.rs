@@ -716,7 +716,7 @@ fn delayed_window_expansion_checks_history_after_the_filter_frontier() {
     let next = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, clock_now())
+        .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
         .unwrap()
         .unwrap();
     assert_eq!(next.key_id().index(), 1);
@@ -1025,7 +1025,7 @@ fn orphaned_receipts_do_not_permanently_exhaust_the_receive_window() {
     let next = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, clock_now())
+        .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
         .unwrap()
         .unwrap();
     assert_eq!(next.key_id().index(), 0);
@@ -3247,7 +3247,7 @@ fn a_cancelled_search_stops_an_invalidated_manual_only_lookup() {
     let reserved = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, now)
+        .prepare_receive_reservation(account, now, NO_LIVE_TIP)
         .unwrap()
         .unwrap();
     assert_eq!(reserved.key_id().index(), 0);
@@ -3266,7 +3266,7 @@ fn a_cancelled_search_stops_an_invalidated_manual_only_lookup() {
         matches!(
             st.wallet_mut()
                 .db_mut()
-                .prepare_receive_reservation(account, now)
+                .prepare_receive_reservation(account, now, NO_LIVE_TIP)
                 .unwrap(),
             Err(crate::wallet::one_time_ivk::swap::ReservationPolicy::ReceiveHistory)
         ),
@@ -3276,7 +3276,7 @@ fn a_cancelled_search_stops_an_invalidated_manual_only_lookup() {
     assert_eq!(
         st.wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, now)
+            .prepare_receive_reservation(account, now, NO_LIVE_TIP)
             .unwrap()
             .unwrap()
             .key_id()
@@ -4642,7 +4642,7 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
         let _ = db.defer_one_time_lookup(account, &work, clock_now());
         let _ = db.record_one_time_lookup(account, &work, &page, clock_now());
         let issued = [
-            db.prepare_receive_reservation(account, clock_now())
+            db.prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
                 .map(|r| r.map(drop)),
             db.reserve_refund_key(account, anchor.height)
                 .map(|r| r.map(drop)),
@@ -4691,7 +4691,7 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
             .enabled
     );
     assert_ne!(
-        db.prepare_receive_reservation(account, clock_now())
+        db.prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
             .unwrap()
             .map(drop),
         Err(ReservationPolicy::Disabled)

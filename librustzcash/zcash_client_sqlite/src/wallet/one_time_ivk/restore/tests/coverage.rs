@@ -94,7 +94,7 @@ fn reserve_receive(st: &mut State, account: AccountUuid) -> (KeyId, usize) {
         match st
             .wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, clock_now())
+            .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
             .unwrap()
         {
             Ok(key) => return (key.key_id(), lookups),
@@ -399,7 +399,7 @@ fn receive_hand_out_waits_for_a_current_marker() {
     let held = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, clock_now())
+        .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
         .unwrap();
     assert!(matches!(held, Err(ReservationPolicy::ReceiveHistory)));
     let state = status(st.wallet().db(), account);
@@ -832,7 +832,7 @@ fn a_first_recovery_reads_its_bootstraps_through_the_publication() {
         let issued = st
             .wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, clock_now())
+            .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
             .unwrap();
         assert_eq!(issued.map(|k| k.key_id()), Ok(receive(0)));
         assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
@@ -882,7 +882,7 @@ fn a_first_recovery_finds_a_payment_past_its_publication_through_filters() {
     let held = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, clock_now())
+        .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
         .unwrap();
     assert!(matches!(held, Err(ReservationPolicy::ReceiveHistory)));
     let state = status_at(&st, account, end);
@@ -1036,7 +1036,7 @@ fn a_first_recovery_issues_within_ten_blocks_of_the_newest_tip() {
         let db = st.wallet_mut().db_mut();
         db.update_chain_tip(end + lag).unwrap();
         let reserved = db
-            .prepare_receive_reservation(account, clock_now())
+            .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
             .unwrap();
         assert_eq!(reserved.is_ok(), issued, "{lag} blocks behind");
         if issued {
@@ -1060,7 +1060,7 @@ fn a_first_recovery_issues_within_ten_blocks_of_the_newest_tip() {
         let held = st
             .wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, clock_now())
+            .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
             .unwrap();
         assert!(matches!(held, Err(ReservationPolicy::ReceiveHistory)));
         let scanned = tip(&st).height + 1;
@@ -1117,4 +1117,33 @@ fn a_reset_before_the_first_publication_keeps_its_obligations() {
         .map(|w| (w.work.key, w.through))
         .collect();
     assert_eq!(runnable, [0, 2, 3].map(|i| (receive(i), end)));
+}
+
+/// Issuance checks the marker against the newer of the caller's live tip and the saved
+/// tip. With the saved tip and the marker at the same block and the live tip 100 blocks
+/// past both, as at saved 1,900, marker 1,900 and live 2,000, a new address waits, since
+/// those 100 blocks were never read through filters. A live draft isn't a new address, so
+/// it is quoted again.
+#[test]
+fn receive_hand_out_checks_the_marker_against_the_live_tip() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    assert_eq!(complete(&mut st, account), 4);
+    let marker = status(st.wallet().db(), account).filter_frontier.unwrap();
+    let saved = st.wallet().chain_height().unwrap().unwrap();
+    assert_eq!(saved, marker.height);
+    let live = saved + 100;
+    let prepare = |st: &mut State, tip| {
+        st.wallet_mut()
+            .db_mut()
+            .prepare_receive_reservation(account, clock_now(), tip)
+            .unwrap()
+            .map(|key| key.key_id())
+    };
+    assert_eq!(
+        prepare(&mut st, live),
+        Err(ReservationPolicy::ReceiveHistory)
+    );
+    assert_eq!(prepare(&mut st, saved), Ok(receive(0)));
+    assert_eq!(prepare(&mut st, live), Ok(receive(0)));
 }

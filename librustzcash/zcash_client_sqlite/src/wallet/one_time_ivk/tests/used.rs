@@ -33,13 +33,13 @@ fn a_receive_hand_out_sets_the_marker() {
     assert!(!used(&st, account));
     let db = st.wallet_mut().db_mut();
     let key = db
-        .prepare_receive_reservation(account, clock_now())
+        .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
         .unwrap();
     assert!(key.is_ok() && used(&st, account));
     clear(&st);
     let db = st.wallet_mut().db_mut();
     let again = db
-        .prepare_receive_reservation(account, clock_now())
+        .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
         .unwrap();
     assert_eq!(again.unwrap().key_id(), key.unwrap().key_id());
     assert!(used(&st, account), "resuming the live reservation is use");

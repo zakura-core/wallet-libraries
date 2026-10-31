@@ -52,7 +52,7 @@ fn seed_gap_and_recycled_hole() {
         desktop.reopen();
         let next = desktop
             .db
-            .prepare_receive_reservation(desktop.account, chain.now())
+            .prepare_receive_reservation(desktop.account, chain.now(), chain.tip())
             .unwrap()
             .unwrap();
         assert_eq!(next.key_id().index(), 1);
