@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc5] - 2026-10-30
+
 ### Changed
 
 - Breaking: `receiver::Projection` places a segment's directory block by block

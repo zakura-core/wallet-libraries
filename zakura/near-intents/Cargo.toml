@@ -1,6 +1,6 @@
 [package]
 name = "zakura-near-intents"
-version = "0.0.1-rc4"
+version = "0.0.1-rc5"
 description = "Experimental NEAR Intents 1Click status normalization for one-time IVK swap keys"
 edition.workspace = true
 rust-version.workspace = true

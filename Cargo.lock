@@ -7399,7 +7399,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-backend"
-version = "0.1.0-rc9.5"
+version = "0.1.0-rc9.6"
 dependencies = [
  "arti-client",
  "assert_matches",
@@ -7468,7 +7468,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-sqlite"
-version = "0.1.0-rc9.5"
+version = "0.1.0-rc9.6"
 dependencies = [
  "assert_matches",
  "bech32",
@@ -7622,7 +7622,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-near-intents"
-version = "0.0.1-rc4"
+version = "0.0.1-rc5"
 dependencies = [
  "zakura-one-time-ivk",
  "zakura-protocol",
@@ -7788,7 +7788,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-client"
-version = "0.0.1-rc4"
+version = "0.0.1-rc5"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -7834,7 +7834,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-config"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hex",
  "serde",
@@ -7847,7 +7847,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-protocol"
-version = "0.0.1-rc4"
+version = "0.0.1-rc5"
 dependencies = [
  "base64 0.22.1",
  "bitcoin",
@@ -7875,7 +7875,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-publisher"
-version = "0.0.1-rc4"
+version = "0.0.1-rc5"
 dependencies = [
  "hex",
  "incrementalmerkletree 0.8.2",
@@ -7890,7 +7890,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-query-server"
-version = "0.0.1-rc4"
+version = "0.0.1-rc5"
 dependencies = [
  "ipir-sp",
  "rayon",
@@ -7903,7 +7903,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-server-core"
-version = "0.0.1-rc4"
+version = "0.0.1-rc5"
 dependencies = [
  "hex",
  "rand 0.8.8",
@@ -8093,7 +8093,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-wallet-lib"
-version = "0.1.0-rc9.5"
+version = "0.1.0-rc9.6"
 dependencies = [
  "orchard",
  "pczt",
