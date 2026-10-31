@@ -1215,6 +1215,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "daggy"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "804169db156b21258a2545757336922d93dfa229892c75911a0ad141aa0ff241"
+dependencies = [
+ "petgraph 0.8.3",
+]
+
+[[package]]
 name = "darling"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4599,10 +4608,23 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e82960ac11ccabd77d53c933532612079e01205b5873ec5095f4b3426493434"
 dependencies = [
- "daggy",
+ "daggy 0.8.1",
  "indexmap 1.9.3",
  "log",
  "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
+name = "schemerz"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85a66556ccb695e22d08620703a9526806e533de0094fe993896932592ba3a6c"
+dependencies = [
+ "daggy 0.9.0",
+ "indexmap 2.14.2",
+ "log",
+ "thiserror 2.0.21",
  "uuid",
 ]
 
@@ -4613,7 +4635,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca6df8a13fb3b7914f94ac6579bd5e76b9292f135886e6becc3525f9e5116827"
 dependencies = [
  "rusqlite",
- "schemerz",
+ "schemerz 0.2.0",
+ "uuid",
+]
+
+[[package]]
+name = "schemerz-rusqlite"
+version = "0.371.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c29c257d3233449db8224f7f0fcf51373b59755aec356d8648dc694804132d60"
+dependencies = [
+ "rusqlite",
+ "schemerz 0.3.0",
  "uuid",
 ]
 
@@ -7621,8 +7654,8 @@ dependencies = [
  "rand_distr",
  "regex",
  "rusqlite",
- "schemerz",
- "schemerz-rusqlite",
+ "schemerz 0.3.0",
+ "schemerz-rusqlite 0.371.0",
  "secp256k1 0.33.1",
  "secrecy",
  "serde",
@@ -8380,8 +8413,8 @@ dependencies = [
  "regex",
  "rusqlite",
  "sapling-crypto",
- "schemerz",
- "schemerz-rusqlite",
+ "schemerz 0.2.0",
+ "schemerz-rusqlite 0.370.0",
  "secrecy",
  "shardtree 0.8.0",
  "static_assertions",

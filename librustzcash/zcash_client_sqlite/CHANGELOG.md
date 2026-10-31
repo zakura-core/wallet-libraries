@@ -7,6 +7,14 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- Use `schemerz` 0.3 and `schemerz-rusqlite` 0.371 for wallet migrations.
+  Applications naming migration errors or implementing external migrations must
+  use `schemerz` 0.3 for `MigratorError` and `Migration`, and
+  `schemerz-rusqlite` 0.371 for `RusqliteMigration`. Migration UUIDs and SQL
+  schema definitions are unchanged.
+
 ## [0.1.0-rc9.4] - 2026-10-23
 
 ### Changed
