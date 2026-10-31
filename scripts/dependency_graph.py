@@ -175,6 +175,7 @@ def main():
         "zakura-fslock-guard", "zakura-oneshot-fused-workaround",
         "zakura-retry-error", "zakura-saturating-time", "zakura-tor-keymgr",
         "zakura-tor-hsservice", "zakura-tor-ptmgr", "zakura-tor-rpcbase",
+        "zakura-tor-general-addr",
     }
     cases = [
         ("scanning", "librustzcash/zcash_client_backend", [], {"nanorand", "futures-core", "futures-sink"}, {"flume"}),
