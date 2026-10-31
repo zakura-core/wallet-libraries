@@ -9,6 +9,9 @@ and this library adheres to Rust's notion of
 
 ### Added
 
+- `SqliteClientError::DivergedCheckpoints`, which exposes the divergent shielded
+  pool and requested truncation height missing from its ordinary checkpoints.
+
 - Migration `transparent_spend_map_prevout_index` indexes `transparent_spend_map`
   by `(prevout_txid, prevout_output_index)`.
 
