@@ -170,16 +170,17 @@ They use the original test sources and vector file. Local malformed-input,
 corruption and output-failure tests remain in ordinary configurations, which
 no longer build the Bitcoin transaction/key library or its secp256k1 backend.
 
-The PIR clients temporarily pin the IPIR family to the main revision that merged
-[IPIR PR 39](https://github.com/valargroup/ipir-sp/pull/39). Native setup derivation and byte framing live in the shared protocol package;
+The PIR packages use the published IPIR family: `ipir-sp` 0.1.0-rc.8,
+`ipir-native-client` 0.1.0-rc.1, InspiRING 0.1.0-rc.3 and ReinspiRING
+0.1.3-rc.1. Keep every member on the same registry source so their exposed
+parameter types share one identity.
+
+Native setup derivation and byte framing live in the shared protocol package;
 client encryption and server operations use ReinspiRING directly. Production
-roles do not import IPIR's native-client facade, evaluator or SimplePIR. The receiver's explicit `server` feature still
-uses the evaluator. Enhance retains the legacy parameter metadata as a shared serialized contract,
-with tests against the previous provider; its production client no longer
-depends on the IPIR evaluator.
-Keep IPIR, its native client, InspiRING and ReinspiRING on the same source when
-repinning, since their exposed types must share one identity. Repin to the
-published family after the extracted client is released.
+roles do not import IPIR's native-client facade, evaluator or SimplePIR. The
+receiver's explicit `server` feature still uses the evaluator. Enhance retains
+the legacy parameter metadata as a shared serialized contract, with tests against
+the previous provider; its production client does not depend on the evaluator.
 
 ## Common dependency compatibility
 
