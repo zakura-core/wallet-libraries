@@ -262,12 +262,34 @@ cargo +1.97 generate-lockfile --manifest-path "$consumer/Cargo.toml"
 cargo +1.97 metadata --manifest-path "$consumer/Cargo.toml" \
   --format-version 1 --locked > "$consumer/metadata.json"
 
-python3 - "$consumer/metadata.json" <<'PY'
+python3 - "$consumer/metadata.json" "$manifest" <<'PY'
 import json
 import sys
+import tomllib
 from pathlib import Path
 
 packages = json.loads(Path(sys.argv[1]).read_text())["packages"]
+
+
+def common_source(manifest_path):
+    """The Cargo source ID every Common package must resolve from.
+
+    crates.io for a published Common release, or the single git revision that
+    manifests/sources.toml pins while a release is unpublished.
+    """
+    with open(manifest_path, "rb") as manifest_file:
+        rewire = tomllib.load(manifest_file)["rewire"]
+    pins = {(target.get("git"), target.get("rev")) for target in rewire.values()}
+    if len(pins) != 1:
+        raise SystemExit(f"[rewire] mixes Common sources: {sorted(pins, key=str)}")
+    git, rev = pins.pop()
+    if git is None:
+        return "registry+https://github.com/rust-lang/crates.io-index"
+    if rev is None:
+        raise SystemExit("[rewire] pins Common by git without a rev")
+    return f"git+{git}?rev={rev}#{rev}"
+
+
 expected = {
     "zakura-proofs",
     "zakura-zip321",
@@ -294,7 +316,7 @@ expected = {
     "zakura-sinsemilla",
 }
 # Cargo checks the declared version ranges; inspect package identities here.
-required_source = "registry+https://github.com/rust-lang/crates.io-index"
+required_source = common_source(sys.argv[2])
 problems = []
 for name in sorted(expected):
     matches = [package for package in packages if package["name"] == name]

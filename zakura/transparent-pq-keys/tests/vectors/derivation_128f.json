@@ -1,0 +1,108 @@
+{
+  "vectors": [
+    {
+      "name": "main_receive_0",
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "origin": "020100000000000000000000",
+      "root_hash": "da1d2d74eac6f2604b40406e5da062fad063ed99083ecaa62dd49753aaff1b3f",
+      "material": "e58ee271aebe097c5f2b325dc0d73515658e10c335478d68b1478cdb2f4ed03cb2462152c5371439e439379b7c25fed7",
+      "public_key": "b2462152c5371439e439379b7c25fed7d007c4daf51746c101bbd5bb5477e19f"
+    },
+    {
+      "name": "main_receive_1",
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "origin": "020100000000000000000001",
+      "root_hash": "da1d2d74eac6f2604b40406e5da062fad063ed99083ecaa62dd49753aaff1b3f",
+      "material": "790daab7105df1011d49511ac48a95a94912eccd9dab07c2c55cd873e8bd8f134ca50605335344ba5208af406bfec042",
+      "public_key": "4ca50605335344ba5208af406bfec0420674c07e5f7812b503d7c60474488772"
+    },
+    {
+      "name": "main_change_0",
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "origin": "020100000000000100000000",
+      "root_hash": "da1d2d74eac6f2604b40406e5da062fad063ed99083ecaa62dd49753aaff1b3f",
+      "material": "b32d751e45cc75a4dc1829ac0fe0e04d96a38461d9764e781f9adc88e7abc0577057c69f97c2031af224392dcd63c654",
+      "public_key": "7057c69f97c2031af224392dcd63c65412938b9053117d0ecfe4bbdf32437449"
+    },
+    {
+      "name": "main_account_1",
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "origin": "020100000000010000000000",
+      "root_hash": "da1d2d74eac6f2604b40406e5da062fad063ed99083ecaa62dd49753aaff1b3f",
+      "material": "134bf22ba057a8fbd2b19c77eaf2f0d45020372fe363fa6a22469a91ff2d38bb06cfdccf32e307e2f6338f3589e0f4b4",
+      "public_key": "06cfdccf32e307e2f6338f3589e0f4b4598276f3356c331b1cff3b11e2eb4eba"
+    },
+    {
+      "name": "test_receive_0",
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "origin": "020101000000000000000000",
+      "root_hash": "da1d2d74eac6f2604b40406e5da062fad063ed99083ecaa62dd49753aaff1b3f",
+      "material": "b0efaa88ef6d04bec599c61dcccd698fbec982526e85b3bb82cf20fdb16b98fb189b3f240f2b581d870ff1fa2ad3138a",
+      "public_key": "189b3f240f2b581d870ff1fa2ad3138ad4325ea22eebc910b3335ae3118588ec"
+    },
+    {
+      "name": "regtest_receive_0",
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "origin": "020102000000000000000000",
+      "root_hash": "da1d2d74eac6f2604b40406e5da062fad063ed99083ecaa62dd49753aaff1b3f",
+      "material": "cd145375a5c9020279cc16c89c6d49d04839090592f64fdb641a441a74a2321181d4fb79d2c7785da3befa02a80bf090",
+      "public_key": "81d4fb79d2c7785da3befa02a80bf0906ec5a25a307a0d2d89048ad5366d3f09"
+    },
+    {
+      "name": "index_below_high_bit",
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "origin": "02010000000000007fffffff",
+      "root_hash": "da1d2d74eac6f2604b40406e5da062fad063ed99083ecaa62dd49753aaff1b3f",
+      "material": "91457760df8ae4cb58dbe9906c629b0b6c6a3add1d690370fa62aeec1da45da6600513ae31cd02f8d29ef0e11ba004a3",
+      "public_key": "600513ae31cd02f8d29ef0e11ba004a33565e04487f0d70db89e62c6d4a69f5e"
+    },
+    {
+      "name": "index_high_bit",
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "origin": "020100000000000080000000",
+      "root_hash": "da1d2d74eac6f2604b40406e5da062fad063ed99083ecaa62dd49753aaff1b3f",
+      "material": "86dbd09acf0695a98005485a8ef71febfd38eac1a1beacd785c755d5cca5ba85ba398a359031ba8e6afb86e03824e5a3",
+      "public_key": "ba398a359031ba8e6afb86e03824e5a37c8816ac4c5b1dae27e6cb0dc1e00ec8"
+    },
+    {
+      "name": "last_index",
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "origin": "0201000000000000ffffffff",
+      "root_hash": "da1d2d74eac6f2604b40406e5da062fad063ed99083ecaa62dd49753aaff1b3f",
+      "material": "94bac888bdfd10b075f438b6b6071c2a99bab718fefdd2270e1c39bf7ec3a3d7727d32d4a24da649ff0d4a1cbd77f6db",
+      "public_key": "727d32d4a24da649ff0d4a1cbd77f6db84ac095ac34644a8dfabdc7e4ea43c72"
+    },
+    {
+      "name": "last_account",
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "origin": "020100ffffffff0000000000",
+      "root_hash": "da1d2d74eac6f2604b40406e5da062fad063ed99083ecaa62dd49753aaff1b3f",
+      "material": "4b4f36cb947e7becacda0c818d8aeb9d6583cb1bcca9cc1977cba2f7e42270d405dc1bcf7215d14d8e0b10a1c6c6a80a",
+      "public_key": "05dc1bcf7215d14d8e0b10a1c6c6a80a373c8950a04f27855497edf7133a9ab3"
+    },
+    {
+      "name": "nontrivial_encoding",
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "origin": "020101010203040180000001",
+      "root_hash": "da1d2d74eac6f2604b40406e5da062fad063ed99083ecaa62dd49753aaff1b3f",
+      "material": "b8f3e77c60a3a5d3cfc5b5c96e62eeb883ac365979234b7f96f1b9625b21a0515930f458f35b2c1010eb06b63c3facae",
+      "public_key": "5930f458f35b2c1010eb06b63c3facae785cbedc7979b8fc4b7934adad6d10b1"
+    },
+    {
+      "name": "long_seed",
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "origin": "020100000000000000000000",
+      "root_hash": "df15f165a46447586cae24fa6f358e43b467cd7655a3272f2adcf47178ecf137",
+      "material": "6012d8cdfdfe24449626e328cc3366ef5b44de02013bcf867e03436c6b16a95eabb5c43289491c3ec5407a17c6466b5a",
+      "public_key": "abb5c43289491c3ec5407a17c6466b5a275373cd715d9e2ab73206ccea87cfbb"
+    },
+    {
+      "name": "different_seed",
+      "seed": "ff0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "origin": "020100000000000000000000",
+      "root_hash": "cc696c282604b0278dca26aea0940665ed234e90d28511dcce65c907751ff8c2",
+      "material": "8820334c0c8af0374651a4887946c6ccb7a4707fa014c0d41c00fb5b411dcdcadfcdb73bbb4e21efabc92ac857b115f3",
+      "public_key": "dfcdb73bbb4e21efabc92ac857b115f376ba486c549b22c227659a16e2a25a86"
+    }
+  ]
+}

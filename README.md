@@ -74,6 +74,9 @@ Cargo dependency rename:
 orchard = { version = "4.0.0", package = "zakura-orchard" }
 ```
 
+While a Common release is unpublished, each entry also carries the `git` and
+`rev` it is pinned to; the PQ transparent work pins Common 5 this way.
+
 The dependency key stays `orchard`, so every `orchard::` path in the vendored
 sources keeps compiling, while the package that satisfies it is the fork. The
 vendored crates inherit these through `workspace = true`. The small source
