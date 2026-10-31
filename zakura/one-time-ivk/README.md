@@ -78,8 +78,8 @@ is queried through receiver PIR until a payment is authenticated. A funded key
 leaves automatic monitoring only once every local operation on it is conclusive:
 the provider reported that no refund is coming, or the expected refund was received
 and settled. A key restored from its memo alone has no local operation, so it stays
-monitored until its funding is seven days old in chain time. Further payments after completion are found by retained block filters or an explicit
-history check. Incoming indices are recovered through four-index lookahead. `RefundMemo::decode` returns `None`
+monitored until the account's filter marker reaches 90 days of chain time after its funding.
+A later refund is found only by an explicit history check. Incoming indices are recovered through four-index lookahead. `RefundMemo::decode` returns `None`
 for any memo that is not a v1 record, and a wallet ignores such a memo even when it
 starts with `swap::REFUND_MEMO_MAGIC`.
 

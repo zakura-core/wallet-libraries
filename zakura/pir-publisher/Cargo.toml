@@ -46,13 +46,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 
 [[test]]
-name = "receiver_directory"
-path = "tests/receiver/directory.rs"
-required-features = ["receiver"]
-
-[[test]]
-name = "receiver_witness"
-path = "tests/receiver/witness.rs"
+name = "receiver_segment"
+path = "tests/receiver/segment.rs"
 required-features = ["receiver"]
 
 [[test]]

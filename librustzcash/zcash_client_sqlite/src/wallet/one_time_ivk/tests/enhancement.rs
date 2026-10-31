@@ -13,7 +13,7 @@ fn ironwood_funded_wallet() -> (State, BlockHeight) {
     let account = st.test_account().unwrap().id();
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(account, true)
+        .enable_one_time_recovery(account)
         .unwrap();
     (st, first)
 }
@@ -56,7 +56,8 @@ fn recover_memos(st: &mut State, account: AccountUuid) {
     .unwrap()
 }
 
-/// `(index, funding height, registered for a lookup)` of each registered refund key.
+/// `(index, funding height, history due)` of each registered refund key: its history is
+/// registered for a lookup.
 fn refund_keys(st: &State) -> Vec<(u64, u32, bool)> {
     let keys: Vec<(Vec<u8>, u32, bool)> = rows(
         st.wallet().conn(),
@@ -138,7 +139,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     st.scan_cached_blocks(first, blocks as usize);
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(restored, true)
+        .enable_one_time_recovery(restored)
         .unwrap();
     let pending = |st: &State| {
         store::restore::recovery::refund_memos_pending(st.wallet().conn(), restored).unwrap()
@@ -148,6 +149,13 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     assert!(refund_keys(&st).is_empty());
     assert!(pending(&st));
     decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
+    // Storing the retrieved memo registers its key at once. Forget it to check the rules.
+    assert_eq!(refund_keys(&st), [(7, u32::from(mined), true)]);
+    exec(
+        st.wallet().conn(),
+        "DELETE FROM ironwood_one_time_keys WHERE purpose = 0",
+        [],
+    );
 
     // Changing the authenticated scope makes the memo ineligible.
     let set_scope = |st: &State, scope: u8| {
@@ -234,7 +242,7 @@ fn refund_funding_refuses_its_memo_on_orchard_change() {
     let account = st.test_account().unwrap().id();
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(account, true)
+        .enable_one_time_recovery(account)
         .unwrap();
     let tip = st.wallet().chain_height().unwrap().unwrap();
     let deposit = p2pkh(7).encode(st.network());
@@ -422,7 +430,7 @@ fn restore_through_funding(
     let from = birthday.height();
     st.scan_cached_blocks(from, (u32::from(mined) - u32::from(from) + 1) as usize);
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(restored, true).unwrap();
+    db.enable_one_time_recovery(restored).unwrap();
     assert!(matches!(
         reserve_refund(db, restored, mined),
         Ok(Err(ReservationPolicy::FundingHistory))
@@ -707,6 +715,10 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
         st.wallet_mut().update_chain_tip(mined).unwrap();
         let blocks = u32::from(mined) - u32::from(first) + 1;
         st.scan_cached_blocks(first, blocks as usize);
+        st.wallet_mut()
+            .db_mut()
+            .enable_one_time_recovery(restored)
+            .unwrap();
 
         let work = st.wallet().db().transaction_enhancement_work().unwrap();
         let requests: Vec<_> = work
@@ -764,7 +776,7 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
         if public {
             decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
         }
-        recover_memos(&mut st, restored);
+        // Storing the memo registers its key, by private enhancement or full retrieval.
         assert_eq!(refund_keys(&st), [(7, u32::from(mined), true)]);
     }
 }
@@ -824,11 +836,16 @@ fn lookup_pending(db: &Db, account: AccountUuid) -> bool {
     )
 }
 
-/// Disabling receiver discovery does not discard independently authenticated outgoing details.
+/// An account whose receiver discovery isn't enabled still keeps independently
+/// authenticated outgoing details.
 #[test]
 fn outgoing_one_time_payment_details_survive_disabled_discovery() {
     for enabled in [false, true] {
-        let mut desktop = scanned_wallet();
+        let mut desktop = if enabled {
+            scanned_wallet()
+        } else {
+            restored_wallet()
+        };
         let account = desktop.test_account().unwrap().id();
         let start = desktop.sapling_activation_height();
         let key = reserve(
@@ -854,11 +871,6 @@ fn outgoing_one_time_payment_details_survive_disabled_discovery() {
             .get_transaction(txid.unwrap())
             .unwrap()
             .unwrap();
-        desktop
-            .wallet_mut()
-            .db_mut()
-            .set_one_time_recovery_enabled(account, enabled)
-            .unwrap();
         let network = *desktop.network();
         decrypt_and_store_transaction(&network, desktop.wallet_mut(), &transaction, None).unwrap();
         let sent: (u64, Vec<u8>, String) = desktop.wallet().conn().query_row(
@@ -875,4 +887,255 @@ fn outgoing_one_time_payment_details_survive_disabled_discovery() {
         );
         assert_eq!(received, 0);
     }
+}
+
+/// Refund memos naming 150 and then 100, funded after a restore's birthday: 150 spends a
+/// note from before the birthday, so the restore cannot prove it funded it, while 100
+/// spends notes received after the birthday, which it owns. Returns the wallet restored with only 150's
+/// transaction stored and scanned through its block, the restored account, and 100's
+/// transaction and block.
+fn memo_150_then_100() -> (
+    State,
+    AccountUuid,
+    zcash_primitives::transaction::Transaction,
+    BlockHeight,
+) {
+    let (mut st, _) = ironwood_funded_wallet();
+    let born = st.latest_cached_block().unwrap().chain_state().clone();
+    let birthday = zcash_client_backend::data_api::AccountBirthday::from_parts(born, None);
+    st.generate_and_scan_empty_blocks(1);
+    let pays = || vec![payment(&p2pkh(7), 100_000, None)];
+    let (_, first, first_mined) = send(&mut st, pays(), &refund_memo(150));
+    let fvk = parent(&st);
+    pay(&mut st, &fvk, 1_000_000);
+    st.generate_and_scan_empty_blocks(5);
+    let (_, second, second_mined) = send(&mut st, pays(), &refund_memo(100));
+    let later = st.wallet().get_transaction(second).unwrap().unwrap();
+    let restored = restore_through_funding(&mut st, &birthday, &[first], first_mined);
+    (st, restored, later, second_mined)
+}
+
+/// R150 is far past every known refund index and unproven, so it waits, and reading the
+/// memos again adds no work. Learning R100 brings R150 within the gap, so both are
+/// accepted.
+#[test]
+fn a_memo_past_the_gap_waits_until_a_lower_index_is_learned() {
+    let (mut st, restored, later, mined) = memo_150_then_100();
+    assert!(refund_keys(&st).is_empty());
+    tx(st.wallet_mut().db_mut(), |c, p| {
+        store::restore::recovery::recover_refund_memos(c, p, restored)
+    })
+    .unwrap();
+    st.scan_cached_blocks(mined, 1);
+    assert!(refund_keys(&st).is_empty());
+    let network = *st.network();
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &later, Some(mined)).unwrap();
+    let indexes: Vec<u64> = refund_keys(&st).iter().map(|(i, _, _)| *i).collect();
+    assert_eq!(indexes, [100, 150]);
+}
+
+/// A funding memo enhancement stores after the last block batch registers its refund key
+/// at once, and its bootstrap lookup makes a round due.
+#[test]
+fn a_memo_stored_after_the_last_batch_makes_a_round_due() {
+    let (mut st, restored, later, mined) = memo_150_then_100();
+    st.scan_cached_blocks(mined, 1);
+    let network = *st.network();
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &later, Some(mined)).unwrap();
+    assert!(refund_keys(&st).contains(&(100, u32::from(mined), true)));
+    let db = st.wallet().db();
+    assert!(
+        db.one_time_recovery(restored, clock_now(), None)
+            .unwrap()
+            .round_due
+    );
+}
+
+/// A memo stored while its transaction was unmined is accepted as soon as storing the
+/// transaction again records its block, without waiting for a block batch.
+#[test]
+fn storing_an_unmined_memos_transaction_again_once_mined_accepts_it() {
+    let (mut st, first) = ironwood_funded_wallet();
+    let account = st.test_account().cloned().unwrap();
+    let network = *st.network();
+    let pays = vec![payment(&p2pkh(7), 100_000, None)];
+    let (_, txid, mined) = send(&mut st, pays, &refund_memo(7));
+    let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
+    let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
+    let _old_wallet = st.reset();
+    let (restored, _) = st
+        .wallet_mut()
+        .create_account("restored", &seed, account.birthday(), None)
+        .unwrap();
+    st.wallet_mut().update_chain_tip(mined).unwrap();
+    let blocks = u32::from(mined) - u32::from(first);
+    st.scan_cached_blocks(first, blocks as usize);
+    st.wallet_mut()
+        .db_mut()
+        .enable_one_time_recovery(restored)
+        .unwrap();
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, None).unwrap();
+    assert!(refund_keys(&st).is_empty(), "an unmined memo waits");
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
+    assert_eq!(refund_keys(&st), [(7, u32::from(mined), true)]);
+}
+
+/// Whether `account` has one-time recovery enabled.
+fn enabled(st: &State, account: AccountUuid) -> bool {
+    let db = st.wallet().db();
+    db.one_time_recovery(account, 0, None).unwrap().enabled
+}
+
+/// Whether `account`'s use marker is set.
+fn used(st: &State, account: AccountUuid) -> bool {
+    let db = st.wallet().db();
+    db.one_time_recovery(account, 0, None).unwrap().used
+}
+
+/// A restored wallet that never enabled recovery, holding `memo` on an unmined payment to
+/// its internal address, stored. Returns the transaction.
+fn unmined_internal_memo(
+    memo: &MemoBytes,
+) -> (
+    State,
+    AccountUuid,
+    zcash_primitives::transaction::Transaction,
+) {
+    let mut st = restored_wallet();
+    let account = st.test_account().unwrap().id();
+    let network = *st.network();
+    let tx = external_payment(parent(&st).address_at(0u32, Scope::Internal), memo);
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, None).unwrap();
+    (st, account, tx)
+}
+
+/// A refund memo that a block batch mines on a never-enabled account is evidence of a swap.
+/// The batch's transaction sets the use marker, enables recovery, registers the refund key
+/// and queues its bootstrap lookup from the funding height, and a rolled back transaction
+/// leaves none of it.
+#[test]
+fn a_mined_refund_memo_enables_a_never_enabled_account_in_one_transaction() {
+    let (mut st, account, tx) = unmined_internal_memo(&refund_memo(0));
+    let (mined, _) = st.generate_next_block_from_tx(1, &tx);
+    let aborted: Result<(), SqliteClientError> = super::tx(st.wallet_mut().db_mut(), |c, p| {
+        c.execute(
+            "UPDATE transactions SET mined_height = ?1 WHERE txid = ?2",
+            rusqlite::params![u32::from(mined), tx.txid().as_ref()],
+        )?;
+        store::restore::recovery::accept_mined_memos(c, p, [*tx.txid().as_ref()])?;
+        Err(corrupt("test rollback"))
+    });
+    assert!(aborted.is_err());
+    assert!(!enabled(&st, account) && !used(&st, account) && refund_keys(&st).is_empty());
+    st.scan_cached_blocks(mined, 1);
+    assert!(enabled(&st, account) && used(&st, account));
+    assert_eq!(refund_keys(&st), [(0, u32::from(mined), true)]);
+    let bootstrap = store::restore::tests::discovery::work_of(&st, KeyId::new(Purpose::Refund, 0));
+    assert_eq!(bootstrap.from, mined);
+    let state = st
+        .wallet()
+        .db()
+        .one_time_recovery(account, clock_now(), None)
+        .unwrap();
+    assert!(state.round_due);
+}
+
+/// A refund memo whose transaction is unmined enables nothing through block batches that
+/// don't mine it, until the batch that mines it enables the account.
+#[test]
+fn an_unmined_refund_memo_waits_for_the_batch_that_mines_it() {
+    let (mut st, account, tx) = unmined_internal_memo(&refund_memo(0));
+    st.generate_and_scan_empty_blocks(1);
+    assert!(!enabled(&st, account) && !used(&st, account) && refund_keys(&st).is_empty());
+    let (mined, _) = st.generate_next_block_from_tx(1, &tx);
+    st.scan_cached_blocks(mined, 1);
+    assert!(enabled(&st, account));
+    assert_eq!(refund_keys(&st), [(0, u32::from(mined), true)]);
+}
+
+/// A reorg below an accepted memo's block clears its funding height, and the batch that
+/// stores the replacement chain's block mining the memo again accepts it at that height.
+#[test]
+fn a_reorged_refund_memo_is_accepted_again_on_the_replacement_chain() {
+    let (mut st, _, tx) = unmined_internal_memo(&refund_memo(0));
+    let (mined, _) = st.generate_next_block_from_tx(1, &tx);
+    st.scan_cached_blocks(mined, 1);
+    assert_eq!(refund_keys(&st), [(0, u32::from(mined), true)]);
+    st.truncate_to_height(mined - 1);
+    let (replaced, _) = st.generate_empty_block();
+    let (again, _) = st.generate_next_block_from_tx(1, &tx);
+    st.scan_cached_blocks(replaced, 2);
+    assert_eq!(refund_keys(&st), [(0, u32::from(again), true)]);
+}
+
+/// A memo with the refund prefix that doesn't decode enables nothing, mined or not.
+#[test]
+fn a_malformed_refund_memo_enables_nothing() {
+    let mut invalid = RefundMemo::new(0).encode();
+    invalid[5] = 0xff;
+    let (mut st, account, tx) = unmined_internal_memo(&MemoBytes::from_bytes(&invalid).unwrap());
+    let (mined, _) = st.generate_next_block_from_tx(1, &tx);
+    st.scan_cached_blocks(mined, 1);
+    assert!(!enabled(&st, account) && !used(&st, account) && refund_keys(&st).is_empty());
+}
+
+/// A mined memo the 100-index gap rule defers registers no key, but it is still evidence of
+/// a swap: it enables the account and sets the marker.
+#[test]
+fn a_gap_deferred_memo_enables_the_account_and_sets_the_marker() {
+    let (mut st, account, tx) = unmined_internal_memo(&refund_memo(150));
+    let (mined, _) = st.generate_next_block_from_tx(1, &tx);
+    st.scan_cached_blocks(mined, 1);
+    assert!(enabled(&st, account) && used(&st, account));
+    assert!(refund_keys(&st).is_empty());
+}
+
+/// Recording the wallet's own funding of a refund key sets the use marker, before the
+/// funding transaction is mined.
+#[test]
+fn own_refund_funding_sets_the_marker() {
+    let (mut st, _) = ironwood_funded_wallet();
+    let account = st.test_account().unwrap().id();
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    let deposit = p2pkh(7).encode(st.network());
+    let now = clock_now();
+    let db = st.wallet_mut().db_mut();
+    let index = reserve_refund(db, account, tip)
+        .unwrap()
+        .unwrap()
+        .key_id()
+        .index();
+    db.record_refund_operation(account, index, &deposit, now + 3_600, now)
+        .unwrap();
+    let memo = db.refund_funding_memo(account, index, &deposit).unwrap();
+    exec(
+        st.wallet().conn(),
+        "UPDATE ironwood_one_time_recovery SET used = 0",
+        [],
+    );
+    let (_, txid) = try_send(&mut st, vec![payment(&p2pkh(7), 100_000, None)], &memo);
+    txid.unwrap();
+    assert!(used(&st, account));
+}
+
+/// A mined refund memo on an account that isn't enabled, whose block no batch stored with
+/// it: enabling the account consumes the memo, and that sets the use marker, which later
+/// batches leave set.
+#[test]
+fn enabling_with_a_stored_mined_memo_sets_the_marker() {
+    let (mut st, account, tx) = unmined_internal_memo(&refund_memo(0));
+    let (mined, _) = st.generate_next_block_from_tx(1, &tx);
+    exec(
+        st.wallet().conn(),
+        "UPDATE transactions SET mined_height = ?1 WHERE txid = ?2",
+        rusqlite::params![u32::from(mined), tx.txid().as_ref()],
+    );
+    st.wallet_mut()
+        .db_mut()
+        .enable_one_time_recovery(account)
+        .unwrap();
+    assert_eq!(refund_keys(&st), [(0, u32::from(mined), true)]);
+    assert!(used(&st, account));
+    st.scan_cached_blocks(mined, 1);
+    assert!(used(&st, account));
 }

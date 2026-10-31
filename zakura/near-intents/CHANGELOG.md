@@ -11,7 +11,7 @@
 
 ### Added
 
-- `NearStatus::origin_tx_hashes` and `NearStatus::destination_tx_hashes` carry the status response's `swapDetails` transaction hashes. `near_observation` reads an incoming key's receipts from the destination chain and a refund key's from the origin chain.
+- `NearStatus::origin_tx_hashes` and `NearStatus::destination_tx_hashes` carry the status response's `swapDetails` transaction hashes. `near_observation` reads an incoming key's receipts from the destination chain and a refund key's from both chains, since NEAR sometimes files a ZEC refund under the destination.
 
 ## [0.0.1-rc3] - 2026-10-20
 

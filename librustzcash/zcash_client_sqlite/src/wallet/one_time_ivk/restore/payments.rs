@@ -1,7 +1,7 @@
 //! Durable ownership-checked candidates. These rows never contribute to balance.
 use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::data_api::one_time_ivk::restore::{
-    DirectoryPayment,
+    DirectoryPayment, SegmentRef, WITNESS_PAYLOAD_BYTES,
     recovery::{EncryptedNote, RecoveredNote},
 };
 use zcash_primitives::{block::BlockHash, transaction::TxId};
@@ -111,17 +111,19 @@ pub(in crate::wallet::one_time_ivk) fn pending_payment(
         .optional()?)
 }
 
-/// Authenticates and queues one candidate idempotently without crediting it. `binding` is
-/// the payment session, its companion witness session and the witness ordinal the candidate
-/// was read under; a candidate still waiting for its witness takes the latest binding, since
-/// only those sessions can answer.
+/// Authenticates and queues one candidate idempotently without crediting it, with the
+/// segment and ordinal it was read under and its witness `payload` at that segment's
+/// companion tree. A candidate read again takes the latest binding and payload. A new
+/// candidate sets the account's use marker (see `queue::mark_used`). Lookups never store
+/// one before the birthday.
 pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     key: KeyId,
     candidate: &PendingPayment,
-    binding: ([u8; 32], [u8; 32], u32),
+    (segment, ordinal): (SegmentRef, u32),
+    payload: &[u8; WITNESS_PAYLOAD_BYTES],
 ) -> Result<(), SqliteClientError> {
     let (id, _) = authenticate(conn, params, account, key, candidate)?;
     if wallet::get_block_hash(conn, candidate.height)?
@@ -140,28 +142,22 @@ pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
             |r| Ok((payment(r)?, r.get::<_, i64>(7)?)),
         )
         .optional()?;
-    if let Some((old, owner)) = old {
-        if old != *candidate || owner != id {
-            return Err(invalid("conflicting directory payment identity"));
-        }
-        conn.execute(
-            "UPDATE ironwood_one_time_payment_recovery SET payments = ?3, witnesses = ?4,
-             ordinal = ?5 WHERE txid = ?1 AND action_index = ?2 AND witness IS NULL",
-            params![
-                candidate.txid.as_ref(),
-                candidate.action_index,
-                binding.0,
-                binding.1,
-                binding.2
-            ],
-        )?;
-        return Ok(());
+    if let Some((old, owner)) = &old
+        && (old != candidate || *owner != id)
+    {
+        return Err(invalid("conflicting directory payment identity"));
     }
+    let tree = segment.tree;
     conn.execute(
         "INSERT INTO ironwood_one_time_payment_recovery (
             one_time_key_id, txid, action_index, height, block_hash, tx_index, position,
-            encrypted_note, payments, witnesses, ordinal
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            encrypted_note, directory, companion, ordinal, witness, witness_height,
+            witness_hash, witness_size
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         ON CONFLICT (txid, action_index) DO UPDATE SET directory = excluded.directory,
+             companion = excluded.companion, ordinal = excluded.ordinal,
+             witness = excluded.witness, witness_height = excluded.witness_height,
+             witness_hash = excluded.witness_hash, witness_size = excluded.witness_size",
         params![
             id,
             candidate.txid.as_ref(),
@@ -171,11 +167,18 @@ pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
             candidate.tx_index,
             candidate.position,
             candidate.encrypted_note.to_bytes().as_slice(),
-            binding.0,
-            binding.1,
-            binding.2,
+            segment.directory,
+            segment.companion,
+            ordinal,
+            payload.as_slice(),
+            u32::from(tree.height),
+            tree.hash,
+            tree.tree_size,
         ],
     )?;
+    if old.is_none() {
+        super::queue::mark_used(conn, wallet::get_account_ref(conn, account)?.0)?;
+    }
     Ok(())
 }
 

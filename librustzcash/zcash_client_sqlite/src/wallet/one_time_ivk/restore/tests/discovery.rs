@@ -1,14 +1,15 @@
 //! Queue behavior using an independent compact-block oracle and Merkle witness builder.
 use super::*;
 use zcash_client_backend::data_api::one_time_ivk::restore::{
-    LookupCursor, RecoveryStatus, SegmentRef, StepShard, WitnessAnswer, WitnessRequest,
+    FilterOutcome, FilterSpan, LookupCursor, LookupRecord, RecoveryStatus, RecoveryToken,
+    SegmentRef, StepShard,
 };
 
 /// A fixture publication's whole history for one receiver: one shard of one segment,
 /// read through its final page in this step.
 pub(in crate::wallet::one_time_ivk) fn whole(
     publication: RecoveryPublication,
-    records: Vec<DirectoryRecord>,
+    records: Vec<LookupRecord>,
 ) -> LookupPage {
     LookupPage {
         publication,
@@ -21,12 +22,64 @@ pub(in crate::wallet::one_time_ivk) fn whole(
     }
 }
 
+/// [`whole`] over `records`, with payloads built at `context`, the companion tree the
+/// step reports.
+pub(in crate::wallet::one_time_ivk) fn whole_at(
+    st: &State,
+    publication: RecoveryPublication,
+    records: Vec<DirectoryRecord>,
+    context: PublicationEnd,
+) -> LookupPage {
+    let mut page = whole(publication, paid(st, records, context));
+    page.segment = page.segment.map(|s| SegmentRef { tree: context, ..s });
+    page
+}
+
+/// `payments`, one page each, as `receiver`'s whole history.
+pub(in crate::wallet::one_time_ivk) fn history(
+    receiver: [u8; 43],
+    payments: &[&PendingPayment],
+) -> Vec<DirectoryRecord> {
+    (0..)
+        .zip(payments)
+        .map(|(page, p)| DirectoryRecord {
+            receiver,
+            page,
+            total: payments.len() as u32,
+            payment: directory_answer(p),
+            ordinal: page,
+        })
+        .collect()
+}
+
+/// `records` with their witness payloads as a companion built at `context` serves them:
+/// the independent path's lower siblings complete at its tree size, every other slot zero.
+pub(in crate::wallet::one_time_ivk) fn paid(
+    st: &State,
+    records: Vec<DirectoryRecord>,
+    context: PublicationEnd,
+) -> Vec<LookupRecord> {
+    records
+        .into_iter()
+        .map(|record| LookupRecord {
+            // A position the chain does not hold gets no siblings.
+            payload: u32::try_from(record.payment.position)
+                .ok()
+                .and_then(|position| path_after(st, &[], position))
+                .map_or([0; 512], |path| {
+                    payload(record.payment.position, &path, context)
+                }),
+            record,
+        })
+        .collect()
+}
+
 /// [`whole`] for `work`, or the step that reads nothing when its first unchecked height is
 /// past the publication's end.
 pub(in crate::wallet::one_time_ivk) fn whole_for(
     work: &LookupWork,
     publication: RecoveryPublication,
-    records: Vec<DirectoryRecord>,
+    records: Vec<LookupRecord>,
 ) -> LookupPage {
     if work.from > publication.end.height {
         LookupPage {
@@ -54,14 +107,15 @@ pub(in crate::wallet::one_time_ivk) fn only_shard(
     }]
 }
 
-/// The fixture publication's only segment: its payment session is the publication's
-/// identity and its witness session is fixed.
+/// The fixture publication's only segment: its directory session is the publication's
+/// identity, its companion session is fixed, and its payloads are built at its end.
 pub(in crate::wallet::one_time_ivk) fn segment_ref(publication: RecoveryPublication) -> SegmentRef {
     SegmentRef {
         shard: 0,
         segment: 0,
-        payments: publication.id,
-        witnesses: [7; 32],
+        directory: publication.id,
+        companion: [7; 32],
+        tree: publication.end,
     }
 }
 
@@ -101,17 +155,17 @@ pub(in crate::wallet::one_time_ivk) fn publication_at(
 /// (see [`assert_no_stall`]).
 pub(in crate::wallet::one_time_ivk) fn status(db: &Db, account: AccountUuid) -> RecoveryStatus {
     assert_no_stall(db, account);
-    db.one_time_recovery(account, clock_now()).unwrap()
+    db.one_time_recovery(account, clock_now(), None).unwrap()
 }
 
 /// The path of the chain's Ironwood leaf at `position` at the cached tip.
 pub(in crate::wallet::one_time_ivk) fn witness_at(st: &State, position: u32) -> MerklePath {
-    path_after(st, &[], position)
+    path_after(st, &[], position).unwrap()
 }
 
 /// The path of the leaf at `position` in a tree of `prefix`, the leaves before the first
-/// cached block, followed by every cached block's Ironwood actions.
-fn path_after(st: &State, prefix: &[MerkleHashOrchard], position: u32) -> MerklePath {
+/// cached block, followed by every cached block's Ironwood actions, if that tree holds it.
+fn path_after(st: &State, prefix: &[MerkleHashOrchard], position: u32) -> Option<MerklePath> {
     use incrementalmerkletree::{frontier::CommitmentTree, witness::IncrementalWitness};
     let mut tree = CommitmentTree::<MerkleHashOrchard, 32>::empty();
     let mut witness: Option<IncrementalWitness<_, 32>> = None;
@@ -136,7 +190,7 @@ fn path_after(st: &State, prefix: &[MerkleHashOrchard], position: u32) -> Merkle
             }
         }
     }
-    witness.unwrap().path().unwrap().into()
+    witness?.path().map(Into::into)
 }
 
 /// `path`'s sibling hashes.
@@ -144,37 +198,18 @@ fn siblings(path: &MerklePath) -> [[u8; 32]; 32] {
     std::array::from_fn(|level| path.auth_path()[level].to_bytes())
 }
 
-/// The companion witness `request` names, as a publication ending at `end` serves it: the
-/// independent path's lower siblings that are complete at that block's tree size, every
-/// other slot zero.
-pub(in crate::wallet::one_time_ivk) fn witness_answer(
-    st: &State,
-    request: &WitnessRequest,
-    end: BlockHeight,
-) -> WitnessAnswer {
-    answer(
-        request,
-        &witness_at(st, request.position),
-        publication_at(st, end).end,
-    )
-}
-
-/// `path`'s lower siblings complete at `context`, answering `request`.
-fn answer(request: &WitnessRequest, path: &MerklePath, context: PublicationEnd) -> WitnessAnswer {
+/// The payload for the leaf at `position` with `path`: its lower siblings complete at
+/// `context`'s tree size, every other slot zero.
+fn payload(position: u64, path: &MerklePath, context: PublicationEnd) -> [u8; 512] {
     let mut payload = [0; 512];
     for level in 0..16 {
-        let start = ((u64::from(request.position) >> level) ^ 1) << level;
+        let start = ((position >> level) ^ 1) << level;
         if start + (1 << level) <= context.tree_size {
             payload[level * 32..(level + 1) * 32]
                 .copy_from_slice(&path.auth_path()[level].to_bytes());
         }
     }
-    WitnessAnswer {
-        payments: request.payments,
-        revision: request.witnesses,
-        context,
-        payload,
-    }
+    payload
 }
 
 /// The note values the wallet holds for one-time keys, with whether each is spent.
@@ -255,7 +290,7 @@ fn oracle(st: &State, receiver: [u8; 43], fvk: &FullViewingKey) -> Vec<Directory
 ///
 /// A reserved receiver held by invalidated history (see `queue::RECEIVE_PENDING`) must also
 /// have a runnable lookup that can lift the hold, or a payment candidate in progress, unless
-/// the user paused discovery, which refuses reservations anyway.
+/// discovery isn't enabled, which refuses reservations anyway.
 pub(in crate::wallet::one_time_ivk) fn assert_no_stall(db: &Db, account: AccountUuid) {
     let owner: i64 = value(
         &db.conn,
@@ -276,14 +311,14 @@ pub(in crate::wallet::one_time_ivk) fn assert_no_stall(db: &Db, account: Account
          EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
          JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
          JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id
-         WHERE k.account_id = ?1 AND p.payments IS NULL
+         WHERE k.account_id = ?1 AND p.directory IS NULL
            AND l.reasons & 3 != 0 AND (l.read_complete = 1 OR l.target_height IS NULL))",
         [owner],
     );
     assert!(!settled, "a settled request keeps a target nothing clears");
     assert!(!cursor, "a completed read keeps a segment cursor");
     assert!(!unbound, "an unbound candidate has no read to rebind it");
-    let state = db.one_time_recovery(account, i64::MAX).unwrap();
+    let state = db.one_time_recovery(account, i64::MAX, None).unwrap();
     if state.enabled {
         let held: bool = value(
             &db.conn,
@@ -304,11 +339,7 @@ pub(in crate::wallet::one_time_ivk) fn assert_no_stall(db: &Db, account: Account
             "a reserved receiver is held with no work to release it"
         );
     }
-    if !state.enabled
-        || state.upgrade_required
-        || !state.lookups.is_empty()
-        || !state.witnesses.is_empty()
-    {
+    if !state.enabled || state.upgrade_required || !state.lookups.is_empty() {
         return;
     }
     // Restore before any publication, or a proven payment waiting for ordinary sync.
@@ -342,34 +373,36 @@ pub(in crate::wallet::one_time_ivk) fn assert_no_stall(db: &Db, account: Account
     );
 }
 
-/// Supplies pages and independent proofs until the bounded fixture has no outstanding work.
+/// Supplies pages with independent proofs until the bounded fixture has no outstanding work.
 pub(in crate::wallet::one_time_ivk) fn drain(
     st: &mut State,
     account: AccountUuid,
     publication: RecoveryPublication,
 ) {
     for _ in 0..256 {
-        if answer_lookup(st, account, publication) {
-            continue;
+        if !answer_lookup(st, account, publication) {
+            return;
         }
-        let state = status(st.wallet().db(), account);
-        if let Some(request) = state.witnesses.first() {
-            let answer = witness_answer(st, request, tip(st).height);
-            assert!(
-                st.wallet_mut()
-                    .db_mut()
-                    .record_one_time_witness(account, state.token, *request, &answer, clock_now())
-                    .unwrap()
-            );
-            continue;
-        }
-        return;
     }
     panic!("fixture recovery did not converge");
 }
 
 /// Answers the first due lookup from the independent oracle, if any is due.
-fn answer_lookup(st: &mut State, account: AccountUuid, publication: RecoveryPublication) -> bool {
+pub(in crate::wallet::one_time_ivk) fn answer_lookup(
+    st: &mut State,
+    account: AccountUuid,
+    publication: RecoveryPublication,
+) -> bool {
+    answer_lookup_at(st, account, publication, publication.end)
+}
+
+/// [`answer_lookup`] with payloads built at `context`.
+pub(in crate::wallet::one_time_ivk) fn answer_lookup_at(
+    st: &mut State,
+    account: AccountUuid,
+    publication: RecoveryPublication,
+    context: PublicationEnd,
+) -> bool {
     let state = status(st.wallet().db(), account);
     let Some(work) = state.lookups.first() else {
         return false;
@@ -387,20 +420,14 @@ fn answer_lookup(st: &mut State, account: AccountUuid, publication: RecoveryPubl
     let end = (start + 32).min(records.len());
     // Nothing is required past the inventory's end, so the step reads no shard.
     let page = if work.from > publication.end.height {
-        LookupPage {
-            shards: vec![],
-            segment: None,
-            records: vec![],
-            checked_through: None,
-            ..whole(publication, vec![])
-        }
+        whole_for(work, publication, vec![])
     } else {
         LookupPage {
-            publication,
-            inventory_shards: 1,
-            shards: only_shard(publication),
-            segment: Some(segment_ref(publication)),
-            records: records[start..end].to_vec(),
+            records: paid(st, records[start..end].to_vec(), context),
+            segment: Some(SegmentRef {
+                tree: context,
+                ..segment_ref(publication)
+            }),
             checked_through: (end == records.len()).then_some(publication.end.height),
             next: (end < records.len()).then(|| LookupCursor {
                 inventory: publication.id,
@@ -408,6 +435,7 @@ fn answer_lookup(st: &mut State, account: AccountUuid, publication: RecoveryPubl
                 segment: 0,
                 last: records[..end].last().cloned(),
             }),
+            ..whole(publication, vec![])
         }
     };
     assert!(
@@ -432,12 +460,24 @@ pub(in crate::wallet::one_time_ivk) fn pay_candidate(st: &mut State, key: KeyId)
     candidate_at(st, height, &fvk)
 }
 
-/// Reads `candidate`'s history at a publication ending at the tip, so it waits for its
-/// witness.
+/// Reads `candidate`'s history at a publication ending at the tip, with its payload built
+/// there, so it is admitted once its payload is usable.
 pub(in crate::wallet::one_time_ivk) fn queue_late(
     st: &mut State,
     key: KeyId,
     candidate: &PendingPayment,
+) -> RecoveryPublication {
+    let end = publication_at(st, tip(st).height).end;
+    queue_late_at(st, key, candidate, end, |_| {})
+}
+
+/// [`queue_late`] with the payload built at `context`, after `edit` changes the page.
+pub(in crate::wallet::one_time_ivk) fn queue_late_at(
+    st: &mut State,
+    key: KeyId,
+    candidate: &PendingPayment,
+    context: PublicationEnd,
+    edit: impl FnOnce(&mut LookupPage),
 ) -> RecoveryPublication {
     let account = st.test_account().unwrap().id();
     recover(st.wallet_mut().db_mut(), account, key, candidate.height);
@@ -448,17 +488,14 @@ pub(in crate::wallet::one_time_ivk) fn queue_late(
             .unwrap()
     );
     let work = work_of(st, key);
-    let db = st.wallet_mut().db_mut();
-    let page = whole(
+    let mut page = whole_at(
+        st,
         publication,
-        vec![DirectoryRecord {
-            receiver: work.work.receiver,
-            page: 0,
-            total: 1,
-            payment: directory_answer(candidate),
-            ordinal: 0,
-        }],
+        history(work.work.receiver, &[candidate]),
+        context,
     );
+    edit(&mut page);
+    let db = st.wallet_mut().db_mut();
     assert!(
         db.record_one_time_lookup(account, &work, &page, clock_now())
             .unwrap()
@@ -487,11 +524,18 @@ pub(in crate::wallet::one_time_ivk) fn work_of(st: &State, key: KeyId) -> Lookup
         },
         from: BlockHeight::from(checked.map_or(start, |c| start.max(c + 1))),
         through: BlockHeight::from(through),
+        birthday: birthday_of(db, account),
         cursor: None,
     }
 }
 
-/// A matched address has authenticated its candidate but is still waiting for inclusion.
+/// `account`'s stored birthday height, which its lookups carry.
+pub(in crate::wallet::one_time_ivk) fn birthday_of(db: &Db, account: AccountUuid) -> BlockHeight {
+    let sql = "SELECT birthday_height FROM accounts WHERE uuid = ?1";
+    BlockHeight::from(value::<u32>(&db.conn, sql, [account.0]))
+}
+
+/// A matched address whose candidate was read with a payload built at the tip and admitted.
 pub(in crate::wallet::one_time_ivk) fn late_fixture() -> (State, PendingPayment, RecoveryPublication)
 {
     let mut st = scanned_wallet();
@@ -500,65 +544,20 @@ pub(in crate::wallet::one_time_ivk) fn late_fixture() -> (State, PendingPayment,
     (st, candidate, publication)
 }
 
-/// The pending witness request for `candidate`.
-pub(in crate::wallet::one_time_ivk) fn request_for(
-    st: &State,
-    key: KeyId,
-    candidate: &PendingPayment,
-) -> WitnessRequest {
-    let account = st.test_account().unwrap().id();
-    *status(st.wallet().db(), account)
-        .witnesses
-        .iter()
-        .find(|r| r.key == key && r.position == candidate.position)
-        .expect("a pending witness request")
-}
-
-/// Delivers a candidate's witness, built at the current tip, under the current
-/// cancellation fence. A candidate already admitted reuses its last binding.
-pub(in crate::wallet::one_time_ivk) fn send_witness(
-    st: &mut State,
-    key: KeyId,
-    candidate: &PendingPayment,
-) {
-    let account = st.test_account().unwrap().id();
-    let state = status(st.wallet().db(), account);
-    let request = state
-        .witnesses
-        .iter()
-        .find(|r| r.key == key && r.position == candidate.position)
-        .copied()
-        .unwrap_or(WitnessRequest {
-            key,
-            position: candidate.position,
-            cmx: candidate.encrypted_note.to_bytes()[32..64]
-                .try_into()
-                .unwrap(),
-            payments: [1; 32],
-            witnesses: [7; 32],
-            ordinal: 0,
-        });
-    let answer = witness_answer(st, &request, tip(st).height);
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_witness(account, state.token, request, &answer, clock_now())
-            .unwrap()
-    );
-    assert_no_stall(st.wallet().db(), account);
-}
-
-/// Ordinary scanning never credits a private receiver. Inclusion proof admission does, once.
+/// Ordinary scanning never credits a private receiver. A lookup whose record carries a usable
+/// payload does, once, with no further query.
 #[test]
-fn a_late_payment_is_admitted_once_its_path_arrives() {
-    let (mut st, candidate, publication) = late_fixture();
+fn a_late_payment_is_admitted_with_its_payload_once() {
+    let mut st = scanned_wallet();
+    let candidate = pay_candidate(&mut st, key8());
     assert!(one_time_notes(&st).is_empty());
-    send_witness(&mut st, key8(), &candidate);
-    assert_eq!(one_time_notes(&st), [(100_000, false)]);
-    send_witness(&mut st, key8(), &candidate);
+    let publication = queue_late(&mut st, key8(), &candidate);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
     let account = st.test_account().unwrap().id();
+    let lookups = status(st.wallet().db(), account).lookups;
+    assert!(lookups.iter().all(|w| w.work.key != key8()));
     drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
 /// Four genuine empty histories stop seed recovery and survive reopening the wallet.
@@ -619,32 +618,30 @@ fn manual_bound_and_cancellation_do_not_use_the_seed_gap() {
     assert_eq!((done.active, done.next, done.receive_end), (false, 10, 10));
 }
 
-/// A callback captured before disabling cannot admit a payment or advance negative coverage.
+/// A lookup captured before the account's generation moved, here by cancelling a history
+/// check, cannot store or admit its payment. The current capture then can.
 #[test]
-fn feature_toggle_rejects_stale_lookup_and_proof_callbacks() {
-    let (mut st, candidate, publication) = late_fixture();
+fn a_stale_lookup_callback_is_refused() {
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
-    let old = status(st.wallet().db(), account);
-    let request = old.witnesses[0];
-    let answer = witness_answer(&st, &request, tip(&st).height);
-    assert_eq!(request.position, candidate.position);
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, false)
-        .unwrap();
-    let state = status(st.wallet().db(), account);
-    assert!(state.lookups.is_empty() && state.witnesses.is_empty());
+    let candidate = pay_candidate(&mut st, key8());
+    recover(st.wallet_mut().db_mut(), account, key8(), candidate.height);
+    let publication = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
     assert!(
-        !st.wallet_mut()
-            .db_mut()
-            .record_one_time_witness(account, old.token, request, &answer, clock_now())
+        db.begin_one_time_recovery(account, publication, false)
             .unwrap()
     );
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, true)
-        .unwrap();
-    assert!(one_time_notes(&st).is_empty());
+    let work = work_of(&st, key8());
+    let records = history(work.work.receiver, &[&candidate]);
+    let page = whole_at(&st, publication, records, publication.end);
+    let db = st.wallet_mut().db_mut();
+    db.cancel_one_time_history(account).unwrap();
+    assert!(
+        !db.record_one_time_lookup(account, &work, &page, clock_now())
+            .unwrap()
+    );
+    assert_eq!(candidates(&st), 0);
     drain(&mut st, account, publication);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
@@ -652,13 +649,15 @@ fn feature_toggle_rejects_stale_lookup_and_proof_callbacks() {
 /// Quiet blocks need no new commitment, so an old same-size checkpoint remains a valid proof root.
 #[test]
 fn quiet_chain_still_admits_a_late_payment() {
-    let (mut st, candidate, _) = late_fixture();
+    let mut st = scanned_wallet();
+    let candidate = pay_candidate(&mut st, key8());
     st.generate_and_scan_empty_blocks(crate::PRUNING_DEPTH as usize + 5);
-    send_witness(&mut st, key8(), &candidate);
+    queue_late(&mut st, key8(), &candidate);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
-/// Delayed recovery of I0 must queue I4 through filters already consumed without knowing I4.
+/// Delayed recovery of I0 must check I4 over filters already consumed without knowing I4:
+/// I4 is left behind the frontier, and re-checking it over that history queues its lookup.
 #[test]
 fn delayed_window_expansion_checks_history_after_the_filter_frontier() {
     let mut st = scanned_wallet();
@@ -676,54 +675,31 @@ fn delayed_window_expansion_checks_history_after_the_filter_frontier() {
     let key4 = KeyId::new(Purpose::Receive, 4);
     pay_candidate(&mut st, key4);
     let publication = publication_at(&st, tip(&st).height);
-    let blocks: Vec<Vec<u8>> = column(
-        &st.cache().0,
-        "SELECT data FROM compactblocks WHERE height > ?1 ORDER BY height",
-        [u32::from(initial.end.height)],
-    );
-    let blocks: Vec<ChainPoint> = blocks
-        .into_iter()
-        .map(|bytes| {
-            let b = CompactBlock::decode(bytes.as_slice()).unwrap();
-            ChainPoint {
-                height: BlockHeight::from(b.height as u32),
-                hash: b.hash(),
-            }
-        })
-        .collect();
+    let blocks = blocks_above(&st, initial.end.height);
     let captured = status(st.wallet().db(), account).token;
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_filters(account, captured, 0, &blocks, &[key0])
-            .unwrap()
-    );
-    let page = whole(
-        publication,
-        vec![DirectoryRecord {
-            receiver: held.work.receiver,
-            page: 0,
-            total: 1,
-            payment: directory_answer(&payment0),
-            ordinal: 0,
-        }],
-    );
+    assert!(record_span(
+        st.wallet_mut().db_mut(),
+        account,
+        captured,
+        &blocks,
+        &[key0]
+    ));
+    let records = history(held.work.receiver, &[&payment0]);
+    let page = whole_at(&st, publication, records, publication.end);
     assert!(
         st.wallet_mut()
             .db_mut()
             .record_one_time_lookup(account, &held, &page, clock_now())
             .unwrap()
     );
-    send_witness(&mut st, key0, &payment0);
     reopen(&mut st);
-    let db = st.wallet().db();
-    let id = key_ref(&db.conn, account, key4).unwrap();
-    let target: u32 = value(
-        &db.conn,
-        "SELECT target_height FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
-        [id],
+    // The window exposed I4 after filters passed its payment, so its bootstrap lookup
+    // reads that history through the frontier.
+    let work = work_of(&st, key4);
+    assert_eq!(
+        (work.from, work.through),
+        (publication.start_height, publication.end.height)
     );
-    assert_eq!(target, u32::from(publication.end.height));
     drain(&mut st, account, publication);
     assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
     let next = st
@@ -786,12 +762,13 @@ fn a_new_filter_target_survives_a_held_older_complete_answer() {
     let held = status(st.wallet().db(), account).lookups[0].clone();
     st.generate_and_scan_empty_blocks(1);
     let block = tip(&st);
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_filters(account, held.token, 0, &[block], &[held.work.key])
-            .unwrap()
-    );
+    assert!(record_span(
+        st.wallet_mut().db_mut(),
+        account,
+        held.token,
+        &[block],
+        &[held.work.key]
+    ));
     let page = whole(publication, vec![]);
     assert!(
         st.wallet_mut()
@@ -806,23 +783,19 @@ fn a_new_filter_target_survives_a_held_older_complete_answer() {
     );
 }
 
-/// Lowering the birthday retains explicit recheck intent across disable and restart.
+/// Lowering the birthday retains explicit recheck intent across a restart.
 #[test]
-fn birthday_recheck_survives_feature_off_and_restart() {
-    let (mut st, candidate, publication) = late_fixture();
+fn birthday_recheck_survives_restart() {
+    let (mut st, _, publication) = late_fixture();
     let account = st.test_account().unwrap().id();
-    send_witness(&mut st, key8(), &candidate);
     drain(&mut st, account, publication);
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, false).unwrap();
     tx(db, |conn, _| {
         crate::wallet::one_time_rewind::reopen_discovery(conn, account)
     })
     .unwrap();
-    assert!(status(db, account).lookups.is_empty());
     reopen(&mut st);
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, true).unwrap();
     let id = key_ref(&db.conn, account, key8()).unwrap();
     let pending: bool = value(
         &db.conn,
@@ -945,6 +918,74 @@ fn paused_manual_history_rechecks_its_prefix_after_invalidation() {
     }
 }
 
+/// A finished history check stays finished after a rewind or correction below its frontier,
+/// so the next check starts fresh at a new frontier instead of resuming the old one.
+#[test]
+fn a_finished_manual_history_stays_finished_after_invalidation() {
+    for correction in [false, true] {
+        let mut st = scanned_wallet();
+        let account = st.test_account().unwrap().id();
+        let publication = publication_at(&st, tip(&st).height);
+        st.wallet_mut()
+            .db_mut()
+            .check_one_time_history(account, publication, Some(2))
+            .unwrap();
+        drain(&mut st, account, publication);
+        let db = st.wallet_mut().db_mut();
+        let done = status(db, account).manual.unwrap();
+        assert!(!done.active && done.refunds_done && done.next == done.receive_end);
+        if correction {
+            let publication = RecoveryPublication {
+                history_revision: 1,
+                ..publication
+            };
+            db.begin_one_time_recovery(account, publication, false)
+                .unwrap();
+        } else {
+            tx(db, |conn, _| {
+                crate::wallet::one_time_rewind::truncate(conn, publication.end.height - 1)
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            status(db, account).manual.unwrap(),
+            done,
+            "correction {correction}"
+        );
+    }
+}
+
+/// Resetting history, as after a switch to another receiver service, forgets the marker
+/// and every lookup's coverage, so the next complete check reads each watched address
+/// again from Ironwood activation rather than trusting the old service's answers.
+#[test]
+fn a_history_reset_reads_every_watched_address_again() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let publication = publication_at(&st, tip(&st).height);
+    st.wallet_mut()
+        .db_mut()
+        .begin_one_time_recovery(account, publication, true)
+        .unwrap();
+    drain(&mut st, account, publication);
+    let done = status(st.wallet().db(), account);
+    assert!(done.lookups.is_empty() && done.filter_frontier.is_some());
+
+    let db = st.wallet_mut().db_mut();
+    db.reset_one_time_history(account).unwrap();
+    let reset = status(db, account);
+    assert!(reset.filter_frontier.is_none() && reset.round_due);
+    db.begin_one_time_recovery(account, publication, true)
+        .unwrap();
+    let activation = st
+        .network()
+        .activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+        .unwrap();
+    let again = status(st.wallet().db(), account).lookups;
+    assert!(!again.is_empty());
+    assert!(again.iter().all(|w| w.from == activation), "{again:?}");
+}
+
 /// Once a replacement chain proves the paid slots empty, the initial window can be reused.
 #[test]
 fn orphaned_receipts_do_not_permanently_exhaust_the_receive_window() {
@@ -979,41 +1020,27 @@ fn orphaned_receipts_do_not_permanently_exhaust_the_receive_window() {
     assert_eq!(next.key_id().index(), 0);
 }
 
-/// Rewound owned funds can be repaired while off, without discovering another payment to the key.
+/// A rewind that displaces an owned receipt repairs it, and the same lookup also finds a
+/// later payment to the key.
 #[test]
-fn disabled_discovery_repairs_known_receipts_without_adding_payments() {
+fn a_rewound_receipt_is_repaired_and_a_later_payment_found() {
     let (mut st, candidate, publication) = late_fixture();
     let account = st.test_account().unwrap().id();
-    send_witness(&mut st, key8(), &candidate);
     drain(&mut st, account, publication);
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, false)
-        .unwrap();
     pay_candidate(&mut st, key8());
     let end = tip(&st).height;
     st.truncate_to_height_retaining_cache(candidate.height - 1);
     reopen(&mut st);
     st.scan_cached_blocks(candidate.height, (end - candidate.height + 1) as usize);
     let publication = publication_at(&st, end);
-    let before = status(st.wallet().db(), account);
-    assert!(!before.enabled);
-    assert_eq!(before.lookups.len(), 1);
-    assert_eq!(before.lookups[0].work.key, key8());
     assert!(
         st.wallet_mut()
             .db_mut()
             .begin_one_time_recovery(account, publication, true)
             .unwrap()
     );
-    assert!(
-        !st.wallet_mut()
-            .db_mut()
-            .check_one_time_history(account, publication, Some(20))
-            .unwrap()
-    );
     drain(&mut st, account, publication);
-    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
     let mined: Option<u32> = value(
         st.wallet().conn(),
         "SELECT mined_height FROM transactions WHERE txid = ?1",
@@ -1021,46 +1048,7 @@ fn disabled_discovery_repairs_known_receipts_without_adding_payments() {
     );
     assert_eq!(mined, Some(u32::from(candidate.height)));
     let after = status(st.wallet().db(), account);
-    assert!(!after.enabled);
-    assert_eq!(after.restore_next, before.restore_next);
-    assert_eq!(after.filter_frontier, before.filter_frontier);
-    assert!(after.lookups.is_empty() && after.witnesses.is_empty());
-}
-
-/// A disabled repair can skip a second receipt, but re-enabling must recover it from page zero.
-#[test]
-fn disabled_repair_does_not_consume_future_discovery_pages() {
-    let (mut st, candidate, publication) = late_fixture();
-    let account = st.test_account().unwrap().id();
-    send_witness(&mut st, key8(), &candidate);
-    drain(&mut st, account, publication);
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, false)
-        .unwrap();
-    pay_candidate(&mut st, key8());
-    let end = tip(&st).height;
-    st.truncate_to_height_retaining_cache(candidate.height - 1);
-    reopen(&mut st);
-    st.scan_cached_blocks(candidate.height, (end - candidate.height + 1) as usize);
-    let publication = publication_at(&st, end);
-    st.wallet_mut()
-        .db_mut()
-        .begin_one_time_recovery(account, publication, true)
-        .unwrap();
-    drain(&mut st, account, publication);
-    assert_eq!(one_time_notes(&st), [(100_000, false)]);
-    reopen(&mut st);
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, true)
-        .unwrap();
-    st.wallet_mut()
-        .db_mut()
-        .check_one_time_history(account, publication, Some(9))
-        .unwrap();
-    drain(&mut st, account, publication);
-    assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
+    assert!(after.lookups.is_empty());
 }
 
 /// A late payment waits while the scan's coverage ends one block short of its scanned tip,
@@ -1082,7 +1070,6 @@ fn a_late_payment_waits_for_coverage_of_the_scanned_tip() {
         Zatoshis::const_from_u64(20_000),
     );
     st.scan_cached_blocks(height, 1);
-    queue_late(&mut st, key8(), &candidate);
     // The spending block was stored without coverage, so without its journal entry.
     let tip = u32::from(height);
     for sql in [
@@ -1092,7 +1079,7 @@ fn a_late_payment_waits_for_coverage_of_the_scanned_tip() {
     ] {
         exec(st.wallet().conn(), sql, [tip]);
     }
-    send_witness(&mut st, key8(), &candidate);
+    queue_late(&mut st, key8(), &candidate);
     assert!(one_time_notes(&st).is_empty(), "admission waits");
     assert!(
         rescans(&st).contains(&(tip, tip + 1)),
@@ -1106,7 +1093,8 @@ fn a_late_payment_waits_for_coverage_of_the_scanned_tip() {
 /// for a rescan, and is admitted once the rescan covers it.
 #[test]
 fn a_late_payment_over_a_one_block_coverage_hole_is_rescanned() {
-    let (mut st, candidate, _) = late_fixture();
+    let mut st = scanned_wallet();
+    let candidate = pay_candidate(&mut st, key8());
     st.generate_and_scan_empty_blocks(2);
     let hole = u32::from(candidate.height) + 1;
     let conn = st.wallet().conn();
@@ -1125,7 +1113,7 @@ fn a_late_payment_over_a_one_block_coverage_hole_is_rescanned() {
         )
         .unwrap();
     assert_eq!(split, 1, "the hole splits the coverage");
-    send_witness(&mut st, key8(), &candidate);
+    queue_late(&mut st, key8(), &candidate);
     assert!(one_time_notes(&st).is_empty(), "admission waits");
     assert!(
         rescans(&st).contains(&(hole, hole + 1)),
@@ -1246,29 +1234,19 @@ fn a_pruned_provisional_witness_is_refreshed_rather_than_completed() {
     let account = st.test_account().unwrap().id();
     let candidate = pay_candidate(&mut st, key8());
     foreign_blocks(&mut st, 2);
-    let three = tip(&st).height;
-    queue_late(&mut st, key8(), &candidate);
-    let request = request_for(&st, key8(), &candidate);
-    let stale = witness_answer(&st, &request, three);
-    assert_eq!(stale.context.tree_size, candidate.position as u64 + 3);
-    assert!(
-        stale.payload[32..64].iter().all(|b| *b == 0),
-        "the [2, 4) sibling is partial at three leaves"
-    );
+    let three = publication_at(&st, tip(&st).height).end;
+    assert_eq!(three.tree_size, candidate.position as u64 + 3);
     foreign_blocks(&mut st, crate::PRUNING_DEPTH as usize + 3);
-    let token = status(st.wallet().db(), account).token;
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_witness(account, token, request, &stale, clock_now())
-            .unwrap()
-    );
+    queue_late_at(&mut st, key8(), &candidate, three, |page| {
+        assert!(
+            page.records[0].payload[32..64].iter().all(|b| *b == 0),
+            "the [2, 4) sibling is partial at three leaves"
+        );
+    });
     assert!(one_time_notes(&st).is_empty());
-    let pending = status(st.wallet().db(), account);
-    assert!(pending.witnesses.is_empty(), "the old binding is dropped");
     let candidates: u32 = value(
         st.wallet().conn(),
-        "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery WHERE payments IS NULL",
+        "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery WHERE directory IS NULL",
         [],
     );
     assert_eq!(candidates, 1, "the payment stays pending");
@@ -1333,7 +1311,7 @@ fn wallet_after_leaves(prefix: &[MerkleHashOrchard]) -> State {
     let account = st.test_account().unwrap().id();
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(account, true)
+        .enable_one_time_recovery(account)
         .unwrap();
     st
 }
@@ -1353,27 +1331,23 @@ fn a_final_witness_is_admitted_at_a_fresh_quiet_anchor() {
     // Leaf 65,535 completes shard zero and 65,536 starts shard one.
     foreign_blocks(&mut st, 2);
     let full = tip(&st).height;
-    queue_late(&mut st, key8(), &candidate);
-    let request = request_for(&st, key8(), &candidate);
-    let path = path_after(&st, &prefix, candidate.position);
-    let provisional = answer(&request, &path, publication_at(&st, filling).end);
-    let complete = answer(&request, &path, publication_at(&st, full).end);
-    assert!(provisional.payload[..32].iter().all(|b| *b == 0));
-    assert!(
-        complete
-            .payload
-            .chunks(32)
-            .all(|s| s.iter().any(|b| *b != 0))
+    let path = path_after(&st, &prefix, candidate.position).unwrap();
+    let position = u64::from(candidate.position);
+    let (filling, full) = (
+        publication_at(&st, filling).end,
+        publication_at(&st, full).end,
     );
+    let (provisional, complete) = (
+        payload(position, &path, filling),
+        payload(position, &path, full),
+    );
+    assert!(provisional[..32].iter().all(|b| *b == 0));
+    assert!(complete.chunks(32).all(|s| s.iter().any(|b| *b != 0)));
     st.generate_and_scan_empty_blocks(crate::PRUNING_DEPTH as usize + 5);
 
-    let token = status(st.wallet().db(), account).token;
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_witness(account, token, request, &provisional, clock_now())
-            .unwrap()
-    );
+    queue_late_at(&mut st, key8(), &candidate, filling, |page| {
+        page.records[0].payload = provisional;
+    });
     assert!(
         one_time_notes(&st).is_empty(),
         "too old to rebuild at 65,535"
@@ -1385,28 +1359,13 @@ fn a_final_witness_is_admitted_at_a_fresh_quiet_anchor() {
     );
     let work = &work_of(&st, key8());
     let publication = publication_at(&st, tip(&st).height);
-    let page = whole(
-        publication,
-        vec![DirectoryRecord {
-            receiver: work.work.receiver,
-            page: 0,
-            total: 1,
-            payment: directory_answer(&candidate),
-            ordinal: 0,
-        }],
-    );
+    let records = history(work.work.receiver, &[&candidate]);
+    let mut page = whole_at(&st, publication, records, full);
+    page.records[0].payload = complete;
     assert!(
         st.wallet_mut()
             .db_mut()
             .record_one_time_lookup(account, work, &page, clock_now())
-            .unwrap()
-    );
-    let request = request_for(&st, key8(), &candidate);
-    let token = status(st.wallet().db(), account).token;
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_witness(account, token, request, &complete, clock_now())
             .unwrap()
     );
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
@@ -1415,7 +1374,7 @@ fn a_final_witness_is_admitted_at_a_fresh_quiet_anchor() {
 /// A history scan leaves a late payment's note-free shard stored as its root alone, and
 /// the payment's final path is inserted there. If that insertion conflicts with the stored
 /// tree, nothing is kept and the payment waits for a newer anchor rather than failing every
-/// step. Once the tree agrees, the next scanned block admits it.
+/// step. Once the tree agrees, the next scanned block admits it, after a restart.
 #[test]
 fn a_witness_insertion_conflict_waits_for_a_newer_anchor() {
     use incrementalmerkletree::{Address, Hashable, Position, Retention};
@@ -1423,14 +1382,11 @@ fn a_witness_insertion_conflict_waits_for_a_newer_anchor() {
     use zcash_client_backend::data_api::WalletCommitmentTrees;
     let prefix = distinct_leaves(65_534);
     let mut st = wallet_after_leaves(&prefix);
-    let account = st.test_account().unwrap().id();
     let candidate = pay_candidate(&mut st, key8());
     foreign_blocks(&mut st, 2);
-    let full = tip(&st).height;
-    queue_late(&mut st, key8(), &candidate);
-    let request = request_for(&st, key8(), &candidate);
-    let path = path_after(&st, &prefix, candidate.position);
-    let complete = answer(&request, &path, publication_at(&st, full).end);
+    let full = publication_at(&st, tip(&st).height).end;
+    let path = path_after(&st, &prefix, candidate.position).unwrap();
+    let complete = payload(u64::from(candidate.position), &path, full);
     // Shard zero becomes its root alone, optionally with a wrong leaf where the note goes.
     let shard = Address::from_parts(16.into(), 0);
     let store_shard = |st: &mut State, planted: bool| {
@@ -1453,13 +1409,9 @@ fn a_witness_insertion_conflict_waits_for_a_newer_anchor() {
             .unwrap();
     };
     store_shard(&mut st, true);
-    let token = status(st.wallet().db(), account).token;
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_witness(account, token, request, &complete, clock_now())
-            .unwrap()
-    );
+    queue_late_at(&mut st, key8(), &candidate, full, |page| {
+        page.records[0].payload = complete;
+    });
     assert!(one_time_notes(&st).is_empty());
     let bound: u32 = value(
         st.wallet().conn(),
@@ -1468,6 +1420,8 @@ fn a_witness_insertion_conflict_waits_for_a_newer_anchor() {
     );
     assert_eq!(bound, 1, "the final witness waits with the payment");
 
+    // The waiting payload survives a restart and needs no further query.
+    reopen(&mut st);
     store_shard(&mut st, false);
     st.generate_and_scan_empty_blocks(1);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
@@ -1477,34 +1431,18 @@ fn a_witness_insertion_conflict_waits_for_a_newer_anchor() {
 /// stays pending and is read again rather than crediting or completing the address.
 #[test]
 fn a_witness_from_another_fork_is_refreshed() {
-    let (mut st, candidate, _) = late_fixture();
-    let account = st.test_account().unwrap().id();
-    let request = request_for(&st, key8(), &candidate);
-    let mut answer = witness_answer(&st, &request, tip(&st).height);
-    answer.context.hash[0] ^= 1;
-    let token = status(st.wallet().db(), account).token;
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_witness(account, token, request, &answer, clock_now())
-            .unwrap()
-    );
+    let mut st = scanned_wallet();
+    let candidate = pay_candidate(&mut st, key8());
+    let mut fork = publication_at(&st, tip(&st).height).end;
+    fork.hash[0] ^= 1;
+    queue_late_at(&mut st, key8(), &candidate, fork, |_| {});
     assert!(one_time_notes(&st).is_empty());
-    let state = status(st.wallet().db(), account);
-    assert!(state.witnesses.is_empty());
-    let pending: u32 = value(
+    let unbound: u32 = value(
         st.wallet().conn(),
-        "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery",
+        "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery WHERE directory IS NULL",
         [],
     );
-    assert_eq!(pending, 1);
-    // A request naming a binding the wallet no longer holds is not accepted.
-    assert!(
-        !st.wallet_mut()
-            .db_mut()
-            .refresh_one_time_witness(account, state.token, request)
-            .unwrap()
-    );
+    assert_eq!(unbound, 1, "the payment stays pending without its binding");
 }
 
 /// Progress through whole shards survives a replacement inventory, but a cursor inside a
@@ -1523,7 +1461,7 @@ fn shard_progress_survives_recapture_but_cursors_do_not() {
     assert!(
         st.wallet_mut()
             .db_mut()
-            .begin_one_time_recovery(account, first, false)
+            .begin_one_time_recovery(account, first, true)
             .unwrap()
     );
     let work = work_of(&st, KeyId::new(Purpose::Receive, 0));
@@ -1562,23 +1500,7 @@ fn shard_progress_survives_recapture_but_cursors_do_not() {
         .unwrap();
     assert_eq!(resumed.from, sealed_end + 1);
     assert_eq!(resumed.cursor.as_ref().unwrap().inventory, first.id);
-    // A cursor the step did not continue must name the same inventory.
-    let foreign = LookupPage {
-        next: Some(LookupCursor {
-            inventory: [0xb2; 32],
-            shard: 1,
-            segment: 0,
-            last: None,
-        }),
-        ..step.clone()
-    };
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_lookup(account, &resumed, &foreign, clock_now())
-            .is_err()
-    );
-    // Under a replacement inventory the step starts at the first unchecked height.
+    // Under another inventory the step starts at the first unchecked height.
     let second = RecoveryPublication {
         id: [0xb2; 32],
         ..first
@@ -1757,24 +1679,15 @@ fn a_witness_missing_the_root_keeps_the_payment_pending() {
     let account = st.test_account().unwrap().id();
     let candidate = pay_candidate(&mut st, key8());
     foreign_blocks(&mut st, 2);
-    queue_late(&mut st, key8(), &candidate);
-    let request = request_for(&st, key8(), &candidate);
-    let mut wrong = witness_answer(&st, &request, tip(&st).height);
-    assert!(
-        wrong.payload[..32].iter().any(|b| *b != 0),
-        "leaf sibling supplied"
-    );
-    wrong.payload[..32].copy_from_slice(&{
-        use incrementalmerkletree::Hashable;
-        MerkleHashOrchard::empty_leaf().to_bytes()
+    let end = publication_at(&st, tip(&st).height).end;
+    queue_late_at(&mut st, key8(), &candidate, end, |page| {
+        let wrong = &mut page.records[0].payload;
+        assert!(wrong[..32].iter().any(|b| *b != 0), "leaf sibling supplied");
+        wrong[..32].copy_from_slice(&{
+            use incrementalmerkletree::Hashable;
+            MerkleHashOrchard::empty_leaf().to_bytes()
+        });
     });
-    let token = status(st.wallet().db(), account).token;
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_witness(account, token, request, &wrong, clock_now())
-            .unwrap()
-    );
     assert!(one_time_notes(&st).is_empty());
     let pending = || {
         value::<u32>(
@@ -1813,35 +1726,7 @@ fn a_witness_missing_the_root_keeps_the_payment_pending() {
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
-/// A witness-only replacement keeps the payment session, so the witness session pins the
-/// companion: an answer from another companion is refused until the payment is reread.
-#[test]
-fn an_answer_from_another_companion_is_refused() {
-    let (mut st, candidate, _) = late_fixture();
-    let account = st.test_account().unwrap().id();
-    let request = request_for(&st, key8(), &candidate);
-    let mut other = witness_answer(&st, &request, tip(&st).height);
-    other.revision[0] ^= 1;
-    let token = status(st.wallet().db(), account).token;
-    assert!(
-        !st.wallet_mut()
-            .db_mut()
-            .record_one_time_witness(account, token, request, &other, clock_now())
-            .unwrap()
-    );
-    assert!(one_time_notes(&st).is_empty());
-    assert_eq!(status(st.wallet().db(), account).witnesses, [request]);
-    let right = witness_answer(&st, &request, tip(&st).height);
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_witness(account, token, request, &right, clock_now())
-            .unwrap()
-    );
-    assert_eq!(one_time_notes(&st), [(100_000, false)]);
-}
-
-/// Refreshing the witness of an extended manual index keeps its lookup manual-only, so
+/// Refreshing the stale payload of an extended manual index keeps its lookup manual-only, so
 /// cancelling the search pauses it until the search resumes.
 #[test]
 fn a_refreshed_manual_witness_stays_manual() {
@@ -1856,15 +1741,29 @@ fn a_refreshed_manual_witness_stays_manual() {
             .check_one_time_history(account, publication, Some(10))
             .unwrap()
     );
-    while answer_lookup(&mut st, account, publication) {}
-    let request = request_for(&st, key9, &candidate);
-    let token = status(st.wallet().db(), account).token;
+    let work = loop {
+        let lookups = status(st.wallet().db(), account).lookups;
+        if let Some(work) = lookups.into_iter().find(|w| w.work.key == key9) {
+            break work;
+        }
+        assert!(answer_lookup(&mut st, account, publication));
+    };
+    // A payload built on another fork is stale, so the payment is read again.
+    let mut fork = publication.end;
+    fork.hash[0] ^= 1;
+    let page = whole_at(
+        &st,
+        publication,
+        history(work.work.receiver, &[&candidate]),
+        fork,
+    );
     assert!(
         st.wallet_mut()
             .db_mut()
-            .refresh_one_time_witness(account, token, request)
+            .record_one_time_lookup(account, &work, &page, clock_now())
             .unwrap()
     );
+    assert!(one_time_notes(&st).is_empty());
     let id = key_ref(&st.wallet().db().conn, account, key9).unwrap();
     let reasons: u8 = value(
         st.wallet().conn(),
@@ -1872,13 +1771,13 @@ fn a_refreshed_manual_witness_stays_manual() {
         [id],
     );
     assert_eq!(reasons, 2, "still manual only");
+    retry_now(&st);
     st.wallet_mut()
         .db_mut()
         .cancel_one_time_history(account)
         .unwrap();
     let paused = status(st.wallet().db(), account);
     assert!(paused.lookups.iter().all(|w| w.work.key != key9));
-    assert!(paused.witnesses.is_empty());
     assert!(
         st.wallet_mut()
             .db_mut()
@@ -1899,29 +1798,20 @@ fn missing_tree_material_within_the_pruning_depth_is_refreshed() {
     let account = st.test_account().unwrap().id();
     let candidate = pay_candidate(&mut st, key8());
     foreign_blocks(&mut st, 2);
-    let three = tip(&st).height;
-    queue_late(&mut st, key8(), &candidate);
-    let request = request_for(&st, key8(), &candidate);
-    let stale = witness_answer(&st, &request, three);
+    let three = publication_at(&st, tip(&st).height).end;
     foreign_blocks(&mut st, 3);
-    assert!(tip(&st).height - three <= crate::PRUNING_DEPTH);
+    assert!(tip(&st).height - three.height <= crate::PRUNING_DEPTH);
     // The tree material at three leaves is gone, though the block is recent.
     exec(
         st.wallet().conn(),
         "DELETE FROM ironwood_tree_checkpoints WHERE checkpoint_id <= ?1",
-        [u32::from(three)],
+        [u32::from(three.height)],
     );
-    let token = status(st.wallet().db(), account).token;
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_witness(account, token, request, &stale, clock_now())
-            .unwrap()
-    );
+    queue_late_at(&mut st, key8(), &candidate, three, |_| {});
     assert!(one_time_notes(&st).is_empty());
     let unbound: u32 = value(
         st.wallet().conn(),
-        "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery WHERE payments IS NULL",
+        "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery WHERE directory IS NULL",
         [],
     );
     assert_eq!(unbound, 1, "pending and read again");
@@ -1951,30 +1841,13 @@ fn a_rejection_after_the_final_segment_rereads_the_payment() {
     let work = work_of(&st, key8());
     let mut misplaced = directory_answer(&candidate);
     misplaced.position += 1;
-    let receiver = work.work.receiver;
-    let page = whole(
-        publication,
-        vec![DirectoryRecord {
-            receiver,
-            page: 0,
-            total: 1,
-            payment: misplaced,
-            ordinal: 0,
-        }],
-    );
+    let mut records = history(work.work.receiver, &[&candidate]);
+    records[0].payment = misplaced;
+    let page = whole_at(&st, publication, records, publication.end);
     assert!(
         st.wallet_mut()
             .db_mut()
             .record_one_time_lookup(account, &work, &page, clock_now())
-            .unwrap()
-    );
-    let request = *status(st.wallet().db(), account).witnesses.first().unwrap();
-    let answer = witness_answer(&st, &request, tip(&st).height);
-    let token = status(st.wallet().db(), account).token;
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_witness(account, token, request, &answer, clock_now())
             .unwrap()
     );
     assert!(one_time_notes(&st).is_empty());
@@ -2027,12 +1900,13 @@ fn a_correction_restores_the_historical_start_of_active_requests() {
     st.generate_and_scan_empty_blocks(1);
     let block = tip(&st);
     let token = status(st.wallet().db(), account).token;
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_filters(account, token, 0, &[block], &[key0])
-            .unwrap()
-    );
+    assert!(record_span(
+        st.wallet_mut().db_mut(),
+        account,
+        token,
+        &[block],
+        &[key0]
+    ));
     assert_eq!(work_of(&st, key0).from, block.height);
     let corrected = RecoveryPublication {
         history_revision: 1,
@@ -2048,49 +1922,6 @@ fn a_correction_restores_the_historical_start_of_active_requests() {
     assert!(work_of(&st, key0).from <= candidate.height);
     drain(&mut st, account, corrected);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
-}
-
-/// While disabled, a repair read can pass shards and skip receipts that discovery would
-/// keep, even when a completed prefix survived a reorg. Enabling discovery between shards
-/// drops that partial progress and the cursor, keeping only the surviving prefix.
-#[test]
-fn enabling_between_shards_drops_partial_repair_progress() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let publication = publication_at(&st, tip(&st).height);
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .begin_one_time_recovery(account, publication, true)
-            .unwrap()
-    );
-    drain(&mut st, account, publication);
-    let key0 = KeyId::new(Purpose::Receive, 0);
-    let id = key_ref(&st.wallet().db().conn, account, key0).unwrap();
-    let done: u32 = value(
-        st.wallet().conn(),
-        "SELECT done_height FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
-        [id],
-    );
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, false)
-        .unwrap();
-    // A repair request after the surviving prefix, stopped between shards.
-    exec(
-        st.wallet().conn(),
-        "UPDATE ironwood_one_time_lookups SET target_height = ?2 + 5, reasons = 1,
-         start_height = ?2 + 1, checked_height = ?2 + 3, inventory = zeroblob(32), shard = 2,
-         segment = 0, read_complete = 0 WHERE one_time_key_id = ?1",
-        rusqlite::params![id, done],
-    );
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, true)
-        .unwrap();
-    let work = work_of(&st, key0);
-    assert_eq!(work.from, BlockHeight::from(done + 1));
-    assert!(work.cursor.is_none());
 }
 
 /// The seed walk checked I1 to I4 after authenticating I0's still unconfirmed payment.
@@ -2161,8 +1992,14 @@ fn an_extended_manual_search_queues_new_indexes_past_a_long_completed_prefix() {
     );
 }
 
-/// Answers every queued lookup from the independent oracle without delivering proofs.
-fn answer_lookups(st: &mut State, account: AccountUuid, publication: RecoveryPublication) {
+/// Answers every queued lookup from the independent oracle, each key's payloads built at
+/// `context` of it.
+fn answer_lookups(
+    st: &mut State,
+    account: AccountUuid,
+    publication: RecoveryPublication,
+    context: impl Fn(KeyId) -> PublicationEnd,
+) {
     for _ in 0..512 {
         let Some(work) = status(st.wallet().db(), account).lookups.first().cloned() else {
             return;
@@ -2171,7 +2008,7 @@ fn answer_lookups(st: &mut State, account: AccountUuid, publication: RecoveryPub
             .unwrap()
             .unwrap();
         let records = oracle(st, work.work.receiver, fvk.full_viewing_key());
-        let page = whole(publication, records);
+        let page = whole_at(st, publication, records, context(work.work.key));
         assert!(
             st.wallet_mut()
                 .db_mut()
@@ -2183,6 +2020,13 @@ fn answer_lookups(st: &mut State, account: AccountUuid, publication: RecoveryPub
     panic!("lookups did not settle");
 }
 
+/// The context of an empty block mined after the wallet's tip and not scanned yet, so a
+/// payload built there waits for it.
+pub(in crate::wallet::one_time_ivk) fn ahead(st: &mut State) -> PublicationEnd {
+    let (height, _) = st.generate_empty_block();
+    publication_at(st, height).end
+}
+
 /// The seed walk reaches I4 only after I4's own lookup already completed, because I0's
 /// proof arrived last. Enrolling I4 must not leave the walk waiting on an already
 /// covered history, so its paid I4 opens the next lookahead index at once.
@@ -2192,24 +2036,32 @@ fn the_seed_walk_continues_past_an_index_completed_before_enrollment() {
     let account = st.test_account().unwrap().id();
     let key0 = KeyId::new(Purpose::Receive, 0);
     let key4 = KeyId::new(Purpose::Receive, 4);
-    let payment0 = pay_candidate(&mut st, key0);
+    pay_candidate(&mut st, key0);
     let payment4 = pay_candidate(&mut st, key4);
     recover(st.wallet_mut().db_mut(), account, key4, payment4.height);
     let publication = publication_at(&st, tip(&st).height);
     assert!(
         st.wallet_mut()
             .db_mut()
-            .begin_one_time_recovery(account, publication, false)
+            .begin_one_time_recovery(account, publication, true)
             .unwrap()
     );
-    answer_lookups(&mut st, account, publication);
-    send_witness(&mut st, key4, &payment4);
-    send_witness(&mut st, key0, &payment0);
+    // I0's payload is built at a block the wallet has not scanned, so it waits, and I0 is
+    // admitted last.
+    let later = ahead(&mut st);
+    answer_lookups(&mut st, account, publication, |key| {
+        if key == key0 { later } else { publication.end }
+    });
+    assert_eq!(mined_receipt_indexes(&st), [4]);
+    st.scan_cached_blocks(later.height, 1);
+    assert_eq!(mined_receipt_indexes(&st), [0, 4]);
     let next = status(st.wallet().db(), account);
     assert!(
-        next.lookups
-            .iter()
-            .any(|w| w.work.key == KeyId::new(Purpose::Receive, 5)),
+        next.restore_complete
+            || next
+                .lookups
+                .iter()
+                .any(|w| w.work.key == KeyId::new(Purpose::Receive, 5)),
         "the walk stalled at index {}",
         next.restore_next
     );
@@ -2225,9 +2077,9 @@ fn the_seed_walk_continues_past_an_index_completed_before_enrollment() {
 fn a_restarted_seed_walk_resumes_after_exhausting_its_step_budget() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
-    let payments: Vec<_> = (0..64)
-        .map(|index| pay_candidate(&mut st, KeyId::new(Purpose::Receive, index)))
-        .collect();
+    for index in 0..64 {
+        pay_candidate(&mut st, KeyId::new(Purpose::Receive, index));
+    }
     let publication = publication_at(&st, tip(&st).height);
     assert!(
         st.wallet_mut()
@@ -2249,23 +2101,15 @@ fn a_restarted_seed_walk_resumes_after_exhausting_its_step_budget() {
             .begin_one_time_recovery(account, publication, false)
             .unwrap()
     );
-    answer_lookups(&mut st, account, publication);
     let key0 = KeyId::new(Purpose::Receive, 0);
-    while let Some(request) = status(st.wallet().db(), account)
-        .witnesses
-        .into_iter()
-        .find(|w| w.key != key0)
-    {
-        send_witness(
-            &mut st,
-            request.key,
-            &payments[request.key.index() as usize],
-        );
-    }
-    send_witness(&mut st, key0, &payments[0]);
+    let later = ahead(&mut st);
+    answer_lookups(&mut st, account, publication, |key| {
+        if key == key0 { later } else { publication.end }
+    });
+    st.scan_cached_blocks(later.height, 1);
     let resumed = status(st.wallet().db(), account);
     assert!(
-        resumed.restore_complete || !resumed.lookups.is_empty() || !resumed.witnesses.is_empty(),
+        resumed.restore_complete || !resumed.lookups.is_empty(),
         "the walk stalled at index {}",
         resumed.restore_next
     );
@@ -2294,7 +2138,7 @@ fn a_manual_search_passes_more_completed_refunds_than_one_step_budget() {
     assert!(
         st.wallet_mut()
             .db_mut()
-            .begin_one_time_recovery(account, publication, false)
+            .begin_one_time_recovery(account, publication, true)
             .unwrap()
     );
     drain(&mut st, account, publication);
@@ -2338,12 +2182,13 @@ fn a_reorg_below_completed_coverage_lowers_active_request_starts() {
     st.generate_and_scan_empty_blocks(1);
     let block = tip(&st);
     let token = status(st.wallet().db(), account).token;
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_filters(account, token, 0, &[block], &[key0])
-            .unwrap()
-    );
+    assert!(record_span(
+        st.wallet_mut().db_mut(),
+        account,
+        token,
+        &[block],
+        &[key0]
+    ));
     assert_eq!(work_of(&st, key0).from, block.height);
 
     st.truncate_to_height(floor);
@@ -2532,9 +2377,7 @@ fn seeded_recovery_sequences_never_stall() {
                 }
                 _ => {
                     let db = st.wallet_mut().db_mut();
-                    db.set_one_time_recovery_enabled(account, false).unwrap();
-                    status(db, account);
-                    db.set_one_time_recovery_enabled(account, true).unwrap();
+                    db.enable_one_time_recovery(account).unwrap();
                     status(db, account);
                 }
             }
@@ -2569,15 +2412,11 @@ fn rewind_and_search(st: &mut State, account: AccountUuid, depth: u32, end: u64,
             .unwrap()
             .unwrap();
         let records = oracle(st, work.work.receiver, fvk.full_viewing_key());
+        let page = whole_for(&work, surviving, paid(st, records, surviving.end));
         assert!(
             st.wallet_mut()
                 .db_mut()
-                .record_one_time_lookup(
-                    account,
-                    &work,
-                    &whole_for(&work, surviving, records),
-                    clock_now()
-                )
+                .record_one_time_lookup(account, &work, &page, clock_now())
                 .unwrap()
         );
     }
@@ -2670,10 +2509,11 @@ fn manual_only_receive_keys_stay_out_of_automatic_monitoring() {
 
     st.generate_and_scan_empty_blocks(1);
     let block = tip(&st);
+    let span = span_over(st.wallet().db(), 0, &[block]);
     assert!(
         st.wallet_mut()
             .db_mut()
-            .record_one_time_filters(account, token, 0, &[block], &[manual_only])
+            .record_one_time_filter_span(account, token, &span, &[(block.height, manual_only)])
             .is_err()
     );
     let automatic: u32 = value(
@@ -2688,7 +2528,7 @@ fn manual_only_receive_keys_stay_out_of_automatic_monitoring() {
 
 /// How a faulty directory mislabels a genuine payment.
 #[derive(Clone, Copy, Debug)]
-enum Mislabel {
+pub(in crate::wallet::one_time_ivk) enum Mislabel {
     /// Under an unrelated transaction's ID.
     OtherTransaction,
     /// Under a transaction whose claimed action differs only in its note commitment.
@@ -2714,15 +2554,15 @@ fn with_other_commitment(
 /// A wallet holding a genuine payment to I8 that a faulty directory labeled with another
 /// transaction's ID, admitted under that label, with that wrong transaction and the true
 /// payment.
-struct Mislabeled {
-    st: State,
-    candidate: PendingPayment,
-    forged: PendingPayment,
-    wrong: zcash_primitives::transaction::Transaction,
+pub(in crate::wallet::one_time_ivk) struct Mislabeled {
+    pub(in crate::wallet::one_time_ivk) st: State,
+    pub(in crate::wallet::one_time_ivk) candidate: PendingPayment,
+    pub(in crate::wallet::one_time_ivk) forged: PendingPayment,
+    pub(in crate::wallet::one_time_ivk) wrong: zcash_primitives::transaction::Transaction,
 }
 
 /// Admits a genuine payment to I8 under the wrong label `mislabel` describes.
-fn mislabeled(mislabel: Mislabel) -> Mislabeled {
+pub(in crate::wallet::one_time_ivk) fn mislabeled(mislabel: Mislabel) -> Mislabeled {
     let mut st = scanned_wallet();
     let receiver = derive(&st, key8()).address_at(0u32, Scope::External);
     let paying = external_payment(receiver, &zcash_protocol::memo::MemoBytes::empty());
@@ -2744,7 +2584,6 @@ fn mislabeled(mislabel: Mislabel) -> Mislabeled {
     let mut forged = candidate.clone();
     forged.txid = wrong.txid();
     queue_late(&mut st, key8(), &forged);
-    send_witness(&mut st, key8(), &forged);
     Mislabeled {
         st,
         candidate,
@@ -2771,17 +2610,11 @@ fn receipts(st: &State) -> Vec<(i64, Vec<u8>, bool)> {
 /// fetched raw transaction does not hold it: the receipt keeps its note row and only its label
 /// becomes disputed, and its key's history is read again. The raw transaction is kept, so the
 /// same mislabeled record repeated later is refused at admission. The true record then moves
-/// the same row to its own transaction. This holds with discovery enabled, and disabled before
-/// the raw transaction arrived.
+/// the same row to its own transaction.
 #[test]
 fn a_raw_transaction_without_the_claimed_action_disputes_the_label() {
     use zcash_client_backend::data_api::wallet::decrypt_and_store_transaction;
-    for (mislabel, enabled) in [
-        (Mislabel::OtherTransaction, true),
-        (Mislabel::OtherTransaction, false),
-        (Mislabel::CommitmentOnly, true),
-        (Mislabel::CommitmentOnly, false),
-    ] {
+    for mislabel in [Mislabel::OtherTransaction, Mislabel::CommitmentOnly] {
         let Mislabeled {
             mut st,
             candidate,
@@ -2794,16 +2627,10 @@ fn a_raw_transaction_without_the_claimed_action_disputes_the_label() {
             panic!("one receipt under the wrong label");
         };
         assert_eq!(*label, forged.txid.as_ref().to_vec());
-        if !enabled {
-            st.wallet_mut()
-                .db_mut()
-                .set_one_time_recovery_enabled(account, false)
-                .unwrap();
-        }
 
         decrypt_and_store_transaction(&network, st.wallet_mut(), &wrong, None).unwrap();
         let disputed = vec![(note, forged.txid.as_ref().to_vec(), true)];
-        assert_eq!(receipts(&st), disputed, "{mislabel:?} {enabled}");
+        assert_eq!(receipts(&st), disputed, "{mislabel:?}");
         assert_eq!(one_time_notes(&st), [(50_000, false)]);
         let id = key_ref(&st.wallet().db().conn, account, key8()).unwrap();
         let reopened: bool = value(
@@ -2816,12 +2643,7 @@ fn a_raw_transaction_without_the_claimed_action_disputes_the_label() {
 
         // The directory repeats the same mislabeled record: the kept raw bytes refuse it.
         let publication = queue_late(&mut st, key8(), &forged);
-        send_witness(&mut st, key8(), &forged);
-        assert_eq!(
-            receipts(&st),
-            disputed,
-            "{mislabel:?} {enabled}: refused again"
-        );
+        assert_eq!(receipts(&st), disputed, "{mislabel:?}: refused again");
 
         // After the rejection's backoff, the true record is read.
         exec(
@@ -2830,11 +2652,10 @@ fn a_raw_transaction_without_the_claimed_action_disputes_the_label() {
             [],
         );
         drain(&mut st, account, publication);
-        assert_eq!(status(st.wallet().db(), account).enabled, enabled);
         assert_eq!(
             receipts(&st),
             [(note, candidate.txid.as_ref().to_vec(), false)],
-            "{mislabel:?} {enabled}"
+            "{mislabel:?}"
         );
         assert_eq!(one_time_notes(&st), [(50_000, false)]);
     }
@@ -2881,14 +2702,13 @@ fn an_orchard_build_checks_raw_bytes_a_build_without_it_stored() {
 /// label. Disputing it keeps the note row and its spend, so the note stays unavailable and the
 /// balance unchanged, while history, transaction outputs and transaction details stop
 /// attributing it to the disproven transaction. The true record moves that same row to its
-/// own transaction with the spend intact, and history shows it received there, with
-/// discovery enabled and disabled.
+/// own transaction with the spend intact, and history shows it received there.
 #[test]
 fn a_disputed_label_keeps_the_receipts_pending_spend() {
     use zcash_client_backend::data_api::{
         transparent_ledger::TransparentDetailRead as _, wallet::decrypt_and_store_transaction,
     };
-    for enabled in [true, false] {
+    {
         let Mislabeled {
             mut st,
             candidate,
@@ -2919,12 +2739,6 @@ fn a_disputed_label_keeps_the_receipts_pending_spend() {
         };
         assert_eq!(spends(&st), [send.as_ref().to_vec()]);
         assert_eq!(one_time_notes(&st), [(50_000, true)]);
-        if !enabled {
-            st.wallet_mut()
-                .db_mut()
-                .set_one_time_recovery_enabled(account.id(), false)
-                .unwrap();
-        }
 
         decrypt_and_store_transaction(&network, st.wallet_mut(), &wrong, None).unwrap();
         assert_eq!(receipts(&st), [(note, forged.txid.as_ref().to_vec(), true)]);
@@ -2939,7 +2753,7 @@ fn a_disputed_label_keeps_the_receipts_pending_spend() {
         assert_eq!(
             received_in(&st, account.id()),
             [(send.as_ref().to_vec(), 0, 50_000)],
-            "enabled {enabled}: history during the dispute"
+            "history during the dispute"
         );
         assert!(outputs_of(&st, forged.txid).is_empty());
         assert!(
@@ -2951,20 +2765,16 @@ fn a_disputed_label_keeps_the_receipts_pending_spend() {
         );
 
         let publication = publication_at(&st, tip(&st).height);
-        if enabled {
-            assert!(
-                st.wallet_mut()
-                    .db_mut()
-                    .begin_one_time_recovery(account.id(), publication, true)
-                    .unwrap()
-            );
-        }
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .begin_one_time_recovery(account.id(), publication, true)
+                .unwrap()
+        );
         drain(&mut st, account.id(), publication);
-        assert_eq!(status(st.wallet().db(), account.id()).enabled, enabled);
         assert_eq!(
             receipts(&st),
-            [(note, candidate.txid.as_ref().to_vec(), false)],
-            "enabled {enabled}"
+            [(note, candidate.txid.as_ref().to_vec(), false)]
         );
         assert_eq!(spends(&st), [send.as_ref().to_vec()]);
         assert_eq!(one_time_notes(&st), [(50_000, true)]);
@@ -2975,10 +2785,7 @@ fn a_disputed_label_keeps_the_receipts_pending_spend() {
             (send.as_ref().to_vec(), 0, 50_000),
         ];
         expected.sort();
-        assert_eq!(
-            history, expected,
-            "enabled {enabled}: history after relabeling"
-        );
+        assert_eq!(history, expected, "history after relabeling");
         assert_eq!(outputs_of(&st, candidate.txid), [50_000]);
     }
 }
@@ -2988,10 +2795,12 @@ fn a_disputed_label_keeps_the_receipts_pending_spend() {
 /// restart, and a publication this client captured resumes it.
 #[test]
 fn an_unsupported_service_waits_for_an_upgrade_and_keeps_its_work() {
-    let (mut st, _, publication) = late_fixture();
+    let mut st = scanned_wallet();
+    let candidate = pay_candidate(&mut st, key8());
+    // The payload waits for a block the wallet has not scanned, so the payment stays pending.
+    let later = ahead(&mut st);
+    let publication = queue_late_at(&mut st, key8(), &candidate, later, |_| {});
     let account = st.test_account().unwrap().id();
-    let pending = status(st.wallet().db(), account);
-    assert!(!pending.witnesses.is_empty());
     let snapshot = |st: &State| -> (Vec<(i64, Option<u32>, u8, u32, i64, bool)>, u32) {
         (
             rows(
@@ -3003,12 +2812,13 @@ fn an_unsupported_service_waits_for_an_upgrade_and_keeps_its_work() {
             value(
                 st.wallet().conn(),
                 "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery
-                 WHERE payments IS NOT NULL",
+                 WHERE directory IS NOT NULL",
                 [],
             ),
         )
     };
     let before = snapshot(&st);
+    assert_eq!(before.1, 1);
     st.wallet_mut()
         .db_mut()
         .require_one_time_upgrade(account)
@@ -3016,7 +2826,11 @@ fn an_unsupported_service_waits_for_an_upgrade_and_keeps_its_work() {
     reopen(&mut st);
     let waiting = status(st.wallet().db(), account);
     assert!(waiting.upgrade_required);
-    assert!(waiting.lookups.is_empty() && waiting.witnesses.is_empty());
+    assert!(waiting.lookups.is_empty());
+    assert!(
+        !waiting.round_due,
+        "no round can succeed until the app updates"
+    );
     assert_eq!(
         snapshot(&st),
         before,
@@ -3029,9 +2843,9 @@ fn an_unsupported_service_waits_for_an_upgrade_and_keeps_its_work() {
             .begin_one_time_recovery(account, publication, true)
             .unwrap()
     );
-    let resumed = status(st.wallet().db(), account);
-    assert!(!resumed.upgrade_required);
-    assert_eq!(resumed.witnesses, pending.witnesses);
+    assert!(!status(st.wallet().db(), account).upgrade_required);
+    st.scan_cached_blocks(later.height, 1);
+    let publication = publication_at(&st, tip(&st).height);
     drain(&mut st, account, publication);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
@@ -3135,6 +2949,41 @@ pub(in crate::wallet::one_time_ivk) fn blocks_above(
         .collect()
 }
 
+/// The filter span over the wallet's consecutive `blocks`, with its parent read from the
+/// wallet, under `revision`.
+pub(in crate::wallet::one_time_ivk) fn span_over(
+    db: &Db,
+    revision: u64,
+    blocks: &[ChainPoint],
+) -> FilterSpan {
+    let (first, end) = (blocks.first().unwrap(), *blocks.last().unwrap());
+    let parent = crate::wallet::get_block_hash(&db.conn, first.height - 1)
+        .unwrap()
+        .unwrap_or(BlockHash([0; 32]));
+    FilterSpan {
+        revision,
+        from: first.height,
+        parent,
+        end,
+    }
+}
+
+/// Commits a filter span over the wallet's consecutive `blocks` under `captured`, with each
+/// of `hits` matched at the span's last block. True if it committed.
+pub(in crate::wallet::one_time_ivk) fn record_span(
+    db: &mut Db,
+    account: AccountUuid,
+    captured: RecoveryToken,
+    blocks: &[ChainPoint],
+    hits: &[KeyId],
+) -> bool {
+    let span = span_over(db, captured.history_revision, blocks);
+    let hits: Vec<_> = hits.iter().map(|key| (span.end.height, *key)).collect();
+    db.record_one_time_filter_span(account, captured, &span, &hits)
+        .unwrap()
+        == FilterOutcome::Committed
+}
+
 /// A manual check already derived I4. A filter request captures the automatic receivers
 /// I0 to I3, then I0's delayed payment proof enrolls I4, and ordinary sync stores a block
 /// paying I4. The held callback never matched I4, so it cannot commit past that block; a
@@ -3172,12 +3021,13 @@ fn enrollment_invalidates_a_held_filter_request() {
     pay_candidate(&mut st, key0);
     let (token, _) = st.wallet().db().one_time_receivers(account).unwrap();
     let first = blocks_above(&st, frontier);
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_filters(account, token, 0, &first, &[key0])
-            .unwrap()
-    );
+    assert!(record_span(
+        st.wallet_mut().db_mut(),
+        account,
+        token,
+        &first,
+        &[key0]
+    ));
     // A filter request for the next blocks captures I0 to I3.
     let (held, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
     assert!(receivers.iter().all(|w| w.key != key4));
@@ -3191,19 +3041,17 @@ fn enrollment_invalidates_a_held_filter_request() {
     pay_candidate(&mut st, key4);
     let next = blocks_above(&st, synced);
     assert!(
-        !st.wallet_mut()
-            .db_mut()
-            .record_one_time_filters(account, held, 0, &next, &[])
-            .unwrap(),
+        !record_span(st.wallet_mut().db_mut(), account, held, &next, &[]),
         "a receiver set from before enrollment is stale"
     );
     let (token, _) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_filters(account, token, 0, &next, &[key4])
-            .unwrap()
-    );
+    assert!(record_span(
+        st.wallet_mut().db_mut(),
+        account,
+        token,
+        &next,
+        &[key4]
+    ));
     let current = publication_at(&st, tip(&st).height);
     drain(&mut st, account, current);
     assert_eq!(mined_receipt_indexes(&st), [0, 4]);
@@ -3212,10 +3060,10 @@ fn enrollment_invalidates_a_held_filter_request() {
 /// One transaction pays two private receipts. A reorg moves it to later positions. Each
 /// receipt keeps its own repair eligibility until its own position and witness are
 /// restored, so repairing the first, which marks the transaction mined, cannot leave the
-/// second at its stale position, with recovery enabled or disabled.
+/// second at its stale position.
 #[test]
 fn a_reorg_repairs_each_private_receipt_of_one_transaction() {
-    for enabled in [true, false] {
+    {
         let mut st = scanned_wallet();
         let account = st.test_account().unwrap().id();
         let publication = publication_at(&st, tip(&st).height);
@@ -3275,12 +3123,6 @@ fn a_reorg_repairs_each_private_receipt_of_one_transaction() {
         got.sort_by_key(|(_, p)| *p);
         assert_eq!(got, expected);
 
-        if !enabled {
-            st.wallet_mut()
-                .db_mut()
-                .set_one_time_recovery_enabled(account, false)
-                .unwrap();
-        }
         st.truncate_to_height(floor);
         // Another payment first moves the transaction's outputs to later positions. It is
         // mined and scanned directly, since `pay` would enable recovery again.
@@ -3294,9 +3136,7 @@ fn a_reorg_repairs_each_private_receipt_of_one_transaction() {
         );
         payment_indexes(&st, shifted, 1);
         st.scan_cached_blocks(shifted, 1);
-        assert_eq!(status(st.wallet().db(), account).enabled, enabled);
         let (height, moved) = mine(&mut st);
-        assert_eq!(status(st.wallet().db(), account).enabled, enabled);
         assert_ne!(moved, positions);
         let mut expected: Vec<_> = moved
             .iter()
@@ -3305,14 +3145,14 @@ fn a_reorg_repairs_each_private_receipt_of_one_transaction() {
         expected.sort_by_key(|(_, p)| *p);
         let mut got = placed(&st);
         got.sort_by_key(|(_, p)| *p);
-        assert_eq!(got, expected, "enabled {enabled}");
+        assert_eq!(got, expected);
         assert_eq!(one_time_notes(&st).len(), 2);
     }
 }
 
-/// Direct catch-up skips a used key whose history is complete, so a second payment the
-/// directory left out of its history is not read. A correction that adds that payment
-/// reads every monitored key once, used ones included, and recovers it automatically.
+/// A complete check reads a used key again, but a directory that left a second payment out
+/// of its history answers that read as empty. A correction that adds the payment reads
+/// every monitored key once more, used ones included, and recovers it automatically.
 #[test]
 fn a_correction_recovers_a_payment_it_adds_to_a_used_receiver() {
     let mut st = scanned_wallet();
@@ -3329,7 +3169,7 @@ fn a_correction_recovers_a_payment_it_adds_to_a_used_receiver() {
     drain(&mut st, account, first);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 
-    // The directory omits the second payment, and catch-up does not read the used key.
+    // The directory omits the second payment, so the complete check reads nothing new.
     pay_candidate(&mut st, key0);
     let omitted = publication_at(&st, tip(&st).height);
     assert!(
@@ -3342,9 +3182,17 @@ fn a_correction_recovers_a_payment_it_adds_to_a_used_receiver() {
         status(st.wallet().db(), account)
             .lookups
             .iter()
-            .all(|w| w.work.key != key0)
+            .any(|w| w.work.key == key0)
     );
-    drain(&mut st, account, omitted);
+    while let Some(work) = status(st.wallet().db(), account).lookups.first().cloned() {
+        let page = whole_for(&work, omitted, vec![]);
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .record_one_time_lookup(account, &work, &page, clock_now())
+                .unwrap()
+        );
+    }
     assert_eq!(one_time_notes(&st).len(), 1);
 
     let corrected = RecoveryPublication {
@@ -3444,7 +3292,6 @@ fn a_cancelled_search_stops_an_invalidated_manual_only_lookup() {
         .unwrap();
     let paused = status(st.wallet().db(), account);
     assert!(paused.lookups.is_empty(), "no requests while paused");
-    assert!(paused.witnesses.is_empty());
     assert!(
         st.wallet_mut()
             .db_mut()
@@ -3497,39 +3344,8 @@ fn conclusive_refund_keys_leave_automatic_monitoring() {
         )
         .unwrap();
     }
-    let watched = |st: &State| -> (Vec<u64>, Vec<u64>) {
-        let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-        let filters = receivers
-            .iter()
-            .filter(|w| w.key.purpose() == Purpose::Refund)
-            .map(|w| w.key.index())
-            .collect();
-        let owner: i64 = value(
-            st.wallet().conn(),
-            "SELECT id FROM accounts WHERE uuid = ?1",
-            [account.0],
-        );
-        let ids = crate::wallet::one_time_ivk::restore::queue::direct_keys(
-            st.wallet().conn(),
-            st.network(),
-            owner,
-        )
-        .unwrap();
-        let mut direct: Vec<u64> = ids
-            .into_iter()
-            .filter_map(|id: i64| {
-                let (purpose, index): (u8, Vec<u8>) = row(
-                    st.wallet().conn(),
-                    "SELECT purpose, key_index FROM ironwood_one_time_keys WHERE id = ?1",
-                    [id],
-                );
-                (purpose == 0).then(|| u64::from_be_bytes(index.try_into().unwrap()))
-            })
-            .collect();
-        direct.sort();
-        (filters, direct)
-    };
-    assert_eq!(watched(&st), (vec![0, 1, 2, 3], vec![0, 1, 2, 3]));
+    let watched = |st: &State| refunds_watched(st, account);
+    assert_eq!(watched(&st), vec![0, 1, 2, 3]);
 
     let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
     let observe = |st: &mut State, i: u64, status, receipts| {
@@ -3550,7 +3366,7 @@ fn conclusive_refund_keys_leave_automatic_monitoring() {
     };
     observe(&mut st, 0, Terminal(ReceiptExpectation::None), vec![]);
     observe(&mut st, 1, Terminal(ReceiptExpectation::Unknown), vec![]);
-    assert_eq!(watched(&st), (vec![1, 2, 3], vec![1, 2, 3]));
+    assert_eq!(watched(&st), vec![1, 2, 3]);
     let (current, _) = st.wallet().db().one_time_receivers(account).unwrap();
     assert_ne!(current, held, "retiring R0 fences held filter requests");
 
@@ -3564,11 +3380,7 @@ fn conclusive_refund_keys_leave_automatic_monitoring() {
         ))),
         vec![paid.txid],
     );
-    assert_eq!(
-        watched(&st),
-        (vec![1, 2, 3], vec![1, 2, 3]),
-        "not yet received"
-    );
+    assert_eq!(watched(&st), vec![1, 2, 3], "not yet received");
     let publication = publication_at(&st, tip(&st).height);
     assert!(
         st.wallet_mut()
@@ -3578,39 +3390,24 @@ fn conclusive_refund_keys_leave_automatic_monitoring() {
     );
     drain(&mut st, account, publication);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
-    assert_eq!(watched(&st), (vec![1, 2], vec![1, 2]));
+    assert_eq!(watched(&st), vec![1, 2]);
 }
 
-/// The refund indexes `account` monitors automatically: in its filter receiver set and in
-/// direct catch-up.
-fn refunds_watched(st: &State, account: AccountUuid) -> (Vec<u64>, Vec<u64>) {
+/// The refund indexes `account` monitors automatically, in its filter receiver set.
+pub(in crate::wallet::one_time_ivk) fn refunds_watched(
+    st: &State,
+    account: AccountUuid,
+) -> Vec<u64> {
     let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
-    let filters = receivers
+    receivers
         .iter()
         .filter(|w| w.key.purpose() == Purpose::Refund)
         .map(|w| w.key.index())
-        .collect();
-    let conn = st.wallet().conn();
-    let owner: i64 = value(conn, "SELECT id FROM accounts WHERE uuid = ?1", [account.0]);
-    let ids = crate::wallet::one_time_ivk::restore::queue::direct_keys(conn, st.network(), owner)
-        .unwrap();
-    let mut direct: Vec<u64> = ids
-        .into_iter()
-        .filter_map(|id: i64| {
-            let (purpose, index): (u8, Vec<u8>) = row(
-                conn,
-                "SELECT purpose, key_index FROM ironwood_one_time_keys WHERE id = ?1",
-                [id],
-            );
-            (purpose == 0).then(|| u64::from_be_bytes(index.try_into().unwrap()))
-        })
-        .collect();
-    direct.sort();
-    (filters, direct)
+        .collect()
 }
 
-/// Starts recovery at the tip with direct catch-up and drains it, so filters have checked
-/// through the tip. Returns that frontier.
+/// Starts recovery at the tip with a complete check and drains it, so coverage reaches the
+/// tip. Returns that frontier.
 fn catch_up(st: &mut State, account: AccountUuid) -> BlockHeight {
     let publication = publication_at(st, tip(st).height);
     let db = st.wallet_mut().db_mut();
@@ -3623,145 +3420,6 @@ fn catch_up(st: &mut State, account: AccountUuid) -> BlockHeight {
         .filter_frontier
         .unwrap()
         .height
-}
-
-/// Mines and scans one empty block and passes filters over it with no hit.
-fn filter_one_block(st: &mut State, account: AccountUuid, frontier: BlockHeight) {
-    st.generate_and_scan_empty_blocks(1);
-    let (token, _) = st.wallet().db().one_time_receivers(account).unwrap();
-    let passed = blocks_above(st, frontier);
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_filters(account, token, 0, &passed, &[])
-            .unwrap()
-    );
-}
-
-/// The memo-only window in blocks is the chain time it spans, so after NU7's 25-second
-/// blocks it covers three times as many blocks, and a window across activation counts each
-/// side at its own spacing.
-#[test]
-fn the_memo_refund_window_is_measured_in_chain_time() {
-    use crate::wallet::one_time_ivk::restore::queue::{MEMO_REFUND_WINDOW, aged_cutoff};
-    use zcash_protocol::zip318::BlockSpacing;
-    let window = MEMO_REFUND_WINDOW;
-    assert_eq!(window, 8_064, "7 days of 75-second blocks");
-    let uniform = BlockSpacing::UNIFORM;
-    assert_eq!(aged_cutoff(uniform, window), None);
-    assert_eq!(aged_cutoff(uniform, window + 1), Some(0));
-    assert_eq!(aged_cutoff(uniform, 100_000), Some(100_000 - window - 1));
-    let nu7 = 1_000_000;
-    let spacing = BlockSpacing::with_nu7_activation(BlockHeight::from(nu7));
-    assert_eq!(aged_cutoff(spacing, nu7 - 1), Some(nu7 - 1 - window - 1));
-    assert_eq!(aged_cutoff(spacing, nu7 + 3 * window), Some(nu7 - 1));
-    assert_eq!(aged_cutoff(spacing, nu7 + 3 * window + 6), Some(nu7 + 5));
-    // A third of the window after activation leaves two thirds before it.
-    assert_eq!(
-        aged_cutoff(spacing, nu7 + window),
-        Some(nu7 - 2 * window / 3 - 1)
-    );
-}
-
-/// A refund key known only from its funding memo has no local operation, so no provider
-/// status can retire it. It leaves automatic monitoring once filters have checked more than
-/// the memo-only window past its funding block, which fences held filter requests, and a key
-/// already past the window when recovered still has its history read once. A key with a
-/// local operation keeps the conclusive-operation rule, and retirement never makes an index
-/// issuable again.
-#[test]
-fn a_memo_only_refund_key_retires_after_its_window() {
-    use crate::wallet::one_time_ivk::restore::queue::MEMO_REFUND_WINDOW;
-    use zakura_one_time_ivk::swap::{Observation, OperationStatus::Active};
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let frontier = catch_up(&mut st, account);
-    let refund = |i| KeyId::new(Purpose::Refund, i);
-    let edge = frontier - MEMO_REFUND_WINDOW;
-    let db = st.wallet_mut().db_mut();
-    recover(db, account, refund(0), edge);
-    recover(db, account, refund(1), edge - 1);
-    recover(db, account, refund(2), edge - 1);
-    let active = Observation {
-        status: Active,
-        funded: true,
-        receipts: vec![],
-    };
-    let now = clock_now();
-    observe_with(
-        db,
-        account,
-        refund(2),
-        ("deposit-2", now + 3_600),
-        active,
-        now,
-    )
-    .unwrap();
-    assert_eq!(refunds_watched(&st, account), (vec![0, 2], vec![0, 2]));
-    // R1 was already past the window, so it was never watched, but its history is read.
-    let r1 = key_ref(&st.wallet().db().conn, account, refund(1)).unwrap();
-    let queued: bool = value(
-        st.wallet().conn(),
-        "SELECT target_height IS NOT NULL FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
-        [r1],
-    );
-    assert!(queued);
-
-    let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
-    filter_one_block(&mut st, account, frontier);
-    assert_eq!(refunds_watched(&st, account), (vec![2], vec![2]));
-    let (current, _) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert_ne!(current, held, "retiring R0 fences held filter requests");
-
-    let tip = tip(&st).height;
-    let next = reserve_refund(st.wallet_mut().db_mut(), account, tip);
-    assert_eq!(next.unwrap().unwrap().key_id().index(), 3);
-}
-
-/// A refund to a memo-only key after it retired is missed by automatic recovery, as the
-/// filters no longer watch it, but an explicit history check still finds it.
-#[test]
-fn a_refund_to_a_retired_memo_only_key_is_found_by_a_history_check() {
-    use crate::wallet::one_time_ivk::restore::queue::MEMO_REFUND_WINDOW;
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let frontier = catch_up(&mut st, account);
-    let r0 = KeyId::new(Purpose::Refund, 0);
-    recover(
-        st.wallet_mut().db_mut(),
-        account,
-        r0,
-        frontier - MEMO_REFUND_WINDOW,
-    );
-    let frontier = catch_up(&mut st, account);
-    filter_one_block(&mut st, account, frontier);
-    assert_eq!(refunds_watched(&st, account), (vec![], vec![]));
-
-    let frontier = status(st.wallet().db(), account)
-        .filter_frontier
-        .unwrap()
-        .height;
-    pay_candidate(&mut st, r0);
-    filter_one_block(&mut st, account, frontier);
-    let publication = publication_at(&st, tip(&st).height);
-    let db = st.wallet_mut().db_mut();
-    assert!(
-        db.begin_one_time_recovery(account, publication, true)
-            .unwrap()
-    );
-    drain(&mut st, account, publication);
-    assert!(
-        one_time_notes(&st).is_empty(),
-        "automatic recovery skips R0"
-    );
-
-    let db = st.wallet_mut().db_mut();
-    assert!(
-        db.check_one_time_history(account, publication, None)
-            .unwrap()
-    );
-    drain(&mut st, account, publication);
-    assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
 /// R0's refund is recovered, then a reorg replaces it with another transaction paying R0,
@@ -3832,88 +3490,12 @@ fn a_refund_replaced_by_a_reorg_still_retires() {
     st.generate_and_scan_empty_blocks(blocks as usize);
     assert_eq!(
         refunds_watched(&st, account),
-        (vec![0], vec![0]),
+        vec![0],
         "no history was read past the expiry"
     );
     let frontier = catch_up(&mut st, account);
     assert_eq!(u32::from(frontier), expiry + crate::PRUNING_DEPTH);
-    assert_eq!(refunds_watched(&st, account), (vec![], vec![]));
-}
-
-/// A manual check finds a payment to a retired memo-only key, and its candidate waits for
-/// a witness, which returns the key to monitoring. That advances the generation, so a
-/// filter request captured without the key cannot commit past blocks that may pay it again,
-/// and the key's history since its earlier completed read is queued automatically.
-#[test]
-fn a_candidate_that_returns_a_retired_key_to_monitoring_fences_held_filters() {
-    use crate::wallet::one_time_ivk::restore::queue::MEMO_REFUND_WINDOW;
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let frontier = catch_up(&mut st, account);
-    let r0 = KeyId::new(Purpose::Refund, 0);
-    let db = st.wallet_mut().db_mut();
-    recover(db, account, r0, frontier - MEMO_REFUND_WINDOW);
-    let frontier = catch_up(&mut st, account);
-    filter_one_block(&mut st, account, frontier);
-    assert_eq!(refunds_watched(&st, account), (vec![], vec![]));
-
-    let frontier = status(st.wallet().db(), account)
-        .filter_frontier
-        .unwrap()
-        .height;
-    pay_candidate(&mut st, r0);
-    let publication = publication_at(&st, tip(&st).height);
-    let db = st.wallet_mut().db_mut();
-    assert!(
-        db.check_one_time_history(account, publication, None)
-            .unwrap()
-    );
-    let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert!(answer_lookup(&mut st, account, publication));
-    assert_eq!(candidates(&st), 1, "the payment waits for its witness");
-    assert_eq!(refunds_watched(&st, account), (vec![0], vec![0]));
-
-    let passed = blocks_above(&st, frontier);
-    let db = st.wallet_mut().db_mut();
-    assert!(
-        !db.record_one_time_filters(account, held, 0, &passed, &[])
-            .unwrap(),
-        "a request captured without R0 cannot commit"
-    );
-    let id = key_ref(&st.wallet().db().conn, account, r0).unwrap();
-    let (target, reasons): (Option<u32>, u8) = row(
-        st.wallet().conn(),
-        "SELECT target_height, reasons FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
-        [id],
-    );
-    assert!(target >= Some(u32::from(tip(&st).height)));
-    assert_ne!(reasons & 1, 0, "R0's history is queued automatically");
-}
-
-/// Recording a first local operation on a retired memo-only key replaces the memo-only
-/// rule with the operation rule, which returns it to monitoring and fences held filters.
-#[test]
-fn a_first_operation_on_a_retired_memo_only_key_fences_held_filters() {
-    use crate::wallet::one_time_ivk::restore::queue::MEMO_REFUND_WINDOW;
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let frontier = catch_up(&mut st, account);
-    let r0 = KeyId::new(Purpose::Refund, 0);
-    let db = st.wallet_mut().db_mut();
-    recover(db, account, r0, frontier - MEMO_REFUND_WINDOW);
-    let frontier = catch_up(&mut st, account);
-    filter_one_block(&mut st, account, frontier);
-    assert_eq!(refunds_watched(&st, account), (vec![], vec![]));
-
-    let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
-    let deposit = p2pkh(7).encode(st.network());
-    let now = clock_now();
-    let db = st.wallet_mut().db_mut();
-    db.record_refund_operation(account, 0, &deposit, now + 3_600, now)
-        .unwrap();
-    assert_eq!(refunds_watched(&st, account), (vec![0], vec![0]));
-    let (current, _) = st.wallet().db().one_time_receivers(account).unwrap();
-    assert_ne!(current, held);
+    assert_eq!(refunds_watched(&st, account), Vec::<u64>::new());
 }
 
 /// As in [`a_refund_replaced_by_a_reorg_still_retires`], but the displaced receipt's expiry
@@ -3964,22 +3546,22 @@ fn storing_a_displaced_receipts_raw_transaction_fences_its_retirement() {
     catch_up(&mut st, account);
     assert_eq!(
         refunds_watched(&st, account),
-        (vec![0], vec![0]),
+        vec![0],
         "the expiry height is unknown"
     );
 
     let (held, _) = st.wallet().db().one_time_receivers(account).unwrap();
     decrypt_and_store_transaction(&network, st.wallet_mut(), &displaced, None).unwrap();
-    assert_eq!(refunds_watched(&st, account), (vec![], vec![]));
+    assert_eq!(refunds_watched(&st, account), Vec::<u64>::new());
     let (current, _) = st.wallet().db().one_time_receivers(account).unwrap();
     assert_ne!(current, held, "retiring R0 fences held filter requests");
 }
 
 /// R0's empty history is checked through the tip and a "no refund" status retires it. A
 /// refund then reaches R0 while rolling filters, no longer watching it, pass that block. A
-/// newer status reports the refund, returning R0 to monitoring, and that alone queues its
-/// skipped history: recovery finds the refund through rolling filters, with no direct
-/// catch-up.
+/// newer status reports the refund, returning R0 to monitoring, which leaves its skipped
+/// history due for a filter re-check: that re-check finds the refund, with no complete
+/// check.
 #[test]
 fn a_refund_paid_while_its_key_was_retired_is_found_after_a_newer_status() {
     use zakura_one_time_ivk::swap::{
@@ -4029,16 +3611,17 @@ fn a_refund_paid_while_its_key_was_retired_is_found_after_a_newer_status() {
         .filter_frontier
         .unwrap()
         .height;
-    pay_candidate(&mut st, r0);
+    let paid = pay_candidate(&mut st, r0);
     st.generate_and_scan_empty_blocks(1);
     let (token, _) = st.wallet().db().one_time_receivers(account).unwrap();
     let passed = blocks_above(&st, frontier);
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_filters(account, token, 0, &passed, &[])
-            .unwrap()
-    );
+    assert!(record_span(
+        st.wallet_mut().db_mut(),
+        account,
+        token,
+        &passed,
+        &[]
+    ));
 
     observe(
         &mut st,
@@ -4048,6 +3631,9 @@ fn a_refund_paid_while_its_key_was_retired_is_found_after_a_newer_status() {
         now + 120,
     );
     assert!(watched(&st), "the newer status returns R0 to monitoring");
+    // R0's lookup reads the history filters passed without it, which holds the refund.
+    let work = work_of(&st, r0);
+    assert!(work.from <= paid.height && work.through >= paid.height);
     let current = publication_at(&st, tip(&st).height);
     drain(&mut st, account, current);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
@@ -4072,25 +3658,23 @@ fn answer_with(
     let work = work_of(st, key);
     let receiver = work.work.receiver;
     let total = payments.len() as u32;
-    let page = whole(
-        publication,
-        (0..)
-            .zip(payments)
-            .map(|(page, payment)| DirectoryRecord {
-                receiver,
-                page,
-                total,
-                payment: payment.clone(),
-                ordinal: page,
-            })
-            .collect(),
-    );
+    let records = (0..)
+        .zip(payments)
+        .map(|(page, payment)| DirectoryRecord {
+            receiver,
+            page,
+            total,
+            payment: payment.clone(),
+            ordinal: page,
+        })
+        .collect();
+    let page = whole_at(st, publication, records, publication.end);
     let db = st.wallet_mut().db_mut();
     db.record_one_time_lookup(account, &work, &page, clock_now())
 }
 
 /// The number of queued payment candidates.
-fn candidates(st: &State) -> u32 {
+pub(in crate::wallet::one_time_ivk) fn candidates(st: &State) -> u32 {
     value(
         st.wallet().conn(),
         "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery",
@@ -4105,7 +3689,6 @@ fn candidates(st: &State) -> u32 {
 fn a_late_payment_already_admitted_under_another_action_is_dequeued() {
     let (mut st, candidate, _) = late_fixture();
     let account = st.test_account().unwrap().id();
-    send_witness(&mut st, key8(), &candidate);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
     let label = |st: &State| -> Vec<(Vec<u8>, u32)> {
         rows(
@@ -4118,27 +3701,8 @@ fn a_late_payment_already_admitted_under_another_action_is_dequeued() {
     let before = label(&st);
     exec(
         st.wallet().conn(),
-        "INSERT INTO ironwood_one_time_payment_recovery
-             (one_time_key_id, txid, action_index, height, block_hash, tx_index, position,
-              encrypted_note, payments, witnesses, ordinal)
-         SELECT k.id, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?9, ?10, 0 FROM ironwood_one_time_keys k
-         WHERE k.purpose = 1 AND k.key_index = ?8",
-        rusqlite::params![
-            candidate.txid.as_ref(),
-            candidate.action_index + 1,
-            u32::from(candidate.height),
-            candidate.block_hash.0,
-            candidate.tx_index,
-            candidate.position,
-            candidate.encrypted_note.to_bytes().to_vec(),
-            key8().index().to_be_bytes(),
-            [1u8; 32],
-            [7u8; 32]
-        ],
-    );
-    exec(
-        st.wallet().conn(),
-        "UPDATE ironwood_one_time_lookups SET reasons = 1, target_height = ?1, read_complete = 0
+        "UPDATE ironwood_one_time_lookups SET reasons = 1, target_height = ?1, read_complete = 0,
+             checked_height = NULL
          WHERE one_time_key_id = (SELECT id FROM ironwood_one_time_keys
              WHERE purpose = 1 AND key_index = ?2)",
         rusqlite::params![u32::from(tip(&st).height), key8().index().to_be_bytes()],
@@ -4147,11 +3711,18 @@ fn a_late_payment_already_admitted_under_another_action_is_dequeued() {
         action_index: candidate.action_index + 1,
         ..candidate.clone()
     };
-    send_witness(&mut st, key8(), &claimed);
+    let work = work_of(&st, key8());
+    let publication = publication_at(&st, tip(&st).height);
+    let records = history(work.work.receiver, &[&claimed]);
+    let page = whole_at(&st, publication, records, publication.end);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.record_one_time_lookup(account, &work, &page, clock_now())
+            .unwrap()
+    );
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
     assert_eq!(candidates(&st), 0);
     assert_eq!(label(&st), before);
-    let _ = account;
 }
 
 /// `st`'s wallet connection, for closures that cannot borrow `st` mutably.
@@ -4223,7 +3794,8 @@ fn a_refused_page_queues_nothing() {
     );
     assert!(due && last.is_none());
     assert!(answer_with(&mut st, key8(), candidate.height, &[good]).unwrap());
-    assert_eq!(status(st.wallet().db(), account).witnesses.len(), 1);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    let _ = account;
 }
 
 /// A record outside the publication, or one the chain contradicts, refuses the whole page
@@ -4265,7 +3837,7 @@ fn a_page_with_an_out_of_range_or_off_chain_record_is_refused() {
         assert_eq!(candidates(&st), 0, "record {i}");
     }
     assert!(answer_with(&mut st, key8(), candidate.height, &[good]).unwrap());
-    assert_eq!(candidates(&st), 1);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
 /// A rewind below a payment still waiting for its path drops it, since its block may be
@@ -4283,7 +3855,8 @@ fn a_rewind_below_a_waiting_payment_drops_it_until_recovery_finds_it_again() {
             .begin_one_time_recovery(account, publication, true)
             .unwrap()
     );
-    answer_lookups(&mut st, account, publication);
+    let later = ahead(&mut st);
+    answer_lookups(&mut st, account, publication, |_| later);
     assert_eq!(candidates(&st), 1);
     assert!(one_time_notes(&st).is_empty());
     let end = tip(&st).height;
@@ -4319,7 +3892,7 @@ fn an_unknown_accounts_recovery_is_an_error() {
     let token = status(st.wallet().db(), st.test_account().unwrap().id()).token;
     let db = st.wallet_mut().db_mut();
     assert!(unknown_account(
-        db.one_time_recovery(unknown, clock_now()).map(drop)
+        db.one_time_recovery(unknown, clock_now(), None).map(drop)
     ));
     assert!(unknown_account(db.one_time_receivers(unknown).map(drop)));
     assert!(unknown_account(
@@ -4334,6 +3907,7 @@ fn an_unknown_accounts_recovery_is_an_error() {
         },
         from: publication.start_height,
         through: publication.end.height,
+        birthday: publication.start_height,
         cursor: None,
     };
     let db = st.wallet_mut().db_mut();
@@ -4386,47 +3960,43 @@ fn stale_future_and_partial_publications_are_refused() {
     assert!(begin(&mut st, from_activation));
 }
 
-/// A payment before the account's birthday must precede the birthday block's first
-/// Ironwood output. A genuine one marks its key paid before the birthday, untracked like
-/// any note there. A later note a directory claims at a height before the birthday is
-/// refused and dropped, and marks nothing.
+/// A page holding a payment before the birthday and one after stores only the later one,
+/// so the earlier one creates no candidate, witness request or use marker. The page still
+/// counts as read: once the later payment is admitted, the lookup settles without reading
+/// that history again.
 #[test]
-fn a_payment_claimed_before_the_birthday_must_precede_the_birthday_block() {
-    for genuine in [true, false] {
-        let mut st = scanned_wallet();
-        let account = st.test_account().unwrap().id();
-        let mut candidate = pay_candidate(&mut st, key8());
-        st.generate_and_scan_empty_blocks(1);
-        let birthday = if genuine {
-            u32::from(candidate.height) + 1
-        } else {
-            let hash: Vec<u8> = value(
-                st.wallet().conn(),
-                "SELECT hash FROM blocks WHERE height = ?1",
-                [u32::from(candidate.height) - 1],
-            );
-            candidate.height = candidate.height - 1;
-            candidate.block_hash = BlockHash(hash.try_into().unwrap());
-            u32::from(candidate.height) + 1
-        };
-        exec(
-            st.wallet().conn(),
-            "UPDATE accounts SET birthday_height = ?1",
-            [birthday],
-        );
-        let publication = queue_late(&mut st, key8(), &candidate);
-        send_witness(&mut st, key8(), &candidate);
-        drain(&mut st, account, publication);
-        assert!(one_time_notes(&st).is_empty());
-        assert_eq!(candidates(&st), 0);
-        let marked: Option<u32> = value(
-            st.wallet().conn(),
-            "SELECT prebirthday_height FROM ironwood_one_time_keys
-             WHERE purpose = 1 AND key_index = ?1",
-            [key8().index().to_be_bytes()],
-        );
-        assert_eq!(marked, genuine.then_some(birthday), "genuine {genuine}");
-    }
+fn a_page_with_a_payment_before_the_birthday_stores_only_the_later_one() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let early = pay_candidate(&mut st, key8());
+    let late = pay_candidate(&mut st, key8());
+    exec(
+        st.wallet().conn(),
+        "UPDATE accounts SET birthday_height = ?1",
+        [u32::from(late.height)],
+    );
+    recover(st.wallet_mut().db_mut(), account, key8(), early.height);
+    let publication = publication_at(&st, tip(&st).height);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, false)
+            .unwrap()
+    );
+    let work = work_of(&st, key8());
+    let records = history(work.work.receiver, &[&early, &late]);
+    let page = whole_at(&st, publication, records, publication.end);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, &work, &page, clock_now())
+            .unwrap()
+    );
+    let state = status(st.wallet().db(), account);
+    let reads = |state: &RecoveryStatus| state.lookups.iter().any(|w| w.work.key == key8());
+    assert_eq!(candidates(&st), 0);
+    assert!(state.used && !reads(&state));
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
 /// A refund key with several local operations retires only once every one is conclusive,
@@ -4525,8 +4095,6 @@ fn a_witness_with_a_wrong_construction_size_is_refused() {
         let account = st.test_account().unwrap().id();
         let candidate = pay_candidate(&mut st, key8());
         st.generate_and_scan_empty_blocks(1);
-        queue_late(&mut st, key8(), &candidate);
-        let request = request_for(&st, key8(), &candidate);
         let honest = publication_at(&st, tip(&st).height).end;
         assert_eq!(honest.tree_size, u64::from(candidate.position) + 1);
         let claimed = PublicationEnd {
@@ -4537,14 +4105,7 @@ fn a_witness_with_a_wrong_construction_size_is_refused() {
             },
             ..honest
         };
-        let forged = answer(&request, &witness_at(&st, candidate.position), claimed);
-        let token = status(st.wallet().db(), account).token;
-        assert!(
-            st.wallet_mut()
-                .db_mut()
-                .record_one_time_witness(account, token, request, &forged, clock_now())
-                .unwrap()
-        );
+        queue_late_at(&mut st, key8(), &candidate, claimed, |_| {});
         assert!(one_time_notes(&st).is_empty(), "inflated {inflated}");
         let pending: u32 = value(
             st.wallet().conn(),
@@ -4577,27 +4138,20 @@ fn a_witness_with_a_wrong_construction_size_is_refused() {
 fn a_final_witness_built_ahead_of_the_scanned_tip_is_admitted() {
     let prefix = distinct_leaves(65_534);
     let mut st = wallet_after_leaves(&prefix);
-    let account = st.test_account().unwrap().id();
     let candidate = pay_candidate(&mut st, key8());
     assert_eq!(candidate.position, 65_534);
     // Leaf 65,535 completes shard zero and 65,536 starts shard one.
     foreign_blocks(&mut st, 2);
-    queue_late(&mut st, key8(), &candidate);
     let scanned = tip(&st).height;
     for _ in 0..3 {
         st.generate_empty_block();
     }
-    let ahead = scanned + 3;
-    let request = request_for(&st, key8(), &candidate);
-    let path = path_after(&st, &prefix, candidate.position);
-    let complete = answer(&request, &path, publication_at(&st, ahead).end);
-    let token = status(st.wallet().db(), account).token;
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_witness(account, token, request, &complete, clock_now())
-            .unwrap()
-    );
+    let ahead = publication_at(&st, scanned + 3).end;
+    let path = path_after(&st, &prefix, candidate.position).unwrap();
+    let complete = payload(u64::from(candidate.position), &path, ahead);
+    queue_late_at(&mut st, key8(), &candidate, ahead, |page| {
+        page.records[0].payload = complete;
+    });
     assert_eq!(tip(&st).height, scanned);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
@@ -4635,7 +4189,7 @@ fn malformed_lookup_steps_cannot_advance_coverage() {
             segments: 1,
             excluded,
         };
-        let cursor = |shard, last| {
+        let cursor = |shard, last: Option<DirectoryRecord>| {
             Some(LookupCursor {
                 inventory: publication.id,
                 shard,
@@ -4644,13 +4198,14 @@ fn malformed_lookup_steps_cannot_advance_coverage() {
             })
         };
         let first = Some(records[0].clone());
+        let read = paid(&st, vec![records[0].clone()], publication.end);
         let (malformed, valid) = match shape {
             "early end" => (
-                whole(publication, vec![records[0].clone()]),
+                whole(publication, read.clone()),
                 LookupPage {
                     checked_through: None,
                     next: cursor(0, first),
-                    ..whole(publication, vec![records[0].clone()])
+                    ..whole(publication, read)
                 },
             ),
             "jump" => {
@@ -4679,7 +4234,7 @@ fn malformed_lookup_steps_cannot_advance_coverage() {
                         shard: 1,
                         ..segment_ref(publication)
                     }),
-                    records: vec![records[0].clone()],
+                    records: read,
                     checked_through: Some(end),
                     next: cursor(1, first),
                     ..whole(publication, vec![])
@@ -4756,16 +4311,17 @@ fn drain_sharded(
             for (page, record) in (0..).zip(records.iter_mut()) {
                 (record.page, record.total, record.ordinal) = (page, total, page);
             }
+            let start_height = if shard == 0 {
+                publication.start_height
+            } else {
+                split + 1
+            };
             let page = LookupPage {
                 publication,
                 inventory_shards: 2,
                 shards: vec![StepShard {
                     index: shard,
-                    start_height: if shard == 0 {
-                        publication.start_height
-                    } else {
-                        split + 1
-                    },
+                    start_height,
                     end_height: ends[shard as usize],
                     segments: 1,
                     excluded: false,
@@ -4774,9 +4330,9 @@ fn drain_sharded(
                     shard,
                     ..segment_ref(publication)
                 }),
-                records,
+                records: paid(st, records, publication.end),
                 checked_through: Some(ends[shard as usize]),
-                next: (shard == 0).then(|| LookupCursor {
+                next: (shard == 0).then_some(LookupCursor {
                     inventory: publication.id,
                     shard: 1,
                     segment: 0,
@@ -4787,16 +4343,6 @@ fn drain_sharded(
                 st.wallet_mut()
                     .db_mut()
                     .record_one_time_lookup(account, work, &page, clock_now())
-                    .unwrap()
-            );
-            continue;
-        }
-        if let Some(request) = state.witnesses.first() {
-            let answer = witness_answer(st, request, tip(st).height);
-            assert!(
-                st.wallet_mut()
-                    .db_mut()
-                    .record_one_time_witness(account, state.token, *request, &answer, clock_now())
                     .unwrap()
             );
             continue;
@@ -5047,32 +4593,17 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
         },
         from: publication.start_height,
         through: publication.end.height,
+        birthday: publication.start_height,
         cursor: None,
     };
     let page = whole(publication, vec![]);
-    let request = WitnessRequest {
-        key: key8(),
-        position: 0,
-        cmx: [0; 32],
-        payments: [1; 32],
-        witnesses: [7; 32],
-        ordinal: 0,
-    };
-    let answer = WitnessAnswer {
-        payments: [1; 32],
-        revision: [7; 32],
-        context: publication.end,
-        payload: [0; 512],
-    };
     for (account, orchard) in accounts {
         let db = st.wallet_mut().db_mut();
         // Receivers come first: with no progress row they must still read as disabled.
         let (_, receivers) = db.one_time_receivers(account).unwrap();
         assert!(receivers.is_empty());
-        assert_eq!(db.one_time_direct_query_count(account).unwrap(), 0);
-        db.set_one_time_recovery_enabled(account, false).unwrap();
-        let state = db.one_time_recovery(account, clock_now()).unwrap();
-        assert!(!state.enabled && state.lookups.is_empty() && state.witnesses.is_empty());
+        let state = db.one_time_recovery(account, clock_now(), None).unwrap();
+        assert!(!state.enabled && state.lookups.is_empty());
         assert!(
             !db.begin_one_time_recovery(account, publication, true)
                 .unwrap()
@@ -5083,12 +4614,22 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
         );
         let _ = db.cancel_one_time_history(account);
         db.require_one_time_upgrade(account).unwrap();
-        let token = db.one_time_recovery(account, clock_now()).unwrap().token;
-        let _ = db.record_one_time_filters(account, token, 0, &[], &[]);
+        let token = db
+            .one_time_recovery(account, clock_now(), None)
+            .unwrap()
+            .token;
+        let span = FilterSpan {
+            revision: 0,
+            from: publication.end.height,
+            parent: BlockHash([0; 32]),
+            end: ChainPoint {
+                height: publication.end.height,
+                hash: BlockHash(publication.end.hash),
+            },
+        };
+        let _ = db.record_one_time_filter_span(account, token, &span, &[]);
         let _ = db.defer_one_time_lookup(account, &work, clock_now());
         let _ = db.record_one_time_lookup(account, &work, &page, clock_now());
-        let _ = db.record_one_time_witness(account, token, request, &answer, clock_now());
-        let _ = db.refresh_one_time_witness(account, token, request);
         let issued = [
             db.prepare_receive_reservation(account, clock_now())
                 .map(|r| r.map(drop)),
@@ -5120,7 +4661,7 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
         let _ = db.refund_funding_memo(account, 0, "deposit");
         if !orchard {
             assert!(matches!(
-                db.set_one_time_recovery_enabled(account, true),
+                db.enable_one_time_recovery(account),
                 Err(SqliteClientError::BadAccountData(_))
             ));
         }
@@ -5129,21 +4670,15 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
     st.generate_and_scan_empty_blocks(2);
     assert_eq!(rows(&st), 0);
 
-    // Only enabling creates progress, and pausing and enabling again keep their behavior.
+    // Only enabling creates progress.
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, true).unwrap();
-    assert!(db.one_time_recovery(account, clock_now()).unwrap().enabled);
-    db.set_one_time_recovery_enabled(account, false).unwrap();
-    assert!(!db.one_time_recovery(account, clock_now()).unwrap().enabled);
-    assert_eq!(
-        db.prepare_receive_reservation(account, clock_now())
+    db.enable_one_time_recovery(account).unwrap();
+    assert!(
+        db.one_time_recovery(account, clock_now(), None)
             .unwrap()
-            .map(drop),
-        Err(ReservationPolicy::Disabled)
+            .enabled
     );
-    db.set_one_time_recovery_enabled(account, true).unwrap();
-    assert!(db.one_time_recovery(account, clock_now()).unwrap().enabled);
     assert_ne!(
         db.prepare_receive_reservation(account, clock_now())
             .unwrap()
@@ -5153,10 +4688,10 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
     assert_eq!(rows(&st), 1);
 }
 
-/// Pausing an account that is not enabled, or reporting an upgrade it already waits for, only
-/// reads: both succeed on a read-only connection, before and after the account has a row.
+/// Reporting an upgrade an account already waits for, or one for an account with no
+/// progress row, only reads, so it succeeds on a read-only connection.
 #[test]
-fn pausing_a_disabled_account_needs_no_write() {
+fn reporting_a_known_upgrade_needs_no_write() {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
     let read_only = |st: &mut State, on: bool| {
@@ -5167,16 +4702,82 @@ fn pausing_a_disabled_account_needs_no_write() {
     };
     read_only(&mut st, true);
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, false).unwrap();
     db.require_one_time_upgrade(account).unwrap();
     read_only(&mut st, false);
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, true).unwrap();
-    db.set_one_time_recovery_enabled(account, false).unwrap();
+    db.enable_one_time_recovery(account).unwrap();
     db.require_one_time_upgrade(account).unwrap();
     read_only(&mut st, true);
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, false).unwrap();
     db.require_one_time_upgrade(account).unwrap();
     read_only(&mut st, false);
+}
+
+/// A wallet-wide history check starts every account's job or none. With one account not
+/// enabled, the batch names it and starts nothing; once both are enabled, both start.
+#[test]
+fn a_batch_history_check_starts_all_jobs_or_none() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let born = st.latest_cached_block().unwrap().chain_state().clone();
+    let birthday = zcash_client_backend::data_api::AccountBirthday::from_parts(born, None);
+    let (other, _) = st
+        .wallet_mut()
+        .db_mut()
+        .create_account("other", &SecretVec::new(vec![9; 32]), &birthday, None)
+        .unwrap();
+    let publication = publication_at(&st, tip(&st).height);
+    let active = |st: &State, account| {
+        status(st.wallet().db(), account)
+            .manual
+            .is_some_and(|m| m.active)
+    };
+    let db = st.wallet_mut().db_mut();
+    let refused = db
+        .check_one_time_history_for(&[account, other], publication)
+        .unwrap();
+    assert_eq!(refused, Some(other));
+    assert!(!active(&st, account) && !active(&st, other));
+    let db = st.wallet_mut().db_mut();
+    db.enable_one_time_recovery(other).unwrap();
+    assert_eq!(
+        db.check_one_time_history_for(&[account, other], publication)
+            .unwrap(),
+        None
+    );
+    assert!(active(&st, account) && active(&st, other));
+}
+
+/// A payment below the birthday is read as below the floor and kept nowhere. Lowering the
+/// birthday reopens the key's history, so the next read finds and admits it.
+#[test]
+fn a_payment_below_the_birthday_is_found_once_the_birthday_is_lowered() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    let set_birthday = |st: &State, height: u32| {
+        exec(
+            st.wallet().conn(),
+            "UPDATE accounts SET birthday_height = ?1",
+            [height],
+        );
+    };
+    set_birthday(&st, u32::from(candidate.height) + 1);
+    queue_late(&mut st, key8(), &candidate);
+    assert_eq!(candidates(&st), 0);
+    assert!(one_time_notes(&st).is_empty());
+
+    set_birthday(&st, u32::from(candidate.height));
+    tx(st.wallet_mut().db_mut(), |conn, _| {
+        crate::wallet::one_time_rewind::reopen_discovery(conn, account)
+    })
+    .unwrap();
+    let publication = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }

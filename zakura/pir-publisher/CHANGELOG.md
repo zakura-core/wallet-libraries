@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Breaking: `receiver::Projection` places a segment's directory block by block
+  under its tag salt, retrying with salts mixed from the forcing block and
+  returning `SealBefore` when every attempt fails, and `receiver::build` lays
+  out the segment's directory, choice object and companion and runs the
+  whole-segment checks. They replace `receiver::snapshot` and the witness
+  table builder; `receiver::witness::{ShardPaths, payloads}` stay.
+
 ## [0.0.1-rc4] - 2026-10-26
 
 ### Changed

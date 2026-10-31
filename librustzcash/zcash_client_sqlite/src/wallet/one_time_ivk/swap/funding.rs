@@ -33,9 +33,10 @@ pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
     if recovery::refund_memos_pending(conn, account)? {
         return Ok(Err(ReservationPolicy::FundingHistory));
     }
+    let (owner, _) = account_key(conn, params, account)?;
     let index = next_refund_index(conn, params, account)?;
-    let key = KeyId::new(Purpose::Refund, index);
-    let (_, key) = register(conn, params, account, key)?;
+    let (_, key) = register(conn, params, account, KeyId::new(Purpose::Refund, index))?;
+    queue::mark_used(conn, owner.0)?;
     Ok(Ok(key))
 }
 
@@ -264,6 +265,7 @@ pub(crate) fn record_funded_refund_keys<P: Parameters>(
             .or_else(|| params.activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3))
             .ok_or_else(|| invalid("Ironwood is not active"))?;
         queue::funded(conn, params, id, height)?;
+        queue::mark_used(conn, account)?;
         // The wallet's own funding is not a provider observation, so `funded` stays unset.
         let sent = Observation {
             status: OperationStatus::Active,

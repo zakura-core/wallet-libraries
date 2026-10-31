@@ -4,7 +4,7 @@ use zakura_one_time_ivk::swap::Observation;
 use zcash_protocol::consensus::Parameters;
 
 use super::{RESERVED, ReservationPolicy, lifecycle::record};
-use crate::wallet::one_time_ivk::restore::queue::RECEIVE_PENDING;
+use crate::wallet::one_time_ivk::restore::queue::{RECEIVE_PENDING, mark_used};
 use crate::wallet::one_time_ivk::{
     KeyId, OneTimeKey, Purpose, account_key, decode_index, index_after, invalid, key_by_id,
     register,
@@ -66,11 +66,11 @@ pub(in crate::wallet::one_time_ivk) fn recovery_end(
     let tip = wallet::chain_tip_height(conn)?.map(u32::from);
     let paid: Option<Vec<u8>> = conn.query_row(
         "SELECT MAX(k.key_index) FROM ironwood_one_time_keys k
-         WHERE k.account_id = :account AND k.purpose = 1 AND (k.prebirthday_height <= :tip
-             OR EXISTS(SELECT 1 FROM ironwood_received_notes n
+         WHERE k.account_id = :account AND k.purpose = 1
+             AND EXISTS(SELECT 1 FROM ironwood_received_notes n
                  JOIN transactions t ON t.id_tx = n.transaction_id
                  JOIN blocks b ON b.height = t.mined_height
-                 WHERE n.one_time_key_id = k.id AND t.mined_height <= :tip))",
+                 WHERE n.one_time_key_id = k.id AND t.mined_height <= :tip)",
         named_params![":account": account, ":tip": tip],
         |r| r.get(0),
     )?;
@@ -400,6 +400,7 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
                 if pending {
                     return Ok(Err(ReservationPolicy::ReceiveHistory));
                 }
+                mark_used(conn, owner.0)?;
                 return key_by_id(conn, params, account, id).map(Ok);
             }
         }
@@ -423,6 +424,23 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     if !checked {
         return Ok(Err(ReservationPolicy::ReceiveHistory));
     }
+    // That lookup may be old, and filters carry it forward only up to the account's marker,
+    // so another device's payment to the address after the marker isn't seen yet. Issuing
+    // waits for filters within the refund rule's 10 blocks of the chain tip, which
+    // `RecoveryStatus::round_due` asks a round for once sync allows it.
+    let marker: Option<u32> = conn.query_row(
+        "SELECT filter_height FROM ironwood_one_time_recovery WHERE account_id = ?1",
+        [owner.0],
+        |r| r.get(0),
+    )?;
+    let tip = wallet::chain_tip_height(conn)?.map(u32::from);
+    if !marker
+        .zip(tip)
+        .is_some_and(|(m, t)| t.saturating_sub(m) <= 10)
+    {
+        return Ok(Err(ReservationPolicy::ReceiveHistory));
+    }
+    mark_used(conn, owner.0)?;
     conn.execute(
         "UPDATE ironwood_one_time_keys SET reserved_at = ?2, released_at = NULL,
             reservation_floor = IFNULL((SELECT MAX(id) FROM ironwood_one_time_operations

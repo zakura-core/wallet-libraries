@@ -2,20 +2,19 @@
 //! for whole chunks, the complete inventory is still proved against its head, and any
 //! mismatch recaptures every chunk.
 mod common;
-use common::manifest;
+use common::empty_segment;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
 };
 use zakura_pir_client::receiver::{
+    Coverage, Publication, Tree,
     inventory::{FilterRef, Inventory, Shard},
-    session::{Error, Manifest, PROTOCOL, Publication, WitnessManifest},
-    snapshot::MIN_ROWS,
+    session::Error,
     transport::{DescriptorStore, Inventories, Transport},
-    witness::{Manifest as WitnessTable, PROFILE},
 };
 
-/// How a shard's companion witness table was built.
+/// How a shard's companion was built.
 #[derive(Clone, Copy)]
 enum Witness {
     /// At the shard's own end, before its Ironwood shard filled.
@@ -46,43 +45,32 @@ impl Chain {
         h
     }
 
-    /// One empty segment over heights and toy positions `start..=end`, with its witness
-    /// table.
+    /// One empty segment over heights and toy positions `start..=end`, its companion
+    /// built as `witness` says.
     fn segment(&self, start: u32, end: u32, witness: Witness) -> Publication {
-        let mut directory = manifest(MIN_ROWS);
-        directory.history_revision = self.revision;
-        (directory.start_height, directory.end_height) = (start, end);
-        directory.start_parent = self.hash(start - 1);
-        directory.end_hash = self.hash(end);
-        (directory.start_position, directory.end_position) = (u64::from(start), u64::from(end) + 1);
-        let (tree_height, tree_hash, tree_size) = match witness {
-            Witness::Provisional => (end, directory.end_hash, directory.end_position),
-            Witness::Final(v) => (end + 1, [v; 32], (1 << 16) + u64::from(v)),
-        };
-        let table = WitnessTable {
-            profile: PROFILE.into(),
-            genesis: directory.genesis,
+        let coverage = Coverage {
+            genesis: [1; 32],
             history_revision: self.revision,
-            payments: directory.revision().unwrap(),
-            payloads: 0,
-            rows: MIN_ROWS,
-            tree_height,
-            tree_hash,
-            tree_size,
-            data_sha256: [0; 32],
+            start_height: start,
+            start_parent: self.hash(start - 1),
+            start_position: u64::from(start),
+            end_height: end,
+            end_hash: self.hash(end),
+            end_position: u64::from(end) + 1,
         };
-        Publication {
-            payments: Manifest {
-                protocol: PROTOCOL.into(),
-                directory,
-                public_digest: [7; 32],
+        let tree = match witness {
+            Witness::Provisional => Tree {
+                height: end,
+                hash: coverage.end_hash,
+                size: coverage.end_position,
             },
-            witnesses: WitnessManifest {
-                protocol: PROTOCOL.into(),
-                table,
-                public_digest: [8; 32],
+            Witness::Final(v) => Tree {
+                height: end + 1,
+                hash: [v; 32],
+                size: (1 << 16) + u64::from(v),
             },
-        }
+        };
+        empty_segment(coverage, tree)
     }
 
     /// `sealed` contiguous ten-block sealed shards from height 100, shard `i` built with
@@ -227,11 +215,11 @@ fn appended_shards_download_only_the_changed_chunks() {
     assert_eq!(capture(&server, &store, &MAIN.inventory(48, settled)), 1);
 }
 
-/// A sealed shard whose witnesses are still provisional is never cached, so its rebuilt
-/// witness table is downloaded with its chunk. A settled shard replaced anyway fails the
+/// A sealed shard whose companion payloads are still provisional is never cached, so its
+/// rebuilt companion is downloaded with its chunk. A settled shard replaced anyway fails the
 /// inventory identity and recaptures every chunk.
 #[test]
-fn witness_replacement_in_a_sealed_shard_is_downloaded() {
+fn companion_replacement_in_a_sealed_shard_is_downloaded() {
     let (server, store) = (Server::default(), Store::default());
     let provisional = |i| {
         if i == 5 {
@@ -244,7 +232,7 @@ fn witness_replacement_in_a_sealed_shard_is_downloaded() {
         capture(&server, &store, &MAIN.inventory(32, provisional)),
         3
     );
-    // Shard 5's table is rebuilt once its Ironwood shard filled: chunk 0 is downloaded.
+    // Shard 5's companion is rebuilt once its Ironwood shard filled: chunk 0 is downloaded.
     assert_eq!(capture(&server, &store, &MAIN.inventory(32, settled)), 2);
     // Settled shard 7 replaced: the cached chunk 0 fails the identity check, then all three.
     let replaced = |i| Witness::Final(u8::from(i == 7));
@@ -309,19 +297,19 @@ fn a_corrupted_cache_recaptures_every_chunk() {
     assert_eq!(capture(&server, &store, &MAIN.inventory(32, settled)), 1);
 }
 
-/// A saved descriptor whose payment or witness protocol was altered is a bad cache, not an
+/// A saved descriptor whose directory or companion schema was altered is a bad cache, not an
 /// upgrade: capture falls back to every chunk, succeeds without `Unsupported`, and the
 /// verified inventory replaces the saved value. A served inventory in an unknown protocol
 /// still surfaces `Unsupported`, with a cache or without one.
 #[test]
 fn an_altered_cached_protocol_recaptures_and_replaces_the_cache() {
-    for field in ["payments", "witnesses"] {
+    for field in ["directory", "companion"] {
         let (server, store) = (Server::default(), Store::default());
         let inventory = MAIN.inventory(32, settled);
         assert_eq!(capture(&server, &store, &inventory), 3);
         let verified = store.load().unwrap();
         let mut saved: serde_json::Value = serde_json::from_slice(&verified).unwrap();
-        saved["shards"][3]["segments"][0][field]["protocol"] = "future-protocol".into();
+        saved["shards"][3]["segments"][0][field]["manifest"]["schema"] = "future-schema".into();
         store.save(&serde_json::to_vec(&saved).unwrap());
         // The altered descriptor is in the first chunk, refused before any download.
         assert_eq!(capture(&server, &store, &inventory), 3, "{field}");
@@ -341,7 +329,8 @@ fn an_altered_cached_protocol_recaptures_and_replaces_the_cache() {
         }
         let mut chunk: serde_json::Value =
             serde_json::from_slice(&server.chunks.borrow()[&key][last]).unwrap();
-        chunk["shards"][0]["segments"][0]["payments"]["protocol"] = "future-protocol".into();
+        chunk["shards"][0]["segments"][0]["directory"]["manifest"]["schema"] =
+            "future-schema".into();
         server.chunks.borrow_mut().get_mut(&key).unwrap()[last] =
             serde_json::to_vec(&chunk).unwrap();
         let result = ready(Inventories::capture_cached(
@@ -354,7 +343,7 @@ fn an_altered_cached_protocol_recaptures_and_replaces_the_cache() {
     }
 }
 
-/// A served inventory whose payment or witness profile a newer client may read surfaces
+/// A served inventory whose directory or companion schema a newer client may read surfaces
 /// `Unsupported`, the host's upgrade outcome, while corrupted descriptor fields are not
 /// `Unsupported`. A cached descriptor with an unknown profile is a bad cache: capture
 /// falls back to every chunk and replaces it.
@@ -376,19 +365,19 @@ fn an_unknown_session_profile_needs_a_newer_client() {
             &store,
         ))
     };
-    let payments =
-        served(&|s| s["payments"]["directory"]["profile"] = "ironwood-receiver/v9".into());
-    assert!(matches!(payments, Err(Error::Unsupported)));
-    let witnesses = served(&|s| s["witnesses"]["table"]["profile"] = "ironwood-witness/v9".into());
-    assert!(matches!(witnesses, Err(Error::Unsupported)));
-    let corrupted = served(&|s| s["payments"]["directory"]["start_height"] = 999_999.into());
+    for table in ["directory", "companion"] {
+        let newer = served(&|s| s[table]["manifest"]["schema"] = "ironwood-receiver/v9".into());
+        assert!(matches!(newer, Err(Error::Unsupported)), "{table}");
+    }
+    let corrupted =
+        served(&|s| s["directory"]["manifest"]["coverage"]["start_height"] = 999_999.into());
     assert!(!matches!(corrupted, Ok(_) | Err(Error::Unsupported)));
 
     let (server, store) = (Server::default(), Store::default());
     assert_eq!(capture(&server, &store, &inventory), 3);
     let verified = store.load().unwrap();
     let mut saved: serde_json::Value = serde_json::from_slice(&verified).unwrap();
-    saved["shards"][3]["segments"][0]["payments"]["directory"]["profile"] =
+    saved["shards"][3]["segments"][0]["directory"]["manifest"]["schema"] =
         "ironwood-receiver/v9".into();
     store.save(&serde_json::to_vec(&saved).unwrap());
     assert_eq!(capture(&server, &store, &inventory), 3);

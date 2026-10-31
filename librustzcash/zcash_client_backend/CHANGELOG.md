@@ -10,6 +10,20 @@ and this library adheres to Rust's notion of
 ### Added
 
 - `data_api::WalletWrite::get_addresses_for_index_range`: generates, persists and marks as exposed the addresses at every diversifier index in a range, equivalent to `get_address_for_index` per index. The default implementation does exactly that; a store can override it to pay the per-call costs once for the range.
+- `data_api::one_time_ivk::restore::{FilterSpan, FilterOutcome}` for committing filter ranges against the account's marker.
+- `one_time_ivk::restore::RecoveryStatus::awaiting_admission` counts recovered payments waiting for ordinary sync to admit them.
+- `one_time_ivk::restore::RecoveryStatus::used` reports the account's one-time use marker.
+- `one_time_ivk::restore::RecoveryStatus::{waits_for_retry, waits_for_publication}` say whether a pending lookup waits out a retry delay or for a publication past the inventory end the status was read against.
+- `one_time_ivk::restore::RecoveryStatus::round_due` says whether the app should run a round for the account now: a lookup is due, the seed walk hasn't captured a publication, or the account's filter marker is missing or more than 10 blocks below the fully scanned block.
+
+### Changed
+
+- Breaking: one-time lookups read Receiver's directory and companion tables. `LookupPage` carries `LookupRecord`s, each a record with its witness payload, and `SegmentRef` names the directory and companion sessions and the companion's construction tree. `LookupWork::birthday` sets the lookup's floor with `from`.
+
+### Removed
+
+- `one_time_ivk::restore::{WitnessRequest, WitnessAnswer}` and `RecoveryStatus::witnesses`: payloads arrive with their records.
+- `one_time_ivk::restore::RecoveryStatus::skipped_through`: no catch-up skips history any more.
 
 ### Removed
 

@@ -10,12 +10,17 @@ mod gcs;
 pub mod inventory;
 #[cfg(feature = "native")]
 pub mod native;
+mod pages;
 pub mod record;
+mod segment;
 pub mod session;
 pub mod shards;
-pub mod snapshot;
+mod table;
 pub mod wire;
-pub mod witness;
+
+pub use pages::{TREE_SIZE, check_next};
+pub use segment::*;
+pub use table::*;
 
 pub use record::{Payment, RECORD_BYTES, RawRecord, ReceiverBytes};
 /// A 32-byte hash in protocol byte order.
@@ -30,9 +35,10 @@ pub enum Error {
     Coverage,
     #[error("receiver directory table or commitment history limit exceeded")]
     Capacity,
-    #[error("missing continuation page")]
-    MissingPage,
-    /// A payment or witness profile, or a record version, that a newer client supports.
+    /// No candidate seed built a segment's choice table.
+    #[error("receiver choice table could not be built")]
+    Choice,
+    /// A schema or record version that a newer client supports.
     #[error("receiver directory format needs a newer client")]
     Unsupported,
     #[error(transparent)]

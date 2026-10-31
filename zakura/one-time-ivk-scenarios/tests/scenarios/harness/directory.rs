@@ -1,4 +1,4 @@
-//! Production snapshot, witness, shard inventory, GCS and encrypted PIR codecs served
+//! Production segment, witness payload, shard inventory, GCS and encrypted PIR codecs served
 //! through a counted transport. History is sealed into shards every [`SEAL_BLOCKS`] blocks,
 //! the last partial shard being the recent tier.
 use super::chain::{ACTIVATION, Chain, GENESIS};
@@ -7,20 +7,19 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use zakura_pir_client::receiver::{
-    RawRecord,
-    blocks::{Batch, BlockFilter, BlockId, Head},
+    Companion, Coverage as SegmentCoverage, Directory as DirectoryManifest, Publication, RawRecord,
+    Tree,
+    blocks::{BlockId, Head, HeightSet, Range},
+    initial_salt,
     inventory::{FilterRef, Inventory, Shard},
-    session::{Error as DirectoryError, MIN_ROWS, Publication},
+    session::Error as DirectoryError,
     shards::{Coverage, ShardFilter},
-    snapshot::{Manifest, PROFILE, Snapshot},
     transport::Transport,
-    witness,
 };
 use zakura_pir_publisher::receiver::{
-    snapshot::{SnapshotPublisherExt, assign_ordinals},
-    witness::{TablePublisherExt, payloads},
+    OPEN_SEED_ATTEMPTS, Paid, Projection, build, query_rows, witness::payloads,
 };
-use zakura_pir_query_server::receiver::server::{Server, WitnessServer};
+use zakura_pir_query_server::receiver::server::Server;
 
 pub const ORIGIN: &str = "https://receiver.test";
 /// Blocks per sealed shard.
@@ -29,11 +28,14 @@ pub const SEAL_BLOCKS: u32 = 32;
 /// An immutable shard inventory and independently lagging rolling filter suffix.
 pub struct Directory {
     inventory: Inventory,
-    payments: Vec<Server>,
-    witnesses: Vec<WitnessServer>,
+    directories: Vec<Server<DirectoryManifest>>,
+    companions: Vec<Server<Companion>>,
+    choices: Vec<([u8; 32], Vec<u8>)>,
     shard_filters: Vec<([u8; 32], Vec<u8>)>,
     head: Head,
-    filters: Vec<BlockFilter>,
+    /// Nonempty block sets, ascending, and every block hash from `head.first - 1`.
+    sets: Vec<HeightSet>,
+    hashes: Vec<[u8; 32]>,
     counts: Mutex<(usize, u64, u64)>,
     pub unavailable: AtomicBool,
 }
@@ -49,8 +51,8 @@ impl Directory {
     ) -> Self {
         let end = chain.tip() - pir_depth;
         let (end_hash, end_size) = (chain.hash_at(end).0, chain.tree_size_at(end));
-        let (mut payments, mut witnesses, mut shard_filters, mut shards) =
-            (vec![], vec![], vec![], vec![]);
+        let (mut directories, mut companions, mut choices) = (vec![], vec![], vec![]);
+        let (mut shard_filters, mut shards) = (vec![], vec![]);
         let (mut start, mut parent, mut position) = (ACTIVATION, [0; 32], 0);
         while start <= u32::from(end) {
             let last = (start + SEAL_BLOCKS - 1).min(u32::from(end));
@@ -61,61 +63,63 @@ impl Directory {
                 .filter_map(|m| m.indexed.clone())
                 .filter(|r| (start..=last).contains(&r.payment.height))
                 .collect();
-            let mut raw: Vec<RawRecord> = vec![];
-            for r in &records {
-                let mut r = RawRecord::decode(&r.encode().unwrap()).unwrap().unwrap();
-                r.page = raw.iter().filter(|o| o.receiver == r.receiver).count() as u32;
-                raw.push(r);
-            }
-            for i in 0..raw.len() {
-                let receiver = raw[i].receiver;
-                raw[i].total = raw.iter().filter(|o| o.receiver == receiver).count() as u32;
-            }
-            assign_ordinals(&mut raw);
             let (last_hash, last_size) = (
                 chain.hash_at(last.into()).0,
                 chain.tree_size_at(last.into()),
             );
-            let snapshot = Snapshot::build(
-                Manifest {
-                    profile: PROFILE.into(),
-                    history_revision: revision,
-                    genesis: GENESIS,
-                    start_height: start,
-                    start_parent: parent,
-                    start_position: position,
-                    end_height: last,
-                    end_hash: last_hash,
-                    end_position: last_size,
-                    rows: MIN_ROWS,
-                    salt: [5; 32],
-                    records: 0,
-                    data_sha256: [0; 32],
-                },
-                &raw,
+            let mut paid: Vec<Paid> = records
+                .iter()
+                .map(|r| {
+                    let raw = RawRecord::decode(&r.encode().unwrap()).unwrap().unwrap();
+                    (raw.receiver, raw.payment, [0; 512])
+                })
+                .collect();
+            let positions: Vec<_> = paid.iter().map(|p| p.1.position).collect();
+            // Every companion is built at the publication's end.
+            let built = payloads(&chain.commitments()[..end_size as usize], &positions).unwrap();
+            for (p, payload) in paid.iter_mut().zip(built) {
+                p.2 = payload;
+            }
+            let mut projection = Projection::new(initial_salt(&parent, 0));
+            let mut heights: Vec<_> = paid.iter().map(|p| p.1.height).collect();
+            heights.dedup();
+            for height in heights {
+                let block: Vec<_> = paid.iter().filter(|p| p.1.height == height).collect();
+                let receivers: Vec<_> = block.iter().map(|p| p.0).collect();
+                projection
+                    .project(&receivers, &block[0].1.block_hash)
+                    .unwrap();
+            }
+            let coverage = SegmentCoverage {
+                genesis: GENESIS,
+                history_revision: revision,
+                start_height: start,
+                start_parent: parent,
+                start_position: position,
+                end_height: last,
+                end_hash: last_hash,
+                end_position: last_size,
+            };
+            let tree = Tree {
+                height: end.into(),
+                hash: end_hash,
+                size: end_size,
+            };
+            let rows = query_rows(paid.len() as u32);
+            let segment = build(
+                &projection,
+                coverage,
+                &last_hash,
+                OPEN_SEED_ATTEMPTS,
+                rows,
+                tree,
+                &paid,
             )
             .unwrap();
-            let mut positions: Vec<_> = raw.iter().map(|r| r.payment.position).collect();
-            positions.sort_unstable();
-            // Every witness table is built at the publication's end.
-            let table = witness::Table::build(
-                witness::Manifest {
-                    profile: witness::PROFILE.into(),
-                    genesis: GENESIS,
-                    history_revision: revision,
-                    payments: snapshot.manifest.revision().unwrap(),
-                    payloads: 0,
-                    rows: MIN_ROWS,
-                    tree_height: end.into(),
-                    tree_hash: end_hash,
-                    tree_size: end_size,
-                    data_sha256: [0; 32],
-                },
-                &payloads(&chain.commitments()[..end_size as usize], &positions).unwrap(),
-            )
-            .unwrap();
-            let server = Server::new(snapshot).unwrap();
-            let witness = WitnessServer::new(table, &server).unwrap();
+            let manifest = segment.directory.manifest.clone();
+            choices.push((manifest.choice.digest, segment.directory.choice.clone()));
+            let (directory, entries) = Server::directory(segment.directory).unwrap();
+            let companion = Server::companion(segment.companion, &manifest, &entries).unwrap();
             let filter = sealed.then(|| {
                 let filter = ShardFilter::build(
                     GENESIS,
@@ -145,13 +149,13 @@ impl Directory {
                 end_hash: last_hash,
                 end_position: last_size,
                 segments: vec![Publication {
-                    payments: server.manifest().clone(),
-                    witnesses: witness.manifest().clone(),
+                    directory: directory.session().clone(),
+                    companion: companion.session().clone(),
                 }],
                 filter,
             });
-            payments.push(server);
-            witnesses.push(witness);
+            directories.push(directory);
+            companions.push(companion);
             (start, parent, position) = (last + 1, last_hash, last_size);
         }
         let inventory = Inventory::build(GENESIS, revision, shards).unwrap();
@@ -159,8 +163,8 @@ impl Directory {
         let first = (u32::from(tip) + 1)
             .saturating_sub(retained)
             .max(ACTIVATION);
-        let filters = (first..=u32::from(tip))
-            .map(|height| {
+        let sets = (first..=u32::from(tip))
+            .filter_map(|height| {
                 let receivers: Vec<_> = chain
                     .mined()
                     .iter()
@@ -168,27 +172,23 @@ impl Directory {
                     .filter(|r| r.payment.height == height)
                     .map(|r| *r.receiver.as_bytes())
                     .collect();
-                let parent = if height == ACTIVATION {
+                HeightSet::build(&GENESIS, height, &receivers).unwrap()
+            })
+            .collect();
+        let hashes = (first - 1..=u32::from(tip))
+            .map(|height| {
+                if height < ACTIVATION {
                     [0; 32]
                 } else {
-                    chain.hash_at((height - 1).into()).0
-                };
-                BlockFilter::build(
-                    &GENESIS,
-                    BlockId {
-                        height,
-                        hash: chain.hash_at(height.into()).0,
-                    },
-                    parent,
-                    &receivers,
-                )
-                .unwrap()
+                    chain.hash_at(height.into()).0
+                }
             })
             .collect();
         Self {
             inventory,
-            payments,
-            witnesses,
+            directories,
+            companions,
+            choices,
             shard_filters,
             head: Head {
                 genesis: GENESIS,
@@ -199,13 +199,14 @@ impl Directory {
                     hash: chain.hash_at(tip).0,
                 },
             },
-            filters,
+            sets,
+            hashes,
             counts: Mutex::new((0, 0, 0)),
             unavailable: AtomicBool::new(false),
         }
     }
 
-    /// Observed encrypted query count, payment and witness alike, and actual
+    /// Observed encrypted query count, directory and companion alike, and actual
     /// request/response body bytes.
     pub fn counts(&self) -> (usize, u64, u64) {
         *self.counts.lock().unwrap()
@@ -232,10 +233,18 @@ impl Directory {
             counts.0 += 1;
             counts.1 += body.len() as u64;
             let session = body.get(4..36);
-            if let Some(w) = self.witnesses.iter().find(|w| session == Some(&w.id()[..])) {
-                w.respond(body)?
-            } else if let Some(p) = self.payments.iter().find(|p| session == Some(&p.id()[..])) {
-                p.respond(body)?
+            if let Some(d) = self
+                .directories
+                .iter()
+                .find(|d| session == Some(&d.id()[..]))
+            {
+                d.respond(body)?
+            } else if let Some(c) = self
+                .companions
+                .iter()
+                .find(|c| session == Some(&c.id()[..]))
+            {
+                c.respond(body)?
             } else {
                 return Err(DirectoryError::Revision);
             }
@@ -254,6 +263,12 @@ impl Directory {
                 .find(|(d, _)| hex::encode(d) == digest)
                 .map(|(_, f)| f.clone())
                 .ok_or_else(|| DirectoryError::Transport("unknown filter".into()))?
+        } else if let Some(digest) = route.strip_prefix("choice/") {
+            self.choices
+                .iter()
+                .find(|(d, _)| hex::encode(d) == digest)
+                .map(|(_, c)| c.clone())
+                .ok_or_else(|| DirectoryError::Transport("unknown choice object".into()))?
         } else if route == "block-filters/head" {
             serde_json::to_vec(&self.head).unwrap()
         } else if let Some(request) = route.strip_prefix("block-filters/") {
@@ -264,27 +279,36 @@ impl Directory {
             }
             let from = parts[1] as u32;
             let limit = parts[2] as u32;
-            self.head.check_request(from, limit)?;
-            let filters = self
-                .filters
+            self.head.check_range(from, limit)?;
+            let end = from.saturating_add(limit - 1).min(self.head.tip.height);
+            let hash = |height: u32| self.hashes[(height + 1 - self.head.first) as usize];
+            let sets = self
+                .sets
                 .iter()
-                .filter(|f| f.block().height >= from)
-                .take(limit as usize)
+                .filter(|s| (from..=end).contains(&s.height()))
                 .cloned()
                 .collect();
-            Batch::new(GENESIS, self.head.revision, filters)?.encode()?
+            Range::new(
+                self.head.revision,
+                from,
+                end - from + 1,
+                hash(from - 1),
+                hash(end),
+                sets,
+            )?
+            .encode()?
         } else {
             let (material, id) = route.split_once('/').unwrap();
             let public = self
-                .payments
+                .directories
                 .iter()
-                .find(|p| hex::encode(p.id()) == id)
-                .map(|p| p.public())
+                .find(|d| hex::encode(d.id()) == id)
+                .map(|d| d.public())
                 .or_else(|| {
-                    self.witnesses
+                    self.companions
                         .iter()
-                        .find(|w| hex::encode(w.id()) == id)
-                        .map(|w| w.public())
+                        .find(|c| hex::encode(c.id()) == id)
+                        .map(|c| c.public())
                 })
                 .ok_or(DirectoryError::Revision)?;
             match material {
