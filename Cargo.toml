@@ -187,11 +187,11 @@ incrementalmerkletree-testing = "0.3"
 # Tor
 # - `arti-client` depends on `rusqlite`, and a version mismatch there causes a compilation
 #   failure due to incompatible `libsqlite3-sys` versions.
-arti-client = { version = "=0.47.0-zakura.1", default-features = false, features = ["rustls", "tokio"], package = "zakura-arti-client", git = "file:///private/tmp/arti-wallet-20261031-v4", rev = "94c73b6e0c097325e65eb905d3bc4727f4037a51" }
+arti-client = { version = "=0.47.0-zakura.1", default-features = false, features = ["rustls", "tokio"], package = "zakura-arti-client", git = "file:///private/tmp/arti-wallet-20261031-v4", rev = "baf9c1fd6bd78070fee98b2379873375346466f7" }
 dynosaur = "0.3"
-fs-mistrust = { version = "=0.16.0-zakura.1", package = "zakura-fs-mistrust", git = "file:///private/tmp/arti-wallet-20261031-v4", rev = "94c73b6e0c097325e65eb905d3bc4727f4037a51" }
+fs-mistrust = { version = "=0.16.0-zakura.1", package = "zakura-fs-mistrust", git = "file:///private/tmp/arti-wallet-20261031-v4", rev = "baf9c1fd6bd78070fee98b2379873375346466f7" }
 tokio = "1"
-tor-rtcompat = { version = "=0.47.0-zakura.1", package = "zakura-tor-rtcompat", git = "file:///private/tmp/arti-wallet-20261031-v4", rev = "94c73b6e0c097325e65eb905d3bc4727f4037a51" }
+tor-rtcompat = { version = "=0.47.0-zakura.1", package = "zakura-tor-rtcompat", git = "file:///private/tmp/arti-wallet-20261031-v4", rev = "baf9c1fd6bd78070fee98b2379873375346466f7" }
 tower = "0.5"
 trait-variant = "0.1"
 
