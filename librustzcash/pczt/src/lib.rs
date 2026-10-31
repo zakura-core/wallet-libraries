@@ -55,6 +55,9 @@ pub mod orchard;
 pub mod sapling;
 pub mod transparent;
 
+#[cfg(test)]
+mod serde_arrays_tests;
+
 pub(crate) const MAGIC_BYTES: &[u8; 4] = b"PCZT";
 pub(crate) const PCZT_VERSION_1: u32 = 1;
 pub(crate) const PCZT_VERSION_2: u32 = 2;
