@@ -145,6 +145,12 @@ and checks both codecs, mask derivation, invalid shapes and row coefficients.
 Thus ordinary test builds omit the IPIR server/client wrappers and SimplePIR
 kernel without losing the previous-provider comparisons.
 
+The pinned rust-bitcoin codec, official BIP 158 vectors, parent precision and
+Receiver payload comparisons run as four external test targets in that lane.
+They use the original test sources and vector file. Local malformed-input,
+corruption and output-failure tests remain in ordinary configurations, which
+no longer build the Bitcoin transaction/key library or its secp256k1 backend.
+
 The PIR clients temporarily pin the IPIR family to the main revision that merged
 [IPIR PR 39](https://github.com/valargroup/ipir-sp/pull/39). Native setup derivation and byte framing live in the shared protocol package;
 client encryption and server operations use ReinspiRING directly. Production
