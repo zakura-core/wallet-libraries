@@ -7,6 +7,14 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Removed
+
+- Remove the `lrz` feature and its upstream dependency family. The
+  `client_backend`, `client_sqlite`, `keys`, `orchard`, `pczt` and `primitives`
+  re-exports now support only the existing Zakura type identities. Default and
+  explicit `zakura` builds retain their capabilities and import names;
+  `BACKEND` remains `"zakura"`. Building without the `zakura` feature still fails.
+
 ## [0.1.0-rc9.6] - 2026-10-30
 
 ### Changed
