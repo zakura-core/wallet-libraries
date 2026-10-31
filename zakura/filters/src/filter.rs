@@ -2,16 +2,10 @@
 // Extracted from rust-bitcoin 0.32.102, src/bip158.rs (CC0-1.0).
 // Upstream credits Tamas Blummer's murmel implementation, relicensed CC0.
 
-use bitcoin_hashes::siphash24;
-use bitcoin_io::{self as io, Write};
+use std::io::{self, Write};
 use std::{cmp, collections::BTreeSet};
 
 use crate::{bits::BitStreamWriter, write_compact_size};
-
-/// Fast reduction of hash to [0, nm) range.
-fn map_to_range(hash: u64, nm: u64) -> u64 {
-    ((hash as u128 * nm as u128) >> 64) as u64
-}
 
 /// Golomb-Rice encoded filter writer.
 pub struct GcsFilterWriter<'a, W> {
@@ -64,7 +58,7 @@ impl<'a, W: Write> GcsFilterWriter<'a, W> {
         let mut mapped: Vec<_> = self
             .elements
             .iter()
-            .map(|e| map_to_range(self.filter.hash(e.as_slice()), nm))
+            .map(|e| crate::hash_to_range(self.filter.k0, self.filter.k1, nm, e.as_slice()))
             .collect();
         mapped.sort_unstable();
 
@@ -115,10 +109,5 @@ impl GcsFilter {
         wrote += writer.write(0, 1)?;
         wrote += writer.write(n, self.p)?;
         Ok(wrote)
-    }
-
-    /// Hashes an arbitrary slice with siphash using parameters of this filter.
-    fn hash(&self, element: &[u8]) -> u64 {
-        siphash24::Hash::hash_to_u64_with_keys(self.k0, self.k1, element)
     }
 }
