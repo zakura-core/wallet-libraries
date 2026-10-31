@@ -13,7 +13,7 @@ and this library adheres to Rust's notion of
   `document-features` feature. Ordinary builds omit the documentation macro;
   docs.rs continues to include the table.
 
-- The `tor` feature pins the streamlined embedded Arti snapshot `29793cc3`.
+- The `tor` feature pins the streamlined embedded Arti snapshot `2a392f77`.
   Embedded bootstrap, Tokio/Rustls/Ring, ordinary Tor and onion connections,
   directory/storage builders, and permission policy are retained. Applications
   using restricted onion services with persistent authentication keys must

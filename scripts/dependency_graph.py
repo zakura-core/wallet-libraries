@@ -135,6 +135,7 @@ def main():
     # Keep removed backends, macro providers and helper packages out of its
     # production graph, even when another workspace member still needs them.
     unused_tor_dependencies = {
+        "futures-executor",
         "async_executors", "async-std", "async-native-tls", "smol",
         "native-tls", "openssl", "openssl-sys", "openssl-probe",
         "derive_builder_fork_arti", "derive_builder_core_fork_arti",
