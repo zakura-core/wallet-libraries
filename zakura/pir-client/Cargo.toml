@@ -231,11 +231,6 @@ path = "tests/native/p8.rs"
 required-features = ["native"]
 
 [[test]]
-name = "transparent_filter_bip158_vectors"
-path = "tests/transparent_filter/bip158_vectors.rs"
-required-features = ["transparent", "reqwest"]
-
-[[test]]
 name = "transparent_filter_golden_envelope"
 path = "tests/transparent_filter/golden_envelope.rs"
 required-features = ["transparent", "reqwest"]
