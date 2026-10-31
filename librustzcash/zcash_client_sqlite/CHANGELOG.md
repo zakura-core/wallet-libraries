@@ -7,6 +7,28 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- An account's first `begin_one_time_recovery` reads its untouched receive
+  bootstrap lookups only through the publication's end and places the filter
+  marker there, even without `complete`. Turning one-time recovery on no longer
+  makes the first receive address wait for the Receiver publication to reach
+  the wallet's tip. Every other lookup target is unchanged.
+- `WalletDb::prepare_receive_reservation` takes a `tip: BlockHeight` argument,
+  the caller's live chain tip, as `reserve_refund_key` does. A new receive
+  address needs the account's filter marker within 10 blocks of the newer of
+  that tip and the saved chain tip, so a wallet no longer has to save the live
+  tip with `update_chain_tip` first. Resuming a live draft is unchanged.
+- `WalletDb::recheck_one_time_history_for` replaces
+  `WalletDb::check_one_time_history_for`. Each account's new history check
+  first forgets its history results, as `reset_one_time_history` does, in the
+  same transaction that starts the batch, so an account refusing the
+  publication rolls back every reset too. An account whose check is unfinished
+  resumes it with the history it kept.
+- Consolidation's additional Ironwood candidates stop rebuilding one-time-key
+  notes once they hold their half of the limit, so a proposal costs about its
+  limit rather than every unspent one-time-key note. The selection is unchanged.
+
 ## [0.1.0-rc9.6] - 2026-10-30
 
 ### Added

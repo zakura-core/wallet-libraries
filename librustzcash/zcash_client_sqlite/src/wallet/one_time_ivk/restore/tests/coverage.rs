@@ -94,7 +94,7 @@ fn reserve_receive(st: &mut State, account: AccountUuid) -> (KeyId, usize) {
         match st
             .wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, clock_now())
+            .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
             .unwrap()
         {
             Ok(key) => return (key.key_id(), lookups),
@@ -399,7 +399,7 @@ fn receive_hand_out_waits_for_a_current_marker() {
     let held = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, clock_now())
+        .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
         .unwrap();
     assert!(matches!(held, Err(ReservationPolicy::ReceiveHistory)));
     let state = status(st.wallet().db(), account);
@@ -754,4 +754,476 @@ fn a_rewind_that_voids_a_waiting_witness_rereads_the_payment() {
     }
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
     assert_eq!(candidates(&st), 0);
+}
+
+/// A restored wallet synced two blocks past the end of the publication it returns, whose
+/// account turns recovery on at the tip and accepts that publication first, as a round
+/// does, without a complete check.
+fn first_recovery() -> (State, AccountUuid, RecoveryPublication) {
+    let mut st = restored_wallet();
+    st.generate_and_scan_empty_blocks(4);
+    let account = st.test_account().unwrap().id();
+    let publication = publication_at(&st, tip(&st).height - 2);
+    let db = st.wallet_mut().db_mut();
+    db.enable_one_time_recovery(account).unwrap();
+    assert!(
+        db.begin_one_time_recovery(account, publication, false)
+            .unwrap()
+    );
+    (st, account, publication)
+}
+
+/// `account`'s receive lookups as (index, target, completed through).
+fn receive_lookups(st: &State, account: AccountUuid) -> Vec<(u64, Option<u32>, Option<u32>)> {
+    let sql = "SELECT k.key_index, l.target_height, l.done_height
+        FROM ironwood_one_time_lookups l JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
+        JOIN accounts a ON a.id = k.account_id WHERE a.uuid = ?1 AND k.purpose = 1
+        ORDER BY k.key_index";
+    rows::<(Vec<u8>, Option<u32>, Option<u32>)>(st.wallet().conn(), sql, [account.0])
+        .into_iter()
+        .map(|(i, t, d)| (u64::from_be_bytes(i.try_into().unwrap()), t, d))
+        .collect()
+}
+
+/// Turning recovery on for two accounts synced past the publication reads each one's
+/// first receive window only through the publication and places its marker there, so its
+/// first address is issued without the publication reaching the tip. The PIR history
+/// records only what was read, the seed walk finishes, and filters cover the blocks after.
+#[test]
+fn a_first_recovery_reads_its_bootstraps_through_the_publication() {
+    let mut st = restored_wallet();
+    let born = st.latest_cached_block().unwrap().chain_state().clone();
+    let birthday = zcash_client_backend::data_api::AccountBirthday::from_parts(born, None);
+    let (other, _) = st
+        .wallet_mut()
+        .db_mut()
+        .create_account("other", &SecretVec::new(vec![9; 32]), &birthday, None)
+        .unwrap();
+    st.generate_and_scan_empty_blocks(4);
+    let tip_height = u32::from(tip(&st).height);
+    let end = tip(&st).height - 2;
+    let publication = publication_at(&st, end);
+    for account in [st.test_account().unwrap().id(), other] {
+        let db = st.wallet_mut().db_mut();
+        db.enable_one_time_recovery(account).unwrap();
+        let queued: Vec<_> = (0..4).map(|i| (i, Some(tip_height), None)).collect();
+        assert_eq!(receive_lookups(&st, account), queued);
+        let db = st.wallet_mut().db_mut();
+        assert!(
+            db.begin_one_time_recovery(account, publication, false)
+                .unwrap()
+        );
+        let state = status_at(&st, account, end);
+        assert_eq!(state.filter_frontier.map(|f| f.height), Some(end));
+        let runnable: Vec<_> = state
+            .lookups
+            .iter()
+            .map(|w| (w.work.key, w.through))
+            .collect();
+        assert_eq!(
+            runnable,
+            (0..4).map(|i| (receive(i), end)).collect::<Vec<_>>()
+        );
+        drain(&mut st, account, publication);
+        let done: Vec<_> = (0..4).map(|i| (i, None, Some(u32::from(end)))).collect();
+        assert_eq!(receive_lookups(&st, account), done);
+        let state = status(st.wallet().db(), account);
+        assert!(state.restore_complete && state.lookups.is_empty());
+        let issued = st
+            .wallet_mut()
+            .db_mut()
+            .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
+            .unwrap();
+        assert_eq!(issued.map(|k| k.key_id()), Ok(receive(0)));
+        assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
+        assert_eq!(
+            status(st.wallet().db(), account).filter_frontier,
+            Some(tip(&st))
+        );
+    }
+}
+
+/// Another device paid I0 just past the publication before this one turned recovery on.
+/// The first lookup reads only through the publication, so it doesn't see the payment, but
+/// filters from the marker watch I0: their hit holds I0 until a publication reaches the
+/// payment, which is then recovered once.
+#[test]
+fn a_first_recovery_finds_a_payment_past_its_publication_through_filters() {
+    let mut st = restored_wallet();
+    let account = st.test_account().unwrap().id();
+    st.generate_and_scan_empty_blocks(1);
+    let end = tip(&st).height;
+    let paid = pay_candidate(&mut st, receive(0));
+    st.generate_and_scan_empty_blocks(1);
+    let publication = publication_at(&st, end);
+    let db = st.wallet_mut().db_mut();
+    db.enable_one_time_recovery(account).unwrap();
+    assert!(
+        db.begin_one_time_recovery(account, publication, false)
+            .unwrap()
+    );
+    assert_eq!(status_at(&st, account, end).lookups.len(), 4);
+    // The publication ends before the payment, so each history it holds is empty.
+    for _ in 0..4 {
+        let work = status_at(&st, account, end).lookups[0].clone();
+        let page = whole(publication, vec![]);
+        let db = st.wallet_mut().db_mut();
+        assert!(
+            db.record_one_time_lookup(account, &work, &page, clock_now())
+                .unwrap()
+        );
+    }
+    assert!(status_at(&st, account, end).lookups.is_empty());
+    assert!(one_time_notes(&st).is_empty());
+    assert_eq!(
+        advance(&mut st, account, &[(paid.height, receive(0))]),
+        FilterOutcome::Committed
+    );
+    let held = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
+        .unwrap();
+    assert!(matches!(held, Err(ReservationPolicy::ReceiveHistory)));
+    let state = status_at(&st, account, end);
+    assert!(state.lookups.is_empty() && state.waits_for_publication);
+    run_pir(&mut st, account);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    complete(&mut st, account);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    assert_eq!(reserve_receive(&mut st, account).0, receive(1));
+}
+
+/// Only receive bootstraps read through a first publication. A funded refund key keeps
+/// reading through the tip it was queued at.
+#[test]
+fn a_first_recovery_keeps_refund_targets() {
+    let mut st = restored_wallet();
+    st.generate_and_scan_empty_blocks(4);
+    let account = st.test_account().unwrap().id();
+    let tip_height = tip(&st).height;
+    let publication = publication_at(&st, tip_height - 2);
+    let db = st.wallet_mut().db_mut();
+    db.enable_one_time_recovery(account).unwrap();
+    recover(db, account, refund(0), tip_height - 3);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.begin_one_time_recovery(account, publication, false)
+            .unwrap()
+    );
+    assert_eq!(work_of(&st, receive(0)).through, publication.end.height);
+    assert_eq!(work_of(&st, refund(0)).through, tip_height);
+}
+
+/// A first recovery whose seed already paid I0 reads I0 to I3 through the publication and
+/// recovers the payment. That exposes I4 after the marker was placed, so I4 keeps the
+/// frontier as its target and waits for a publication reaching it.
+#[test]
+fn an_index_a_first_recovery_exposes_keeps_the_frontier() {
+    let mut st = restored_wallet();
+    let account = st.test_account().unwrap().id();
+    let paid = pay_candidate(&mut st, receive(0));
+    st.generate_and_scan_empty_blocks(2);
+    let tip_height = tip(&st).height;
+    let publication = publication_at(&st, paid.height);
+    let db = st.wallet_mut().db_mut();
+    db.enable_one_time_recovery(account).unwrap();
+    assert!(
+        db.begin_one_time_recovery(account, publication, false)
+            .unwrap()
+    );
+    drain_at(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    assert_eq!(work_of(&st, receive(4)).through, tip_height);
+    let state = status_at(&st, account, paid.height);
+    assert!(state.lookups.is_empty() && state.waits_for_publication);
+    assert!(!state.restore_complete);
+}
+
+/// Answers `account`'s lookups in queue order while the next one is within `publication`.
+fn drain_at(st: &mut State, account: AccountUuid, publication: RecoveryPublication) {
+    for _ in 0..256 {
+        let next = status(st.wallet().db(), account).lookups.first().cloned();
+        if !next.is_some_and(|w| w.through <= publication.end.height) {
+            return;
+        }
+        assert!(answer_lookup(st, account, publication));
+    }
+    panic!("fixture recovery did not converge");
+}
+
+/// A history reset and a lowered birthday both clear the marker, but neither is a first
+/// recovery: a held reservation, a filter hit and the reopened histories keep their targets
+/// past an older publication, and accepting it places no marker.
+#[test]
+fn a_cleared_marker_keeps_targets_past_the_publication() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    assert_eq!(complete(&mut st, account), 4);
+    assert_eq!(reserve_receive(&mut st, account).0, receive(0));
+    st.generate_and_scan_empty_blocks(2);
+    let hit = tip(&st).height;
+    assert_eq!(
+        advance(&mut st, account, &[(hit, receive(1))]),
+        FilterOutcome::Committed
+    );
+    let publication = publication_at(&st, hit - 1);
+    let accept = |st: &mut State| {
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .begin_one_time_recovery(account, publication, false)
+                .unwrap()
+        );
+        let state = status_at(st, account, publication.end.height);
+        assert_eq!(state.filter_frontier, None);
+        assert!(state.lookups.is_empty() && state.waits_for_publication);
+    };
+    st.wallet_mut()
+        .db_mut()
+        .reset_one_time_history(account)
+        .unwrap();
+    accept(&mut st);
+    for key in [receive(0), receive(1)] {
+        assert_eq!(work_of(&st, key).through, hit);
+    }
+    tx(st.wallet_mut().db_mut(), |conn, _| {
+        crate::wallet::one_time_rewind::reopen_discovery(conn, account)
+    })
+    .unwrap();
+    accept(&mut st);
+    for index in 0..4 {
+        assert_eq!(work_of(&st, receive(index)).through, hit);
+    }
+}
+
+/// A history check started at the tip, then paused, keeps its frontier: a round at an older
+/// publication places no marker, and the resumed check still needs history through the tip.
+#[test]
+fn a_paused_history_check_keeps_its_frontier_past_the_publication() {
+    let mut st = restored_wallet();
+    st.generate_and_scan_empty_blocks(4);
+    let account = st.test_account().unwrap().id();
+    let tip_height = tip(&st).height;
+    let (older, latest) = (
+        publication_at(&st, tip_height - 2),
+        publication_at(&st, tip_height),
+    );
+    let db = st.wallet_mut().db_mut();
+    db.enable_one_time_recovery(account).unwrap();
+    assert!(db.check_one_time_history(account, latest, None).unwrap());
+    let db = st.wallet_mut().db_mut();
+    db.cancel_one_time_history(account).unwrap();
+    assert!(db.begin_one_time_recovery(account, older, false).unwrap());
+    assert!(db.check_one_time_history(account, older, None).unwrap());
+    let state = status_at(&st, account, older.end.height);
+    assert_eq!(state.filter_frontier, None);
+    assert!(state.manual.is_some_and(|m| m.active));
+    assert!(state.lookups.is_empty() && state.waits_for_publication);
+    assert_eq!(work_of(&st, receive(0)).through, tip_height);
+}
+
+/// After a first recovery, its address is issued while the newest tip the wallet saved,
+/// which can be past its scanned blocks, is within 10 blocks of the marker, and not at 11.
+/// A span that fails, by a mismatch or by waiting for a block the wallet hasn't scanned,
+/// leaves the marker where it was, and a span that commits lets the address be issued.
+#[test]
+fn a_first_recovery_issues_within_ten_blocks_of_the_newest_tip() {
+    for (lag, issued) in [(10, true), (11, false)] {
+        let (mut st, account, publication) = first_recovery();
+        drain(&mut st, account, publication);
+        let end = publication.end.height;
+        let db = st.wallet_mut().db_mut();
+        db.update_chain_tip(end + lag).unwrap();
+        let reserved = db
+            .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
+            .unwrap();
+        assert_eq!(reserved.is_ok(), issued, "{lag} blocks behind");
+        if issued {
+            continue;
+        }
+        assert!(matches!(reserved, Err(ReservationPolicy::ReceiveHistory)));
+        let mut wrong = next_span(&st, account);
+        wrong.end.hash = BlockHash([9; 32]);
+        assert_eq!(
+            record(&mut st, account, &wrong, &[]),
+            FilterOutcome::Mismatch
+        );
+        st.generate_empty_block();
+        let unscanned = next_span(&st, account);
+        assert_eq!(
+            record(&mut st, account, &unscanned, &[]),
+            FilterOutcome::Wait
+        );
+        let state = status(st.wallet().db(), account);
+        assert_eq!(state.filter_frontier.map(|f| f.height), Some(end));
+        let held = st
+            .wallet_mut()
+            .db_mut()
+            .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
+            .unwrap();
+        assert!(matches!(held, Err(ReservationPolicy::ReceiveHistory)));
+        let scanned = tip(&st).height + 1;
+        st.scan_cached_blocks(scanned, 1);
+        assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
+        assert_eq!(reserve_receive(&mut st, account), (receive(0), 0));
+    }
+}
+
+/// A correction or a server reset before an account's first accepted publication leaves
+/// nothing checked, so its untouched bootstraps still read only through that publication.
+/// The hit the voided filters found keeps its target, so the obligations those events
+/// carry are kept.
+#[test]
+fn a_reset_before_the_first_publication_keeps_its_obligations() {
+    let mut st = restored_wallet();
+    st.generate_and_scan_empty_blocks(4);
+    let account = st.test_account().unwrap().id();
+    let tip_height = tip(&st).height;
+    st.wallet_mut()
+        .db_mut()
+        .enable_one_time_recovery(account)
+        .unwrap();
+    assert_eq!(
+        advance(&mut st, account, &[(tip_height, receive(1))]),
+        FilterOutcome::Committed
+    );
+    let corrected = span_over(st.wallet().db(), 1, &blocks_above(&st, activation(&st) - 1));
+    assert_eq!(
+        record(&mut st, account, &corrected, &[]),
+        FilterOutcome::Restart
+    );
+    st.wallet_mut()
+        .db_mut()
+        .reset_one_time_history(account)
+        .unwrap();
+    let publication = RecoveryPublication {
+        history_revision: 1,
+        ..publication_at(&st, tip_height - 2)
+    };
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, false)
+            .unwrap()
+    );
+    let end = publication.end.height;
+    assert_eq!(work_of(&st, receive(1)).through, tip_height);
+    let state = status_at(&st, account, end);
+    assert_eq!(state.filter_frontier.map(|f| f.height), Some(end));
+    let runnable: Vec<_> = state
+        .lookups
+        .iter()
+        .map(|w| (w.work.key, w.through))
+        .collect();
+    assert_eq!(runnable, [0, 2, 3].map(|i| (receive(i), end)));
+}
+
+/// Issuance checks the marker against the newer of the caller's live tip and the saved
+/// tip. With the saved tip and the marker at the same block and the live tip 100 blocks
+/// past both, as at saved 1,900, marker 1,900 and live 2,000, a new address waits, since
+/// those 100 blocks were never read through filters. A live draft isn't a new address, so
+/// it is quoted again.
+#[test]
+fn receive_hand_out_checks_the_marker_against_the_live_tip() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    assert_eq!(complete(&mut st, account), 4);
+    let marker = status(st.wallet().db(), account).filter_frontier.unwrap();
+    let saved = st.wallet().chain_height().unwrap().unwrap();
+    assert_eq!(saved, marker.height);
+    let live = saved + 100;
+    let prepare = |st: &mut State, tip| {
+        st.wallet_mut()
+            .db_mut()
+            .prepare_receive_reservation(account, clock_now(), tip)
+            .unwrap()
+            .map(|key| key.key_id())
+    };
+    assert_eq!(
+        prepare(&mut st, live),
+        Err(ReservationPolicy::ReceiveHistory)
+    );
+    assert_eq!(prepare(&mut st, saved), Ok(receive(0)));
+    assert_eq!(prepare(&mut st, live), Ok(receive(0)));
+}
+
+/// A wallet-wide history check forgets each account's history in the transaction that
+/// starts it. Account A holds a found payment waiting for admission, and account B saved a
+/// newer history revision than the publication, so B refuses it: nothing starts, and A's
+/// payment and history are as they were. Once B accepts, both start, and A's new check
+/// reads its history again from the start.
+#[test]
+fn a_refused_history_check_leaves_every_account_unchanged() {
+    let (mut st, _) = waiting_witness_in(scanned_wallet());
+    let account = st.test_account().unwrap().id();
+    let born = st.latest_cached_block().unwrap().chain_state().clone();
+    let birthday = zcash_client_backend::data_api::AccountBirthday::from_parts(born, None);
+    let db = st.wallet_mut().db_mut();
+    let (other, _) = db
+        .create_account("other", &SecretVec::new(vec![9; 32]), &birthday, None)
+        .unwrap();
+    db.enable_one_time_recovery(other).unwrap();
+    let revise = |st: &State, revision: u64| {
+        exec(
+            st.wallet().conn(),
+            "UPDATE ironwood_one_time_recovery SET history_revision = ?1
+             WHERE account_id = (SELECT id FROM accounts WHERE uuid = ?2)",
+            rusqlite::params![revision.to_be_bytes(), other.0],
+        );
+    };
+    revise(&st, 1);
+    let snapshot = |st: &State| {
+        let lookups: Vec<(i64, Option<u32>, u8, Option<u32>, Option<u32>, bool)> = rows(
+            st.wallet().conn(),
+            "SELECT one_time_key_id, target_height, reasons, done_height, done_from,
+                read_complete FROM ironwood_one_time_lookups ORDER BY one_time_key_id",
+            [],
+        );
+        (status(st.wallet().db(), account), candidates(st), lookups)
+    };
+    let before = snapshot(&st);
+    assert_eq!((before.0.awaiting_admission, before.1), (1, 1));
+    let publication = publication_at(&st, tip(&st).height);
+    let refused = st
+        .wallet_mut()
+        .db_mut()
+        .recheck_one_time_history_for(&[account, other], publication)
+        .unwrap();
+    assert_eq!(refused, Some(other));
+    assert_eq!(snapshot(&st), before);
+    revise(&st, 0);
+    let started = st
+        .wallet_mut()
+        .db_mut()
+        .recheck_one_time_history_for(&[account, other], publication)
+        .unwrap();
+    assert_eq!(started, None);
+    let after = status(st.wallet().db(), account);
+    assert!(after.manual.is_some_and(|m| m.active));
+    assert_eq!((after.awaiting_admission, candidates(&st)), (0, 0));
+}
+
+/// An unfinished history check resumes with the history it kept: rechecking doesn't forget
+/// the payment it found.
+#[test]
+fn rechecking_resumes_an_unfinished_history_check() {
+    let (mut st, _) = waiting_witness_in(scanned_wallet());
+    let account = st.test_account().unwrap().id();
+    let publication = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.check_one_time_history(account, publication, None)
+            .unwrap()
+    );
+    db.cancel_one_time_history(account).unwrap();
+    assert_eq!(
+        db.recheck_one_time_history_for(&[account], publication)
+            .unwrap(),
+        None
+    );
+    assert_eq!(candidates(&st), 1);
+    let state = status(st.wallet().db(), account);
+    assert!(state.manual.is_some_and(|m| m.active));
+    assert_eq!(state.awaiting_admission, 1);
 }
