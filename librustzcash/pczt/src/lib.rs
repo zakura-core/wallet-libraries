@@ -55,6 +55,8 @@ pub mod orchard;
 pub mod sapling;
 pub mod transparent;
 
+mod serde_arrays;
+
 #[cfg(test)]
 mod serde_arrays_tests;
 

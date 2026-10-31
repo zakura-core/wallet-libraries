@@ -746,14 +746,26 @@ pub mod v1 {
     pub(crate) struct Spend {
         nullifier: [u8; 32],
         rk: [u8; 32],
-        #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 64]>>")]
+        #[serde(
+            default,
+            serialize_with = "crate::serde_arrays::serialize_option",
+            deserialize_with = "crate::serde_arrays::deserialize_option"
+        )]
         spend_auth_sig: Option<[u8; 64]>,
-        #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 43]>>")]
+        #[serde(
+            default,
+            serialize_with = "crate::serde_arrays::serialize_option",
+            deserialize_with = "crate::serde_arrays::deserialize_option"
+        )]
         recipient: Option<[u8; 43]>,
         value: Option<u64>,
         rho: Option<[u8; 32]>,
         rseed: Option<[u8; 32]>,
-        #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 96]>>")]
+        #[serde(
+            default,
+            serialize_with = "crate::serde_arrays::serialize_option",
+            deserialize_with = "crate::serde_arrays::deserialize_option"
+        )]
         fvk: Option<[u8; 96]>,
         witness: Option<(u32, [[u8; 32]; 32])>,
         alpha: Option<[u8; 32]>,
@@ -769,7 +781,11 @@ pub mod v1 {
         ephemeral_key: [u8; 32],
         enc_ciphertext: Vec<u8>,
         out_ciphertext: Vec<u8>,
-        #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 43]>>")]
+        #[serde(
+            default,
+            serialize_with = "crate::serde_arrays::serialize_option",
+            deserialize_with = "crate::serde_arrays::deserialize_option"
+        )]
         recipient: Option<[u8; 43]>,
         value: Option<u64>,
         rseed: Option<[u8; 32]>,
@@ -1004,18 +1020,38 @@ pub(crate) mod v2 {
     /// Information about the spend part of an Orchard action.
     #[derive(Clone, Debug, Serialize, Deserialize)]
     pub(crate) struct Spend {
-        #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 32]>>")]
+        #[serde(
+            default,
+            serialize_with = "crate::serde_arrays::serialize_option",
+            deserialize_with = "crate::serde_arrays::deserialize_option"
+        )]
         nullifier: Option<[u8; 32]>,
-        #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 32]>>")]
+        #[serde(
+            default,
+            serialize_with = "crate::serde_arrays::serialize_option",
+            deserialize_with = "crate::serde_arrays::deserialize_option"
+        )]
         rk: Option<[u8; 32]>,
-        #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 64]>>")]
+        #[serde(
+            default,
+            serialize_with = "crate::serde_arrays::serialize_option",
+            deserialize_with = "crate::serde_arrays::deserialize_option"
+        )]
         spend_auth_sig: Option<[u8; 64]>,
-        #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 43]>>")]
+        #[serde(
+            default,
+            serialize_with = "crate::serde_arrays::serialize_option",
+            deserialize_with = "crate::serde_arrays::deserialize_option"
+        )]
         recipient: Option<[u8; 43]>,
         value: Option<u64>,
         rho: Option<[u8; 32]>,
         rseed: Option<[u8; 32]>,
-        #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 96]>>")]
+        #[serde(
+            default,
+            serialize_with = "crate::serde_arrays::serialize_option",
+            deserialize_with = "crate::serde_arrays::deserialize_option"
+        )]
         fvk: Option<[u8; 96]>,
         witness: Option<(u32, [[u8; 32]; 32])>,
         alpha: Option<[u8; 32]>,
@@ -1031,7 +1067,11 @@ pub(crate) mod v2 {
         ephemeral_key: [u8; 32],
         enc_ciphertext: super::EncCiphertext,
         out_ciphertext: Vec<u8>,
-        #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 43]>>")]
+        #[serde(
+            default,
+            serialize_with = "crate::serde_arrays::serialize_option",
+            deserialize_with = "crate::serde_arrays::deserialize_option"
+        )]
         recipient: Option<[u8; 43]>,
         value: Option<u64>,
         rseed: Option<[u8; 32]>,

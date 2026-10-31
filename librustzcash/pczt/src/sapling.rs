@@ -79,14 +79,19 @@ pub struct Spend {
     /// This is set by the Prover.
     #[serde(
         default,
-        with = "serde_with::As::<Option<[serde_with::Same; GROTH_PROOF_SIZE]>>"
+        serialize_with = "crate::serde_arrays::serialize_option",
+        deserialize_with = "crate::serde_arrays::deserialize_option"
     )]
     pub(crate) zkproof: Option<[u8; GROTH_PROOF_SIZE]>,
 
     /// The spend authorization signature.
     ///
     /// This is set by the Signer.
-    #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 64]>>")]
+    #[serde(
+        default,
+        serialize_with = "crate::serde_arrays::serialize_option",
+        deserialize_with = "crate::serde_arrays::deserialize_option"
+    )]
     pub(crate) spend_auth_sig: Option<[u8; 64]>,
 
     /// The [raw encoding] of the Sapling payment address that received the note being spent.
@@ -95,7 +100,11 @@ pub struct Spend {
     /// - This is required by the Prover.
     ///
     /// [raw encoding]: https://zips.z.cash/protocol/protocol.pdf#saplingpaymentaddrencoding
-    #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 43]>>")]
+    #[serde(
+        default,
+        serialize_with = "crate::serde_arrays::serialize_option",
+        deserialize_with = "crate::serde_arrays::deserialize_option"
+    )]
     pub(crate) recipient: Option<[u8; 43]>,
 
     /// The value of the input being spent.
@@ -210,7 +219,8 @@ pub struct Output {
     /// This is set by the Prover.
     #[serde(
         default,
-        with = "serde_with::As::<Option<[serde_with::Same; GROTH_PROOF_SIZE]>>"
+        serialize_with = "crate::serde_arrays::serialize_option",
+        deserialize_with = "crate::serde_arrays::deserialize_option"
     )]
     pub(crate) zkproof: Option<[u8; GROTH_PROOF_SIZE]>,
 
@@ -220,7 +230,11 @@ pub struct Output {
     /// - This is required by the Prover.
     ///
     /// [raw encoding]: https://zips.z.cash/protocol/protocol.pdf#saplingpaymentaddrencoding
-    #[serde(default, with = "serde_with::As::<Option<[serde_with::Same; 43]>>")]
+    #[serde(
+        default,
+        serialize_with = "crate::serde_arrays::serialize_option",
+        deserialize_with = "crate::serde_arrays::deserialize_option"
+    )]
     #[getset(get = "pub")]
     pub(crate) recipient: Option<[u8; 43]>,
 
