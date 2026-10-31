@@ -61,7 +61,7 @@ base64 = { version = "0.22", optional = true }
 thiserror = { version = "2", optional = true }
 http = { version = "1", optional = true }
 zakura-filters = { path = "../filters", version = "=0.0.1-rc0", optional = true }
-reinspiring = { version = "=0.1.3-rc.1", git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2", optional = true }
+reinspiring = { version = "=0.1.3-rc.1", optional = true }
 
 [dev-dependencies]
 hex = { workspace = true, features = ["std"] }

@@ -1847,7 +1847,8 @@ dependencies = [
 [[package]]
 name = "inspiring"
 version = "0.1.0-rc.3"
-source = "git+https://github.com/valargroup/ipir-sp?rev=5ea080a3281a01c5459f585e0a1bbbde50ec2bd2#5ea080a3281a01c5459f585e0a1bbbde50ec2bd2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe3c47b3ed60fef25d532e017ab3e53ebe13d6bec8821b54ed1449dce109b36e"
 dependencies = [
  "bytemuck",
  "memmap2",
@@ -2913,7 +2914,8 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "reinspiring"
 version = "0.1.3-rc.1"
-source = "git+https://github.com/valargroup/ipir-sp?rev=5ea080a3281a01c5459f585e0a1bbbde50ec2bd2#5ea080a3281a01c5459f585e0a1bbbde50ec2bd2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40e44e05ce528b6482bda9d9060123594e08933ad32b049bdbbec4df381de4b5"
 dependencies = [
  "bytemuck",
  "inspiring",
