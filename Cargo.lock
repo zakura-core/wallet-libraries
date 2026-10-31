@@ -472,7 +472,7 @@ checksum = "ec0797fb7aeb1406c84efac526901f7ec3ead2124f946b494e72879d4b54704d"
 dependencies = [
  "anstyle",
  "clap_lex",
- "strsim 0.11.1",
+ "strsim",
 ]
 
 [[package]]
@@ -701,36 +701,12 @@ dependencies = [
 
 [[package]]
 name = "darling"
-version = "0.14.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b750cb3417fd1b327431a470f388520309479ab0bf5e323505daf0290cd3850"
-dependencies = [
- "darling_core 0.14.4",
- "darling_macro 0.14.4",
-]
-
-[[package]]
-name = "darling"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed17f5901b6630b993ca003def43f2f8ef4014fc13b047b57aad617ff32bc2ec"
 dependencies = [
- "darling_core 0.24.1",
- "darling_macro 0.24.1",
-]
-
-[[package]]
-name = "darling_core"
-version = "0.14.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "109c1ca6e6b7f82cc233a97004ea8ed7ca123a9af07a8230878fcfda9b158bf0"
-dependencies = [
- "fnv",
- "ident_case",
- "proc-macro2",
- "quote",
- "strsim 0.10.0",
- "syn 1.0.109",
+ "darling_core",
+ "darling_macro",
 ]
 
 [[package]]
@@ -742,19 +718,8 @@ dependencies = [
  "ident_case",
  "proc-macro2",
  "quote",
- "strsim 0.11.1",
+ "strsim",
  "syn 3.0.6",
-]
-
-[[package]]
-name = "darling_macro"
-version = "0.14.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4aab4dbc9f7611d8b55048a3a16d2d010c2c8334e46304b40ac1cc14bf3b48e"
-dependencies = [
- "darling_core 0.14.4",
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -763,7 +728,7 @@ version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ac7135c3ef02b2f7833bbeb1be5ba7f966dcde8a87c6b87f65a778d71a02785"
 dependencies = [
- "darling_core 0.24.1",
+ "darling_core",
  "quote",
  "syn 3.0.6",
 ]
@@ -849,37 +814,6 @@ dependencies = [
  "syn 3.0.6",
  "unicode-ident",
  "void",
-]
-
-[[package]]
-name = "derive_builder_core_fork_arti"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24c1b715c79be6328caa9a5e1a387a196ea503740f0722ec3dd8f67a9e72314d"
-dependencies = [
- "darling 0.14.4",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "derive_builder_fork_arti"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3eae24d595f4d0ecc90a9a5a6d11c2bd8dafe2375ec4a1ec63250e5ade7d228"
-dependencies = [
- "derive_builder_macro_fork_arti",
-]
-
-[[package]]
-name = "derive_builder_macro_fork_arti"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69887769a2489cd946bf782eb2b1bb2cb7bc88551440c94a765d4f040c08ebf3"
-dependencies = [
- "derive_builder_core_fork_arti",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -3169,7 +3103,7 @@ version = "3.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e17bbc68e28663bbbb90df47e058aa7eda4fb445b89fe70457bb94fbccf6e49"
 dependencies = [
- "darling 0.24.1",
+ "darling",
  "proc-macro2",
  "quote",
  "syn 3.0.6",
@@ -3340,12 +3274,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "strsim"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73473c0e59e6d5812c5dfe2a064a6444949f089e20eec9a2e5506596494e4623"
 
 [[package]]
 name = "strsim"
@@ -4246,7 +4174,7 @@ dependencies = [
 [[package]]
 name = "zakura-arti-client"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "async-trait",
  "cfg-if",
@@ -4324,7 +4252,7 @@ dependencies = [
 [[package]]
 name = "zakura-caret"
 version = "0.11.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 
 [[package]]
 name = "zakura-client-backend"
@@ -4469,7 +4397,7 @@ dependencies = [
 [[package]]
 name = "zakura-fs-mistrust"
 version = "0.16.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "dirs-sys",
  "extend",
@@ -4625,14 +4553,6 @@ dependencies = [
  "zakura-sapling-crypto",
  "zakura-transparent",
  "zakura-zip321",
-]
-
-[[package]]
-name = "zakura-oneshot-fused-workaround"
-version = "0.8.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
-dependencies = [
- "futures",
 ]
 
 [[package]]
@@ -4947,7 +4867,7 @@ dependencies = [
 [[package]]
 name = "zakura-safelog"
 version = "0.10.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "derive_more",
  "educe",
@@ -4989,14 +4909,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zakura-saturating-time"
-version = "0.5.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
-dependencies = [
- "zakura-web-time-compat",
-]
-
-[[package]]
 name = "zakura-service-config"
 version = "0.1.0"
 dependencies = [
@@ -5022,7 +4934,7 @@ dependencies = [
 [[package]]
 name = "zakura-slotmap-careful"
 version = "0.9.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "paste",
  "serde",
@@ -5033,7 +4945,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-async-utils"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "cfg-if",
  "derive-deftly",
@@ -5048,7 +4960,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "void",
- "zakura-oneshot-fused-workaround",
  "zakura-slotmap-careful",
  "zakura-tor-basic-utils",
  "zakura-tor-rtcompat",
@@ -5058,12 +4969,13 @@ dependencies = [
 [[package]]
 name = "zakura-tor-basic-utils"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "derive-deftly",
  "derive_more",
  "educe",
  "extend",
+ "futures",
  "getrandom 0.4.3",
  "hex",
  "itertools 0.15.0",
@@ -5083,7 +4995,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-bytes"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "bytes",
  "derive-deftly",
@@ -5100,7 +5012,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-cell"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",
@@ -5130,7 +5042,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-cert"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "derive_more",
  "digest 0.10.7",
@@ -5146,7 +5058,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-chanmgr"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -5163,7 +5075,6 @@ dependencies = [
  "tracing",
  "void",
  "zakura-caret",
- "zakura-oneshot-fused-workaround",
  "zakura-safelog",
  "zakura-tor-async-utils",
  "zakura-tor-basic-utils",
@@ -5184,7 +5095,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-checkable"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "humantime",
  "itertools 0.15.0",
@@ -5197,7 +5108,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-circmgr"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "async-trait",
  "cfg-if",
@@ -5216,7 +5127,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "weak-table",
- "zakura-oneshot-fused-workaround",
  "zakura-safelog",
  "zakura-tor-async-utils",
  "zakura-tor-basic-utils",
@@ -5242,10 +5152,9 @@ dependencies = [
 [[package]]
 name = "zakura-tor-config"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "derive-deftly",
- "derive_builder_fork_arti",
  "educe",
  "either",
  "extend",
@@ -5266,7 +5175,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-config-path"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "directories",
  "serde",
@@ -5278,7 +5187,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-consdiff"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "derive_more",
  "digest 0.10.7",
@@ -5294,7 +5203,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-dirclient"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "async-compression",
  "base64ct",
@@ -5321,7 +5230,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-dircommon"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "base64ct",
  "derive-deftly",
@@ -5341,7 +5250,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-dirmgr"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -5369,7 +5278,6 @@ dependencies = [
  "tracing",
  "void",
  "zakura-fs-mistrust",
- "zakura-oneshot-fused-workaround",
  "zakura-safelog",
  "zakura-tor-async-utils",
  "zakura-tor-basic-utils",
@@ -5394,7 +5302,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-error"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "derive_more",
  "futures",
@@ -5412,7 +5320,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-general-addr"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "derive_more",
  "thiserror 2.0.21",
@@ -5422,7 +5330,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-guardmgr"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "derive-deftly",
  "derive_more",
@@ -5438,7 +5346,6 @@ dependencies = [
  "strum",
  "thiserror 2.0.21",
  "tracing",
- "zakura-oneshot-fused-workaround",
  "zakura-safelog",
  "zakura-tor-async-utils",
  "zakura-tor-basic-utils",
@@ -5460,7 +5367,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-hsclient"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "async-trait",
  "cfg-if",
@@ -5474,7 +5381,6 @@ dependencies = [
  "strum",
  "thiserror 2.0.21",
  "tracing",
- "zakura-oneshot-fused-workaround",
  "zakura-safelog",
  "zakura-slotmap-careful",
  "zakura-tor-async-utils",
@@ -5502,7 +5408,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-hscrypto"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "data-encoding",
  "derive-deftly",
@@ -5531,7 +5437,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-linkspec"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "base64ct",
  "by_address",
@@ -5555,7 +5461,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-llcrypto"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "aes",
  "base64ct",
@@ -5596,7 +5502,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-log-ratelim"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "futures",
  "humantime",
@@ -5611,7 +5517,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-memquota"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "cfg-if",
  "derive-deftly",
@@ -5643,7 +5549,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-memquota-cost"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "derive-deftly",
  "itertools 0.15.0",
@@ -5654,7 +5560,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-netdir"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "async-trait",
  "bitflags 2.13.2",
@@ -5684,7 +5590,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-netdoc"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "arrayvec",
  "base64ct",
@@ -5713,7 +5619,6 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "void",
- "zakura-saturating-time",
  "zakura-tor-basic-utils",
  "zakura-tor-bytes",
  "zakura-tor-cell",
@@ -5732,7 +5637,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-persist"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "derive-deftly",
  "derive_more",
@@ -5750,7 +5655,6 @@ dependencies = [
  "void",
  "windows-sys 0.61.2",
  "zakura-fs-mistrust",
- "zakura-oneshot-fused-workaround",
  "zakura-tor-basic-utils",
  "zakura-tor-error",
  "zakura-web-time-compat",
@@ -5759,7 +5663,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-proto"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "aes",
  "async-trait",
@@ -5771,7 +5675,6 @@ dependencies = [
  "coarsetime",
  "ctr",
  "derive-deftly",
- "derive_builder_fork_arti",
  "derive_more",
  "digest 0.10.7",
  "educe",
@@ -5797,7 +5700,6 @@ dependencies = [
  "visibility",
  "void",
  "zakura-caret",
- "zakura-oneshot-fused-workaround",
  "zakura-safelog",
  "zakura-slotmap-careful",
  "zakura-tor-async-utils",
@@ -5823,7 +5725,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-protover"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "derive-deftly",
  "derive_more",
@@ -5839,7 +5741,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-relay-selection"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "rand 0.10.3",
  "serde",
@@ -5852,13 +5754,12 @@ dependencies = [
 [[package]]
 name = "zakura-tor-rtcompat"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "async-trait",
  "asynchronous-codec",
  "cfg-if",
  "coarsetime",
- "derive_builder_fork_arti",
  "derive_more",
  "dyn-clone",
  "educe",
@@ -5887,7 +5788,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-socksproto"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "derive-deftly",
  "educe",
@@ -5902,7 +5803,7 @@ dependencies = [
 [[package]]
 name = "zakura-tor-units"
 version = "0.47.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "derive-deftly",
  "derive_more",
@@ -5989,7 +5890,7 @@ dependencies = [
 [[package]]
 name = "zakura-web-time-compat"
 version = "0.3.0-zakura.1"
-source = "git+file:///private/tmp/arti-wallet-20261031-v5?rev=c636b18d6fa1c3cba2b2488313d46cc6ff9ef117#c636b18d6fa1c3cba2b2488313d46cc6ff9ef117"
+source = "git+file:///private/tmp/arti-wallet-20261101-v6-namespaced?rev=e5193a0bf520d6a33f882f80e9f0ccb43b248ebd#e5193a0bf520d6a33f882f80e9f0ccb43b248ebd"
 dependencies = [
  "web-time",
 ]
