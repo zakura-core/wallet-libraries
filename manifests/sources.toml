@@ -115,6 +115,9 @@ rand_distr = "0.6"
 bip32 = "0.6"
 secp256k1 = "0.33"
 zcash_script = "0.6"
+# Share the released migration graph family already required by the LRZ facade.
+schemerz = "0.3"
+schemerz-rusqlite = "0.371"
 
 # Wallet-owned packages must never import the Zakura node or wallet-pir,
 # including optional, development, build and target-specific dependencies.
