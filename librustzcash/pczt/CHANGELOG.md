@@ -7,6 +7,11 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- Replace `serde_with` with internal fixed-byte-array adapters, preserving the
+  existing PCZT encodings and public APIs.
+
 ## [0.1.0-rc9] - 2026-10-20
 
 ### Changed
