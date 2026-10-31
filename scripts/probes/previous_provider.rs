@@ -92,10 +92,45 @@ fn main() {
         scans,
         serde_json::from_str::<Value>(include_str!("receiver_scans.json")).unwrap()
     );
-    for profile in [P8, P16] {
+    // Construct the pinned provider's profiles from its own parameter type.
+    // These fixed vectors stay independent when the candidate uses a newer
+    // registry Reinspiring with a distinct Rust type identity.
+    for (profile, (p_bits, gadget_bits, ell)) in [(P8, (8, 27, 1)), (P16, (16, 19, 2))] {
+        let previous_params = ipir_native_client::NativeParams::new(
+            2048,
+            54,
+            p_bits,
+            gadget_bits,
+            ell,
+            ipir_native_client::SecretDistribution::Gaussian,
+        )
+        .unwrap();
+        let current_params = profile.params();
+        assert_eq!(
+            (
+                current_params.d(),
+                current_params.q(),
+                current_params.p(),
+                current_params.gadget_bits(),
+                current_params.ell(),
+                current_params.dropped_bits(),
+                current_params.sampler() as u64,
+            ),
+            (
+                previous_params.d(),
+                previous_params.q(),
+                previous_params.p(),
+                previous_params.gadget_bits(),
+                previous_params.ell(),
+                previous_params.dropped_bits(),
+                previous_params.sampler() as u64,
+            )
+        );
+        assert_eq!(current_params.encoding(), previous_params.encoding());
         for (rows, cols) in [(D, D), (2 * D, 3 * D), (16 * D, 6 * D)] {
             let previous =
-                ipir_native_client::NativeProfile::new(profile.params(), rows, cols).unwrap();
+                ipir_native_client::NativeProfile::new(previous_params.clone(), rows, cols)
+                    .unwrap();
             for seed in [[0; 32], [0x91; 32]] {
                 let previous =
                     ipir_native_client::NativePublicSetup::new(previous.clone(), seed, [0; 32]);
@@ -113,9 +148,10 @@ fn main() {
             (usize::MAX, D),
             (1 << 21, 1 << 21),
         ] {
-            let previous = ipir_native_client::NativeProfile::new(profile.params(), rows, cols)
-                .map(|_| ())
-                .map_err(|e| e.to_string());
+            let previous =
+                ipir_native_client::NativeProfile::new(previous_params.clone(), rows, cols)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
             assert_eq!(
                 profile.public_query_masks([0; 32], rows, cols).map(|_| ()),
                 previous
