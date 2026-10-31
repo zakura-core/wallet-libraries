@@ -13,10 +13,13 @@
 //! (the fixture does not parse, or the service publishes a schema this build
 //! does not know), `placement_unknown`, `recent_below_floor`, `unavailable` and
 //! `protocol_failure`. Neither the txid, the query nor any server text is printed.
-use clap::Parser;
+#[path = "../../src/cli_args.rs"]
+mod cli_args;
+
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
+    ffi::{OsStr, OsString},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -26,19 +29,72 @@ use zakura_pir_client::transparent::txid_client::{
 };
 use zakura_pir_protocol::endpoint::Endpoint;
 
-#[derive(Parser)]
+#[derive(Debug, PartialEq, Eq)]
 struct Args {
     /// Public server base; the client appends the `/transparent/v1/txid/`
     /// paths below its path. Required: there is no default server.
-    #[arg(long)]
     url: String,
     /// The pinned `{"txid", "height", "entry_sha256"}` document.
-    #[arg(long)]
     fixture: PathBuf,
     /// Per-request timeout. A cold lookup fetches init, the map, an index
     /// chunk, a manifest and the bucket's setups before its one query.
-    #[arg(long, default_value_t = 15)]
     timeout_seconds: u64,
+}
+
+const HELP: &str = r##"Usage: {program} [OPTIONS] --url <URL> --fixture <FIXTURE>
+
+Options:
+      --url <URL>
+          Public server base; the client appends the `/transparent/v1/txid/` paths below its path. Required: there is no default server
+      --fixture <FIXTURE>
+          The pinned `{"txid", "height", "entry_sha256"}` document
+      --timeout-seconds <TIMEOUT_SECONDS>
+          Per-request timeout. A cold lookup fetches init, the map, an index chunk, a manifest and the bucket's setups before its one query [default: 15]
+  -h, --help
+          Print help
+"##;
+
+fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Option<Args>, String> {
+    let mut arguments = arguments.into_iter();
+    let mut url = None;
+    let mut fixture = None;
+    let mut timeout_seconds = None;
+    while let Some(argument) = arguments.next() {
+        if cli_args::is_help(&argument) {
+            return Ok(None);
+        }
+        if argument == "--" {
+            if arguments.next().is_some() {
+                return Err("unexpected positional argument".into());
+            }
+            break;
+        }
+        if let Some(value) = cli_args::take_value(&argument, "--url", &mut arguments) {
+            if url.is_some() {
+                return Err("--url cannot be used multiple times".into());
+            }
+            url = Some(value?.into_string().map_err(|_| "--url requires UTF-8")?);
+        } else if let Some(value) = cli_args::take_value(&argument, "--fixture", &mut arguments) {
+            if fixture.is_some() {
+                return Err("--fixture cannot be used multiple times".into());
+            }
+            fixture = Some(PathBuf::from(value?));
+        } else if let Some(value) =
+            cli_args::take_value(&argument, "--timeout-seconds", &mut arguments)
+        {
+            if timeout_seconds.is_some() {
+                return Err("--timeout-seconds cannot be used multiple times".into());
+            }
+            timeout_seconds = Some(cli_args::number(value?, "--timeout-seconds")?);
+        } else {
+            return Err("unexpected argument; use --help for usage".into());
+        }
+    }
+    Ok(Some(Args {
+        url: url.ok_or("--url is required")?,
+        fixture: fixture.ok_or("--fixture is required")?,
+        timeout_seconds: timeout_seconds.unwrap_or(15),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -168,7 +224,23 @@ fn probe(args: &Args) -> &'static str {
 }
 
 fn main() {
-    let args = Args::parse();
+    let mut arguments = std::env::args_os();
+    let executable = arguments.next().unwrap_or_default();
+    let program = std::path::Path::new(&executable)
+        .file_name()
+        .unwrap_or(OsStr::new("txid-quality-canary"))
+        .to_string_lossy();
+    let args = match parse_args(arguments) {
+        Ok(Some(args)) => args,
+        Ok(None) => {
+            print!("{}", HELP.replace("{program}", &program));
+            return;
+        }
+        Err(error) => {
+            eprintln!("error: {error}\n\n{}", HELP.replace("{program}", &program));
+            std::process::exit(2);
+        }
+    };
     let start = Instant::now();
     let category = probe(&args);
     println!(
@@ -190,6 +262,64 @@ mod tests {
     };
 
     const TXID_DISPLAY: &str = "00000000000000000000000000000000000000000000000000000000000000ab";
+
+    fn parse(arguments: &[&str]) -> Result<Option<Args>, String> {
+        parse_args(arguments.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn argument_defaults_empty_values_and_numeric_limits() {
+        assert_eq!(
+            parse(&["--url=x", "--fixture", "pin.json"]),
+            Ok(Some(Args {
+                url: "x".into(),
+                fixture: "pin.json".into(),
+                timeout_seconds: 15,
+            }))
+        );
+        assert_eq!(
+            parse(&[
+                "--fixture=-h",
+                "--url",
+                "",
+                "--timeout-seconds=18446744073709551615",
+                "--"
+            ]),
+            Ok(Some(Args {
+                url: String::new(),
+                fixture: "-h".into(),
+                timeout_seconds: u64::MAX,
+            }))
+        );
+        assert_eq!(
+            parse(&["--url=x", "--fixture=f", "--timeout-seconds=+1"])
+                .unwrap()
+                .unwrap()
+                .timeout_seconds,
+            1
+        );
+    }
+
+    #[test]
+    fn argument_errors_and_help_preserve_validation_order() {
+        for arguments in [
+            vec![],
+            vec!["--url=x"],
+            vec!["--fixture=f"],
+            vec!["--url", "--help"],
+            vec!["--timeout-seconds=bad", "--help"],
+            vec!["--timeout-seconds=18446744073709551616", "--help"],
+            vec!["--url=x", "--url=x", "--help"],
+            vec!["--timeout-seconds=1", "--timeout-seconds=1", "--help"],
+            vec!["--unknown", "--help"],
+            vec!["--url=x", "--fixture=f", "--", "--help"],
+        ] {
+            assert!(parse(&arguments).is_err(), "{arguments:?}");
+        }
+        for arguments in [vec!["--help", "--unknown"], vec!["-hfoo"]] {
+            assert!(parse(&arguments).unwrap().is_none());
+        }
+    }
 
     fn entry(txid: [u8; 32], value: u64) -> DisplayEntry {
         DisplayEntry {
