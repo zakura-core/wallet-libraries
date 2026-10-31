@@ -50,8 +50,13 @@
 //!                  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
 //! ```
 //!
-//! ## Feature flags
-#![doc = document_features::document_features!()]
+//! Enable the `document-features` feature when building documentation to include
+//! the generated feature table.
+#![cfg_attr(all(doc, feature = "document-features"), doc = "## Feature flags")]
+#![cfg_attr(
+    all(doc, feature = "document-features"),
+    doc = document_features::document_features!()
+)]
 //!
 
 #![cfg_attr(docsrs, feature(doc_cfg))]

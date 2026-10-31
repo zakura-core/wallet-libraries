@@ -76,7 +76,7 @@ zip32.workspace = true
 
 [features]
 default = ["std"]
-std = ["document-features"]
+std = []
 ## Enables functionality that requires Orchard protocol types.
 orchard = [
     "dep:ff",

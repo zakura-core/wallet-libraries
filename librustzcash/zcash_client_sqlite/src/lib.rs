@@ -18,8 +18,13 @@
 //!   **MUST NOT** write to the database without using these APIs. Callers **MAY** read
 //!   the database directly in order to extract information for display to users.
 //!
-//! ## Feature flags
-#![doc = document_features::document_features!()]
+//! Enable the `document-features` feature when building documentation to include
+//! the generated feature table.
+#![cfg_attr(all(doc, feature = "document-features"), doc = "## Feature flags")]
+#![cfg_attr(
+    all(doc, feature = "document-features"),
+    doc = document_features::document_features!()
+)]
 //!
 //! [`WalletRead`]: zcash_client_backend::data_api::WalletRead
 //! [`WalletWrite`]: zcash_client_backend::data_api::WalletWrite

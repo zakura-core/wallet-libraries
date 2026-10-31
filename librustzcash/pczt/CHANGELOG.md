@@ -7,6 +7,12 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- The `std` feature no longer enables `document-features`. Generating the
+  crate's feature table requires both features; docs.rs continues to include
+  the table. PCZT types, encodings, and `no_std` support are unchanged.
+
 ## [0.1.0-rc9] - 2026-10-20
 
 ### Changed

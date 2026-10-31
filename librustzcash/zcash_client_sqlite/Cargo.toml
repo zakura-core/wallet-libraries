@@ -18,6 +18,7 @@ categories.workspace = true
 # Manually specify features while `orchard` is not in the public API.
 #all-features = true
 features = [
+    "document-features",
     "multicore",
     "test-dependencies",
     "transparent-inputs",
@@ -88,7 +89,7 @@ uuid = { workspace = true, features = ["v4"] }
 
 # Dependencies used internally:
 # (Breaking upgrades to these are usually backwards-compatible, but check MSRVs.)
-document-features.workspace = true
+document-features = { workspace = true, optional = true }
 maybe-rayon.workspace = true
 pczt.workspace = true
 zcash_proofs = { workspace = true, optional = true }
