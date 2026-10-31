@@ -79,6 +79,8 @@ impl ShieldedPoolTester for OrchardPoolTester {
             Some(fvk.address_at(0u32, zip32::Scope::External)),
             None,
             None,
+            None,
+            None,
         )
         .unwrap()
         .into()
@@ -181,6 +183,7 @@ impl ShieldedPoolTester for OrchardPoolTester {
         tx: &Transaction,
         fvk: &Self::Fvk,
     ) -> Option<(Note, Address, MemoBytes)> {
+<<<<<<< HEAD
         for (pool, bundle) in [
             (orchard::ValuePool::Orchard, tx.orchard_bundle()),
             (orchard::ValuePool::Ironwood, tx.ironwood_bundle()),
@@ -208,6 +211,26 @@ impl ShieldedPoolTester for OrchardPoolTester {
                     return Some((
                         Note::Orchard { note, pool },
                         UnifiedAddress::from_receivers(Some(addr), None, None)
+=======
+        for action in tx.orchard_bundle().unwrap().actions() {
+            // Find the output that decrypts with the external OVK
+            let result = try_output_recovery_with_ovk(
+                &OrchardDomain::for_action(action),
+                &fvk.to_ovk(zip32::Scope::External),
+                action,
+                action.cv_net(),
+                &action.encrypted_note().out_ciphertext,
+            );
+
+            if result.is_some() {
+                return result.map(|(note, addr, memo)| {
+                    (
+                        Note::Orchard {
+                            note,
+                            pool: orchard::ValuePool::Orchard,
+                        },
+                        UnifiedAddress::from_receivers(Some(addr), None, None, None, None)
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
                             .unwrap()
                             .into(),
                         MemoBytes::from_bytes(&memo).expect("correct length"),
@@ -238,11 +261,13 @@ impl ShieldedPoolTester for OrchardPoolTester {
         usk: &UnifiedSpendingKey,
     ) -> Result<(), pczt::roles::signer::Error> {
         let sk = Self::usk_to_sk(usk);
+        use rand::{rand_core::UnwrapErr, rngs::SysRng};
+
         let ask = orchard::keys::SpendAuthorizingKey::from(sk);
 
         // Figuring out which one is for us is hard. Let's just try signing all of them!
         for index in 0.. {
-            match signer.sign_orchard(index, &ask) {
+            match signer.sign_orchard(UnwrapErr(SysRng), index, &ask) {
                 // Loop termination.
                 Err(pczt::roles::signer::Error::InvalidIndex) => break,
                 // Ignore any errors due to using the wrong key.

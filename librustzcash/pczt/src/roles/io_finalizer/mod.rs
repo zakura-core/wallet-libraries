@@ -3,7 +3,11 @@
 //! - Sets the appropriate bits in `Global.tx_modifiable` to 0.
 //! - Updates the various bsk values using the rcv information from spends and outputs.
 
+<<<<<<< HEAD
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
+=======
+use rand_core::{CryptoRng, Rng};
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
 use zcash_primitives::transaction::{sighash::SignableInput, txid::TxIdDigester};
 
 use crate::{
@@ -26,7 +30,9 @@ impl IoFinalizer {
     }
 
     /// Finalizes the IO of the PCZT.
-    pub fn finalize_io(self) -> Result<Pczt, Error> {
+    ///
+    /// `rng` provides the randomness for the signatures of any dummy shielded spends.
+    pub fn finalize_io<R: Rng + CryptoRng>(self, mut rng: R) -> Result<Pczt, Error> {
         let Self { pczt } = self;
 
         let has_orchard_actions = !pczt.orchard.actions.is_empty();
@@ -81,7 +87,11 @@ impl IoFinalizer {
         // the bundle is empty.
         sapling
             .bundle
+<<<<<<< HEAD
             .finalize_io(shielded_sighash, UnwrapErr(SysRng))
+=======
+            .finalize_io(shielded_sighash, &mut rng)
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
             .map_err(Error::SaplingFinalize)?;
         // An empty Orchard-protocol bundle carries no value commitment information
         // and contributes nothing to the transaction; leave its `bsk` unset so that
@@ -90,13 +100,21 @@ impl IoFinalizer {
         if has_orchard_actions {
             orchard
                 .bundle
+<<<<<<< HEAD
                 .finalize_io(shielded_sighash, UnwrapErr(SysRng))
+=======
+                .finalize_io(shielded_sighash, &mut rng)
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
                 .map_err(Error::OrchardFinalize)?;
         }
         if has_ironwood_actions {
             ironwood
                 .bundle
+<<<<<<< HEAD
                 .finalize_io(shielded_sighash, UnwrapErr(SysRng))
+=======
+                .finalize_io(shielded_sighash, &mut rng)
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
                 .map_err(Error::IronwoodFinalize)?;
         }
 

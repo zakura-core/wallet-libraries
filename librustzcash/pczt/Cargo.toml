@@ -1,6 +1,11 @@
 [package]
+<<<<<<< HEAD
 name = "zakura-pczt"
 version = "0.1.0-rc9"
+=======
+name = "pczt"
+version = "0.10.0-pre.2"
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
 authors = ["Jack Grigg <jack@electriccoin.co>"]
 edition.workspace = true
 rust-version.workspace = true
@@ -46,6 +51,10 @@ pasta_curves = { workspace = true, optional = true }
 
 # Dependencies used internally:
 # (Breaking upgrades to these are usually backwards-compatible, but check MSRVs.)
+# - Secret management
+subtle.workspace = true
+zeroize.workspace = true
+
 # - Boilerplate
 getset.workspace = true
 
@@ -58,7 +67,14 @@ orchard = { workspace = true, features = ["zip32-addresses"] }
 sapling = { workspace = true, features = ["zip32-addresses"] }
 hex.workspace = true
 incrementalmerkletree.workspace = true
+<<<<<<< HEAD
 rand_chacha_10 = { package = "rand_chacha", version = "0.10" }
+=======
+proptest.workspace = true
+rand = { workspace = true, features = ["sys_rng"] }
+rand_chacha.workspace = true
+ripemd.workspace = true
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
 secp256k1 = { workspace = true, features = ["rand"] }
 shardtree.workspace = true
 zcash_primitives = { workspace = true, features = [
@@ -70,13 +86,14 @@ zcash_protocol = { workspace = true, features = ["local-consensus"] }
 zip32.workspace = true
 
 [features]
-default = ["std"]
+default = ["std", "orchard", "sapling"]
 std = ["document-features"]
 ## Enables functionality that requires Orchard protocol types.
 orchard = [
     "dep:ff",
     "dep:orchard",
     "dep:pasta_curves",
+    "orchard/zeroize",
     "dep:zcash_note_encryption",
 ]
 
@@ -86,6 +103,7 @@ sapling = [
     "dep:redjubjub",
     "dep:sapling",
     "dep:zcash_note_encryption",
+    "sapling/zeroize",
 ]
 
 ## Enables functionality that requires Zcash transparent protocol types.
@@ -108,7 +126,10 @@ zcp-builder = ["dep:zcash_primitives", "zcash_primitives/pczt", "orchard", "sapl
 io-finalizer = [
     "dep:blake2b_simd",
     "dep:rand_core",
+<<<<<<< HEAD
     "dep:rand",
+=======
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
     "dep:zcash_primitives",
     "orchard",
     "sapling",
@@ -118,7 +139,10 @@ io-finalizer = [
 ## Enables the Prover role.
 prover = [
     "dep:rand_core",
+<<<<<<< HEAD
     "dep:rand",
+=======
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
     "orchard?/circuit",
     "sapling?/circuit",
     "sapling?/temporary-zcashd",
@@ -128,7 +152,10 @@ prover = [
 signer = [
     "dep:blake2b_simd",
     "dep:rand_core",
+<<<<<<< HEAD
     "dep:rand",
+=======
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
     "dep:zcash_primitives",
     "orchard",
     "sapling",
@@ -142,7 +169,10 @@ spend-finalizer = ["transparent"]
 tx-extractor = [
     "dep:blake2b_simd",
     "dep:rand_core",
+<<<<<<< HEAD
     "dep:rand",
+=======
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
     "dep:zcash_primitives",
     "orchard",
     "orchard/circuit",

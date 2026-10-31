@@ -9,7 +9,7 @@ use getset::Getters;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    common::{Global, Zip32Derivation},
+    common::{Global, SecretKeyBytes, Zip32Derivation},
     roles::combiner::{merge_map, merge_optional},
 };
 
@@ -41,7 +41,7 @@ pub struct Bundle {
     ///
     /// - This is `None` until it is set by the IO Finalizer.
     /// - The Transaction Extractor uses this to produce the binding signature.
-    pub(crate) bsk: Option<[u8; 32]>,
+    pub(crate) bsk: Option<SecretKeyBytes>,
 }
 
 /// The canonical empty Sapling bundle: the form the Sapling bundle of a PCZT takes
@@ -167,7 +167,7 @@ pub struct Spend {
     /// - This is chosen by the Constructor.
     /// - This is required by the IO Finalizer, and is cleared by it once used.
     /// - Signers MUST reject PCZTs that contain `dummy_ask` values.
-    pub(crate) dummy_ask: Option<[u8; 32]>,
+    pub(crate) dummy_ask: Option<SecretKeyBytes>,
 
     /// Proprietary fields related to the note being spent.
     #[getset(get = "pub")]
@@ -476,7 +476,7 @@ pub(crate) mod v1 {
         outputs: Vec<super::Output>,
         value_sum: i128,
         anchor: [u8; 32],
-        bsk: Option<[u8; 32]>,
+        bsk: Option<crate::common::SecretKeyBytes>,
     }
 
     impl TryFrom<super::Bundle> for Bundle {
@@ -582,7 +582,7 @@ impl Bundle {
                             )
                         })
                         .transpose()?,
-                    spend.dummy_ask,
+                    spend.dummy_ask.as_ref().map(|ask| *ask.expose_secret()),
                     spend.proprietary,
                 )
             })
@@ -619,8 +619,13 @@ impl Bundle {
             })
             .collect::<Result<_, _>>()?;
 
-        let bundle =
-            sapling::pczt::Bundle::parse(spends, outputs, self.value_sum, anchor, self.bsk)?;
+        let bundle = sapling::pczt::Bundle::parse(
+            spends,
+            outputs,
+            self.value_sum,
+            anchor,
+            self.bsk.as_ref().map(|bsk| *bsk.expose_secret()),
+        )?;
 
         Ok(Parsed {
             bundle,
@@ -653,7 +658,7 @@ impl Bundle {
                     proof_generation_key: spend
                         .proof_generation_key()
                         .as_ref()
-                        .map(|key| (key.ak.to_bytes(), key.nsk.to_bytes())),
+                        .map(|key| (key.ak().to_bytes(), key.nsk().to_bytes())),
                     witness: spend.witness().as_ref().map(|witness| {
                         (
                             u32::try_from(u64::from(witness.position()))
@@ -675,7 +680,7 @@ impl Bundle {
                     dummy_ask: spend
                         .dummy_ask()
                         .as_ref()
-                        .map(|dummy_ask| dummy_ask.to_bytes()),
+                        .map(|dummy_ask| SecretKeyBytes::new(dummy_ask.to_bytes())),
                     proprietary: spend.proprietary().clone(),
                 }
             })
@@ -710,7 +715,10 @@ impl Bundle {
             outputs,
             value_sum: bundle.value_sum().to_raw(),
             anchor: Some(bundle.anchor().to_bytes()),
-            bsk: bundle.bsk().map(|bsk| bsk.into()),
+            bsk: bundle
+                .bsk()
+                .as_ref()
+                .map(|bsk| SecretKeyBytes::new(bsk.to_bytes())),
         }
     }
 }
@@ -724,7 +732,7 @@ pub enum ParseError {
     /// The operation requires the bundle's `anchor` to be set, but it was absent.
     ///
     /// For a v6 transaction, an Updater can resolve this by setting the anchor; see
-    /// [ZIP 374: Anchors and pre-authorization](https://zips.z.cash/zip-0374#anchors-and-pre-authorization).
+    /// [ZIP 374: Anchors and pre-authorization](https://zips.z.cash/zip-0374#anchorsandpre-authorization).
     MissingAnchor,
     /// The bundle's remaining fields were structurally invalid.
     Bundle(sapling::pczt::ParseError),
@@ -756,7 +764,7 @@ pub enum AnchorConsistencyError {
 /// Zero-valued spends are skipped, as their Merkle paths are not checked by the Sapling
 /// circuit.
 ///
-/// [ZIP 374]: https://zips.z.cash/zip-0374#anchors-and-pre-authorization
+/// [ZIP 374]: https://zips.z.cash/zip-0374#anchorsandpre-authorization
 #[cfg(all(feature = "sapling", feature = "prover"))]
 pub(crate) fn verify_witnesses_root_to_anchor(
     bundle: &sapling::pczt::Bundle,
@@ -795,7 +803,7 @@ pub(crate) fn verify_witnesses_root_to_anchor(
 /// Carries the bundle's original wire `anchor` alongside the parsed form, so that
 /// [`Parsed::reserialize`] can restore it after an operation that does not itself
 /// change the anchor, even though parsing may have substituted a placeholder for it
-/// (see [ZIP 374: Anchors and pre-authorization](https://zips.z.cash/zip-0374#anchors-and-pre-authorization)).
+/// (see [ZIP 374: Anchors and pre-authorization](https://zips.z.cash/zip-0374#anchorsandpre-authorization)).
 #[cfg(feature = "sapling")]
 pub(crate) struct Parsed {
     pub(crate) bundle: sapling::pczt::Bundle,
@@ -827,6 +835,7 @@ mod tests {
 
     fn output_only_bundle() -> Bundle {
         let recipient = sapling::zip32::ExtendedSpendingKey::master(&[0; 32])
+            .expect("the derivation path yields a valid key")
             .to_diversifiable_full_viewing_key()
             .default_address()
             .1;

@@ -20,7 +20,7 @@ pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x1f5420e3_f8a0_4afd_a9e5_e20fc6f
 // Depends on `orchard_shardtree` (the Ironwood tree tables mirror the Orchard ones) and on
 // `wallet_summaries` (which adds the `blocks` output/action-count columns), so the Ironwood
 // block-metadata columns append after all existing `blocks` columns.
-const DEPENDENCIES: &[Uuid] = &[
+pub(super) const DEPENDENCIES: &[Uuid] = &[
     orchard_shardtree::MIGRATION_ID,
     wallet_summaries::MIGRATION_ID,
 ];
@@ -321,6 +321,8 @@ mod tests {
                 nu6_2: None,
                 nu6_3: Some(activation),
                 nu7: None,
+                #[cfg(zcash_unstable = "nutachyon")]
+                nu_tachyon: None,
             },
         }
         .up(&tx)
