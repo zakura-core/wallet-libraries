@@ -23,6 +23,7 @@ use tracing::{debug, error};
 
 use super::{Client, Error, Timeouts};
 
+#[cfg(feature = "tor")]
 pub mod cryptex;
 
 /// How a particular connection failure should be retried.
@@ -442,9 +443,8 @@ pub enum HttpError {
     Timeout(TimeoutPhase),
     /// The status code indicated that the request was unsuccessful.
     ///
-    /// This is only returned by APIs that make specific queries, such as
-    /// [`Client::get_latest_zec_to_usd_rate`]. Generic APIs like [`Client::http_get`]
-    /// will not return this error variant.
+    /// This is only returned by exchange-specific APIs enabled by the `tor`
+    /// feature. Generic APIs like [`Client::http_get`] do not return this variant.
     Unsuccessful(hyper::http::StatusCode),
 }
 

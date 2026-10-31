@@ -77,7 +77,7 @@ pub mod serialization;
 #[cfg(feature = "sync-decryptor")]
 mod task;
 
-#[cfg(feature = "tor")]
+#[cfg(feature = "tor-client")]
 pub mod tor;
 
 pub use decrypt::{DecryptedOutput, TransferType, decrypt_transaction};
