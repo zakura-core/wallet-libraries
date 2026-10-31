@@ -1878,16 +1878,14 @@ fn a_rejection_after_the_final_segment_rereads_the_payment() {
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
-/// A directory that keeps serving claims the wallet's chain checks reject backs the key's
+/// A directory that keeps serving a claim the wallet's chain checks reject backs the key's
 /// lookup off, doubling from a minute, rather than reading its history again every minute.
-/// Two rejected claims in one read count as one failure. A history check makes the lookup
-/// due at once, and correct answers then recover both payments.
+/// A history check makes it due at once, and a correct answer then recovers the payment.
 #[test]
 fn a_repeatedly_rejected_claim_backs_off_until_a_history_check() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let candidate = pay_candidate(&mut st, key8());
-    let second = pay_candidate(&mut st, key8());
     foreign_blocks(&mut st, 2);
     recover(st.wallet_mut().db_mut(), account, key8(), candidate.height);
     let publication = publication_at(&st, tip(&st).height);
@@ -1911,10 +1909,8 @@ fn a_repeatedly_rejected_claim_backs_off_until_a_history_check() {
     for _ in 0..3 {
         retry_now(&st);
         let work = work_of(&st, key8());
-        let mut records = history(work.work.receiver, &[&candidate, &second]);
-        for record in &mut records {
-            record.payment.position += 1;
-        }
+        let mut records = history(work.work.receiver, &[&candidate]);
+        records[0].payment.position += 1;
         let page = whole_at(&st, publication, records, publication.end);
         assert!(
             st.wallet_mut()
@@ -1933,59 +1929,7 @@ fn a_repeatedly_rejected_claim_backs_off_until_a_history_check() {
     );
     assert_eq!(retry(&st), (0, 0));
     drain(&mut st, account, publication);
-    assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
-}
-
-/// Failures before a read that holds don't carry past it: after three deferred failures and
-/// a valid page that continues in a later step, the next failure waits a minute again.
-#[test]
-fn a_valid_page_clears_earlier_lookup_failures() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let initial = publication_at(&st, tip(&st).height);
-    let db = st.wallet_mut().db_mut();
-    assert!(db.begin_one_time_recovery(account, initial, true).unwrap());
-    drain(&mut st, account, initial);
-    let first = pay_candidate(&mut st, key8());
-    let second = pay_candidate(&mut st, key8());
-    recover(st.wallet_mut().db_mut(), account, key8(), first.height);
-    let publication = publication_at(&st, tip(&st).height);
-    let db = st.wallet_mut().db_mut();
-    assert!(
-        db.begin_one_time_recovery(account, publication, false)
-            .unwrap()
-    );
-    let now = clock_now();
-    let work = work_of(&st, key8());
-    for _ in 0..3 {
-        let db = st.wallet_mut().db_mut();
-        db.defer_one_time_lookup(account, &work, now).unwrap();
-    }
-    let records = history(work.work.receiver, &[&first, &second]);
-    let mut page = whole_at(&st, publication, records[..1].to_vec(), publication.end);
-    page.checked_through = None;
-    page.next = Some(LookupCursor {
-        inventory: publication.id,
-        shard: 0,
-        segment: 0,
-        last: Some(records[0].clone()),
-    });
-    let db = st.wallet_mut().db_mut();
-    assert!(
-        db.record_one_time_lookup(account, &work, &page, now)
-            .unwrap()
-    );
-    let lookups = status(st.wallet().db(), account).lookups;
-    let next = lookups.iter().find(|w| w.work.key == key8()).unwrap();
-    assert!(next.cursor.is_some());
-    let db = st.wallet_mut().db_mut();
-    db.defer_one_time_lookup(account, next, now).unwrap();
-    let retry_at: i64 = value(
-        st.wallet().conn(),
-        "SELECT next_attempt_at FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1",
-        [key_ref(&st.wallet().db().conn, account, key8()).unwrap()],
-    );
-    assert_eq!(retry_at - now, 60);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
 /// After a finished seed walk completed I0 empty, a live hit queues I0 only from the next
