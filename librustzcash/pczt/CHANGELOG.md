@@ -9,6 +9,10 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- The `std` feature no longer enables `document-features`. Generating the
+  crate's feature table requires both features; docs.rs continues to include
+  the table. PCZT types, encodings, and `no_std` support are unchanged.
+
 - Replace `serde_with` with internal fixed-byte-array adapters, preserving the
   existing PCZT encodings and public APIs.
 

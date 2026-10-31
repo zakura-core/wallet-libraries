@@ -112,7 +112,7 @@ rust_decimal = { workspace = true, optional = true }
 # Dependencies used internally:
 # (Breaking upgrades to these are usually backwards-compatible, but check MSRVs.)
 # - Documentation
-document-features.workspace = true
+document-features = { workspace = true, optional = true }
 
 # - Encodings
 byteorder = { workspace = true, optional = true }

@@ -78,6 +78,25 @@ when needed. `cargo fmt --all -- --check` remains the read-only formatting check
 A runtime/sandbox rejection is an environment issue; formatting does not need
 broader permissions, Cargo compilation, or a shared build lock.
 
+## Feature documentation
+
+The backend, SQLite, and PCZT crates keep their generated feature tables behind
+the optional `document-features` feature, so ordinary builds do not compile the
+documentation macro. Plain `cargo doc` still documents the enabled Rust APIs;
+enable the feature to include the tables:
+
+```sh
+cargo doc -p zakura-client-backend --no-deps --features document-features
+cargo doc -p zakura-client-sqlite --no-deps --features document-features
+cargo doc -p zakura-pczt --no-deps --features document-features
+```
+
+For these commands, set `CARGO_TARGET_DIR` to a directory owned by the
+documentation run, separate from development leases and other Cargo processes.
+The PCZT table also requires its default `std` feature. To document it with
+default features disabled, explicitly enable `std,document-features`.
+The existing docs.rs feature selections enable the tables automatically.
+
 ## Build ownership and results
 
 Build directories live under `~/.cache/wallet-libraries/targets/`, keyed by

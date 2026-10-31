@@ -9,6 +9,10 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- Generating the crate's feature table now requires the optional
+  `document-features` feature. Ordinary builds omit the documentation macro;
+  docs.rs continues to include the table.
+
 - The `tor` feature pins the streamlined embedded Arti snapshot `29793cc3`.
   Embedded bootstrap, Tokio/Rustls/Ring, ordinary Tor and onion connections,
   directory/storage builders, and permission policy are retained. Applications
