@@ -12,6 +12,8 @@ and this library adheres to Rust's notion of
 ### Changed
 
 - Use backend and SQLite `0.1.0-rc9.6` for the Zakura backend.
+- The `lrz` backend requires the final upstream releases: `zcash_client_backend` 0.25.0,
+  `zcash_client_sqlite` 0.23.0, `zcash_keys` 0.17.0, `pczt` 0.10.0 and `zcash_primitives` 0.31.0.
 
 ## [0.1.0-rc9.5] - 2026-10-26
 

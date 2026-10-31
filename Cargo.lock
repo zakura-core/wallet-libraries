@@ -1152,6 +1152,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "daggy"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "804169db156b21258a2545757336922d93dfa229892c75911a0ad141aa0ff241"
+dependencies = [
+ "petgraph 0.8.3",
+]
+
+[[package]]
 name = "darling"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3411,9 +3420,9 @@ dependencies = [
 
 [[package]]
 name = "pczt"
-version = "0.10.0-pre.2"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "796c04aa6db999abe904c26a417a63b373e05457210d38f04a552d4eb6f99e54"
+checksum = "c6b48fdfdc5c6b58a00514f9b2504fae98f7cde9f741f3477264b411cd69134d"
 dependencies = [
  "blake2b_simd",
  "bls12_381",
@@ -4495,10 +4504,23 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e82960ac11ccabd77d53c933532612079e01205b5873ec5095f4b3426493434"
 dependencies = [
- "daggy",
+ "daggy 0.8.1",
  "indexmap 1.9.3",
  "log",
  "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
+name = "schemerz"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85a66556ccb695e22d08620703a9526806e533de0094fe993896932592ba3a6c"
+dependencies = [
+ "daggy 0.9.0",
+ "indexmap 2.14.2",
+ "log",
+ "thiserror 2.0.21",
  "uuid",
 ]
 
@@ -4509,7 +4531,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca6df8a13fb3b7914f94ac6579bd5e76b9292f135886e6becc3525f9e5116827"
 dependencies = [
  "rusqlite",
- "schemerz",
+ "schemerz 0.2.0",
+ "uuid",
+]
+
+[[package]]
+name = "schemerz-rusqlite"
+version = "0.371.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c29c257d3233449db8224f7f0fcf51373b59755aec356d8648dc694804132d60"
+dependencies = [
+ "rusqlite",
+ "schemerz 0.3.0",
  "uuid",
 ]
 
@@ -5120,7 +5153,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -7489,8 +7522,8 @@ dependencies = [
  "rand_distr",
  "regex",
  "rusqlite",
- "schemerz",
- "schemerz-rusqlite",
+ "schemerz 0.2.0",
+ "schemerz-rusqlite 0.370.0",
  "secp256k1 0.33.1",
  "secrecy",
  "serde",
@@ -8144,9 +8177,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_address"
-version = "0.14.0-pre.2"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9234c534431e406c7f8f59983d3f115234855ffb233f78f2ba3d2351f318cd7"
+checksum = "372023d82d978ab3f27b8e9f7f9b56fc61f3c9cc2b72ec2f8e3bbb278497e474"
 dependencies = [
  "bech32",
  "bs58",
@@ -8158,9 +8191,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_client_backend"
-version = "0.25.0-pre.2"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdac709d1ea4a80233c5ea0d42af7f3719ddea5391365b88f82c90018a45a43f"
+checksum = "27228f279facfd6b9dd015cea88538020c30f87c8a4aa59e8ed85808d81febb5"
 dependencies = [
  "base64 0.22.1",
  "bech32",
@@ -8206,9 +8239,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_client_sqlite"
-version = "0.23.0-pre.2"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee4f4fa77ee29dedbacc008bb55352a1b3103bfda422a91b3e93ad8ac31b0457"
+checksum = "d1d85c3c832c8554da6ed6114c81afef84f7dbb84c2279a3889277a8d2225019"
 dependencies = [
  "bitflags 2.13.2",
  "bs58",
@@ -8229,8 +8262,8 @@ dependencies = [
  "regex",
  "rusqlite",
  "sapling-crypto",
- "schemerz",
- "schemerz-rusqlite",
+ "schemerz 0.3.0",
+ "schemerz-rusqlite 0.371.0",
  "secrecy",
  "shardtree 0.8.0",
  "static_assertions",
@@ -8274,9 +8307,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_keys"
-version = "0.17.0-pre.2"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d5caff2ce11d394455aadae43b7a5d4f7e62d24d679d7576c351fc088be5dd4"
+checksum = "6e35ad8dafd173b0465e5963b520b241f497d978319faed46547bd81f403fa98"
 dependencies = [
  "bech32",
  "blake2b_simd",
@@ -8315,9 +8348,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_pool_migration"
-version = "0.2.0-pre.2"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b646e29ec9b72ad11368c608432f94e7b5020b2a69b47291cb09ad02339c95b"
+checksum = "5b5211aea88f920316150527eda23efe419b507d03c8dda9e655bfbf22bfa68d"
 dependencies = [
  "blake2b_simd",
  "corez",
@@ -8337,9 +8370,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_primitives"
-version = "0.31.0-pre.2"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f51d0187f228671d1a10bd7c0eee81e74a77d6b74e61c68acc409c0609ac970"
+checksum = "50ad9ffda3d83c35e401b2f914980762f201ab40525cb0aab67b8d91e180e7df"
 dependencies = [
  "blake2b_simd",
  "corez",
@@ -8365,9 +8398,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_protocol"
-version = "0.11.0-pre.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b92a9bf4c5aaac45d5d283c41e3649501e3c271bf0d5eb1f7604c9a89c4f5f52"
+checksum = "266da226b6be42545b9fc299f1def9f5e525764845b8afa874f167155de943ba"
 dependencies = [
  "corez",
  "document-features",
@@ -8404,9 +8437,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_transparent"
-version = "0.11.0-pre.2"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f97c4ba309c2bc4516a8c5696a481eb5fff5ee8c632c303098876920ce91ea9"
+checksum = "eb804d0179500e9543502dd6dfa178826617107897e6fe171241e5b767b7a0dd"
 dependencies = [
  "bip32",
  "bs58",
@@ -8561,9 +8594,9 @@ dependencies = [
 
 [[package]]
 name = "zip321"
-version = "0.10.0-pre.2"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23ccca94a64f403680d93bf07da09d17a6808c5181ae824e2d16630d3ead445d"
+checksum = "e6960586c9e1a91c734e9175913e22b88f2df11617f1decdefb15dd971ffd383"
 dependencies = [
  "base64 0.22.1",
  "nom",
