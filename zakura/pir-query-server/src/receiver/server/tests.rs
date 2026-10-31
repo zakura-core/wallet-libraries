@@ -172,16 +172,20 @@ fn served_sessions_form_a_publication() {
 
 #[test]
 fn native_scan_matches_previous_provider_fixtures() {
-    let fixtures: serde_json::Value =
-        serde_json::from_str(include_str!("../../../testdata/previous_provider_scans.json"))
-            .unwrap();
+    let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../testdata/previous_provider_scans.json"
+    ))
+    .unwrap();
     for rows in [DIRECTORY_ROWS as usize, 2 * DIRECTORY_ROWS as usize] {
         let data: Vec<u8> = (0..rows * COLS)
             .map(|i| (i as u8).wrapping_mul(157).wrapping_add(19))
             .collect();
         let database = Database::new(rows, &data).unwrap();
         let fixture = &fixtures[rows.to_string()];
-        assert_eq!(hex::encode(Sha256::digest(&database.values)), fixture["database"]);
+        assert_eq!(
+            hex::encode(Sha256::digest(&database.values)),
+            fixture["database"]
+        );
         for (index, query) in [
             vec![0; rows],
             vec![Q - 1; rows],
