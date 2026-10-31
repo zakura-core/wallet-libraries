@@ -63,6 +63,33 @@ def check_previous_endpoint(directory):
                     str(directory / "Cargo.toml")], check=True)
 
 
+def check_previous_provider(directory, *, emit_fixtures=False):
+    """Keep IPIR's independent setup/codec/scan oracles out of ordinary builds."""
+    (directory / "src").mkdir(parents=True)
+    manifest = (
+        '[package]\nname = "previous-provider-counterpart"\nversion = "0.0.0"\nedition = "2024"\n'
+        '[workspace]\nresolver = "2"\n[profile.test]\nopt-level = 3\n[dependencies]\n'
+        f'candidate_protocol = {{ package = "zakura-pir-protocol", path = {json.dumps(str(ROOT / "zakura/pir-protocol"))}, features = ["native", "enhance", "receiver", "transparent"] }}\n'
+        'ipir-sp = { git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2", version = "=0.1.0-rc.7" }\n'
+        'ipir-native-client = { git = "https://github.com/valargroup/ipir-sp", rev = "5ea080a3281a01c5459f585e0a1bbbde50ec2bd2", version = "=0.1.0-rc.1" }\n'
+        'hex = "0.4"\nserde_json = "1"\nsha2 = "0.10"\n'
+    )
+    (directory / "Cargo.toml").write_text(manifest)
+    files = {
+        "main.rs": "scripts/probes/previous_provider.rs",
+        "reference_bits.rs": "zakura/pir-client/tests/support/reference_bits.rs",
+        "metadata.json": "zakura/pir-protocol/testdata/previous_provider_metadata.json",
+        "receiver_scans.json": "zakura/pir-query-server/testdata/previous_provider_scans.json",
+    }
+    for target, source in files.items():
+        (directory / "src" / target).write_text((ROOT / source).read_text())
+    command = ["cargo", "run", "--profile", "test", "--quiet", "--manifest-path",
+               str(directory / "Cargo.toml")]
+    if emit_fixtures:
+        return subprocess.check_output(command + ["--", "--emit-fixtures"], text=True)
+    subprocess.run(command, check=True)
+
+
 def check_previous_native(directory):
     """Cross both directions with pinned pre-packaging code, independently of workspace features."""
     directory.mkdir()
@@ -85,6 +112,11 @@ def check_previous_native(directory):
 
 
 def main():
+    legacy_helpers = {"ipir-sp", "ipir-native-client", "simplepir-kernel"}
+    workspace_lock = tomllib.loads((ROOT / "Cargo.lock").read_text())
+    retained = legacy_helpers & {package["name"] for package in workspace_lock["package"]}
+    if retained:
+        raise RuntimeError(f"verification-only providers in workspace lockfile: {sorted(retained)}")
     # Check both feature-off libraries and real consumer capabilities. The
     # proving consumer also ensures the real fixture remains available.
     pczt_macros = {"serde_with_macros", "darling", "darling_core", "darling_macro", "ident_case", "strsim"}
@@ -202,6 +234,7 @@ def main():
             receipt[name] = graph
             print(f"{name}: {len(graph) - 1} dependency packages; boundary passed", flush=True)
         check_previous_endpoint(Path(temporary) / "previous-endpoint-counterpart")
+        check_previous_provider(Path(temporary) / "previous-provider-counterpart")
         check_previous_native(Path(temporary) / "frozen-native-counterpart")
     output = Path(os.environ["CARGO_TARGET_DIR"]) / "dependency-graphs.json"
     output.write_text(json.dumps(receipt, indent=2) + "\n")

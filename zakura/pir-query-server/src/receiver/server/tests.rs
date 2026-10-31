@@ -171,33 +171,37 @@ fn served_sessions_form_a_publication() {
 }
 
 #[test]
-fn native_scan_matches_previous_evaluator() {
-    use ipir_sp::{SimplePirProfile, server::IPIRServer};
+fn native_scan_matches_previous_provider_fixtures() {
+    let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../testdata/previous_provider_scans.json"
+    ))
+    .unwrap();
     for rows in [DIRECTORY_ROWS as usize, 2 * DIRECTORY_ROWS as usize] {
         let data: Vec<u8> = (0..rows * COLS)
             .map(|i| (i as u8).wrapping_mul(157).wrapping_add(19))
             .collect();
         let database = Database::new(rows, &data).unwrap();
-        let (_, params) = ipir_sp::params_for_simplepir_profile(
-            rows as u64,
-            (ROW_BYTES * 16) as u64,
-            SimplePirProfile::P16Q48,
-        )
-        .unwrap();
-        let previous = IPIRServer::<u8>::new(params, data.iter().copied(), false, false);
-        assert_eq!(database.values, previous.db());
-        for query in [
+        let fixture = &fixtures[rows.to_string()];
+        assert_eq!(
+            hex::encode(Sha256::digest(&database.values)),
+            fixture["database"]
+        );
+        for (index, query) in [
             vec![0; rows],
             vec![Q - 1; rows],
             (0..rows)
                 .map(|i| (i as u64).wrapping_mul(Q / 3) & (Q - 1))
                 .collect(),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let actual = database.multiply(&query).unwrap();
-            assert_eq!(
-                actual,
-                previous.try_multiply_power_of_two(Q, &query).unwrap()
-            );
+            let mut hash = Sha256::new();
+            for value in &actual {
+                hash.update(value.to_le_bytes());
+            }
+            assert_eq!(hex::encode(hash.finalize()), fixture["scans"][index]);
             for col in [0, COLS / 2, COLS - 1] {
                 let exact: u128 = (0..rows)
                     .map(|row| u128::from(data[row * COLS + col]) * u128::from(query[row]))
