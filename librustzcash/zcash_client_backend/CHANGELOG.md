@@ -7,6 +7,8 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9.6] - 2026-10-30
+
 ### Added
 
 - `data_api::WalletWrite::get_addresses_for_index_range`: generates, persists and marks as exposed the addresses at every diversifier index in a range, equivalent to `get_address_for_index` per index. The default implementation does exactly that; a store can override it to pay the per-call costs once for the range.
