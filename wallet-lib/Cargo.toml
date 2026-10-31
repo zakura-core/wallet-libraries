@@ -2,10 +2,7 @@
 name = "zakura-wallet-lib"
 version = "0.1.0-rc9.6"
 authors = ["Zakura developers"]
-description = """
-Selects either the upstream librustzcash wallet stack or its Zakura forks, so
-one source tree can build against both.
-"""
+description = "The Zakura wallet stack under stable import names."
 edition.workspace = true
 rust-version.workspace = true
 license = "MIT OR Apache-2.0"
@@ -17,23 +14,8 @@ keywords = ["zcash", "zakura"]
 [lib]
 name = "zakura_wallet_lib"
 
-# Exactly one backend is active at a time, so each family is optional and
-# enabled by its own feature. Cargo features are additive and cannot express
-# "enable this when that is off", which is why the upstream family needs a
-# named feature rather than being the implicit `not(zakura)` case.
-#
-# Every key is renamed explicitly, so the extern name a re-export refers to is
-# the key itself, not the library target name — which is deliberately identical
-# across both families.
+# Dependency keys preserve the import names used by facade consumers.
 [dependencies]
-
-# -- upstream (crates.io), pinned to the release this repository forks --------
-lrz-client-backend = { package = "zcash_client_backend", version = "0.25.0", default-features = false, optional = true }
-lrz-client-sqlite = { package = "zcash_client_sqlite", version = "0.23.0", default-features = false, optional = true }
-lrz-keys = { package = "zcash_keys", version = "0.17.0", default-features = false, optional = true }
-lrz-orchard = { package = "orchard", version = "0.16", optional = true }
-lrz-pczt = { package = "pczt", version = "0.10.0", optional = true }
-lrz-primitives = { package = "zcash_primitives", version = "0.31.0", default-features = false, optional = true }
 
 # -- Zakura: the default stack, under the upstream names consumers expect ----
 zcash-client-backend = { package = "zakura-client-backend", path = "../librustzcash/zcash_client_backend", version = "0.1.0-rc9.6", default-features = false, optional = true }
@@ -74,27 +56,6 @@ zakura-proofs-pin = { package = "zakura-proofs", version = "4.0.0", default-feat
 
 [features]
 default = ["zakura"]
-
-## Complete upstream librustzcash capability set required by zcash_voting.
-lrz = [
-    "dep:lrz-client-backend",
-    "dep:lrz-client-sqlite",
-    "dep:lrz-keys",
-    "dep:lrz-orchard",
-    "dep:lrz-pczt",
-    "dep:lrz-primitives",
-    "lrz-client-backend/orchard",
-    "lrz-client-backend/lightwalletd-tonic",
-    "lrz-client-backend/lightwalletd-tonic-tls-webpki-roots",
-    "lrz-client-sqlite/orchard",
-    "lrz-keys/orchard",
-    "lrz-orchard/circuit",
-    "lrz-orchard/unstable-voting-circuits",
-    "lrz-pczt/orchard",
-    "lrz-pczt/io-finalizer",
-    "lrz-pczt/signer",
-    "lrz-pczt/zcp-builder",
-]
 
 ## Complete Zakura capability set required by zcash_voting. This is the default.
 zakura = [
