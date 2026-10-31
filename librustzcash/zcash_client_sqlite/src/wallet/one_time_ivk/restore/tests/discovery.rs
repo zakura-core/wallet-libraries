@@ -700,6 +700,17 @@ fn delayed_window_expansion_checks_history_after_the_filter_frontier() {
         (work.from, work.through),
         (publication.start_height, publication.end.height)
     );
+    // An older publication, short of I4's payment, doesn't lower that target: filters
+    // already passed the payment without I4 watched, so I4 waits.
+    let older = publication_at(&st, publication.end.height - 1);
+    let db = st.wallet_mut().db_mut();
+    assert!(db.begin_one_time_recovery(account, older, false).unwrap());
+    let state = db
+        .one_time_recovery(account, clock_now(), Some(older.end.height))
+        .unwrap();
+    assert!(state.lookups.iter().all(|w| w.work.key != key4));
+    assert!(state.waits_for_publication);
+    assert_eq!(work_of(&st, key4).through, publication.end.height);
     drain(&mut st, account, publication);
     assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
     let next = st

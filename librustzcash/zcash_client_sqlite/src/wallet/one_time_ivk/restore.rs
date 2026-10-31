@@ -65,6 +65,13 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// the publication's end. The marker moves to the highest block at or below both that
     /// end and the wallet's fully scanned block, and stays put when there is none, so the
     /// round asks again after more sync. A repeat payment to a paid key is found either way.
+    ///
+    /// The first publication an account accepts, before any marker, seed walk or history
+    /// check, runs that complete check even without `complete` when the account's untouched
+    /// receive bootstraps were queued past the publication's end and the marker can be
+    /// placed. Those lookups then read only through that end, and filters from the marker
+    /// cover the blocks after it, so the account's first receive address doesn't wait for
+    /// the publication to reach the wallet's tip. Every other target is kept.
     pub fn begin_one_time_recovery(
         &mut self,
         account: AccountUuid,

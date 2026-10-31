@@ -30,6 +30,11 @@ and this library adheres to Rust's notion of
   from a transparent UTXO query, avoiding a scan of the whole transactions table.
 - Storing a received transparent output no longer scans `transparent_spend_map`
   to learn whether a wallet transaction already spends it.
+- An account's first `begin_one_time_recovery` reads its untouched receive
+  bootstrap lookups only through the publication's end and places the filter
+  marker there, even without `complete`. Turning one-time recovery on no longer
+  makes the first receive address wait for the Receiver publication to reach
+  the wallet's tip. Every other lookup target is unchanged.
 
 ## [0.1.0-rc9.6] - 2026-10-30
 
