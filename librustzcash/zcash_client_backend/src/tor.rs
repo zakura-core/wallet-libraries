@@ -1,6 +1,6 @@
 //! Tor support for Zcash wallets.
 
-use std::{fmt, io, path::Path, time::Duration};
+use std::{fmt, io, path::Path, sync::Arc, time::Duration};
 
 use arti_client::{TorClient, config::TorClientConfigBuilder};
 use tor_rtcompat::PreferredRuntime;
@@ -102,7 +102,7 @@ impl Timeouts {
 /// A Tor client that exposes capabilities designed for Zcash wallets.
 #[derive(Clone)]
 pub struct Client {
-    inner: TorClient<PreferredRuntime>,
+    inner: Arc<TorClient<PreferredRuntime>>,
     timeouts: Timeouts,
 }
 
