@@ -195,7 +195,7 @@ def main():
         ("status-lightwalletd", "zakura/pir-client", ["lightwalletd"], server_roles | {"httpdate"}, {"zakura-client-backend", "tonic", "tokio"}),
         ("receiver-evaluator", "zakura/pir-query-server", ["receiver"], wallet_roles | native_evaluators | {"zakura-pir-publisher", "zakura-server-chain", "sha1"}, {"reinspiring", "rayon"}),
         ("filter", "zakura/pir-protocol", ["transparent"], bitcoin_helpers | {"secp256k1", "secp256k1-sys", "zakura-protocol", "zakura-transparent"} | server_roles, {"zakura-filters", "siphasher"}),
-        ("filter-cli", "zakura/pir-client", ["cli"], {"anstream", "anstyle-parse", "colorchoice"}, {"clap"}),
+        ("filter-cli", "zakura/pir-client", ["cli"], {"clap", "clap_builder", "clap_derive", "clap_lex", "anstyle", "anstream", "anstyle-parse", "colorchoice"}, {"zakura-pir-publisher"}),
         ("filters", "zakura/filters", [], bitcoin_helpers | {"secp256k1", "secp256k1-sys"}, {"siphasher"}),
         ("receiver-formats", "zakura/pir-protocol", ["receiver"], bitcoin_helpers | {"secp256k1", "secp256k1-sys"} | server_roles | wallet_roles, {"zakura-filters", "siphasher"}),
         ("receiver-wallet", "zakura/pir-client", ["receiver-wallet"], {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"} | native_evaluators | server_roles, {"zakura-filters", "reinspiring"}),
@@ -228,6 +228,15 @@ def main():
             missing = required - names
             if unexpected or missing:
                 raise RuntimeError(f"{name}: unexpected {sorted(unexpected)}; missing {sorted(missing)}")
+            if name == "filter-cli":
+                # Exercise the retained binary's ordinary argument tests; a
+                # library-only graph does not compile command-line targets.
+                subprocess.run(
+                    ["cargo", "test", "--locked", "--manifest-path",
+                     str(ROOT / "zakura/pir-client/Cargo.toml"),
+                     "--no-default-features", "--features", "cli",
+                     "--bin", "transparent-filter-cli"], check=True,
+                )
             if name == "recovery":
                 # Build and execute actual recovery APIs outside workspace feature unification.
                 example = ROOT / "zakura/pir-client/examples/transparent/recovery-without-backend.rs"
