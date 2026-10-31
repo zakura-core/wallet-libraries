@@ -9,7 +9,7 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
-- The `tor` feature pins the streamlined embedded Arti snapshot `e5193a0b`.
+- The `tor` feature pins the streamlined embedded Arti snapshot `29793cc3`.
   Embedded bootstrap, Tokio/Rustls/Ring, ordinary Tor and onion connections,
   directory/storage builders, and permission policy are retained. Applications
   using restricted onion services with persistent authentication keys must
