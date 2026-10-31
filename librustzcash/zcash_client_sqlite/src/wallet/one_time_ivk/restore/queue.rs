@@ -545,6 +545,8 @@ fn accepts<P: Parameters>(
 /// from its last PIR check through the publication's end (see [`enqueue`]), and moves the
 /// account's marker up to that end, capped at the wallet's fully scanned block (see
 /// [`complete_marker`]). A newer correction generation reads every monitored key once.
+/// An account's first accepted publication can run it without `complete` (see
+/// [`first_bootstraps`]).
 pub(crate) fn begin<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -563,6 +565,13 @@ pub(crate) fn begin<P: Parameters>(
     {
         return Ok(false);
     }
+    // Read before a correction clears the marker, which a first recovery never had.
+    let first: bool = conn.query_row(
+        "SELECT restore_height IS NULL AND filter_height IS NULL AND manual_end IS NULL
+         FROM ironwood_one_time_recovery WHERE account_id = ?1",
+        [owner.0],
+        |r| r.get(0),
+    )?;
     // This client captured the publication, so the service speaks a format it supports.
     conn.execute(
         "UPDATE ironwood_one_time_recovery SET upgrade_required = 0 WHERE account_id = ?1",
@@ -579,7 +588,10 @@ pub(crate) fn begin<P: Parameters>(
         WHERE account_id = ?1",
         params![owner.0, height],
     )?;
-    if complete {
+    let first = first
+        && complete_marker(conn, height)?.is_some()
+        && first_bootstraps(conn, owner.0, height)?;
+    if complete || first {
         // Advancing the marker can age refund keys out of monitoring.
         fencing_monitoring(conn, params, &[owner.0], || {
             for key in monitored_keys(conn, params, owner.0)? {
@@ -623,6 +635,44 @@ fn complete_marker(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?)
+}
+
+/// Lowers to `end`, a first publication's end, the target of each of `owner`'s untouched
+/// receive bootstraps, and returns whether any changed, advancing the generation so work
+/// captured against the old target does not commit. The caller then runs a complete check,
+/// whose marker at or below `end` makes filters, which watch these keys, cover the blocks
+/// after it, so a fresh account's first address doesn't wait for the publication to reach
+/// the wallet's tip. Only a monitored receive key with no reservation, operation, receipt
+/// or candidate qualifies, whose lookup is purely automatic with no progress. Any other
+/// obligation, such as history a hit, correction or rewind invalidated, a manual check, a
+/// refund or an index exposed after the marker, keeps its target.
+fn first_bootstraps(conn: &Connection, owner: i64, end: u32) -> Result<bool, SqliteClientError> {
+    let lowered = conn.execute(
+        &format!(
+            "UPDATE ironwood_one_time_lookups SET target_height = ?2
+        WHERE target_height > ?2 AND reasons = {AUTOMATIC} AND read_complete = 0
+            AND done_height IS NULL AND checked_height IS NULL AND inventory IS NULL
+            AND one_time_key_id IN (SELECT k.id FROM ironwood_one_time_keys k
+                WHERE k.account_id = ?1 AND k.purpose = 1 AND k.used = 0
+                AND k.reserved_at IS NULL AND k.key_index < (SELECT receive_end
+                    FROM ironwood_one_time_recovery WHERE account_id = ?1)
+                AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o
+                    WHERE o.one_time_key_id = k.id)
+                AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n
+                    WHERE n.one_time_key_id = k.id)
+                AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
+                    WHERE p.one_time_key_id = k.id))"
+        ),
+        params![owner, end],
+    )?;
+    if lowered > 0 {
+        conn.execute(
+            "UPDATE ironwood_one_time_recovery SET generation = generation + 1
+             WHERE account_id = ?1",
+            [owner],
+        )?;
+    }
+    Ok(lowered > 0)
 }
 
 /// Applies an indexing correction to `revision`. A correction can replace payments without
@@ -1671,6 +1721,35 @@ pub(crate) fn reset<P: Parameters>(
         r.get(0)
     })?;
     correct(conn, params, owner.0, current.history_revision, height)
+}
+
+/// Starts a history check of `account` that reads every watched address again from its
+/// history start, after voiding its history results (see [`reset`]), or resumes an
+/// unfinished one, which voided them when it started, with the history it has kept since.
+pub(crate) fn recheck<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    account: AccountUuid,
+    publication: RecoveryPublication,
+) -> Result<bool, SqliteClientError> {
+    let unfinished = match one_time_account(conn, params, account)? {
+        Some(owner) => conn
+            .query_row(
+                &format!(
+                    "SELECT {MANUAL_UNFINISHED} FROM ironwood_one_time_recovery
+                     WHERE account_id = ?1"
+                ),
+                [owner.0],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false),
+        None => false,
+    };
+    if !unfinished {
+        reset(conn, params, account)?;
+    }
+    manual(conn, params, account, publication, None)
 }
 
 /// Backs off a failed request without counting it as an empty or completed history.

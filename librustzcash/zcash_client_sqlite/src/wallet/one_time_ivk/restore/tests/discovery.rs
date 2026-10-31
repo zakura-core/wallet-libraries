@@ -700,12 +700,23 @@ fn delayed_window_expansion_checks_history_after_the_filter_frontier() {
         (work.from, work.through),
         (publication.start_height, publication.end.height)
     );
+    // An older publication, short of I4's payment, doesn't lower that target: filters
+    // already passed the payment without I4 watched, so I4 waits.
+    let older = publication_at(&st, publication.end.height - 1);
+    let db = st.wallet_mut().db_mut();
+    assert!(db.begin_one_time_recovery(account, older, false).unwrap());
+    let state = db
+        .one_time_recovery(account, clock_now(), Some(older.end.height))
+        .unwrap();
+    assert!(state.lookups.iter().all(|w| w.work.key != key4));
+    assert!(state.waits_for_publication);
+    assert_eq!(work_of(&st, key4).through, publication.end.height);
     drain(&mut st, account, publication);
     assert_eq!(one_time_notes(&st), [(100_000, false), (100_000, false)]);
     let next = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, clock_now())
+        .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
         .unwrap()
         .unwrap();
     assert_eq!(next.key_id().index(), 1);
@@ -1014,7 +1025,7 @@ fn orphaned_receipts_do_not_permanently_exhaust_the_receive_window() {
     let next = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, clock_now())
+        .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
         .unwrap()
         .unwrap();
     assert_eq!(next.key_id().index(), 0);
@@ -3236,7 +3247,7 @@ fn a_cancelled_search_stops_an_invalidated_manual_only_lookup() {
     let reserved = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, now)
+        .prepare_receive_reservation(account, now, NO_LIVE_TIP)
         .unwrap()
         .unwrap();
     assert_eq!(reserved.key_id().index(), 0);
@@ -3255,7 +3266,7 @@ fn a_cancelled_search_stops_an_invalidated_manual_only_lookup() {
         matches!(
             st.wallet_mut()
                 .db_mut()
-                .prepare_receive_reservation(account, now)
+                .prepare_receive_reservation(account, now, NO_LIVE_TIP)
                 .unwrap(),
             Err(crate::wallet::one_time_ivk::swap::ReservationPolicy::ReceiveHistory)
         ),
@@ -3265,7 +3276,7 @@ fn a_cancelled_search_stops_an_invalidated_manual_only_lookup() {
     assert_eq!(
         st.wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, now)
+            .prepare_receive_reservation(account, now, NO_LIVE_TIP)
             .unwrap()
             .unwrap()
             .key_id()
@@ -4631,7 +4642,7 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
         let _ = db.defer_one_time_lookup(account, &work, clock_now());
         let _ = db.record_one_time_lookup(account, &work, &page, clock_now());
         let issued = [
-            db.prepare_receive_reservation(account, clock_now())
+            db.prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
                 .map(|r| r.map(drop)),
             db.reserve_refund_key(account, anchor.height)
                 .map(|r| r.map(drop)),
@@ -4680,7 +4691,7 @@ fn a_never_enabled_account_reads_as_disabled_without_state() {
             .enabled
     );
     assert_ne!(
-        db.prepare_receive_reservation(account, clock_now())
+        db.prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
             .unwrap()
             .map(drop),
         Err(ReservationPolicy::Disabled)
@@ -4734,14 +4745,14 @@ fn a_batch_history_check_starts_all_jobs_or_none() {
     };
     let db = st.wallet_mut().db_mut();
     let refused = db
-        .check_one_time_history_for(&[account, other], publication)
+        .recheck_one_time_history_for(&[account, other], publication)
         .unwrap();
     assert_eq!(refused, Some(other));
     assert!(!active(&st, account) && !active(&st, other));
     let db = st.wallet_mut().db_mut();
     db.enable_one_time_recovery(other).unwrap();
     assert_eq!(
-        db.check_one_time_history_for(&[account, other], publication)
+        db.recheck_one_time_history_for(&[account, other], publication)
             .unwrap(),
         None
     );

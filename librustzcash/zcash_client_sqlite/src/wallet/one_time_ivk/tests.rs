@@ -91,6 +91,10 @@ pub(super) fn restored_wallet() -> State {
     st
 }
 
+/// A live tip no newer than the saved chain tip, so receive issuance checks the marker
+/// against the tip sync saved.
+pub(super) const NO_LIVE_TIP: BlockHeight = BlockHeight::from_u32(0);
+
 pub(super) fn start() -> BlockHeight {
     BlockHeight::from_u32(100)
 }

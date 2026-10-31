@@ -65,6 +65,13 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// the publication's end. The marker moves to the highest block at or below both that
     /// end and the wallet's fully scanned block, and stays put when there is none, so the
     /// round asks again after more sync. A repeat payment to a paid key is found either way.
+    ///
+    /// The first publication an account accepts, before any marker, seed walk or history
+    /// check, runs that complete check even without `complete` when the account's untouched
+    /// receive bootstraps were queued past the publication's end and the marker can be
+    /// placed. Those lookups then read only through that end, and filters from the marker
+    /// cover the blocks after it, so the account's first receive address doesn't wait for
+    /// the publication to reach the wallet's tip. Every other target is kept.
     pub fn begin_one_time_recovery(
         &mut self,
         account: AccountUuid,
@@ -171,17 +178,21 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     }
 
     /// Starts or resumes the history check of every account in `accounts` through one
-    /// captured publication, each up to its automatic receive end, in one transaction. If
-    /// any account refuses, as one not enabled or one whose chain no longer holds the
-    /// publication's end does, none start: this returns that account, and nothing changes.
-    pub fn check_one_time_history_for(
+    /// captured publication, each up to its automatic receive end, in one transaction. A
+    /// new check first forgets the account's history results, as
+    /// [`Self::reset_one_time_history`] does, so it reads every watched address again from
+    /// its history start rather than trusting earlier answers. An unfinished check resumes
+    /// with the history it kept. If any account refuses, as one not enabled or one whose
+    /// chain no longer holds the publication's end does, none start and nothing is reset:
+    /// this returns that account, and nothing changes.
+    pub fn recheck_one_time_history_for(
         &mut self,
         accounts: &[AccountUuid],
         publication: RecoveryPublication,
     ) -> Result<Option<AccountUuid>, SqliteClientError> {
         let started = self.transactionally(|db| {
             for account in accounts {
-                if !queue::manual(db.conn.0, db.params, *account, publication, None)
+                if !queue::recheck(db.conn.0, db.params, *account, publication)
                     .map_err(Batch::Failed)?
                 {
                     return Err(Batch::Refused(*account));
