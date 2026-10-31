@@ -112,7 +112,7 @@ def main():
         ("pczt", "librustzcash/pczt", [], pczt_macros, {"serde_with"}),
         ("pir", "zakura/pir-client", ["native"], native_evaluators | server_roles | {"sha1"}, {"reinspiring"}),
         ("status-policy", "zakura/pir-client", ["status"], recovery_forbidden | server_roles | native_evaluators | {"tonic", "tonic-prost", "tokio", "hyper", "hyper-util", "h2"}, {"zakura-protocol"}),
-        ("status-lightwalletd", "zakura/pir-client", ["lightwalletd"], server_roles, {"zakura-client-backend", "tonic", "tokio"}),
+        ("status-lightwalletd", "zakura/pir-client", ["lightwalletd"], server_roles | {"httpdate"}, {"zakura-client-backend", "tonic", "tokio"}),
         ("receiver-evaluator", "zakura/pir-query-server", ["receiver"], wallet_roles | native_evaluators | {"zakura-pir-publisher", "zakura-server-chain", "sha1"}, {"reinspiring", "rayon"}),
         ("filter", "zakura/pir-protocol", ["transparent"], {"bitcoin", "secp256k1", "secp256k1-sys", "zakura-protocol", "zakura-transparent"} | server_roles, {"bitcoin_hashes"}),
         ("filter-cli", "zakura/pir-client", ["cli"], {"anstream", "anstyle-parse", "colorchoice"}, {"clap"}),
