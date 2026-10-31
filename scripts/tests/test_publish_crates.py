@@ -128,11 +128,9 @@ class PublishingTests(unittest.TestCase):
             if isinstance(dependency, dict)
             and dependency.get("git") == "https://github.com/zakura-core/common.git"
         })
-        self.assertEqual(upstream, sorted(common_prerequisites + [
-            ("ipir-native-client", "0.1.0-rc.1"),
-            ("ipir-sp", "0.1.0-rc.7"),
-            ("reinspiring", "0.1.3-rc.1"),
-        ]))
+        # The IPIR family now uses published registry dependencies, so it no
+        # longer adds prerequisites for development-only Git dependencies.
+        self.assertEqual(upstream, common_prerequisites)
 
     def test_wallet_pir_packages_are_refused_under_any_source(self):
         declarations = (
