@@ -7,6 +7,24 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- The embedded Tor configuration no longer implicitly enables an unused
+  persistent onion-key store. Ordinary Tor and onion connections are retained.
+  Applications using restricted onion services with keys in that store must
+  explicitly enable `keymgr` on the same Arti package and source revision.
+
+- The `tor` feature uses Zakura's embedded Arti 0.47 fork. The `DormantMode`
+  re-export, `Error::Tor` payload and its `From` conversion now use
+  `zakura-arti-client` types. The permission-builder closures accepted by
+  `Client::{create, create_with_timeouts}` use `zakura-fs-mistrust` 0.16 types.
+  Callers that explicitly name these dependency types must use the same fork
+  family; inferred permission-builder closures retain their existing syntax.
+- Embedded Tor directory downloads use `deflate` or `identity` encoding instead
+  of optional XZ/Zstandard compression, avoiding the native codec dependencies.
+  Downloads may be larger; embedded Tor and onion-service connections remain
+  supported.
+
 ## [0.1.0-rc9.6] - 2026-10-30
 
 ### Added

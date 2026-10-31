@@ -13,7 +13,8 @@ Four rules are applied to `[workspace.dependencies]`:
 
 1. a dependency named in the manifest's `[rewire]` table is redirected at the
    configured Zakura fork, version, and features, keeping the upstream key so
-   crate sources are unchanged (`orchard = { package = "zakura-orchard", ... }`);
+   crate sources are unchanged (`orchard = { package = "zakura-orchard", ... }`).
+   Optional `remove_features` entries omit inherited feature bundles;
 2. a path dependency on a crate this repository vendors keeps its path,
    rewritten into the vendored directory, gains the crate's published name,
    and takes the Zakura `version` from `[[crate]]` rather than upstream's;
@@ -146,9 +147,14 @@ def main(argv: list[str]) -> int:
             for target_field in ("version", "package", "git", "rev"):
                 if target_field in target:
                     fields[target_field] = f'"{target[target_field]}"'
-            if "features" in target:
+            if "features" in target or "remove_features" in target:
                 existing = re.findall(r'"([^"]+)"', fields.get("features", "[]"))
-                features = list(dict.fromkeys(existing + target["features"]))
+                removed = set(target.get("remove_features", []))
+                features = [
+                    feature
+                    for feature in dict.fromkeys(existing + target.get("features", []))
+                    if feature not in removed
+                ]
                 fields["features"] = "[" + ", ".join(f'"{feature}"' for feature in features) + "]"
         elif "path" in fields:
             if package in vendored:
