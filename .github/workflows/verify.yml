@@ -141,7 +141,7 @@ jobs:
       - run: git diff --exit-code
 
   tests:
-    if: always()
+    if: ${{ always() && !cancelled() }}
     needs: [prepare, lightweight, repository-checks, test-configurations, protobuf]
     runs-on: ubuntu-latest
     timeout-minutes: 5
