@@ -1,4 +1,7 @@
 //! Tor support for Zcash wallets.
+//!
+//! Enable `tor-client` for the client and generic HTTP APIs. The `tor` feature
+//! also includes cryptocurrency exchange-rate helpers.
 
 use std::{fmt, io, path::Path, time::Duration};
 

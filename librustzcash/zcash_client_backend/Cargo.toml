@@ -251,22 +251,28 @@ sync-decryptor = [
 ## Exposes a Tor client for hiding a wallet's IP address while performing certain wallet
 ## operations.
 tor = [
+    "tor-client",
+    "dep:dynosaur",
+    "dep:rust_decimal",
+    "dep:trait-variant",
+]
+
+## Exposes the Tor client and generic HTTP APIs without exchange-rate helpers.
+## The `tor` feature additionally includes cryptocurrency exchange-rate queries.
+tor-client = [
     "dep:arti-client",
     "arti-client/onion-service-client",
-    "dep:dynosaur",
     "dep:fs-mistrust",
     "dep:futures-util",
     "dep:http-body-util",
     "dep:hyper",
     "dep:hyper-util",
-    "dep:rust_decimal",
     "dep:serde",
     "dep:serde_json",
     "dep:tokio",
     "tokio?/time",
     "dep:tokio-rustls",
     "dep:tor-rtcompat",
-    "dep:trait-variant",
     "dep:tower",
     "dep:webpki-roots",
 ]
