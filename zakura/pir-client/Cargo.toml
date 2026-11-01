@@ -82,6 +82,7 @@ recovery = [
     "dep:transparent",
     "dep:same-file",
     "dep:rustix",
+    "dep:rand_10",
 ]
 wallet = ["dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol"]
 transparent-wallet = ["wallet", "recovery", "zcash_client_backend/transparent-inputs"]
@@ -194,6 +195,11 @@ required-features = ["transparent"]
 name = "transparent_private_recovery"
 path = "tests/transparent/private_recovery.rs"
 required-features = ["transparent", "sqlite", "testing", "reqwest"]
+
+[[test]]
+name = "transparent_page_cover"
+path = "tests/transparent/page_cover.rs"
+required-features = ["recovery", "testing"]
 
 [[test]]
 name = "transparent_private_discovery"
