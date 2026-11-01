@@ -6348,6 +6348,7 @@ dependencies = [
  "zakura-sapling-crypto",
  "zakura-sinsemilla",
  "zakura-transparent",
+ "zakura-zcash-script",
  "zakura-zip321",
  "zcash_client_backend",
  "zcash_client_sqlite",
