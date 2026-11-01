@@ -72,6 +72,8 @@ zakura-zip321-pin = { package = "zakura-zip321", version = "=5.0.0", git = "http
 
 zakura-proofs-pin = { package = "zakura-proofs", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df", default-features = false, optional = true }
 
+zakura-zcash-script-pin = { package = "zakura-zcash-script", version = "=0.0.1", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df", default-features = false, optional = true }
+
 [features]
 default = ["zakura"]
 
@@ -107,6 +109,7 @@ zakura = [
     "dep:zakura-address-pin",
     "dep:zakura-protocol-pin",
     "dep:zakura-transparent-pin",
+    "dep:zakura-zcash-script-pin",
     "dep:zakura-equihash-pin",
     "dep:zakura-zip321-pin",
     "dep:zakura-proofs-pin",
