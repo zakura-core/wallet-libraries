@@ -26,7 +26,7 @@ blake2b_simd = { version = "1", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 # The wire reader uses protocol APIs available since RC1. Keep it consumable by
 # services pinned to that protocol family while allowing current Common releases.
-zcash_protocol = { package = "zakura-protocol", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df", default-features = false }
+zcash_protocol = { package = "zakura-protocol", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df", default-features = false }
 
 # The existing typed decoder is the differential oracle. It is only a test
 # dependency, so it never enters a normal consumer's dependency graph.

@@ -81,22 +81,22 @@ version = "0.1.0-rc9.6"
 # The upstream dependency key is kept, so crate sources continue to say
 # `orchard::` and `zcash_primitives::` while resolving to the forks.
 [rewire]
-zcash_script = { package = "zakura-zcash-script", version = "0.0.1", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
-bellman = { package = "zakura-bellman", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
-bls12_381 = { package = "zakura-bls12-381", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
-jubjub = { package = "zakura-jubjub", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
-zcash_address = { package = "zakura-address", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
-zcash_protocol = { package = "zakura-protocol", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
-transparent = { package = "zakura-transparent", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
-zip321 = { package = "zakura-zip321", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
-zcash_note_encryption = { package = "zakura-note-encryption", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
-zcash_primitives = { package = "zakura-primitives", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
-zcash_keys = { package = "zakura-keys", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
-zcash_proofs = { package = "zakura-proofs", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
-orchard = { features = ["backend-halo2"], package = "zakura-orchard", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
-sapling = { package = "zakura-sapling-crypto", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
-redjubjub = { package = "zakura-redjubjub", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
-pasta_curves = { package = "zakura-pasta-curves", version = "5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+zcash_script = { package = "zakura-zcash-script", version = "=0.0.1", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+bellman = { package = "zakura-bellman", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+bls12_381 = { package = "zakura-bls12-381", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+jubjub = { package = "zakura-jubjub", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+zcash_address = { package = "zakura-address", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+zcash_protocol = { package = "zakura-protocol", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+transparent = { package = "zakura-transparent", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+zip321 = { package = "zakura-zip321", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+zcash_note_encryption = { package = "zakura-note-encryption", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+zcash_primitives = { package = "zakura-primitives", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+zcash_keys = { package = "zakura-keys", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+zcash_proofs = { package = "zakura-proofs", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+orchard = { features = ["backend-halo2"], package = "zakura-orchard", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+sapling = { package = "zakura-sapling-crypto", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+redjubjub = { package = "zakura-redjubjub", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
+pasta_curves = { package = "zakura-pasta-curves", version = "=5.0.0", git = "https://github.com/zakura-core/common.git", rev = "26fb46d9110092f07cc682f16d4678b01fb915df" }
 
 # Keep the embedded Tor client, filesystem policy and runtime on one fork revision.
 # Disabling the optional directory codecs retains deflate and identity support.
