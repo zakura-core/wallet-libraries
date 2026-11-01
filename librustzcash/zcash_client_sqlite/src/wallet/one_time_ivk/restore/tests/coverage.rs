@@ -1122,8 +1122,8 @@ fn a_reset_before_the_first_publication_keeps_its_obligations() {
 /// Issuance checks the marker against the newer of the caller's live tip and the saved
 /// tip. With the saved tip and the marker at the same block and the live tip 100 blocks
 /// past both, as at saved 1,900, marker 1,900 and live 2,000, a new address waits, since
-/// those 100 blocks were never read through filters. A live draft isn't a new address, so
-/// it is quoted again.
+/// those 100 blocks were never read through filters. A live draft waits too, since another
+/// device may have paid it in those blocks, and is quoted again once filters reach them.
 #[test]
 fn receive_hand_out_checks_the_marker_against_the_live_tip() {
     let mut st = scanned_wallet();
@@ -1145,7 +1145,53 @@ fn receive_hand_out_checks_the_marker_against_the_live_tip() {
         Err(ReservationPolicy::ReceiveHistory)
     );
     assert_eq!(prepare(&mut st, saved), Ok(receive(0)));
+    assert_eq!(
+        prepare(&mut st, live),
+        Err(ReservationPolicy::ReceiveHistory)
+    );
+    st.generate_and_scan_empty_blocks(100);
+    assert_eq!(advance(&mut st, account, &[]), FilterOutcome::Committed);
     assert_eq!(prepare(&mut st, live), Ok(receive(0)));
+}
+
+/// A live draft is quoted again only while the marker is within 10 blocks of the tip. With
+/// the draft reserved at marker M and the wallet then scanned 100 blocks on, as marker 1,900
+/// and tip 2,000, the draft waits while filters reach 1,989, 11 blocks behind, and is
+/// handed out again once they reach 1,990.
+#[test]
+fn a_live_draft_waits_for_the_marker_to_catch_up() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    assert_eq!(complete(&mut st, account), 4);
+    let marker = status(st.wallet().db(), account)
+        .filter_frontier
+        .unwrap()
+        .height;
+    let prepare = |st: &mut State| {
+        st.wallet_mut()
+            .db_mut()
+            .prepare_receive_reservation(account, clock_now(), NO_LIVE_TIP)
+            .unwrap()
+            .map(|key| key.key_id())
+    };
+    assert_eq!(prepare(&mut st), Ok(receive(0)));
+    st.generate_and_scan_empty_blocks(100);
+    assert_eq!(tip(&st).height, marker + 100);
+    assert_eq!(prepare(&mut st), Err(ReservationPolicy::ReceiveHistory));
+    let blocks = blocks_above(&st, marker);
+    let revision = status(st.wallet().db(), account).token.history_revision;
+    let behind = span_over(st.wallet().db(), revision, &blocks[..89]);
+    assert_eq!(
+        record(&mut st, account, &behind, &[]),
+        FilterOutcome::Committed
+    );
+    assert_eq!(prepare(&mut st), Err(ReservationPolicy::ReceiveHistory));
+    let within = span_over(st.wallet().db(), revision, &blocks[89..90]);
+    assert_eq!(
+        record(&mut st, account, &within, &[]),
+        FilterOutcome::Committed
+    );
+    assert_eq!(prepare(&mut st), Ok(receive(0)));
 }
 
 /// A wallet-wide history check forgets each account's history in the transaction that
@@ -1226,4 +1272,67 @@ fn rechecking_resumes_an_unfinished_history_check() {
     let state = status(st.wallet().db(), account);
     assert!(state.manual.is_some_and(|m| m.active));
     assert_eq!(state.awaiting_admission, 1);
+}
+
+/// Account A's history check paused at receive index 0 of 4, whose four addresses automatic
+/// lookups then read in full, with I8's found payment waiting for admission outside the
+/// check's range.
+fn paused_check_with_a_waiting_payment() -> (State, AccountUuid, RecoveryPublication) {
+    let (mut st, read) = waiting_witness_in(scanned_wallet());
+    let account = st.test_account().unwrap().id();
+    let publication = publication_at(&st, read);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.check_one_time_history(account, publication, None)
+            .unwrap()
+    );
+    db.cancel_one_time_history(account).unwrap();
+    drain(&mut st, account, publication);
+    let state = status(st.wallet().db(), account);
+    let manual = state.manual.unwrap();
+    assert!(!manual.active && manual.next < manual.receive_end);
+    assert_eq!((state.awaiting_admission, candidates(&st)), (1, 1));
+    (st, account, publication)
+}
+
+/// Naming an account twice in one history check batch checks it once. Rechecking A's paused
+/// check resumes it, and it finishes at once since its remaining addresses are read. The
+/// repeat must not then start a new check, which would forget I8's waiting payment.
+#[test]
+fn a_repeated_account_in_a_history_check_batch_is_checked_once() {
+    let snapshot = |st: &State, account| {
+        let payments: Vec<String> = column(
+            st.wallet().conn(),
+            "SELECT quote(one_time_key_id) || quote(txid) || quote(action_index)
+                || quote(height) || quote(block_hash) || quote(tx_index) || quote(position)
+                || quote(encrypted_note) || quote(directory) || quote(companion)
+                || quote(ordinal) || quote(witness) || quote(witness_height)
+                || quote(witness_hash) || quote(witness_size)
+             FROM ironwood_one_time_payment_recovery ORDER BY txid, action_index",
+            [],
+        );
+        (status(st.wallet().db(), account), payments)
+    };
+    let recheck = |accounts: &[AccountUuid], publication, st: &mut State| {
+        let refused = st
+            .wallet_mut()
+            .db_mut()
+            .recheck_one_time_history_for(accounts, publication)
+            .unwrap();
+        assert_eq!(refused, None);
+    };
+    let (mut once, a, publication) = paused_check_with_a_waiting_payment();
+    let (mut twice, a2, publication2) = paused_check_with_a_waiting_payment();
+    assert_eq!(snapshot(&once, a), snapshot(&twice, a2));
+    recheck(&[a], publication, &mut once);
+    recheck(&[a2, a2], publication2, &mut twice);
+    let after = snapshot(&once, a);
+    assert!(
+        after
+            .0
+            .manual
+            .is_some_and(|m| !m.active && m.next == m.receive_end)
+    );
+    assert_eq!((after.0.awaiting_admission, after.1.len()), (1, 1));
+    assert_eq!(snapshot(&twice, a2), after);
 }

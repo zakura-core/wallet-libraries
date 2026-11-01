@@ -39,13 +39,24 @@ and this library adheres to Rust's notion of
   the caller's live chain tip, as `reserve_refund_key` does. A new receive
   address needs the account's filter marker within 10 blocks of the newer of
   that tip and the saved chain tip, so a wallet no longer has to save the live
-  tip with `update_chain_tip` first. Resuming a live draft is unchanged.
+  tip with `update_chain_tip` first. Resuming a live draft now needs the same
+  fresh marker, so a draft isn't quoted again while another device's payment to
+  it may sit in blocks filters haven't read.
 - `WalletDb::recheck_one_time_history_for` replaces
   `WalletDb::check_one_time_history_for`. Each account's new history check
   first forgets its history results, as `reset_one_time_history` does, in the
   same transaction that starts the batch, so an account refusing the
   publication rolls back every reset too. An account whose check is unfinished
-  resumes it with the history it kept.
+  resumes it with the history it kept. An account named more than once in the
+  batch is checked once, so a repeat can't restart a check the first occurrence
+  just finished and forget its pending payments.
+- `WalletDb::reserve_refund_key` allocates a refund key only once the wallet is
+  fully scanned to within 1 block of the chain tip, the newer of `tip` and the
+  saved chain tip, rather than 10. Funding memos arrive through ordinary block
+  scanning, so this narrows the unread blocks in which another device's memo
+  for the same index can hide. Wallets such as Vizor now wait for ordinary sync
+  to reach within 1 block of the tip before quoting a refund, and get
+  `ReservationPolicy::FundingHistory` until then.
 - Consolidation's additional Ironwood candidates stop rebuilding one-time-key
   notes once they hold their half of the limit, so a proposal costs about its
   limit rather than every unspent one-time-key note. The selection is unchanged.

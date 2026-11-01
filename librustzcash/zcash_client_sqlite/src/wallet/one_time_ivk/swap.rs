@@ -51,7 +51,10 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, CL, R> {
-    /// Allocates above locally known refund indexes after ordinary funding history catches up.
+    /// Allocates above locally known refund indexes after ordinary funding history catches up:
+    /// the wallet must be fully scanned to within 1 block of the chain tip, the newer of
+    /// `tip`, the caller's live tip, and the tip sync saved, and every funding memo it holds
+    /// must be retrieved. Otherwise this returns `FundingHistory`.
     pub fn reserve_refund_key(
         &mut self,
         account: AccountUuid,
@@ -84,9 +87,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
 
     /// Resumes a live draft or recycles the lowest unpaid eligible receive index.
     /// Payment evidence alone extends the four-index window. A new index is issued only
-    /// once its own automatic history lookup completed, never waiting on other indexes, and
-    /// the account's filter marker is within 10 blocks of the chain tip, the newer of `tip`,
-    /// the caller's live tip, and the tip sync saved. Otherwise this returns
+    /// once its own automatic history lookup completed, never waiting on other indexes.
+    /// Either needs the account's filter marker within 10 blocks of the chain tip, the newer
+    /// of `tip`, the caller's live tip, and the tip sync saved. Otherwise this returns
     /// `ReceiveHistory`, and the caller runs recovery (see `RecoveryStatus::round_due`).
     pub fn prepare_receive_reservation(
         &mut self,

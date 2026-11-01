@@ -10,6 +10,7 @@ use payments::PendingPayment;
 use rand_core::Rng;
 use rusqlite::Connection;
 use std::borrow::{Borrow, BorrowMut};
+use std::collections::HashSet;
 use zakura_one_time_ivk::KeyId;
 use zcash_client_backend::data_api::one_time_ivk::restore::{
     DiscoveryWork, FilterOutcome, FilterSpan, LookupPage, LookupWork, RecoveryPublication,
@@ -182,16 +183,20 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// new check first forgets the account's history results, as
     /// [`Self::reset_one_time_history`] does, so it reads every watched address again from
     /// its history start rather than trusting earlier answers. An unfinished check resumes
-    /// with the history it kept. If any account refuses, as one not enabled or one whose
-    /// chain no longer holds the publication's end does, none start and nothing is reset:
-    /// this returns that account, and nothing changes.
+    /// with the history it kept. An account named more than once is checked once. If any
+    /// account refuses, as one not enabled or one whose chain no longer holds the
+    /// publication's end does, none start and nothing is reset: this returns that account,
+    /// and nothing changes.
     pub fn recheck_one_time_history_for(
         &mut self,
         accounts: &[AccountUuid],
         publication: RecoveryPublication,
     ) -> Result<Option<AccountUuid>, SqliteClientError> {
         let started = self.transactionally(|db| {
-            for account in accounts {
+            let mut seen = HashSet::with_capacity(accounts.len());
+            // A resumed check can finish at once, so a repeat would start a fresh one that
+            // forgets the history the first kept.
+            for account in accounts.iter().filter(|account| seen.insert(**account)) {
                 if !queue::recheck(db.conn.0, db.params, *account, publication)
                     .map_err(Batch::Failed)?
                 {
