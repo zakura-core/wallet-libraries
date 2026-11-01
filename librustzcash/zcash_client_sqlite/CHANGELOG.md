@@ -39,7 +39,9 @@ and this library adheres to Rust's notion of
   the caller's live chain tip, as `reserve_refund_key` does. A new receive
   address needs the account's filter marker within 10 blocks of the newer of
   that tip and the saved chain tip, so a wallet no longer has to save the live
-  tip with `update_chain_tip` first. Resuming a live draft is unchanged.
+  tip with `update_chain_tip` first. Resuming a live draft now needs the same
+  fresh marker, so a draft isn't quoted again while another device's payment to
+  it may sit in blocks filters haven't read.
 - `WalletDb::recheck_one_time_history_for` replaces
   `WalletDb::check_one_time_history_for`. Each account's new history check
   first forgets its history results, as `reset_one_time_history` does, in the
