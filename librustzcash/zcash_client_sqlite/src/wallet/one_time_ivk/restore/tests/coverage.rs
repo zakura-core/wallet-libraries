@@ -1227,3 +1227,66 @@ fn rechecking_resumes_an_unfinished_history_check() {
     assert!(state.manual.is_some_and(|m| m.active));
     assert_eq!(state.awaiting_admission, 1);
 }
+
+/// Account A's history check paused at receive index 0 of 4, whose four addresses automatic
+/// lookups then read in full, with I8's found payment waiting for admission outside the
+/// check's range.
+fn paused_check_with_a_waiting_payment() -> (State, AccountUuid, RecoveryPublication) {
+    let (mut st, read) = waiting_witness_in(scanned_wallet());
+    let account = st.test_account().unwrap().id();
+    let publication = publication_at(&st, read);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.check_one_time_history(account, publication, None)
+            .unwrap()
+    );
+    db.cancel_one_time_history(account).unwrap();
+    drain(&mut st, account, publication);
+    let state = status(st.wallet().db(), account);
+    let manual = state.manual.unwrap();
+    assert!(!manual.active && manual.next < manual.receive_end);
+    assert_eq!((state.awaiting_admission, candidates(&st)), (1, 1));
+    (st, account, publication)
+}
+
+/// Naming an account twice in one history check batch checks it once. Rechecking A's paused
+/// check resumes it, and it finishes at once since its remaining addresses are read. The
+/// repeat must not then start a new check, which would forget I8's waiting payment.
+#[test]
+fn a_repeated_account_in_a_history_check_batch_is_checked_once() {
+    let snapshot = |st: &State, account| {
+        let payments: Vec<String> = column(
+            st.wallet().conn(),
+            "SELECT quote(one_time_key_id) || quote(txid) || quote(action_index)
+                || quote(height) || quote(block_hash) || quote(tx_index) || quote(position)
+                || quote(encrypted_note) || quote(directory) || quote(companion)
+                || quote(ordinal) || quote(witness) || quote(witness_height)
+                || quote(witness_hash) || quote(witness_size)
+             FROM ironwood_one_time_payment_recovery ORDER BY txid, action_index",
+            [],
+        );
+        (status(st.wallet().db(), account), payments)
+    };
+    let recheck = |accounts: &[AccountUuid], publication, st: &mut State| {
+        let refused = st
+            .wallet_mut()
+            .db_mut()
+            .recheck_one_time_history_for(accounts, publication)
+            .unwrap();
+        assert_eq!(refused, None);
+    };
+    let (mut once, a, publication) = paused_check_with_a_waiting_payment();
+    let (mut twice, a2, publication2) = paused_check_with_a_waiting_payment();
+    assert_eq!(snapshot(&once, a), snapshot(&twice, a2));
+    recheck(&[a], publication, &mut once);
+    recheck(&[a2, a2], publication2, &mut twice);
+    let after = snapshot(&once, a);
+    assert!(
+        after
+            .0
+            .manual
+            .is_some_and(|m| !m.active && m.next == m.receive_end)
+    );
+    assert_eq!((after.0.awaiting_admission, after.1.len()), (1, 1));
+    assert_eq!(snapshot(&twice, a2), after);
+}

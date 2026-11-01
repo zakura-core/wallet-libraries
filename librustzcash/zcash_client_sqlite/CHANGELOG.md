@@ -45,7 +45,9 @@ and this library adheres to Rust's notion of
   first forgets its history results, as `reset_one_time_history` does, in the
   same transaction that starts the batch, so an account refusing the
   publication rolls back every reset too. An account whose check is unfinished
-  resumes it with the history it kept.
+  resumes it with the history it kept. An account named more than once in the
+  batch is checked once, so a repeat can't restart a check the first occurrence
+  just finished and forget its pending payments.
 - Consolidation's additional Ironwood candidates stop rebuilding one-time-key
   notes once they hold their half of the limit, so a proposal costs about its
   limit rather than every unspent one-time-key note. The selection is unchanged.
