@@ -96,6 +96,8 @@ orchard = { features = ["backend-halo2"], package = "zakura-orchard", version = 
 sapling = { package = "zakura-sapling-crypto", version = "4.0.0" }
 redjubjub = { package = "zakura-redjubjub", version = "4.0.0" }
 pasta_curves = { package = "zakura-pasta-curves", version = "4.0.0" }
+# Scan workers use sync and async channels, not Flume's selector.
+flume = { version = "0.11", default-features = false, features = ["async"] }
 
 # Keep the embedded Tor client, filesystem policy and runtime on one fork revision.
 # Disabling the optional directory codecs retains deflate and identity support.
