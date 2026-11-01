@@ -364,8 +364,8 @@ pub(in crate::wallet::one_time_ivk) fn record_status<P: Parameters>(
     Ok(!operations.is_empty())
 }
 
-/// Resumes a live draft or reserves the lowest unpaid hole inside the mined window, whose
-/// marker must be within 10 blocks of the newer of `tip` and the saved chain tip.
+/// Resumes a live draft or reserves the lowest unpaid hole inside the mined window. Either
+/// needs the account's marker within 10 blocks of the newer of `tip` and the saved chain tip.
 pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -376,6 +376,20 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     let (owner, _) = account_key(conn, params, account)?;
     let end = recovery_end(conn, owner.0)?;
     let clock = deadline_clock(conn, now)?;
+    // Filters carry a key's history forward only up to the account's marker, so another
+    // device's payment to it after the marker isn't seen yet. Handing out a key, new or a
+    // draft quoted again, waits for filters within 10 blocks of the chain tip, a margin for
+    // Receiver publication lag. `RecoveryStatus::round_due` asks for that round once sync
+    // allows it.
+    let fresh = || -> Result<bool, SqliteClientError> {
+        let marker: Option<u32> = conn.query_row(
+            "SELECT filter_height FROM ironwood_one_time_recovery WHERE account_id = ?1",
+            [owner.0],
+            |r| r.get(0),
+        )?;
+        let tip = u32::from(tip.max(wallet::chain_tip_height(conn)?.unwrap_or(tip)));
+        Ok(marker.is_some_and(|m| tip.saturating_sub(m) <= 10))
+    };
     let rows = conn.prepare(&format!(
         "SELECT k.id, k.key_index, k.used, {RESERVED}, {STARTED}, {LATEST_DEADLINE},
             EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = k.id),
@@ -399,7 +413,7 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
             }
             if !started && deadline.is_none_or(|deadline| deadline > clock) {
                 // A positive hint since it was reserved may mean another device paid it.
-                if pending {
+                if pending || !fresh()? {
                     return Ok(Err(ReservationPolicy::ReceiveHistory));
                 }
                 mark_used(conn, owner.0)?;
@@ -426,17 +440,8 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     if !checked {
         return Ok(Err(ReservationPolicy::ReceiveHistory));
     }
-    // That lookup may be old, and filters carry it forward only up to the account's marker,
-    // so another device's payment to the address after the marker isn't seen yet. Issuing
-    // waits for filters within the refund rule's 10 blocks of the chain tip, which
-    // `RecoveryStatus::round_due` asks a round for once sync allows it.
-    let marker: Option<u32> = conn.query_row(
-        "SELECT filter_height FROM ironwood_one_time_recovery WHERE account_id = ?1",
-        [owner.0],
-        |r| r.get(0),
-    )?;
-    let tip = u32::from(tip.max(wallet::chain_tip_height(conn)?.unwrap_or(tip)));
-    if !marker.is_some_and(|m| tip.saturating_sub(m) <= 10) {
+    // That lookup may be old (see `fresh`).
+    if !fresh()? {
         return Ok(Err(ReservationPolicy::ReceiveHistory));
     }
     mark_used(conn, owner.0)?;
