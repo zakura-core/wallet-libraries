@@ -24,7 +24,7 @@ use {
 /// The migration that records ephemeral addresses for each account.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x0e1d4274_1f8e_44e2_909d_689a4bc2967b);
 
-const DEPENDENCIES: &[Uuid] = &[utxos_to_txos::MIGRATION_ID];
+pub(super) const DEPENDENCIES: &[Uuid] = &[utxos_to_txos::MIGRATION_ID];
 
 #[allow(dead_code)]
 pub(super) struct Migration<P> {
@@ -59,8 +59,8 @@ fn init_accounts<P: consensus::Parameters>(
         let ufvk_str: Option<String> = row.get(1)?;
         if let Some(ufvk_str) = ufvk_str
             && let Some(tfvk) = UnifiedFullViewingKey::decode(params, &ufvk_str)
-                .map_err(SqliteClientError::CorruptedData)?
-                .transparent()
+                .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?
+                .p2pkh()
         {
             let ephemeral_ivk = tfvk.derive_ephemeral_ivk().map_err(|_| {
                 SqliteClientError::CorruptedData(

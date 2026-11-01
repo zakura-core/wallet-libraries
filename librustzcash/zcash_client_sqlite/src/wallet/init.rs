@@ -3,14 +3,19 @@
 use std::{borrow::BorrowMut, collections::HashSet, fmt, rc::Rc};
 
 use rand_core::Rng;
+<<<<<<< HEAD
 use schemerz::{Migration as _, Migrator, MigratorError};
+=======
+use regex::Regex;
+use schemerz::{Migrator, MigratorError};
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
 use schemerz_rusqlite::{RusqliteAdapter, RusqliteMigration};
 use secrecy::SecretVec;
 use shardtree::error::ShardTreeError;
 use uuid::Uuid;
 
 use zcash_client_backend::data_api::{SeedRelevance, WalletRead};
-use zcash_keys::keys::AddressGenerationError;
+use zcash_keys::{encoding::UnifiedEncodingError, keys::AddressGenerationError};
 use zcash_protocol::{consensus, value::BalanceError};
 
 use self::migrations::verify_network_compatibility;
@@ -91,6 +96,12 @@ impl From<BalanceError> for WalletMigrationError {
 impl From<ShardTreeError<commitment_tree::Error>> for WalletMigrationError {
     fn from(e: ShardTreeError<commitment_tree::Error>) -> Self {
         WalletMigrationError::CommitmentTree(Box::new(e))
+    }
+}
+
+impl From<UnifiedEncodingError> for WalletMigrationError {
+    fn from(e: UnifiedEncodingError) -> Self {
+        WalletMigrationError::Other(Box::new(SqliteClientError::UnifiedEncoding(e)))
     }
 }
 
@@ -228,6 +239,9 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::Io(e) => WalletMigrationError::CorruptedData(e.to_string()),
         SqliteClientError::InvalidMemo(e) => WalletMigrationError::CorruptedData(e.to_string()),
         SqliteClientError::AddressGeneration(e) => WalletMigrationError::AddressGeneration(e),
+        SqliteClientError::UnifiedEncoding(e) => {
+            WalletMigrationError::Other(Box::new(SqliteClientError::UnifiedEncoding(e)))
+        }
         SqliteClientError::BadAccountData(e) => WalletMigrationError::CorruptedData(e),
         SqliteClientError::CommitmentTree(e) => WalletMigrationError::CommitmentTree(Box::new(e)),
         SqliteClientError::UnsupportedPoolType(pool) => WalletMigrationError::CorruptedData(
@@ -237,6 +251,7 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::TableNotEmpty => unreachable!("wallet already initialized"),
         SqliteClientError::BlockConflict(_)
         | SqliteClientError::NonSequentialBlocks
+        | SqliteClientError::DivergedCheckpoints { .. }
         | SqliteClientError::PutBlocksCommitmentTree { .. }
         | SqliteClientError::TruncateCommitmentTree { .. }
         | SqliteClientError::RequestedRewindInvalid { .. }
@@ -359,12 +374,16 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
 /// # let data_file = NamedTempFile::new().unwrap();
 /// # let get_data_db_path = || data_file.path();
 /// # let load_seed = || -> Result<_, String> { Ok(SecretVec::new(vec![])) };
+<<<<<<< HEAD
 /// let mut db = WalletDb::for_path(
 ///     get_data_db_path(),
 ///     Network::TestNetwork,
 ///     SystemClock,
 ///     UnwrapErr(SysRng),
 /// )?;
+=======
+/// let mut db = WalletDb::for_path(get_data_db_path(), Network::TestNetwork, SystemClock, UnwrapErr(SysRng))?;
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
 /// match init_wallet_db(&mut db, None) {
 ///     Err(e)
 ///         if matches!(
@@ -460,12 +479,16 @@ pub fn init_wallet_db<
 /// # let data_file = NamedTempFile::new().unwrap();
 /// # let get_data_db_path = || data_file.path();
 /// # let load_seed = || -> Result<_, String> { Ok(SecretVec::new(vec![])) };
+<<<<<<< HEAD
 /// let mut db = WalletDb::for_path(
 ///     get_data_db_path(),
 ///     Network::TestNetwork,
 ///     SystemClock,
 ///     UnwrapErr(SysRng),
 /// )?;
+=======
+/// let mut db = WalletDb::for_path(get_data_db_path(), Network::TestNetwork, SystemClock, UnwrapErr(SysRng))?;
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
 /// match WalletMigrator::new().init_or_migrate(&mut db) {
 ///     Err(e)
 ///         if matches!(
@@ -1037,6 +1060,7 @@ mod tests {
             db::TABLE_TRANSPARENT_DETAIL_WORK,
             db::TABLE_TRANSPARENT_RECEIVED_OUTPUT_SPENDS,
             db::TABLE_TRANSPARENT_RECEIVED_OUTPUTS,
+            db::TABLE_TRANSPARENT_SPEND_LOCATOR_MAP,
             db::TABLE_TRANSPARENT_SPEND_MAP,
             db::TABLE_TRANSPARENT_SPEND_SEARCH_QUEUE,
             db::TABLE_TRANSPARENT_TX_DISPLAY,
@@ -1102,7 +1126,11 @@ mod tests {
             db::INDEX_TRANSPARENT_RECEIVED_OUTPUTS_ADDRESS,
             db::INDEX_TRANSPARENT_RECEIVED_OUTPUTS_TX,
             db::INDEX_TRANSPARENT_RECEIVED_OUTPUTS_VALUE_ZAT,
+<<<<<<< HEAD
             db::INDEX_TRANSPARENT_SPEND_MAP_PREVOUT,
+=======
+            db::INDEX_TRANSPARENT_SPEND_LOCATOR_IDX,
+>>>>>>> 75a187f2638827515d5d0a1c4894a28a57db6b8b
             db::INDEX_TRANSPARENT_SPEND_MAP_TX,
             db::INDEX_TRANSPARENT_SPEND_SEARCH_TX,
             db::INDEX_TX_RECONFIRMATION_RECEIPTS_HEIGHT,
@@ -1131,6 +1159,7 @@ mod tests {
             db::view_ironwood_shard_scan_ranges(st.network()),
             db::view_ironwood_shard_unscanned_ranges(),
             db::VIEW_IRONWOOD_SHARDS_SCAN_STATE.to_owned(),
+            db::view_migration_transactions(),
             db::view_orchard_shard_scan_ranges(st.network()),
             db::view_orchard_shard_unscanned_ranges(),
             db::VIEW_ORCHARD_SHARDS_SCAN_STATE.to_owned(),
@@ -1140,6 +1169,7 @@ mod tests {
             db::view_sapling_shard_unscanned_ranges(),
             db::VIEW_SAPLING_SHARDS_SCAN_STATE.to_owned(),
             db::VIEW_TRANSACTIONS.to_owned(),
+            db::VIEW_TRANSACTIONS_WITH_PENDING_MIGRATIONS.to_owned(),
             db::VIEW_TX_OUTPUTS.to_owned(),
         ];
 
@@ -1344,11 +1374,13 @@ mod tests {
             )?;
 
             let address = encode_payment_address(
-                wdb.params.hrp_sapling_payment_address(),
+                zcash_address::constants::hrp_sapling_payment_address(wdb.params.network_type()),
                 &extfvk.default_address().1,
             );
             let extfvk = encode_extended_full_viewing_key(
-                wdb.params.hrp_sapling_extended_full_viewing_key(),
+                zcash_keys::constants::hrp_sapling_extended_full_viewing_key(
+                    wdb.params.network_type(),
+                ),
                 extfvk,
             );
             wdb.conn.execute(
@@ -1375,7 +1407,8 @@ mod tests {
 
         let seed = [0xab; 32];
         let account = AccountId::ZERO;
-        let secret_key = sapling::spending_key(&seed, db_data.params.coin_type(), account);
+        let secret_key = sapling::spending_key(&seed, db_data.params.coin_type(), account)
+            .expect("the derivation path yields a valid key");
         #[allow(deprecated)]
         let extfvk = secret_key.to_extended_full_viewing_key();
 
@@ -1488,11 +1521,13 @@ mod tests {
             )?;
 
             let address = encode_payment_address(
-                wdb.params.hrp_sapling_payment_address(),
+                zcash_address::constants::hrp_sapling_payment_address(wdb.params.network_type()),
                 &extfvk.default_address().1,
             );
             let extfvk = encode_extended_full_viewing_key(
-                wdb.params.hrp_sapling_extended_full_viewing_key(),
+                zcash_keys::constants::hrp_sapling_extended_full_viewing_key(
+                    wdb.params.network_type(),
+                ),
                 extfvk,
             );
             wdb.conn.execute(
@@ -1554,7 +1589,8 @@ mod tests {
 
         let seed = [0xab; 32];
         let account = AccountId::ZERO;
-        let secret_key = sapling::spending_key(&seed, db_data.params.coin_type(), account);
+        let secret_key = sapling::spending_key(&seed, db_data.params.coin_type(), account)
+            .expect("the derivation path yields a valid key");
         #[allow(deprecated)]
         let extfvk = secret_key.to_extended_full_viewing_key();
 
@@ -1667,12 +1703,12 @@ mod tests {
                 [],
             )?;
 
-            let ufvk_str = ufvk.encode(&wdb.params);
+            let ufvk_str = ufvk.encode(&wdb.params).unwrap();
 
             // Unified addresses at the time of the addition of migrations did not contain an
             // Orchard component.
             let ua_request = UnifiedAddressRequest::unsafe_custom(Omit, Require, UA_TRANSPARENT);
-            let address_str = Address::Unified(
+            let address_str = Address::from(
                 ufvk.default_address(ua_request)
                     .expect("A valid default address exists for the UFVK")
                     .0,
@@ -1816,7 +1852,7 @@ mod tests {
                 assert_eq!(tvua.transparent(), ua.transparent());
                 assert_eq!(tvua.sapling(), ua.sapling());
                 #[cfg(not(feature = "orchard"))]
-                assert_eq!(tv.unified_addr, ua.encode(&Network::MainNetwork));
+                assert_eq!(ua.encode(&Network::MainNetwork), tv.unified_addr);
 
                 db_data
                     .get_next_available_address(account_id, ua_request)
