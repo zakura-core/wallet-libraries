@@ -1038,7 +1038,8 @@ pub(crate) fn import_standalone_transparent_script<P: consensus::Parameters>(
         }
     }
 
-    let script_pubkey = sh(&redeem_script);
+    let script_pubkey =
+        sh(&redeem_script).expect("redeem script size was checked against the P2SH limit above");
     // `sh()` always produces a valid P2SH scriptPubKey, so `from_script_pubkey`
     // should always succeed here. This is a defensive check.
     let addr = TransparentAddress::from_script_pubkey(&script_pubkey).ok_or_else(|| {

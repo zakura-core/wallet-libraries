@@ -1550,7 +1550,7 @@ where
         .unwrap();
 
     // The P2SH address derived from the redeem script should be present
-    let script_pubkey = sh(&redeem_script);
+    let script_pubkey = sh(&redeem_script).expect("test multisig script fits the P2SH size limit");
     let expected_addr =
         TransparentAddress::from_script_pubkey(&script_pubkey).expect("valid P2SH address");
 
@@ -1605,7 +1605,7 @@ where
 
     assert_eq!(receivers_before.len(), receivers_after.len());
 
-    let script_pubkey = sh(&redeem_script);
+    let script_pubkey = sh(&redeem_script).expect("test multisig script fits the P2SH size limit");
     let expected_addr =
         TransparentAddress::from_script_pubkey(&script_pubkey).expect("valid P2SH address");
     let metadata = receivers_after
@@ -1686,7 +1686,7 @@ where
         .unwrap();
 
     // Derive the expected transparent address from the redeem script.
-    let script_pubkey = sh(&redeem_script);
+    let script_pubkey = sh(&redeem_script).expect("test multisig script fits the P2SH size limit");
     let taddr = TransparentAddress::from_script_pubkey(&script_pubkey).expect("valid P2SH address");
 
     let height = birthday + 1000;
@@ -1758,7 +1758,7 @@ where
         .unwrap();
 
     // Derive the P2SH address.
-    let script_pubkey = sh(&redeem_script);
+    let script_pubkey = sh(&redeem_script).expect("test multisig script fits the P2SH size limit");
     let taddr = TransparentAddress::from_script_pubkey(&script_pubkey).expect("valid P2SH address");
 
     // Initialize chain data with blocks (needed for shielding transaction creation).
