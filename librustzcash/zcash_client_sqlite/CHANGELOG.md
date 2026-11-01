@@ -50,6 +50,13 @@ and this library adheres to Rust's notion of
   resumes it with the history it kept. An account named more than once in the
   batch is checked once, so a repeat can't restart a check the first occurrence
   just finished and forget its pending payments.
+- `WalletDb::reserve_refund_key` allocates a refund key only once the wallet is
+  fully scanned to within 1 block of the chain tip, the newer of `tip` and the
+  saved chain tip, rather than 10. Funding memos arrive through ordinary block
+  scanning, so this narrows the unread blocks in which another device's memo
+  for the same index can hide. Wallets such as Vizor now wait for ordinary sync
+  to reach within 1 block of the tip before quoting a refund, and get
+  `ReservationPolicy::FundingHistory` until then.
 - Consolidation's additional Ironwood candidates stop rebuilding one-time-key
   notes once they hold their half of the limit, so a proposal costs about its
   limit rather than every unspent one-time-key note. The selection is unchanged.

@@ -17,6 +17,13 @@ use crate::wallet::one_time_ivk::{
 };
 use crate::{AccountUuid, error::SqliteClientError};
 
+/// How many blocks ordinary scanning may trail the chain tip when a refund key is allocated.
+/// Another device's funding memo arrives through ordinary block scanning, so an unread block
+/// may hold the index this device is about to allocate. Receive issuance allows 10 blocks
+/// because it waits on Receiver publications, which lag the chain. Funding memos have no
+/// such lag, so this allows only the newest block.
+const REFUND_SCAN_LAG: u32 = 1;
+
 /// See `WalletDb::reserve_refund_key`.
 pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
@@ -26,7 +33,9 @@ pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
 ) -> Result<Result<OneTimeKey, ReservationPolicy>, SqliteClientError> {
     let scanned = crate::wallet::fully_scanned_height(conn)?;
     let tip = tip.max(crate::wallet::chain_tip_height(conn)?.unwrap_or(tip));
-    if scanned.is_none_or(|height| u32::from(tip).saturating_sub(u32::from(height)) > 10) {
+    if scanned
+        .is_none_or(|height| u32::from(tip).saturating_sub(u32::from(height)) > REFUND_SCAN_LAG)
+    {
         return Ok(Err(ReservationPolicy::FundingHistory));
     }
     recovery::recover_refund_memos(conn, params, account)?;

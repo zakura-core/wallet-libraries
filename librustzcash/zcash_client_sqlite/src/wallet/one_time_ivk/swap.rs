@@ -51,7 +51,10 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, CL, R> {
-    /// Allocates above locally known refund indexes after ordinary funding history catches up.
+    /// Allocates above locally known refund indexes after ordinary funding history catches up:
+    /// the wallet must be fully scanned to within 1 block of the chain tip, the newer of
+    /// `tip`, the caller's live tip, and the tip sync saved, and every funding memo it holds
+    /// must be retrieved. Otherwise this returns `FundingHistory`.
     pub fn reserve_refund_key(
         &mut self,
         account: AccountUuid,

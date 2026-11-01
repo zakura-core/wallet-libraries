@@ -388,6 +388,35 @@ fn a_refund_key_queues_history_when_its_matching_funding_transaction_is_stored()
     assert_eq!(next.unwrap().unwrap().key_id().index(), key.index() + 1);
 }
 
+/// Refund issuance waits for ordinary sync to reach within 1 block of the chain tip, the
+/// newer of the caller's tip and the saved one, since an unread block may hold another
+/// device's funding memo for the next index. Scanned through 1,000, a tip of 1,002 waits,
+/// and 1,001 and 1,000 allocate. A saved tip of 1,002 waits too.
+#[test]
+fn refund_issuance_waits_for_sync_within_one_block_of_the_tip() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let scanned = st.wallet().chain_height().unwrap().unwrap();
+    let db = st.wallet_mut().db_mut();
+    assert!(matches!(
+        reserve_refund(db, account, scanned + 2),
+        Ok(Err(ReservationPolicy::FundingHistory))
+    ));
+    let issued = [scanned + 1, scanned].map(|tip| {
+        reserve_refund(db, account, tip)
+            .unwrap()
+            .unwrap()
+            .key_id()
+            .index()
+    });
+    assert_eq!(issued, [0, 1]);
+    st.wallet_mut().update_chain_tip(scanned + 2).unwrap();
+    assert!(matches!(
+        reserve_refund(st.wallet_mut().db_mut(), account, NO_LIVE_TIP),
+        Ok(Err(ReservationPolicy::FundingHistory))
+    ));
+}
+
 /// A restored account recovers a funding memo's refund key as soon as the scan stores the
 /// funding transaction, so issuance never hands the memo's index out again, and the key's
 /// history is due for a lookup.
