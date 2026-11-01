@@ -436,6 +436,15 @@ pub(crate) fn get_legacy_transparent_address<P: consensus::Parameters>(
 ///
 /// Returns `Ok(None)` if the gap would start at an index greater than the maximum valid
 /// non-hardened transparent child index.
+///
+/// An address counts as used once any received note or output at it has been mined - the same
+/// test `v_address_first_use` makes with `first_use_height IS NOT NULL`. That view takes the
+/// union of every received note in the wallet joined to `addresses` and `transactions`,
+/// materialised and sorted in full before the account and scope filter can apply, so a wallet
+/// with thousands of notes paid for all of them on every gap check - which runs on every stored
+/// transaction. Probing per address through the `address_id` indexes visits only this account's
+/// addresses of this scope. Migrations that run before the note tables reach their current
+/// shape use [`find_gap_start_via_address_uses`] instead.
 pub(crate) fn find_gap_start(
     conn: &rusqlite::Connection,
     account_id: AccountRef,
@@ -445,17 +454,42 @@ pub(crate) fn find_gap_start(
     match conn
         .query_row(
             r#"
-            WITH offsets AS (
-                SELECT
-                    a.transparent_child_index,
-                    LEAD(a.transparent_child_index)
-                        OVER (ORDER BY a.transparent_child_index)
-                        AS next_child_index
-                FROM v_address_first_use a
+            WITH used AS (
+                SELECT a.transparent_child_index
+                FROM addresses a
                 WHERE a.account_id = :account_id
                 AND a.key_scope = :key_scope
                 AND a.transparent_child_index IS NOT NULL
-                AND a.first_use_height IS NOT NULL
+                AND (
+                    EXISTS (
+                        SELECT 1 FROM transparent_received_outputs tro
+                        JOIN transactions t ON t.id_tx = tro.transaction_id
+                        WHERE tro.address_id = a.id AND t.mined_height IS NOT NULL
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM sapling_received_notes srn
+                        JOIN transactions t ON t.id_tx = srn.transaction_id
+                        WHERE srn.address_id = a.id AND t.mined_height IS NOT NULL
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM orchard_received_notes orn
+                        JOIN transactions t ON t.id_tx = orn.transaction_id
+                        WHERE orn.address_id = a.id AND t.mined_height IS NOT NULL
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM ironwood_received_notes irn
+                        JOIN transactions t ON t.id_tx = irn.transaction_id
+                        WHERE irn.address_id = a.id AND t.mined_height IS NOT NULL
+                    )
+                )
+            ),
+            offsets AS (
+                SELECT
+                    transparent_child_index,
+                    LEAD(transparent_child_index)
+                        OVER (ORDER BY transparent_child_index)
+                        AS next_child_index
+                FROM used
             )
             SELECT
                 transparent_child_index + 1,
@@ -482,6 +516,90 @@ pub(crate) fn find_gap_start(
         Some(i) => Ok(NonHardenedChildIndex::from_index(i)),
         None => Ok(Some(NonHardenedChildIndex::ZERO)),
     }
+}
+
+/// [`find_gap_start`] as it read before the per-address probe: through `v_address_first_use`.
+///
+/// For migrations. The transparent gap-limit migration runs a gap search while older wallets
+/// are still being brought forward, when the note tables have neither their current columns
+/// nor, for Ironwood, their existence; the view is re-created by each later migration and so
+/// always matches the schema of the moment, where a query naming the tables directly cannot.
+pub(crate) fn find_gap_start_via_address_uses(
+    conn: &rusqlite::Connection,
+    account_id: AccountRef,
+    key_scope: TransparentKeyScope,
+    gap_limit: u32,
+) -> Result<Option<NonHardenedChildIndex>, SqliteClientError> {
+    match conn
+        .query_row(
+            r#"
+            WITH offsets AS (
+                SELECT
+                    a.transparent_child_index,
+                    LEAD(a.transparent_child_index)
+                        OVER (ORDER BY a.transparent_child_index)
+                        AS next_child_index
+                FROM v_address_first_use a
+                WHERE a.account_id = :account_id
+                AND a.key_scope = :key_scope
+                AND a.transparent_child_index IS NOT NULL
+                AND a.first_use_height IS NOT NULL
+            )
+            SELECT
+                transparent_child_index + 1,
+                next_child_index - transparent_child_index - 1 AS gap_len
+            FROM offsets
+            WHERE gap_len >= :gap_limit OR next_child_index IS NULL
+            ORDER BY transparent_child_index
+            LIMIT 1
+            "#,
+            named_params![
+                ":account_id": account_id.0,
+                ":key_scope": KeyScope::try_from(key_scope)?.encode(),
+                ":gap_limit": gap_limit
+            ],
+            |row| row.get::<_, u32>(0),
+        )
+        .optional()?
+    {
+        Some(i) => Ok(NonHardenedChildIndex::from_index(i)),
+        None => Ok(Some(NonHardenedChildIndex::ZERO)),
+    }
+}
+
+/// Whether every child index in `range` already has an address row of this scope for the
+/// account.
+///
+/// Gap regeneration is idempotent: deriving the addresses of a range the store already holds
+/// and upserting them changes nothing. A store that can answer this with one indexed count lets
+/// [`generate_gap_addresses`] skip deriving a gap limit's worth of unified addresses, which on
+/// a wallet that regenerates after every stored transaction was most of what the regeneration
+/// cost.
+pub(crate) fn address_range_present(
+    conn: &rusqlite::Connection,
+    account_id: AccountRef,
+    key_scope: TransparentKeyScope,
+    range: Range<NonHardenedChildIndex>,
+) -> Result<bool, SqliteClientError> {
+    let wanted = range.end.index().saturating_sub(range.start.index());
+    if wanted == 0 {
+        return Ok(true);
+    }
+    let present: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM addresses
+         WHERE account_id = :account_id
+         AND key_scope = :key_scope
+         AND transparent_child_index >= :start
+         AND transparent_child_index < :end",
+        named_params![
+            ":account_id": account_id.0,
+            ":key_scope": KeyScope::try_from(key_scope)?.encode(),
+            ":start": range.start.index(),
+            ":end": range.end.index(),
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(present >= wanted)
 }
 
 pub(crate) fn decode_transparent_child_index(
@@ -906,15 +1024,11 @@ pub(crate) fn generate_gap_addresses<P: consensus::Parameters>(
     )?;
 
     if let Some(gap_start) = find_gap_start(conn, account_id, key_scope, gap_limit)? {
-        generate_address_range(
-            conn,
-            params,
-            account_id,
-            key_scope,
-            request,
-            gap_start..gap_start.saturating_add(gap_limit),
-            require_key,
-        )?;
+        let range = gap_start..gap_start.saturating_add(gap_limit);
+        if address_range_present(conn, account_id, key_scope, range.clone())? {
+            return Ok(());
+        }
+        generate_address_range(conn, params, account_id, key_scope, request, range, require_key)?;
     }
 
     Ok(())
