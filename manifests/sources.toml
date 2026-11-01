@@ -96,6 +96,8 @@ orchard = { features = ["backend-halo2"], package = "zakura-orchard", version = 
 sapling = { package = "zakura-sapling-crypto", version = "4.0.0" }
 redjubjub = { package = "zakura-redjubjub", version = "4.0.0" }
 pasta_curves = { package = "zakura-pasta-curves", version = "4.0.0" }
+# Scan channels use async receive, but never Flume's Selector.
+flume = { version = "0.11", default-features = false, features = ["async"] }
 
 # Non-renamed ecosystem crates whose public traits changed with the 1.0 crypto
 # family. The generated workspace keeps upstream's other dependency metadata

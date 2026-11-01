@@ -12,8 +12,9 @@ applied to arrives untouched on the vendor branch.
 Four rules are applied to `[workspace.dependencies]`:
 
 1. a dependency named in the manifest's `[rewire]` table is redirected at the
-   configured Zakura fork, version, and features, keeping the upstream key so
-   crate sources are unchanged (`orchard = { package = "zakura-orchard", ... }`);
+   configured package, version, and features, keeping the upstream key so
+   crate sources are unchanged (`orchard = { package = "zakura-orchard", ... }`).
+   An optional boolean `default-features` overrides the upstream setting;
 2. a path dependency on a crate this repository vendors keeps its path,
    rewritten into the vendored directory, gains the crate's published name,
    and takes the Zakura `version` from `[[crate]]` rather than upstream's;
@@ -90,6 +91,14 @@ def main(argv: list[str]) -> int:
             return 1
 
     rewire = manifest["rewire"]
+    for key, target in rewire.items():
+        if "default-features" in target:
+            if not isinstance(target["default-features"], bool):
+                print(
+                    f"rewire.{key}.default-features must be a boolean",
+                    file=sys.stderr,
+                )
+                return 1
     versions = manifest.get("versions", {})
     layout = manifest["layout"]
     vendored_directory = layout["vendored_directory"]
@@ -146,6 +155,10 @@ def main(argv: list[str]) -> int:
             for target_field in ("version", "package", "git", "rev"):
                 if target_field in target:
                     fields[target_field] = f'"{target[target_field]}"'
+            if "default-features" in target:
+                fields["default-features"] = (
+                    "true" if target["default-features"] else "false"
+                )
             if "features" in target:
                 existing = re.findall(r'"([^"]+)"', fields.get("features", "[]"))
                 features = list(dict.fromkeys(existing + target["features"]))
