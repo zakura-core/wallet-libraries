@@ -93,6 +93,10 @@ and this library adheres to Rust's notion of
 - `WalletDb::record_one_time_filters`, its per-block identities and 256-block cap, and `WalletDb::one_time_direct_query_count`.
 - `testing::db::TestDb` implements the wallet traits by forwarding every method, including those with default bodies, to its `WalletDb` by hand rather than through `ambassador`, which the `test-dependencies` feature no longer depends on. Its behavior is unchanged.
 
+### Fixed
+
+- `WalletWrite::store_decrypted_tx` no longer re-reads and re-parses every fee-less transaction that spent any wallet transparent output on each call. The search for transactions spending the stored transaction's outputs correlated with that transaction only in the `ON` clause of a `LEFT OUTER JOIN`, which filtered nothing; it now returns only the transactions that spend an output of the stored transaction.
+
 ## [0.1.0-rc9.5] - 2026-10-26
 
 ### Changed
