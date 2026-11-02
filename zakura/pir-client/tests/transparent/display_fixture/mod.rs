@@ -11,12 +11,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::Router;
-use axum::body::Bytes;
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use http::{Method, Request, StatusCode};
+
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use zakura_pir_client::transparent::native::TableProfile;
@@ -26,6 +22,19 @@ use zakura_pir_publisher::transparent::display::{
     DisplaySealParams, DisplayTable, ManifestHeader, NATIVE_SCHEMA, TXID_4K8, build_shard,
     query_binding, setup_seed,
 };
+
+type Response = http::Response<Vec<u8>>;
+
+const PREFIX: &str = "/transparent/v1/txid/";
+const QUERY_BODY_LIMIT: usize = 2 * 1024 * 1024;
+
+enum Route<'a> {
+    Init,
+    RecentMap,
+    Manifest(&'a str, &'a str),
+    Setup(&'a str, &'a str, &'a str, &'a str),
+    Query(&'a str, &'a str, &'a str),
+}
 
 /// What the router answers from.
 struct Published {
@@ -40,10 +49,9 @@ struct Published {
     tables: BTreeMap<DisplayTable, Vec<Segment>>,
 }
 
-/// The display service: its router and the runtime that drives it.
+/// The in-process HTTP handler for the display publication.
 pub struct DisplayService {
-    pub runtime: tokio::runtime::Runtime,
-    pub router: Router,
+    published: Arc<Published>,
 }
 
 impl DisplayService {
@@ -153,86 +161,201 @@ impl DisplayService {
             tables,
         });
 
-        const SETUP: &str = "shards/:shard_id/revisions/:digest/setup/:table/:segment";
-        const QUERY: &str = "shards/:shard_id/revisions/:digest/query/:table";
-        let router = Router::new()
-            .route("/transparent/v1/txid/init", get(init_route))
-            .route("/transparent/v1/txid/map", get(recent_map))
-            .route(
-                "/transparent/v1/txid/shards/:shard_id/revisions/:digest/manifest",
-                get(manifest_route),
-            )
-            .route(&format!("/transparent/v1/txid/recent/{SETUP}"), get(setup))
-            .route(&format!("/transparent/v1/txid/recent/{QUERY}"), post(query))
-            .with_state(published);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        Self { runtime, router }
+        Self { published }
+    }
+
+    /// Answers the fixture's HTTP routes without a network hop.
+    pub(super) fn answer(&self, request: Request<Vec<u8>>) -> Response {
+        let method = request.method();
+        let Some(path) = request.uri().path().strip_prefix(PREFIX) else {
+            return response(StatusCode::NOT_FOUND, &[], vec![]);
+        };
+        let parts: Vec<_> = path.split('/').collect();
+        if parts.iter().any(|part| part.is_empty()) {
+            return response(StatusCode::NOT_FOUND, &[], vec![]);
+        }
+        let route = match parts.as_slice() {
+            ["init"] => Route::Init,
+            ["map"] => Route::RecentMap,
+            ["shards", shard, "revisions", digest, "manifest"] => Route::Manifest(shard, digest),
+            [
+                "recent",
+                "shards",
+                shard,
+                "revisions",
+                digest,
+                "setup",
+                table,
+                segment,
+            ] => Route::Setup(shard, digest, table, segment),
+            [
+                "recent",
+                "shards",
+                shard,
+                "revisions",
+                digest,
+                "query",
+                table,
+            ] => Route::Query(shard, digest, table),
+            _ => return response(StatusCode::NOT_FOUND, &[], vec![]),
+        };
+        let allow = if matches!(route, Route::Query(..)) {
+            "POST"
+        } else {
+            "GET,HEAD"
+        };
+        let head = method == Method::HEAD;
+        if (allow == "POST" && method != Method::POST)
+            || (allow != "POST" && method != Method::GET && !head)
+        {
+            return response(StatusCode::METHOD_NOT_ALLOWED, &[("allow", allow)], vec![]);
+        }
+        let result = (|| {
+            let p = &self.published;
+            Ok(match route {
+                Route::Init => init_route(p),
+                Route::RecentMap => recent_map(p),
+                Route::Manifest(shard, digest) => {
+                    manifest_route(p, number(shard, "shard_id")?, &parameter(digest, "digest")?)
+                }
+                Route::Setup(shard, digest, table, segment) => setup(
+                    p,
+                    number(shard, "shard_id")?,
+                    &parameter(digest, "digest")?,
+                    &parameter(table, "table")?,
+                    number(segment, "segment")?,
+                ),
+                Route::Query(shard, digest, table) => {
+                    let shard_id = number(shard, "shard_id")?;
+                    let digest = parameter(digest, "digest")?;
+                    let table = parameter(table, "table")?;
+                    // Preserve the previous Bytes extractor's default limit.
+                    if request.body().len() > QUERY_BODY_LIMIT {
+                        return Err(text(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "Failed to buffer the request body: length limit exceeded".into(),
+                        ));
+                    }
+                    query(p, shard_id, &digest, &table, request.body())
+                }
+            })
+        })();
+        let mut reply = result.unwrap_or_else(|reply| reply);
+        if head {
+            reply.body_mut().clear();
+        }
+        reply
     }
 }
 
-type Shared = State<Arc<Published>>;
+fn response(status: StatusCode, headers: &[(&str, &str)], body: Vec<u8>) -> Response {
+    let mut response = http::Response::builder()
+        .status(status)
+        .header("content-length", body.len());
+    for (name, value) in headers {
+        response = response.header(*name, *value);
+    }
+    response.body(body).unwrap()
+}
+
+fn text(status: StatusCode, body: String) -> Response {
+    response(
+        status,
+        &[("content-type", "text/plain; charset=utf-8")],
+        body.into_bytes(),
+    )
+}
+
+/// Path captures are percent-decoded before typed extraction.
+fn parameter(value: &str, name: &str) -> Result<String, Response> {
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut input = value.as_bytes().iter().copied();
+    while let Some(byte) = input.next() {
+        if byte == b'%' {
+            let mut next = input.clone();
+            if let Some(decoded) = next.next().and_then(|a| {
+                let high = char::from(a).to_digit(16)?;
+                let low = char::from(next.next()?).to_digit(16)?;
+                Some((high * 16 + low) as u8)
+            }) {
+                bytes.push(decoded);
+                input = next;
+                continue;
+            }
+        }
+        bytes.push(byte);
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        text(
+            StatusCode::BAD_REQUEST,
+            format!("Invalid URL: Invalid UTF-8 in `{name}`"),
+        )
+    })
+}
+
+fn number<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, Response> {
+    let value = parameter(value, name)?;
+    value.parse().map_err(|_| {
+        text(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Invalid URL: Cannot parse `{name}` with value `{value:?}` to a `{}`",
+                std::any::type_name::<T>()
+            ),
+        )
+    })
+}
 
 fn json(value: serde_json::Value) -> Response {
-    (
+    response(
         StatusCode::OK,
-        [("content-type", "application/json")],
+        &[("content-type", "application/json")],
         serde_json::to_vec(&value).unwrap(),
     )
-        .into_response()
 }
 
 fn refuse(status: StatusCode, error: impl Into<String>) -> Response {
     let error: String = error.into();
-    (
+    response(
         status,
-        [("content-type", "application/json")],
+        &[("content-type", "application/json")],
         serde_json::to_vec(&serde_json::json!({ "error": error })).unwrap(),
     )
-        .into_response()
 }
 
-async fn init_route(State(p): Shared) -> Response {
-    (
+fn init_route(p: &Published) -> Response {
+    response(
         StatusCode::OK,
-        [("content-type", "application/json")],
+        &[("content-type", "application/json")],
         p.init.clone(),
     )
-        .into_response()
 }
 
-async fn recent_map(State(p): Shared) -> Response {
-    (
+fn recent_map(p: &Published) -> Response {
+    response(
         StatusCode::OK,
-        [
+        &[
             ("content-type", "application/json"),
             ("x-txid-map-sha256", p.recent_sha256.as_str()),
             ("cache-control", "no-cache"),
         ],
         p.recent_map.clone(),
     )
-        .into_response()
 }
 
-async fn manifest_route(
-    State(p): Shared,
-    Path((shard_id, digest)): Path<(u64, String)>,
-) -> Response {
+fn manifest_route(p: &Published, shard_id: u64, digest: &str) -> Response {
     if shard_id != p.shard_id || digest != p.digest {
         return refuse(StatusCode::NOT_FOUND, "no such revision");
     }
-    (
+    response(
         StatusCode::OK,
-        [
+        &[
             ("content-type", "application/json"),
             ("cache-control", "public, max-age=31536000, immutable"),
             ("x-manifest-sha256", p.digest.as_str()),
         ],
         p.manifest.clone(),
     )
-        .into_response()
 }
 
 /// The segments of `label` in the revision `(shard_id, digest)`.
@@ -254,11 +377,8 @@ fn table<'a>(
     Ok((table, segments))
 }
 
-async fn setup(
-    State(p): Shared,
-    Path((shard_id, digest, label, segment)): Path<(u64, String, String, u32)>,
-) -> Response {
-    let (table, segments) = match table(&p, shard_id, &digest, &label) {
+fn setup(p: &Published, shard_id: u64, digest: &str, label: &str, segment: u32) -> Response {
+    let (table, segments) = match table(p, shard_id, digest, label) {
         Ok(found) => found,
         Err(refused) => return refused,
     };
@@ -280,17 +400,13 @@ async fn setup(
 }
 
 /// Every segment's reply to the query, concatenated in segment order.
-async fn query(
-    State(p): Shared,
-    Path((shard_id, digest, label)): Path<(u64, String, String)>,
-    body: Bytes,
-) -> Response {
-    let (table, segments) = match table(&p, shard_id, &digest, &label) {
+fn query(p: &Published, shard_id: u64, digest: &str, label: &str, body: &[u8]) -> Response {
+    let (table, segments) = match table(p, shard_id, digest, label) {
         Ok(found) => found,
         Err(refused) => return refused,
     };
-    let binding = query_binding(&digest, table);
-    let (keys, selection) = match native::parse(&p.profile, binding, &body, p.profile.rows) {
+    let binding = query_binding(digest, table);
+    let (keys, selection) = match native::parse(&p.profile, binding, body, p.profile.rows) {
         Ok(parsed) => parsed,
         Err(error) => return refuse(StatusCode::BAD_REQUEST, error),
     };
@@ -301,10 +417,9 @@ async fn query(
             Err(error) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, error),
         }
     }
-    (
+    response(
         StatusCode::OK,
-        [("content-type", "application/octet-stream")],
+        &[("content-type", "application/octet-stream")],
         reply,
     )
-        .into_response()
 }
