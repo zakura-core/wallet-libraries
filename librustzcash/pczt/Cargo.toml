@@ -58,7 +58,7 @@ sapling = { workspace = true, features = ["zip32-addresses"] }
 hex.workspace = true
 incrementalmerkletree.workspace = true
 rand_chacha_10 = { package = "rand_chacha", version = "0.10" }
-secp256k1 = { workspace = true, features = ["rand"] }
+secp256k1.workspace = true
 shardtree.workspace = true
 zcash_primitives = { workspace = true, features = [
     "test-dependencies",
