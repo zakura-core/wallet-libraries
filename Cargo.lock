@@ -4487,6 +4487,7 @@ dependencies = [
  "incrementalmerkletree 0.8.2",
  "incrementalmerkletree-testing",
  "nonempty",
+ "num-traits",
  "proptest",
  "prost",
  "rand 0.10.3",
