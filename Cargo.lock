@@ -4590,7 +4590,7 @@ dependencies = [
  "zakura-tor-rtcompat",
  "zakura-transparent",
  "zakura-zip321",
- "zcash_encoding 0.4.0",
+ "zcash_encoding",
  "zcash_script",
  "zip32 0.2.1",
 ]
@@ -6176,7 +6176,7 @@ dependencies = [
  "bs58",
  "corez",
  "f4jumble",
- "zcash_encoding 0.5.0",
+ "zcash_encoding",
  "zcash_protocol",
 ]
 
@@ -6217,7 +6217,7 @@ dependencies = [
  "tracing",
  "which",
  "zcash_address",
- "zcash_encoding 0.5.0",
+ "zcash_encoding",
  "zcash_keys",
  "zcash_note_encryption",
  "zcash_primitives",
@@ -6264,7 +6264,7 @@ dependencies = [
  "uuid",
  "zcash_address",
  "zcash_client_backend",
- "zcash_encoding 0.5.0",
+ "zcash_encoding",
  "zcash_keys",
  "zcash_pool_migration",
  "zcash_primitives",
@@ -6272,17 +6272,6 @@ dependencies = [
  "zcash_script",
  "zcash_transparent",
  "zip32 0.3.0",
-]
-
-[[package]]
-name = "zcash_encoding"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1440921903cdb86133fb9e2fe800be488015db2939a30bedb413078a1acb0306"
-dependencies = [
- "corez",
- "hex",
- "nonempty",
 ]
 
 [[package]]
@@ -6318,7 +6307,7 @@ dependencies = [
  "subtle",
  "tracing",
  "zcash_address",
- "zcash_encoding 0.5.0",
+ "zcash_encoding",
  "zcash_protocol",
  "zcash_transparent",
  "zip32 0.3.0",
@@ -6380,7 +6369,7 @@ dependencies = [
  "redjubjub",
  "sapling-crypto",
  "sha2 0.10.9",
- "zcash_encoding 0.5.0",
+ "zcash_encoding",
  "zcash_note_encryption",
  "zcash_protocol",
  "zcash_script",
@@ -6397,7 +6386,7 @@ dependencies = [
  "document-features",
  "hex",
  "memuse",
- "zcash_encoding 0.5.0",
+ "zcash_encoding",
 ]
 
 [[package]]
@@ -6443,7 +6432,7 @@ dependencies = [
  "secp256k1",
  "sha2 0.10.9",
  "subtle",
- "zcash_encoding 0.5.0",
+ "zcash_encoding",
  "zcash_protocol",
  "zcash_script",
  "zcash_spec",
