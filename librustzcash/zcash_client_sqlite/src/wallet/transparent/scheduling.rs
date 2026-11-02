@@ -28,7 +28,7 @@ pub(super) fn delay_seconds(rng: &mut (impl Rng + ?Sized), interval_seconds: u32
 }
 
 /// Sample Exp(1) using the upstream one-sided ZIGNOR implementation.
-#[inline]
+#[inline(always)]
 fn sample_unit_exponential(rng: &mut (impl Rng + ?Sized)) -> f64 {
     loop {
         let bits = rng.next_u64();
