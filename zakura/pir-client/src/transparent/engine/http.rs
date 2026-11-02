@@ -80,6 +80,11 @@ fn status_error(
 /// Ureq calls, disable automatic status errors with
 /// [`ureq::config::ConfigBuilder::http_status_as_error`] so refusal bodies reach
 /// this function.
+///
+/// Configure an absolute request deadline with
+/// [`ureq::config::ConfigBuilder::timeout_global`] before sending the request.
+/// This helper bounds body size; it cannot attach a deadline to an already
+/// received response.
 pub fn checked(
     response: ureq::http::Response<ureq::Body>,
     shard_id: u64,

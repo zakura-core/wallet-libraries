@@ -92,22 +92,32 @@ impl HttpExchange for Exchange {
                 .map(str::to_owned)
         };
         let (retry_after, map_sha256) = (header("retry-after"), header("x-txid-map-sha256"));
-        let mut body = Vec::new();
-        std::io::Read::read_to_end(&mut response.into_body().into_reader(), &mut body).map_err(
-            |error| {
-                if error.kind() == std::io::ErrorKind::TimedOut {
-                    HttpFailure::Timeout
-                } else {
-                    HttpFailure::Unreachable
-                }
-            },
-        )?;
-        if (200..300).contains(&status) {
-            if body.len() > request.limit {
-                return Err(HttpFailure::TooLarge);
-            }
+        let success = (200..300).contains(&status);
+        let limit = if success {
+            request.limit
         } else {
-            body.truncate(request.error_limit);
+            request.error_limit
+        };
+        let read_limit = limit
+            .checked_add(usize::from(success))
+            .ok_or(HttpFailure::TooLarge)?;
+        let mut body = Vec::new();
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(
+                response.into_body().into_reader(),
+                u64::try_from(read_limit).map_err(|_| HttpFailure::TooLarge)?,
+            ),
+            &mut body,
+        )
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                HttpFailure::Timeout
+            } else {
+                HttpFailure::Unreachable
+            }
+        })?;
+        if success && body.len() > limit {
+            return Err(HttpFailure::TooLarge);
         }
         Ok(HttpReply {
             status,
@@ -541,4 +551,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         after.spends.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+#[path = "../../tests/support/exchange_limits.rs"]
+mod exchange_limits;
+
+#[cfg(test)]
+#[test]
+fn response_limits_apply_before_reading_to_eof() {
+    let client = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .proxy(None)
+            .timeout_global(Some(Duration::from_millis(500)))
+            .build(),
+    );
+    exchange_limits::assert_bounded_responses(|origin| Exchange {
+        client: client.clone(),
+        origin,
+    });
 }

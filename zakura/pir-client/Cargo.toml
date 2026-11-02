@@ -290,6 +290,7 @@ required-features = ["receiver-wallet"]
 [[example]]
 name = "transparent_recover-activity"
 path = "examples/transparent/recover-activity.rs"
+test = true
 required-features = ["transparent", "sqlite"]
 
 [[example]]
@@ -305,8 +306,8 @@ required-features = ["transparent", "recovery"]
 [[example]]
 name = "transparent_txid_client_txid-quality-canary"
 path = "examples/transparent_txid_client/txid-quality-canary.rs"
-required-features = ["transparent", "testing"]
 test = true
+required-features = ["transparent", "testing"]
 
 [[example]]
 name = "transaction_status_private-source"
