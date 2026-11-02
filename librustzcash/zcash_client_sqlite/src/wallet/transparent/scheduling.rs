@@ -52,145 +52,6 @@ fn sample_unit_exponential(rng: &mut (impl Rng + ?Sized)) -> f64 {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::{
-        collections::VecDeque,
-        convert::Infallible,
-        time::{Duration, SystemTime},
-    };
-
-    use rand::{Rng, SeedableRng, TryRng, rngs::StdRng};
-    use rand_distr::{Distribution, Exp, Exp1};
-
-    use super::{delay_seconds, sample_unit_exponential};
-
-    struct CountedRng {
-        prefix: VecDeque<u64>,
-        fallback: StdRng,
-        draws: usize,
-    }
-
-    impl CountedRng {
-        fn new(seed: u64, prefix: impl IntoIterator<Item = u64>) -> Self {
-            Self {
-                prefix: prefix.into_iter().collect(),
-                fallback: StdRng::seed_from_u64(seed),
-                draws: 0,
-            }
-        }
-    }
-
-    impl TryRng for CountedRng {
-        type Error = Infallible;
-
-        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-            Ok(self.next_u64() as u32)
-        }
-
-        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-            self.draws += 1;
-            Ok(self
-                .prefix
-                .pop_front()
-                .unwrap_or_else(|| self.fallback.next_u64()))
-        }
-
-        fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), Self::Error> {
-            for chunk in destination.chunks_mut(8) {
-                chunk.copy_from_slice(&self.next_u64().to_le_bytes()[..chunk.len()]);
-            }
-            Ok(())
-        }
-    }
-
-    fn compare_prefix(seed: u64, prefix: impl IntoIterator<Item = u64>) -> usize {
-        let prefix: Vec<_> = prefix.into_iter().collect();
-        let mut local = CountedRng::new(seed, prefix.clone());
-        let mut reference = CountedRng::new(seed, prefix);
-        let expected: f64 = Exp1.sample(&mut reference);
-        assert_eq!(
-            sample_unit_exponential(&mut local).to_bits(),
-            expected.to_bits()
-        );
-        assert_eq!(local.draws, reference.draws);
-        assert_eq!(local.next_u64(), reference.next_u64());
-        reference.draws - 1
-    }
-
-    #[test]
-    fn fast_rejection_and_tail_paths_match_the_published_sampler() {
-        assert_eq!(compare_prefix(1, [1]), 1);
-        assert_eq!(compare_prefix(1, [0x7fff_ffff_ffff_ffff, u64::MAX]), 2);
-        assert_eq!(compare_prefix(1, [0x7fff_ffff_ffff_ffff, 0, 1]), 3);
-        for second_word in [0, 1, 1 << 63, u64::MAX] {
-            assert_eq!(compare_prefix(1, [u64::MAX & !0xff, second_word]), 2);
-        }
-    }
-
-    #[test]
-    fn every_ziggurat_box_matches_at_mantissa_boundaries() {
-        for index in 0..256 {
-            for mantissa in [0, 1_u64 << 51, (1_u64 << 52) - 1] {
-                for second_word in [0, 1 << 63, u64::MAX] {
-                    compare_prefix(index, [(mantissa << 12) | index, second_word]);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn deterministic_streams_preserve_samples_and_random_consumption() {
-        for seed in 0..32 {
-            let mut local = CountedRng::new(seed, []);
-            let mut reference = CountedRng::new(seed, []);
-            for _ in 0..4096 {
-                let expected: f64 = Exp1.sample(&mut reference);
-                assert_eq!(
-                    sample_unit_exponential(&mut local).to_bits(),
-                    expected.to_bits()
-                );
-                assert_eq!(local.draws, reference.draws);
-            }
-            assert_eq!(local.next_u64(), reference.next_u64());
-        }
-    }
-
-    #[test]
-    fn delay_rounding_and_check_times_match_for_interval_boundaries() {
-        let from = SystemTime::UNIX_EPOCH + Duration::from_secs(3600);
-        for interval in [
-            0,
-            1,
-            2,
-            3,
-            7,
-            15,
-            60,
-            86400,
-            604800,
-            1 << 31,
-            u32::MAX - 1,
-            u32::MAX,
-        ] {
-            let distribution = Exp::new(1.0 / f64::from(interval)).unwrap();
-            let mut local = CountedRng::new(u64::from(interval), []);
-            let mut reference = CountedRng::new(u64::from(interval), []);
-            for _ in 0..512 {
-                let sample: f64 = distribution.sample(&mut reference);
-                assert_eq!(delay_seconds(&mut local, interval), sample.round() as u64);
-                assert_eq!(local.draws, reference.draws);
-            }
-
-            let sample: f64 = distribution.sample(&mut reference);
-            assert_eq!(
-                super::super::next_check_time(&mut local, from, interval).unwrap(),
-                from + Duration::from_secs(sample.round() as u64),
-            );
-        }
-    }
-}
-
 // Original exponential tables from rand_distr 0.6.0.
 #[expect(
     clippy::excessive_precision,
@@ -333,3 +194,142 @@ static ZIG_EXP_F: [f64; 257] =
      0.775956852040116218, 0.791527636972496285, 0.808421651523009044, 0.826993296643051101,
      0.847785500623990496, 0.871704332381204705, 0.900469929925747703, 0.938143680862176477,
      1.000000000000000000];
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::VecDeque,
+        convert::Infallible,
+        time::{Duration, SystemTime},
+    };
+
+    use rand::{Rng, SeedableRng, TryRng, rngs::StdRng};
+    use rand_distr::{Distribution, Exp, Exp1};
+
+    use super::{delay_seconds, sample_unit_exponential};
+
+    struct CountedRng {
+        prefix: VecDeque<u64>,
+        fallback: StdRng,
+        draws: usize,
+    }
+
+    impl CountedRng {
+        fn new(seed: u64, prefix: impl IntoIterator<Item = u64>) -> Self {
+            Self {
+                prefix: prefix.into_iter().collect(),
+                fallback: StdRng::seed_from_u64(seed),
+                draws: 0,
+            }
+        }
+    }
+
+    impl TryRng for CountedRng {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(self.next_u64() as u32)
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            self.draws += 1;
+            Ok(self
+                .prefix
+                .pop_front()
+                .unwrap_or_else(|| self.fallback.next_u64()))
+        }
+
+        fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), Self::Error> {
+            for chunk in destination.chunks_mut(8) {
+                chunk.copy_from_slice(&self.next_u64().to_le_bytes()[..chunk.len()]);
+            }
+            Ok(())
+        }
+    }
+
+    fn compare_prefix(seed: u64, prefix: impl IntoIterator<Item = u64>) -> usize {
+        let prefix: Vec<_> = prefix.into_iter().collect();
+        let mut local = CountedRng::new(seed, prefix.clone());
+        let mut reference = CountedRng::new(seed, prefix);
+        let expected: f64 = Exp1.sample(&mut reference);
+        assert_eq!(
+            sample_unit_exponential(&mut local).to_bits(),
+            expected.to_bits()
+        );
+        assert_eq!(local.draws, reference.draws);
+        assert_eq!(local.next_u64(), reference.next_u64());
+        reference.draws - 1
+    }
+
+    #[test]
+    fn fast_rejection_and_tail_paths_match_the_published_sampler() {
+        assert_eq!(compare_prefix(1, [1]), 1);
+        assert_eq!(compare_prefix(1, [0x7fff_ffff_ffff_ffff, u64::MAX]), 2);
+        assert_eq!(compare_prefix(1, [0x7fff_ffff_ffff_ffff, 0, 1]), 3);
+        for second_word in [0, 1, 1 << 63, u64::MAX] {
+            assert_eq!(compare_prefix(1, [!0xff_u64, second_word]), 2);
+        }
+    }
+
+    #[test]
+    fn every_ziggurat_box_matches_at_mantissa_boundaries() {
+        for index in 0..256 {
+            for mantissa in [0, 1_u64 << 51, (1_u64 << 52) - 1] {
+                for second_word in [0, 1 << 63, u64::MAX] {
+                    compare_prefix(index, [(mantissa << 12) | index, second_word]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deterministic_streams_preserve_samples_and_random_consumption() {
+        for seed in 0..32 {
+            let mut local = CountedRng::new(seed, []);
+            let mut reference = CountedRng::new(seed, []);
+            for _ in 0..4096 {
+                let expected: f64 = Exp1.sample(&mut reference);
+                assert_eq!(
+                    sample_unit_exponential(&mut local).to_bits(),
+                    expected.to_bits()
+                );
+                assert_eq!(local.draws, reference.draws);
+            }
+            assert_eq!(local.next_u64(), reference.next_u64());
+        }
+    }
+
+    #[test]
+    fn delay_rounding_and_check_times_match_for_interval_boundaries() {
+        let from = SystemTime::UNIX_EPOCH + Duration::from_secs(3600);
+        for interval in [
+            0,
+            1,
+            2,
+            3,
+            7,
+            15,
+            60,
+            86400,
+            604800,
+            1 << 31,
+            u32::MAX - 1,
+            u32::MAX,
+        ] {
+            let distribution = Exp::new(1.0 / f64::from(interval)).unwrap();
+            let mut local = CountedRng::new(u64::from(interval), []);
+            let mut reference = CountedRng::new(u64::from(interval), []);
+            for _ in 0..512 {
+                let sample: f64 = distribution.sample(&mut reference);
+                assert_eq!(delay_seconds(&mut local, interval), sample.round() as u64);
+                assert_eq!(local.draws, reference.draws);
+            }
+
+            let sample: f64 = distribution.sample(&mut reference);
+            assert_eq!(
+                super::super::next_check_time(&mut local, from, interval).unwrap(),
+                from + Duration::from_secs(sample.round() as u64),
+            );
+        }
+    }
+}
