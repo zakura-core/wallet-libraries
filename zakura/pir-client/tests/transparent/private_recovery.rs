@@ -2425,7 +2425,6 @@ impl zakura_pir_client::transparent::TxidTransport for DisplayTransport<'_> {
         zakura_pir_client::transparent::TxidReply,
         zakura_pir_client::transparent::TransportError,
     > {
-        use tower::ServiceExt as _;
         self.sent
             .push((request.path().to_string(), request.body.clone()));
         if self.unavailable {
@@ -2435,40 +2434,27 @@ impl zakura_pir_client::transparent::TxidTransport for DisplayTransport<'_> {
                 ..Default::default()
             });
         }
-        let mut builder = axum::http::Request::builder()
+        let mut builder = http::Request::builder()
             .method(request.method.as_str())
             .uri(request.path())
             .header("content-length", request.body.len());
         if let Some(content_type) = request.content_type() {
             builder = builder.header("content-type", content_type);
         }
-        let http = builder
-            .body(axum::body::Body::from(request.body.clone()))
-            .unwrap();
-        let router = self.service.router.clone();
-        self.service.runtime.block_on(async move {
-            let response = router.oneshot(http).await.unwrap();
-            let header = |name: &str| {
-                response
-                    .headers()
-                    .get(name)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string)
-            };
-            let (status, retry_after, map_sha256) = (
-                response.status().as_u16(),
-                header("retry-after"),
-                header("x-txid-map-sha256"),
-            );
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .map_err(|e| zakura_pir_client::transparent::TransportError(e.to_string()))?;
-            Ok(zakura_pir_client::transparent::TxidReply {
-                status,
-                retry_after,
-                map_sha256,
-                body: body.to_vec(),
-            })
+        let http = builder.body(request.body.clone()).unwrap();
+        let response = self.service.answer(http);
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        Ok(zakura_pir_client::transparent::TxidReply {
+            status: response.status().as_u16(),
+            retry_after: header("retry-after"),
+            map_sha256: header("x-txid-map-sha256"),
+            body: response.into_body(),
         })
     }
 }

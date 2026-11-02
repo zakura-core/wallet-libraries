@@ -158,9 +158,11 @@ tempfile = "3"
 serde_json = { workspace = true }
 zcash_keys = { workspace = true, features = ["transparent-inputs"] }
 ureq = { version = "3.5", default-features = false, features = ["rustls"] }
-axum = { version = "0.7", default-features = false, features = ["http1", "tokio"] }
+http = "1"
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util.workspace = true
 regex = { workspace = true, features = ["std"] }
-tower = { version = "0.5", features = ["util"] }
 hex = { workspace = true, features = ["std"] }
 sha2 = { workspace = true }
 rand = "0.8"
