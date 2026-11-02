@@ -88,7 +88,7 @@ document-features = { workspace = true, optional = true }
 pczt.workspace = true
 zcash_proofs = { workspace = true, optional = true }
 rand_core.workspace = true
-num-traits = { version = "0.2", default-features = false, features = ["libm"], optional = true }
+num-traits = { version = "0.2.9", default-features = false, features = ["libm"], optional = true }
 rand.workspace = true
 zcash_note_encryption = { workspace = true, optional = true }
 

@@ -61,6 +61,13 @@ and this library adheres to Rust's notion of
   notes once they hold their half of the limit, so a proposal costs about its
   limit rather than every unspent one-time-key note. The selection is unchanged.
 
+### Removed
+
+- The unreachable `SchedulingError::Distribution` variant and its
+  `From<rand_distr::ExpError>` conversion. Transparent-address check scheduling
+  keeps the same exponential sampler in a private module, with `rand_distr`
+  retained only as a test oracle.
+
 ## [0.1.0-rc9.6] - 2026-10-30
 
 ### Added
