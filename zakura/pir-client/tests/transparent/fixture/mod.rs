@@ -3,11 +3,19 @@
 //! them, and the exchange a wallet reaches it over. The publisher is the
 //! `testing` feature's [`zakura_pir_client::transparent::testing::service`].
 
+use std::convert::Infallible;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use axum::{body::Body, extract::Request, middleware::Next, response::Response};
+use http::{Request, Response};
+use http_body_util::{BodyExt as _, Full};
+use hyper::{
+    body::{Bytes, Incoming},
+    server::conn::http1,
+    service::service_fn,
+};
+use hyper_util::rt::TokioIo;
 use tokio::{net::TcpListener, runtime::Runtime, task::JoinHandle};
 use zakura_pir_client::transparent::testing::service::InProcess;
 use zakura_pir_client::transparent::{
@@ -60,15 +68,22 @@ impl Server {
         let requests = self.requests.clone();
         let service = InProcess::serve(dir);
         let (url, serving) = self.runtime.block_on(async move {
-            let app = axum::Router::new()
-                .fallback(move |request: Request| forward(service.clone(), request))
-                .layer(axum::middleware::from_fn(
-                    move |request: Request, next: Next| record(requests.clone(), request, next),
-                ));
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let serving = tokio::spawn(async move {
-                axum::serve(listener, app).await.unwrap();
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let service = service.clone();
+                    let requests = requests.clone();
+                    tokio::spawn(async move {
+                        let answering = service_fn(move |request| {
+                            forward(service.clone(), requests.clone(), request)
+                        });
+                        let _ = http1::Builder::new()
+                            .serve_connection(TokioIo::new(stream), answering)
+                            .await;
+                    });
+                }
             });
             (url, serving)
         });
@@ -85,12 +100,18 @@ impl Server {
     }
 }
 
-/// Records `request`, headers and body included, then hands it on unchanged.
-async fn record(requests: Arc<Mutex<Vec<Recorded>>>, request: Request, next: Next) -> Response {
+/// Records the complete request, then evaluates real PIR off the async runtime.
+async fn forward(
+    service: InProcess,
+    requests: Arc<Mutex<Vec<Recorded>>>,
+    request: Request<Incoming>,
+) -> Result<Response<Full<Bytes>>, Infallible> {
     let (parts, body) = request.into_parts();
-    let body = axum::body::to_bytes(body, usize::MAX)
+    let body = body
+        .collect()
         .await
-        .expect("a readable request body");
+        .expect("a readable request body")
+        .to_bytes();
     requests
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -105,21 +126,11 @@ async fn record(requests: Arc<Mutex<Vec<Recorded>>>, request: Request, next: Nex
                 .collect(),
             body: body.to_vec(),
         });
-    next.run(Request::from_parts(parts, Body::from(body))).await
-}
-
-/// Hands `request` to the in-process service, off the async runtime: a
-/// query is evaluated with real PIR, which takes a while.
-async fn forward(service: InProcess, request: Request) -> Response {
-    let (parts, body) = request.into_parts();
-    let body = axum::body::to_bytes(body, usize::MAX)
-        .await
-        .expect("a readable request body");
-    let request = axum::http::Request::from_parts(parts, body.to_vec());
+    let request = Request::from_parts(parts, body.to_vec());
     let reply = tokio::task::spawn_blocking(move || service.answer(request))
         .await
         .expect("the service answered");
-    reply.map(Body::from)
+    Ok(reply.map(|body| Full::new(Bytes::from(body))))
 }
 
 /// A wallet's [`HttpExchange`] over loopback HTTP to one served publication: one

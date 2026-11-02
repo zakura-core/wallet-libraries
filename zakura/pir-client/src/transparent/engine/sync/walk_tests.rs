@@ -2169,7 +2169,7 @@ fn activity_recovered_from_a_replacement_revision_advances_the_gap_limit() {
                 }
             }
             let answered = self.serving.borrow().answer(
-                axum::http::Request::builder()
+                http::Request::builder()
                     .method(request.method.as_str())
                     .uri(&request.path)
                     .body(request.body.clone())
@@ -2375,7 +2375,7 @@ fn activity_saved_before_a_budget_stop_reaches_the_gap_limit_rule() {
     impl HttpExchange for Serving {
         fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
             let answered = self.0.answer(
-                axum::http::Request::builder()
+                http::Request::builder()
                     .method(request.method.as_str())
                     .uri(&request.path)
                     .body(request.body.clone())
