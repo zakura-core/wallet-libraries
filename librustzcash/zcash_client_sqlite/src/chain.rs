@@ -21,7 +21,7 @@ use {
 };
 
 pub mod init;
-pub mod migrations;
+mod migrations;
 
 /// Implements a traversal of `limit` blocks of the block cache database.
 ///

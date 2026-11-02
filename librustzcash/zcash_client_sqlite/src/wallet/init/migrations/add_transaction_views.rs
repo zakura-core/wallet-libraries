@@ -1,8 +1,8 @@
 //! Migration that adds transaction summary views & add fee information to transactions.
 use std::collections::HashSet;
 
+use crate::migration::SqliteMigration as RusqliteMigration;
 use rusqlite::{self, OptionalExtension, params, types::ToSql};
-use schemerz_rusqlite::RusqliteMigration;
 use uuid::Uuid;
 
 use zcash_primitives::transaction::Transaction;
@@ -24,7 +24,7 @@ const DEPENDENCIES: &[Uuid] = &[
 
 pub(crate) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

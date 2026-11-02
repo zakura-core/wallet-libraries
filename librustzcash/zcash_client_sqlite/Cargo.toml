@@ -77,8 +77,6 @@ shardtree = { workspace = true, features = ["legacy-api"] }
 
 # - SQLite databases
 rusqlite = { workspace = true, features = ["time", "array", "uuid", "hooks"] }
-schemerz.workspace = true
-schemerz-rusqlite.workspace = true
 time.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
@@ -95,6 +93,9 @@ zcash_note_encryption = { workspace = true, optional = true }
 tempfile = { version = "3.5.0", optional = true }
 
 [dev-dependencies]
+# Independent oracle for the wallet's internal migration runner.
+schemerz.workspace = true
+schemerz-rusqlite.workspace = true
 regex.workspace = true
 assert_matches.workspace = true
 incrementalmerkletree = { workspace = true, features = ["test-dependencies"] }

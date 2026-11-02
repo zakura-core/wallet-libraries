@@ -6,8 +6,8 @@
 
 use std::collections::HashSet;
 
+use crate::migration::SqliteMigration as RusqliteMigration;
 use rusqlite::named_params;
-use schemerz_rusqlite::RusqliteMigration;
 use uuid::Uuid;
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_protocol::consensus;
@@ -28,7 +28,7 @@ pub(crate) struct Migration<P: consensus::Parameters> {
     pub(super) params: P,
 }
 
-impl<P: consensus::Parameters> schemerz::Migration<Uuid> for Migration<P> {
+impl<P: consensus::Parameters> crate::migration::Migration for Migration<P> {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

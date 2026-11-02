@@ -2,17 +2,17 @@
 //! link: this module is always compiled, while the type it names exists only under the `unstable`
 //! feature).
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 
 /// Returns all migrations required for the block metadata database.
-pub fn all_migrations() -> Vec<Box<dyn RusqliteMigration<Error = rusqlite::Error>>> {
+pub(in crate::chain) fn all_migrations() -> Vec<Box<dyn RusqliteMigration<Error = rusqlite::Error>>>
+{
     vec![Box::new(init::Migration {})]
 }
 
 mod init {
+    use crate::migration::SqliteMigration as RusqliteMigration;
     use rusqlite::{self};
-    use schemerz::{self, migration};
-    use schemerz_rusqlite::RusqliteMigration;
     use uuid::Uuid;
 
     pub(super) struct Migration;
@@ -27,12 +27,19 @@ mod init {
         b"\xa7\x65\x72\x0f\x83\x89\xb9\x9d",
     );
 
-    migration!(
-        Migration,
-        MIGRATION_ID,
-        [],
-        "Initialize the cachemeta database."
-    );
+    impl crate::migration::Migration for Migration {
+        fn id(&self) -> Uuid {
+            MIGRATION_ID
+        }
+
+        fn dependencies(&self) -> std::collections::HashSet<Uuid> {
+            std::collections::HashSet::new()
+        }
+
+        fn description(&self) -> &'static str {
+            "Initialize the cachemeta database."
+        }
+    }
 
     impl RusqliteMigration for Migration {
         type Error = rusqlite::Error;

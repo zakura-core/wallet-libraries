@@ -1,15 +1,15 @@
 //! Adds durable transparent txid enhancement work and validated display facts, and queues work
 //! for existing transactions whose transparent details the wallet cannot otherwise obtain.
 use super::ironwood_transparent_output_shape;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use crate::wallet::init::WalletMigrationError;
-use schemerz_rusqlite::RusqliteMigration;
 use std::collections::HashSet;
 use uuid::Uuid;
 
 /// Additive: new tables only, plus work rows for transactions without raw bytes.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x73d751a3_dbdc_461a_9154_e061903aae4f);
 pub(super) struct Migration;
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

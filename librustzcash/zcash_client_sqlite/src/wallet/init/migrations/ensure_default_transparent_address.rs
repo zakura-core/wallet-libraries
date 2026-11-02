@@ -5,8 +5,8 @@
 use std::collections::HashSet;
 use uuid::Uuid;
 
+use crate::migration::SqliteMigration as RusqliteMigration;
 use rusqlite::Transaction;
-use schemerz_rusqlite::RusqliteMigration;
 use zcash_protocol::consensus;
 
 use super::transparent_gap_limit_handling;
@@ -23,7 +23,7 @@ pub(super) struct Migration<P> {
     pub(super) _params: P,
 }
 
-impl<P> schemerz::Migration<Uuid> for Migration<P> {
+impl<P> crate::migration::Migration for Migration<P> {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

@@ -1,7 +1,7 @@
 //! Adds expiration to transaction enhancement requests.
 
+use crate::migration::SqliteMigration as RusqliteMigration;
 use rusqlite::{Transaction, named_params};
-use schemerz_rusqlite::RusqliteMigration;
 use std::collections::HashSet;
 use uuid::Uuid;
 use zcash_primitives::transaction::builder::PRE_NU7_DEFAULT_TX_EXPIRY_DELTA;
@@ -17,7 +17,7 @@ const DEPENDENCIES: &[Uuid] = &[tx_retrieval_queue::MIGRATION_ID];
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

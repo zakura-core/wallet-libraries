@@ -6,7 +6,7 @@
 //! The SQL is frozen here so future summary API edits cannot change this migration.
 use std::collections::HashSet;
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use uuid::Uuid;
 
 use super::v_transactions_sender_grouping;
@@ -19,7 +19,7 @@ const DEPENDENCIES: &[Uuid] = &[v_transactions_sender_grouping::MIGRATION_ID];
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

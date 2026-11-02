@@ -81,8 +81,8 @@
 
 use std::collections::HashSet;
 
+use crate::migration::SqliteMigration as RusqliteMigration;
 use rusqlite::named_params;
-use schemerz_rusqlite::RusqliteMigration;
 use uuid::Uuid;
 
 use super::orchard_ironwood_migration_anchor_interval;
@@ -114,7 +114,7 @@ const CREATE_SPEND_NULLIFIERS_SQL: &str = "CREATE TABLE orchard_ironwood_migrati
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

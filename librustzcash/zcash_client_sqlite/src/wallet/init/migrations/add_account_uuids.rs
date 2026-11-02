@@ -3,8 +3,8 @@
 
 use std::collections::HashSet;
 
+use crate::migration::SqliteMigration as RusqliteMigration;
 use rusqlite::named_params;
-use schemerz_rusqlite::RusqliteMigration;
 use uuid::Uuid;
 use zcash_client_backend::data_api::{AccountPurpose, AccountSource, Zip32Derivation};
 use zip32::fingerprint::SeedFingerprint;
@@ -20,7 +20,7 @@ const DEPENDENCIES: &[Uuid] = &[support_legacy_sqlite::MIGRATION_ID];
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

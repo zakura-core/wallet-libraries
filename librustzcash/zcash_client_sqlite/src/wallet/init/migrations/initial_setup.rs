@@ -1,7 +1,7 @@
 //! The migration that performs the initial setup of the wallet database.
 use std::collections::HashSet;
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use uuid::Uuid;
 
 use crate::wallet::init::WalletMigrationError;
@@ -11,7 +11,7 @@ pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xbc4f5e57_d600_4b6c_990f_b3538f0
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

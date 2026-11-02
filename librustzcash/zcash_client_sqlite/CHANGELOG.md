@@ -16,6 +16,12 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- Wallet and block-cache initialization return the owned
+  `error::MigrationError<E>` instead of `schemerz::MigratorError<Uuid, E>`.
+  Its error source retains the underlying wallet or SQLite error. The internal
+  migration runner preserves migration SQL, identifiers, dependencies and the
+  existing journal format; the published engine is retained as a test oracle.
+
 - Generating the crate's feature table now requires the optional
   `document-features` feature. Ordinary builds omit the documentation macro;
   docs.rs continues to include the table.
@@ -67,6 +73,10 @@ and this library adheres to Rust's notion of
   `From<rand_distr::ExpError>` conversion. Transparent-address check scheduling
   keeps the same exponential sampler in a private module, with `rand_distr`
   retained only as a test oracle.
+
+- `WalletMigrator::with_external_migrations` and the public
+  `chain::migrations` module. Applications manage their own schema migrations;
+  wallet initialization refuses journal identifiers it does not recognize.
 
 ## [0.1.0-rc9.6] - 2026-10-30
 

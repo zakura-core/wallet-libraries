@@ -6,7 +6,7 @@
 //! Existing rows are untouched; no coverage is inferred for them.
 use std::collections::HashSet;
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use uuid::Uuid;
 
 use super::transparent_policy_generation;
@@ -19,7 +19,7 @@ const DEPENDENCIES: &[Uuid] = &[transparent_policy_generation::MIGRATION_ID];
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

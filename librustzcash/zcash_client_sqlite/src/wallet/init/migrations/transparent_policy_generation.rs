@@ -5,7 +5,7 @@
 //! generation). Route `2` records that transparent details cannot be recovered publicly.
 use std::collections::HashSet;
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use uuid::Uuid;
 
 use super::transparent_ledger_schema;
@@ -18,7 +18,7 @@ const DEPENDENCIES: &[Uuid] = &[transparent_ledger_schema::MIGRATION_ID];
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

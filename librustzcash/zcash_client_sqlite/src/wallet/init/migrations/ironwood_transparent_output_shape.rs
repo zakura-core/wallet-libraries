@@ -1,15 +1,15 @@
 //! Retains Enhance PIR's transparent-output assertion and privately recovers it for existing
 //! mixed transactions even when their received memos were already recovered.
 use super::ironwood_unsupported_memo_retry;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use crate::wallet::init::WalletMigrationError;
-use schemerz_rusqlite::RusqliteMigration;
 use std::collections::HashSet;
 use uuid::Uuid;
 
 /// Adds nullable display evidence; no existing transaction is assumed to lack outputs.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x8f4c3210_04e1_49eb_9de2_d713ee0a8426);
 pub(super) struct Migration;
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

@@ -1,7 +1,7 @@
 //! The migration that records ephemeral addresses for each account.
 use std::collections::HashSet;
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use uuid::Uuid;
 
 use crate::wallet::init::WalletMigrationError;
@@ -16,7 +16,7 @@ const DEPENDENCIES: &[Uuid] = &[full_account_ids::MIGRATION_ID];
 #[allow(dead_code)]
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

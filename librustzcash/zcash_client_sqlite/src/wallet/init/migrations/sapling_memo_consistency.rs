@@ -4,8 +4,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::migration::SqliteMigration as RusqliteMigration;
 use rusqlite::{OptionalExtension, named_params};
-use schemerz_rusqlite::RusqliteMigration;
 use uuid::Uuid;
 
 use zcash_client_backend::decrypt_transaction;
@@ -34,7 +34,7 @@ pub(super) struct Migration<P> {
     pub(super) params: P,
 }
 
-impl<P> schemerz::Migration<Uuid> for Migration<P> {
+impl<P> crate::migration::Migration for Migration<P> {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }
