@@ -1,6 +1,4 @@
-//! Migrations for the `compactblocks_meta` table used by `FsBlockDb` (a plain code span, not a
-//! link: this module is always compiled, while the type it names exists only under the `unstable`
-//! feature).
+//! Migrations for the `compactblocks_meta` table used by [`crate::FsBlockDb`].
 
 use crate::migration::SqliteMigration as RusqliteMigration;
 

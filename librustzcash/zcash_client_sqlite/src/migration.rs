@@ -254,6 +254,10 @@ pub(crate) fn migrate<E: From<rusqlite::Error>>(
         targets.iter().copied().map(Some).collect()
     };
     for target in targets {
+        match target {
+            Some(id) => tracing::info!("Migrating up to target: {}", id),
+            None => tracing::info!("Migrating everything"),
+        }
         let order = graph.order(target).map_err(MigrationError::dependency)?;
         let mut statement = conn
             .prepare(&format!("SELECT id FROM {};", TABLE))
@@ -272,6 +276,7 @@ pub(crate) fn migrate<E: From<rusqlite::Error>>(
                 continue;
             }
             let description = migration.description();
+            tracing::info!("Applying migration {} ({})", id, description);
             let result = (|| -> Result<(), E> {
                 let transaction = conn.transaction()?;
                 migration.up(&transaction)?;
