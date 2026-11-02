@@ -65,7 +65,6 @@ mod tests {
 
     use super::{delay_seconds, sample_unit_exponential};
 
-    #[derive(Clone)]
     struct CountedRng {
         prefix: VecDeque<u64>,
         fallback: StdRng,
@@ -106,8 +105,9 @@ mod tests {
     }
 
     fn compare_prefix(seed: u64, prefix: impl IntoIterator<Item = u64>) -> usize {
-        let mut local = CountedRng::new(seed, prefix);
-        let mut reference = local.clone();
+        let prefix: Vec<_> = prefix.into_iter().collect();
+        let mut local = CountedRng::new(seed, prefix.clone());
+        let mut reference = CountedRng::new(seed, prefix);
         let expected: f64 = Exp1.sample(&mut reference);
         assert_eq!(
             sample_unit_exponential(&mut local).to_bits(),
@@ -143,7 +143,7 @@ mod tests {
     fn deterministic_streams_preserve_samples_and_random_consumption() {
         for seed in 0..32 {
             let mut local = CountedRng::new(seed, []);
-            let mut reference = local.clone();
+            let mut reference = CountedRng::new(seed, []);
             for _ in 0..4096 {
                 let expected: f64 = Exp1.sample(&mut reference);
                 assert_eq!(
@@ -175,7 +175,7 @@ mod tests {
         ] {
             let distribution = Exp::new(1.0 / f64::from(interval)).unwrap();
             let mut local = CountedRng::new(u64::from(interval), []);
-            let mut reference = local.clone();
+            let mut reference = CountedRng::new(u64::from(interval), []);
             for _ in 0..512 {
                 let sample: f64 = distribution.sample(&mut reference);
                 assert_eq!(delay_seconds(&mut local, interval), sample.round() as u64);
