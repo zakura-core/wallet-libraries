@@ -20,9 +20,9 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
-use zakura_pir_client::transparent::txid_client::{
-    Method, TransportError, TxidDisplayClient, TxidError, TxidLookup, TxidReply, TxidRequest,
-    TxidTransport,
+use zakura_pir_client::transparent::{
+    HttpExchange, HttpFailure, HttpMethod, HttpReply, HttpRequest, TxidHttp,
+    txid_client::{TxidDisplayClient, TxidError, TxidLookup},
 };
 use zakura_pir_protocol::endpoint::Endpoint;
 
@@ -102,26 +102,29 @@ struct Http {
     base: Endpoint,
 }
 
-impl TxidTransport for Http {
-    fn send(&mut self, request: TxidRequest) -> Result<TxidReply, TransportError> {
+impl HttpExchange for Http {
+    fn send(&self, request: &HttpRequest) -> Result<HttpReply, HttpFailure> {
         let url = self
             .base
-            .join(request.path())
-            .map_err(|_| TransportError("invalid route".into()))?;
+            .join(&request.path)
+            .map_err(|_| HttpFailure::Unreachable)?;
         let mut builder = ureq::http::Request::builder().uri(url);
         builder = match request.method {
-            Method::Get => builder.method("GET"),
-            Method::Post => builder
+            HttpMethod::Get => builder.method("GET"),
+            HttpMethod::Post => builder
                 .method("POST")
-                .header("content-type", request.content_type().unwrap_or_default()),
+                .header("content-type", "application/octet-stream"),
         };
-        let request = builder
-            .body(request.body)
-            .map_err(|_| TransportError("invalid request".into()))?;
-        let response = self
-            .client
-            .run(request)
-            .map_err(|_| TransportError("request failed".into()))?;
+        let sending = builder
+            .body(request.body.as_slice())
+            .map_err(|_| HttpFailure::Unreachable)?;
+        let response = self.client.run(sending).map_err(|error| {
+            if matches!(error, ureq::Error::Timeout(_)) {
+                HttpFailure::Timeout
+            } else {
+                HttpFailure::Unreachable
+            }
+        })?;
         let header = |name: &str| {
             response
                 .headers()
@@ -134,10 +137,34 @@ impl TxidTransport for Http {
             header("retry-after"),
             header("x-txid-map-sha256"),
         );
+        let success = (200..300).contains(&status);
+        let limit = if success {
+            request.limit
+        } else {
+            request.error_limit
+        };
+        let read_limit = limit
+            .checked_add(usize::from(success))
+            .ok_or(HttpFailure::TooLarge)?;
         let mut body = Vec::new();
-        std::io::Read::read_to_end(&mut response.into_body().into_reader(), &mut body)
-            .map_err(|_| TransportError("body failed".into()))?;
-        Ok(TxidReply {
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(
+                response.into_body().into_reader(),
+                u64::try_from(read_limit).map_err(|_| HttpFailure::TooLarge)?,
+            ),
+            &mut body,
+        )
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                HttpFailure::Timeout
+            } else {
+                HttpFailure::Unreachable
+            }
+        })?;
+        if success && body.len() > limit {
+            return Err(HttpFailure::TooLarge);
+        }
+        Ok(HttpReply {
             status,
             retry_after,
             map_sha256,
@@ -163,7 +190,7 @@ fn probe(args: &Args) -> &'static str {
     let Ok(base) = Endpoint::parse(&args.url) else {
         return "unavailable";
     };
-    let mut transport = Http { client, base };
+    let mut transport = TxidHttp::new(Http { client, base });
     // A fresh client every run: the cold path, with no cached map or setups.
     let outcome = TxidDisplayClient::new().lookup(&mut transport, pin.txid, pin.height, &|| false);
     judge(outcome, &pin)
@@ -183,6 +210,10 @@ fn main() {
 }
 
 #[cfg(test)]
+#[path = "../../tests/support/exchange_limits.rs"]
+mod exchange_limits;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use zakura_pir_client::transparent::txid_client::{Placement, ProtocolKind};
@@ -192,6 +223,21 @@ mod tests {
     };
 
     const TXID_DISPLAY: &str = "00000000000000000000000000000000000000000000000000000000000000ab";
+
+    #[test]
+    fn response_limits_apply_before_reading_to_eof() {
+        let client = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .proxy(None)
+                .timeout_global(Some(Duration::from_millis(500)))
+                .build(),
+        );
+        exchange_limits::assert_bounded_responses(|origin| Http {
+            client: client.clone(),
+            base: Endpoint::parse(&origin).unwrap(),
+        });
+    }
 
     fn entry(txid: [u8; 32], value: u64) -> DisplayEntry {
         DisplayEntry {

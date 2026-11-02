@@ -86,6 +86,7 @@ impl HttpTransport {
                 String::from_utf8_lossy(&prefix)
                     .chars()
                     .take(200)
+                    .flat_map(char::escape_default)
                     .collect::<String>()
             )));
         }
@@ -228,6 +229,24 @@ mod tests {
         assert_eq!(health.phase, "serving");
         assert_eq!(health.filters_stored, 2);
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn error_diagnostics_escape_peer_control_characters() {
+        let body = b"\x1b[31m\n\r";
+        let (transport, worker) = serve(move |mut stream| {
+            write!(
+                stream,
+                "HTTP/1.1 503 Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        });
+        let error = transport.health().unwrap_err().to_string();
+        worker.join().unwrap();
+        assert!(error.contains(r"\u{1b}[31m\n\r"), "{error}");
+        assert!(!error.chars().any(char::is_control));
     }
 
     #[test]
