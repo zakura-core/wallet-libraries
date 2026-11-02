@@ -215,18 +215,20 @@ impl DisplayService {
             Ok(match route {
                 Route::Init => init_route(p),
                 Route::RecentMap => recent_map(p),
-                Route::Manifest(shard, digest) => {
-                    manifest_route(p, number(shard, "shard_id")?, &parameter(digest, "digest")?)
-                }
+                Route::Manifest(shard, digest) => manifest_route(
+                    p,
+                    number(shard, "shard_id", 0)?,
+                    &parameter(digest, "digest")?,
+                ),
                 Route::Setup(shard, digest, table, segment) => setup(
                     p,
-                    number(shard, "shard_id")?,
+                    number(shard, "shard_id", 0)?,
                     &parameter(digest, "digest")?,
                     &parameter(table, "table")?,
-                    number(segment, "segment")?,
+                    number(segment, "segment", 3)?,
                 ),
                 Route::Query(shard, digest, table) => {
-                    let shard_id = number(shard, "shard_id")?;
+                    let shard_id = number(shard, "shard_id", 0)?;
                     let digest = parameter(digest, "digest")?;
                     let table = parameter(table, "table")?;
                     // Preserve the previous Bytes extractor's default limit.
@@ -293,13 +295,13 @@ fn parameter(value: &str, name: &str) -> Result<String, Response> {
     })
 }
 
-fn number<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, Response> {
+fn number<T: std::str::FromStr>(value: &str, name: &str, index: usize) -> Result<T, Response> {
     let value = parameter(value, name)?;
     value.parse().map_err(|_| {
         text(
             StatusCode::BAD_REQUEST,
             format!(
-                "Invalid URL: Cannot parse `{name}` with value `{value:?}` to a `{}`",
+                "Invalid URL: Cannot parse value at index {index} with value `{value:?}` to a `{}`",
                 std::any::type_name::<T>()
             ),
         )
