@@ -7,6 +7,9 @@
 # they depend on is resolved from the published zakura-* crates, and every
 # other librustzcash component from its crates.io release, so exactly one copy
 # of each package can ever enter a consumer's graph.
+#
+# Dependency comments below describe the upstream workspace. Version and feature
+# overrides in manifests/sources.toml take precedence over those upstream notes.
 
 [workspace]
 members = [
@@ -53,7 +56,7 @@ zcash_client_backend = { version = "0.1.0-rc9.6", path = "librustzcash/zcash_cli
 # `zcash_history` (a leaf crate, and the sole consumer of the new API) takes an
 # explicit path dependency on the local 0.5. Migrate the remaining crates one at a
 # time, then flip this back to `path = "components/zcash_encoding"` at "0.5".
-zcash_encoding = { version = "0.4", default-features = false }
+zcash_encoding = { version = "0.5", default-features = false }
 zcash_keys = { version = "4.0.0", default-features = false, package = "zakura-keys" }
 zcash_pool_migration = { version = "0.1.0-rc.6" }
 zcash_protocol = { version = "4.0.0", default-features = false, package = "zakura-protocol" }
