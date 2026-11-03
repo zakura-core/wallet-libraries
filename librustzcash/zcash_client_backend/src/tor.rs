@@ -5,7 +5,7 @@
 
 use std::{fmt, io, path::Path, sync::Arc, time::Duration};
 
-use arti_client::{TorClient, config::TorClientConfigBuilder};
+use arti_client::{ErrorKind, HasKind, TorClient, config::TorClientConfigBuilder};
 use tor_rtcompat::PreferredRuntime;
 use tracing::debug;
 
@@ -235,6 +235,17 @@ pub enum Error {
     Io(io::Error),
     /// A Tor-specific error.
     Tor(arti_client::Error),
+}
+
+impl Error {
+    /// Returns whether Tor reported a remote name-resolution failure.
+    ///
+    /// This identifies [`ErrorKind::RemoteHostResolutionFailed`], including a
+    /// failed hostname lookup reported by an exit relay. It does not establish
+    /// that the hostname exists or that the failure is transient.
+    pub fn is_tor_name_resolution_failure(&self) -> bool {
+        matches!(self, Self::Tor(error) if error.kind() == ErrorKind::RemoteHostResolutionFailed)
+    }
 }
 
 impl fmt::Display for Error {
