@@ -12,16 +12,14 @@
 //! the registration that creates them inside the wallet schema, and it depends on
 //! [`ironwood_received_notes`] because the migration writes Ironwood notes, whose tables must exist.
 //!
-//! The DDL below is a FROZEN COPY of the text a released build of this migration actually ran, not
-//! a call into the store's canonical DDL. This migration is published, so its effect is observable
-//! by anything that anchors to it: an external [`schemerz`] migration may declare this migration as
-//! a dependency and a later one as a dependent, and it then runs against exactly the schema these
-//! statements create — down to the `tx_id` column that
-//! [`orchard_ironwood_migration_unsatisfiability`] renames to `transfer_id`. Sourcing the text from
-//! a shared builder would let an edit made for a future database silently change what an
-//! already-published migration does to an existing one. The canonical DDL in
-//! `crate::pool_migration::store` states the FINAL shape instead; a fresh database reaches that
-//! shape by running this migration and then the later ones, and the two are pinned together by
+//! The DDL below is a frozen copy of the text a released build actually ran.
+//! Later migrations depend on the schema these statements create, including the
+//! `tx_id` column that [`orchard_ironwood_migration_unsatisfiability`] renames to
+//! `transfer_id`. Sourcing this text from a shared builder would let an edit for
+//! a future database silently change how a released migration upgrades
+//! an existing database. The canonical DDL in `crate::pool_migration::store`
+//! states the final shape; a fresh database reaches that shape by running this
+//! migration and then the later ones. The two are pinned together by
 //! `verify_schema` and `canonical_pool_migration_ddl_matches_the_migration_path`.
 //!
 //! [ZIP 318]: https://zips.z.cash/zip-0318

@@ -790,9 +790,9 @@ pub(crate) mod tests {
         assert_eq!(computed_leaves, listed_leaves);
     }
 
-    /// Every migration in the graph must have a publicly-exported identifier, so that an
-    /// external migration can always anchor itself precisely. Listing them here rather than
-    /// deriving them means a migration added without an `ids` entry fails this test.
+    /// Every migration must have a public identifier for inspecting the journal.
+    /// Listing them here rather than deriving them means a migration added
+    /// without an `ids` entry fails this test.
     #[test]
     #[cfg(feature = "unstable")]
     fn ids_module_covers_every_migration() {

@@ -149,6 +149,7 @@ def main():
     # Check both feature-off libraries and real consumer capabilities. The
     # proving consumer also ensures the real fixture remains available.
     pczt_macros = {"serde_with_macros", "darling", "darling_core", "darling_macro", "ident_case", "strsim"}
+    migration_engines = {"schemerz", "schemerz-rusqlite", "daggy", "petgraph", "fixedbitset"}
     endpoint_stack = {"url", "idna", "idna_adapter", "icu_provider", "icu_normalizer", "icu_properties"}
     recovery_forbidden = {
         "zakura-client-backend", "zakura-client-sqlite", "zakura-primitives", "zakura-pczt",
@@ -186,9 +187,9 @@ def main():
         ("endpoint", "zakura/pir-protocol", ["http-endpoint"], endpoint_stack | server_roles, {"http"}),
         ("recovery-types", "zakura/pir-protocol", ["transparent-inputs"], recovery_forbidden | server_roles, {"zakura-protocol"}),
         ("recovery", "zakura/pir-client", ["recovery"], recovery_forbidden | endpoint_stack | server_roles | native_evaluators, {"zakura-pir-protocol"}),
-        ("sqlite-default", "librustzcash/zcash_client_sqlite", [], {"rand_distr"}, set()),
+        ("sqlite-default", "librustzcash/zcash_client_sqlite", [], {"rand_distr"} | migration_engines, set()),
         ("tor", "librustzcash/zcash_client_backend", ["tor"], {"dynosaur", "dynosaur_derive", "trait-variant", "liblzma", "liblzma-sys", "zstd", "zstd-safe", "zstd-sys", "jobserver", "arti-client", "fs-mistrust", "tor-rtcompat", "sysinfo", "criterion-cycles-per-byte", "url", "idna", "idna_adapter", "icu_normalizer", "icu_provider", "figment", "toml", "serde_ignored", "pear", "uncased", "zakura-tor-key-forge", "ssh-key-fork-arti", "ssh-cipher-fork-arti", "ssh-encoding-fork-arti", "p256", "p384", "p521"} | unused_tor_dependencies, {"zakura-arti-client", "zakura-fs-mistrust", "zakura-tor-rtcompat", "rust_decimal", "flate2", "miniz_oxide", "zakura-tor-hsclient", "ring"}),
-        ("wallet", "librustzcash/zcash_client_sqlite", ["orchard", "transparent-inputs"], {"prost-build", "tonic-prost-build", "which", "regex", "regex-automata", "regex-syntax", "rand_distr"} | pczt_macros, {"num-traits"}),
+        ("wallet", "librustzcash/zcash_client_sqlite", ["orchard", "transparent-inputs"], {"prost-build", "tonic-prost-build", "which", "regex", "regex-automata", "regex-syntax", "rand_distr"} | pczt_macros | migration_engines, {"num-traits"}),
         ("pczt", "librustzcash/pczt", [], pczt_macros | {"serde_with"}, set()),
         ("pir", "zakura/pir-client", ["native"], native_evaluators | server_roles | {"sha1"}, {"reinspiring"}),
         ("status-policy", "zakura/pir-client", ["status"], recovery_forbidden | server_roles | native_evaluators | {"tonic", "tonic-prost", "tokio", "hyper", "hyper-util", "h2"}, {"zakura-protocol"}),
