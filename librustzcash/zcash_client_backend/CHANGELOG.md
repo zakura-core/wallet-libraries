@@ -12,6 +12,8 @@ and this library adheres to Rust's notion of
 - Add the `tor-client` feature for generic Tor client and HTTP APIs without
   exchange-rate helpers. The existing `tor` feature continues to enable the
   full Tor API, including cryptocurrency exchange-rate queries.
+- `tor::Error::is_tor_name_resolution_failure` classifies Tor-reported remote
+  hostname lookup failures without requiring callers to depend on Arti.
 
 ### Changed
 
