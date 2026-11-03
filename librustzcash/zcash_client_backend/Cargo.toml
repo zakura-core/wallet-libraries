@@ -149,6 +149,7 @@ incrementalmerkletree = { workspace = true, features = ["test-dependencies"] }
 jubjub.workspace = true
 proptest.workspace = true
 rand.workspace = true
+rand_08 = { package = "rand", version = "0.8" }
 rand_chacha.workspace = true
 shardtree = { workspace = true, features = ["test-dependencies"] }
 tempfile = "3.5.0"
