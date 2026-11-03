@@ -39,6 +39,7 @@ mod nullifier_map;
 mod one_time_ivk;
 mod one_time_ivk_discovery;
 mod one_time_pir;
+mod one_time_reset;
 mod orchard_ironwood_migration_anchor_interval;
 mod orchard_ironwood_migration_tables;
 mod orchard_ironwood_migration_unsatisfiability;
@@ -57,6 +58,7 @@ mod status_reconfirmation;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
 mod transaction_reconfirmation_receipts;
+mod transactions_mined_height_index;
 mod transparent_activation_schema;
 mod transparent_activity_metadata;
 mod transparent_detail_content_failures;
@@ -65,6 +67,7 @@ mod transparent_ledger_schema;
 mod transparent_policy_generation;
 mod transparent_recovery_schema;
 mod transparent_shared_derivations;
+mod transparent_spend_map_prevout_index;
 mod transparent_txid_enhancement;
 mod tree_retained_checkpoints;
 mod tx_observation_height;
@@ -160,7 +163,7 @@ pub mod ids {
         ivk_item_cache::MIGRATION_ID as IVK_ITEM_CACHE, note_locking::MIGRATION_ID as NOTE_LOCKING,
         nullifier_map::MIGRATION_ID as NULLIFIER_MAP, one_time_ivk::MIGRATION_ID as ONE_TIME_IVK,
         one_time_ivk_discovery::MIGRATION_ID as ONE_TIME_IVK_DISCOVERY,
-        one_time_pir::MIGRATION_ID as ONE_TIME_PIR,
+        one_time_pir::MIGRATION_ID as ONE_TIME_PIR, one_time_reset::MIGRATION_ID as ONE_TIME_RESET,
         orchard_ironwood_migration_anchor_interval::MIGRATION_ID as ORCHARD_IRONWOOD_MIGRATION_ANCHOR_INTERVAL,
         orchard_ironwood_migration_tables::MIGRATION_ID as ORCHARD_IRONWOOD_MIGRATION_TABLES,
         orchard_ironwood_migration_unsatisfiability::MIGRATION_ID as ORCHARD_IRONWOOD_MIGRATION_UNSATISFIABILITY,
@@ -179,6 +182,7 @@ pub mod ids {
         support_legacy_sqlite::MIGRATION_ID as SUPPORT_LEGACY_SQLITE,
         support_zcashd_wallet_import::MIGRATION_ID as SUPPORT_ZCASHD_WALLET_IMPORT,
         transaction_reconfirmation_receipts::MIGRATION_ID as TRANSACTION_RECONFIRMATION_RECEIPTS,
+        transactions_mined_height_index::MIGRATION_ID as TRANSACTIONS_MINED_HEIGHT_INDEX,
         transparent_activation_schema::MIGRATION_ID as TRANSPARENT_ACTIVATION_SCHEMA,
         transparent_activity_metadata::MIGRATION_ID as TRANSPARENT_ACTIVITY_METADATA,
         transparent_detail_content_failures::MIGRATION_ID as TRANSPARENT_DETAIL_CONTENT_FAILURES,
@@ -187,6 +191,7 @@ pub mod ids {
         transparent_policy_generation::MIGRATION_ID as TRANSPARENT_POLICY_GENERATION,
         transparent_recovery_schema::MIGRATION_ID as TRANSPARENT_RECOVERY_SCHEMA,
         transparent_shared_derivations::MIGRATION_ID as TRANSPARENT_SHARED_DERIVATIONS,
+        transparent_spend_map_prevout_index::MIGRATION_ID as TRANSPARENT_SPEND_MAP_PREVOUT_INDEX,
         transparent_txid_enhancement::MIGRATION_ID as TRANSPARENT_TXID_ENHANCEMENT,
         tree_retained_checkpoints::MIGRATION_ID as TREE_RETAINED_CHECKPOINTS,
         tx_observation_height::MIGRATION_ID as TX_OBSERVATION_HEIGHT,
@@ -417,6 +422,8 @@ pub(super) fn all_migrations<
         Box::new(v_transactions_pool_crossing::Migration),
         Box::new(zip318_classification::Migration),
         Box::new(v_transactions_zip318_kind::Migration),
+        Box::new(transparent_spend_map_prevout_index::Migration),
+        Box::new(transactions_mined_height_index::Migration),
         Box::new(orchard_ironwood_migration_tables::Migration),
         Box::new(tree_retained_checkpoints::Migration),
         Box::new(note_locking::Migration),
@@ -443,6 +450,7 @@ pub(super) fn all_migrations<
         Box::new(transparent_detail_content_failures::Migration),
         Box::new(one_time_ivk_discovery::Migration),
         Box::new(one_time_pir::Migration),
+        Box::new(one_time_reset::Migration),
     ]
 }
 
@@ -702,10 +710,7 @@ pub(crate) fn forget_txid_enhancement(conn: &rusqlite::Connection) {
 }
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
-    transparent_detail_content_failures::MIGRATION_ID,
-    one_time_pir::MIGRATION_ID,
-];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transactions_mined_height_index::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -835,6 +840,7 @@ pub(crate) mod tests {
             ids::ONE_TIME_IVK,
             ids::ONE_TIME_IVK_DISCOVERY,
             ids::ONE_TIME_PIR,
+            ids::ONE_TIME_RESET,
             ids::ORCHARD_IRONWOOD_MIGRATION_ANCHOR_INTERVAL,
             ids::ORCHARD_IRONWOOD_MIGRATION_TABLES,
             ids::ORCHARD_IRONWOOD_MIGRATION_UNSATISFIABILITY,
@@ -853,6 +859,8 @@ pub(crate) mod tests {
             ids::TRANSPARENT_ACTIVITY_METADATA,
             ids::TRANSPARENT_ACTIVATION_SCHEMA,
             ids::TRANSPARENT_SHARED_DERIVATIONS,
+            ids::TRANSPARENT_SPEND_MAP_PREVOUT_INDEX,
+            ids::TRANSACTIONS_MINED_HEIGHT_INDEX,
             ids::TRANSPARENT_GAP_LIMIT_HANDLING,
             ids::TRANSPARENT_LEDGER_SCHEMA,
             ids::TRANSPARENT_POLICY_GENERATION,

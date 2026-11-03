@@ -1,0 +1,18 @@
+{
+  "2048": {
+    "database": "8e2d6a84a4f33f9e4153255c7eb4fb90180d9cdd9d98399a88660317ddd31997",
+    "scans": [
+      "c35020473aed1b4642cd726cad727b63fff2824ad68cedd7ffb73c7cbd890479",
+      "8f3e0cd3127ec70bfc92f789fd649bdb1bc7798e441dab08d8c7762143c56217",
+      "c81a881f233a3dc00fc6166a1985d88e0a624a1a4ab9d65f36a254a4b3cb91d5"
+    ]
+  },
+  "4096": {
+    "database": "4bf4eeea005fd7f41bc4d6c5370b2e9ea704c4586eb900e850a8f6f77a90b567",
+    "scans": [
+      "c35020473aed1b4642cd726cad727b63fff2824ad68cedd7ffb73c7cbd890479",
+      "112d35b733dffcac7fa980845bef862daf577c82701a1315c662cfd16ce8f551",
+      "e54ef348172f97f3a09960ed8076d81025b4883742a509abfadcce77cfedbb0b"
+    ]
+  }
+}

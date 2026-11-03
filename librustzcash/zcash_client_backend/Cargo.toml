@@ -1,7 +1,7 @@
 [package]
 name = "zakura-client-backend"
 description = "APIs for creating shielded Zcash light clients"
-version = "0.1.0-rc9.5"
+version = "0.1.0-rc9.6"
 authors = [
     "Jack Grigg <jack@z.cash>",
     "Kris Nuttycombe <kris@electriccoin.co>"
@@ -25,7 +25,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-zakura-pir-protocol = { path = "../../zakura/pir-protocol", version = "=0.0.1-rc4", features = ["enhance", "recovery"] }
+zakura-pir-protocol = { path = "../../zakura/pir-protocol", version = "=0.0.1-rc5", features = ["enhance", "recovery"] }
 zakura-one-time-ivk = { version = "=0.0.1-rc4", path = "../../zakura/one-time-ivk", optional = true }
 zcash_address.workspace = true
 zcash_encoding.workspace = true
@@ -79,7 +79,8 @@ secp256k1 = { workspace = true, optional = true }
 
 # - Sync engine
 async-trait = { version = "0.1", optional = true }
-futures-util = { version = "0.3", optional = true }
+# Only Tor's exchange joins need the procedural async macros.
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"], optional = true }
 
 # - Note commitment trees
 incrementalmerkletree.workspace = true
@@ -98,6 +99,8 @@ zcash_proofs = { workspace = true, optional = true }
 # -- Exposed error types: `arti_client::Error`, `arti_client::config::ConfigBuildError`,
 #    `hyper::Error`, `hyper::http::Error`, `serde_json::Error`. We could avoid this with
 #    changes to error handling.
+# Directory downloads retain mandatory deflate/identity support without the
+# optional XZ/Zstandard codecs and their native builds.
 arti-client = { workspace = true, optional = true }
 fs-mistrust = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true, features = ["client", "http1"] }
@@ -109,15 +112,14 @@ rust_decimal = { workspace = true, optional = true }
 # Dependencies used internally:
 # (Breaking upgrades to these are usually backwards-compatible, but check MSRVs.)
 # - Documentation
-document-features.workspace = true
+document-features = { workspace = true, optional = true }
 
 # - Encodings
 byteorder = { workspace = true, optional = true }
 
 # - Scanning
-# Scanning uses ordinary channels; async receive is enabled by sync-decryptor.
-# Neither path uses channel selection or its randomized fairness support.
-flume = { version = "0.11", default-features = false }
+# Ordinary scanning uses standard channels; only sync-decryptor needs Flume.
+flume = { version = "0.11", default-features = false, optional = true }
 rayon.workspace = true
 
 # - Tor
@@ -131,7 +133,8 @@ hyper-util = { workspace = true, optional = true }
 rand = { workspace = true, features = ["sys_rng", "thread_rng"] }
 rand_08 = { package = "rand", version = "0.8", optional = true }
 serde = { workspace = true, optional = true }
-tokio-rustls = { workspace = true, optional = true }
+# Arti leaves provider selection to its caller; retain the wallet's Ring backend.
+tokio-rustls = { workspace = true, features = ["ring"], optional = true }
 webpki-roots = { workspace = true, optional = true }
 
 # Dependencies used internally:
@@ -141,11 +144,11 @@ getset.workspace = true
 
 [dev-dependencies]
 assert_matches.workspace = true
-gumdrop = "0.8"
 incrementalmerkletree = { workspace = true, features = ["test-dependencies"] }
 jubjub.workspace = true
 proptest.workspace = true
 rand.workspace = true
+rand_08 = { package = "rand", version = "0.8" }
 rand_chacha.workspace = true
 shardtree = { workspace = true, features = ["test-dependencies"] }
 tempfile = "3.5.0"
@@ -156,6 +159,10 @@ zcash_keys = { workspace = true, features = ["test-dependencies"] }
 zcash_primitives = { workspace = true, features = ["test-dependencies"] }
 zcash_proofs.workspace = true
 zcash_protocol = { workspace = true, features = ["local-consensus", "test-dependencies"] }
+
+[[example]]
+name = "diversify-address"
+test = true
 
 [features]
 default = ["time/default"]
@@ -232,7 +239,8 @@ sync = [
 ## `sync` feature flag is replaced with a sync engine that makes use of the batch
 ## decryption engine.
 sync-decryptor = [
-    "flume/async",
+    "dep:flume",
+    "flume?/async",
     "dep:tokio",
     "tokio?/macros",
     "tokio?/rt",
@@ -246,14 +254,21 @@ sync-decryptor = [
 ## Exposes a Tor client for hiding a wallet's IP address while performing certain wallet
 ## operations.
 tor = [
+    "tor-client",
+    "dep:rust_decimal",
+]
+
+## Exposes the Tor client and generic HTTP APIs without exchange-rate helpers.
+## The `tor` feature additionally includes cryptocurrency exchange-rate queries.
+tor-client = [
     "dep:arti-client",
     "arti-client/onion-service-client",
     "dep:fs-mistrust",
     "dep:futures-util",
+    "futures-util/async-await-macro",
     "dep:http-body-util",
     "dep:hyper",
     "dep:hyper-util",
-    "dep:rust_decimal",
     "dep:serde",
     "dep:serde_json",
     "dep:tokio",

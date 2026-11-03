@@ -10,7 +10,6 @@ use std::{
 
 use nonempty::NonEmpty;
 use rand::Rng;
-use rand_distr::Distribution;
 use rusqlite::{Connection, OptionalExtension, Row, ToSql, named_params, types::Value};
 use tracing::{debug, warn};
 
@@ -94,6 +93,7 @@ use {
 };
 
 pub(crate) mod ephemeral;
+mod scheduling;
 
 pub(crate) fn detect_spending_accounts<'a>(
     conn: &Connection,
@@ -2622,8 +2622,6 @@ pub(crate) fn is_wallet_output(
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum SchedulingError {
-    /// An error occurred in sampling a time offset using an exponential distribution.
-    Distribution(rand_distr::ExpError),
     /// The system attempted to generate an invalid timestamp.
     Time(SystemTimeError),
     /// A generated duration was out of the range of valid integer values for durations.
@@ -2633,9 +2631,6 @@ pub enum SchedulingError {
 impl std::fmt::Display for SchedulingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self {
-            SchedulingError::Distribution(e) => {
-                write!(f, "Failure in sampling scheduling time: {e}")
-            }
             SchedulingError::Time(t) => write!(f, "Invalid system time: {t}"),
             SchedulingError::OutOfRange(t) => write!(f, "Not a valid timestamp or duration: {t}"),
         }
@@ -2645,16 +2640,9 @@ impl std::fmt::Display for SchedulingError {
 impl std::error::Error for SchedulingError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self {
-            SchedulingError::Distribution(_) => None,
             SchedulingError::Time(t) => Some(t),
             SchedulingError::OutOfRange(i) => Some(i),
         }
-    }
-}
-
-impl From<rand_distr::ExpError> for SchedulingError {
-    fn from(value: rand_distr::ExpError) -> Self {
-        SchedulingError::Distribution(value)
     }
 }
 
@@ -2677,10 +2665,7 @@ pub(crate) fn next_check_time<R: Rng, D: DerefMut<Target = R>>(
     from_event: SystemTime,
     check_interval_seconds: u32,
 ) -> Result<SystemTime, SchedulingError> {
-    // A λ parameter of 1/check_interval_seconds will result in a distribution with an expected
-    // value of `check_interval_seconds`.
-    let dist = rand_distr::Exp::new(1.0 / f64::from(check_interval_seconds))?;
-    let event_delay = dist.sample(rng.deref_mut()).round() as u64;
+    let event_delay = scheduling::delay_seconds(rng.deref_mut(), check_interval_seconds);
 
     Ok(from_event + Duration::new(event_delay, 0))
 }

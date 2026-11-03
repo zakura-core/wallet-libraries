@@ -1,210 +1,189 @@
-//! Pinned bytes for what receiver PIR adds to the shared `pir-native` profile (seeds,
-//! session ID, framing and row placement), from a request built without `Client`; a
-//! manifest-only changes alter session framing but preserve native setup and rows.
+//! Pinned bytes for what receiver PIR adds to the shared `pir-native` P8 profile (seeds,
+//! session IDs, framing and the directory row a lookup selects), from a request built
+//! without `Client`.
 mod common;
-use common::{manifest, receiver, record};
-use ipir_sp::bits::u64s_to_contiguous_bytes;
+use common::receiver;
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
 use sha2::{Digest, Sha256};
-use zakura_pir_client::native::{D, NativeKeys, NativeSecret, NativeSetup, Q, Q_BITS, QUERY_BITS};
+use std::sync::Arc;
+use zakura_pir_client::native::{D, NativeSetup, P8, ProfileClientExt as _};
 use zakura_pir_client::receiver::{
-    Client, WitnessClient,
-    session::{HEADER_BYTES, MAGIC, PROTOCOL, Publication},
-    snapshot::{MIN_ROWS, ROW_BYTES, Snapshot, lookup_row, row_for},
+    Client, Coverage, DIRECTORY_ROWS, Kind, Payment, ROW_BYTES, SCHEMA, Tree, choose_row,
+    decode_choice, initial_salt, lookup_entry, lookup_slot,
+    native::{COLS, MAGIC, profile},
+    session::{Error, HEADER_BYTES},
+    slot_row, tag,
+    wire::PAYLOAD_BYTES,
 };
-use zakura_pir_publisher::receiver::{snapshot::SnapshotPublisherExt, witness::TablePublisherExt};
-use zakura_pir_query_server::receiver::server::{Server, WitnessServer};
+use zakura_pir_publisher::receiver::{OPEN_SEED_ATTEMPTS, Paid, Projection, build};
+use zakura_pir_query_server::receiver::server::Server;
 
 fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// A profile seed: SHA-256 of the protocol, `/`, the purpose, a zero byte and the
-/// little-endian row count.
-fn seed(purpose: &[u8], rows: u32) -> [u8; 32] {
+/// A profile seed: SHA-256 of the schema, `/native-p8/`, the purpose, a zero byte, the
+/// table kind, a zero byte and the little-endian row count.
+fn seed(purpose: &[u8], kind: &str, rows: u32) -> [u8; 32] {
     Sha256::new()
-        .chain_update(PROTOCOL)
-        .chain_update(b"/")
+        .chain_update(SCHEMA)
+        .chain_update(b"/native-p8/")
         .chain_update(purpose)
+        .chain_update(b"\0")
+        .chain_update(kind)
         .chain_update(b"\0")
         .chain_update(rows.to_le_bytes())
         .finalize()
         .into()
 }
 
-/// Rounds `x` modulo `Q` to its top `bits` bits, as `pir-native` switches a request.
-fn round(x: u64, bits: usize) -> u64 {
-    (((x as u128 * (1u128 << bits) + (Q / 2) as u128) / Q as u128) as u64) & ((1 << bits) - 1)
-}
-
 #[test]
 fn the_protocol_reproduces_its_pinned_bytes() {
-    let records = [record(0, 2), record(1, 2)];
-    let snapshot = Snapshot::build(manifest(MIN_ROWS), &records).unwrap();
-    let (rows, cols) = (MIN_ROWS as usize, ROW_BYTES / 2);
-    let target = row_for(&snapshot.manifest, &receiver(), 1).unwrap();
-    let server = Server::new(snapshot.clone()).unwrap();
-    let id = server.manifest().id().unwrap();
-
-    // `RPQ1`, the session ID, a nonce, then the packing key and the selection.
-    let masks = zakura_pir_client::native::P16
-        .public_query_masks(seed(b"query-masks", MIN_ROWS), rows, cols)
-        .unwrap();
-    let setup = NativeSetup::new(
-        zakura_pir_client::native::params(),
-        seed(b"packing-setup", MIN_ROWS),
-    );
-    let mut rng = ChaCha20Rng::from_seed([21; 32]);
-    let secret = NativeSecret::sample(&zakura_pir_client::native::params(), &mut rng);
-    let keys = NativeKeys::generate_one_key(&setup, &secret, &mut rng).unwrap();
-    let selection = secret
-        .encrypt_selection(&masks[..rows / D], target, &mut rng)
-        .unwrap();
-    let mut request = MAGIC.to_vec();
-    request.extend(id);
-    request.extend([22; 16]);
-    request.extend(u64s_to_contiguous_bytes(&keys.kg_words(), Q_BITS));
-    let switched: Vec<_> = selection.iter().map(|&x| round(x, QUERY_BITS)).collect();
-    request.extend(u64s_to_contiguous_bytes(&switched, QUERY_BITS));
-
-    let response = server.respond(&request).unwrap();
-    assert_eq!(response[..HEADER_BYTES], request[..HEADER_BYTES]);
-    let row = zakura_pir_client::native::decode_cols(
-        &secret,
-        server.public(),
-        &response[HEADER_BYTES..],
-        cols,
+    let coverage = Coverage {
+        genesis: [1; 32],
+        history_revision: 0,
+        start_height: 100,
+        start_parent: [2; 32],
+        start_position: 200,
+        end_height: 101,
+        end_hash: [3; 32],
+        end_position: 300,
+    };
+    let paid: Vec<Paid> = (0..3u32)
+        .map(|i| {
+            let payment = Payment {
+                height: 101,
+                block_hash: [3; 32],
+                txid: [4; 32],
+                tx_index: 1,
+                action_index: i,
+                position: 200 + u64::from(i),
+                action_nullifier: [5; 32],
+                cmx: [6; 32],
+                ephemeral_key: [7; 32],
+                ciphertext_prefix: [8; 52],
+            };
+            let to = if i < 2 { receiver() } else { [9; 43] };
+            (to, payment, [0; PAYLOAD_BYTES])
+        })
+        .collect();
+    let mut projection = Projection::new(initial_salt(&coverage.start_parent, 0));
+    let receivers: Vec<_> = paid.iter().map(|p| p.0).collect();
+    projection.project(&receivers, &[3; 32]).unwrap();
+    let tree = Tree {
+        height: 101,
+        hash: [3; 32],
+        size: 300,
+    };
+    let segment = build(
+        &projection,
+        coverage,
+        &[10; 32],
+        OPEN_SEED_ATTEMPTS,
+        2048,
+        tree,
+        &paid,
     )
     .unwrap();
-    assert_eq!(
-        row,
-        snapshot.data[target * ROW_BYTES..(target + 1) * ROW_BYTES]
+    let (d, choice, data) = (
+        segment.directory.manifest.clone(),
+        segment.directory.choice.clone(),
+        segment.directory.data.clone(),
     );
-    assert_eq!(
-        lookup_row(&snapshot.manifest, &receiver(), 1, &row).unwrap(),
-        Some(records[1].clone())
-    );
+    let (directory, entries) = Server::directory(segment.directory).unwrap();
+    let companion = Server::companion(segment.companion, &d, &entries).unwrap();
+    let t = tag(&d.salt, &receiver());
+    let target = choose_row(&d.salt, &decode_choice(&d, &choice).unwrap(), &t);
 
-    // `Client` frames its own fresh query the same way.
-    let client = Client::new(server.manifest().clone(), server.public()).unwrap();
-    let query = client.prepare(receiver(), 1).unwrap();
+    // `RPQ1`, the session ID, a nonce, then the packing key and the dithered selection.
+    let rows = DIRECTORY_ROWS as usize;
+    let masks = P8
+        .public_query_masks(
+            seed(b"query-masks", "directory", DIRECTORY_ROWS),
+            rows,
+            COLS,
+        )
+        .unwrap();
+    let setup = NativeSetup::new(
+        P8.params(),
+        seed(b"packing-setup", "directory", DIRECTORY_ROWS),
+    );
+    assert_eq!(
+        masks,
+        profile(Kind::Directory, DIRECTORY_ROWS).unwrap().masks
+    );
+    let mut rng = ChaCha20Rng::from_seed([21; 32]);
+    let (secret, upload) = P8
+        .prepare_dithered_with(&setup, &masks[..rows / D], rows, target as usize, &mut rng)
+        .unwrap();
+    let request = [&MAGIC[..], &directory.id(), &[22; 16], &upload].concat();
+    let response = directory.respond(&request).unwrap();
+    assert_eq!(response[..HEADER_BYTES], request[..HEADER_BYTES]);
+    let row = P8
+        .decode_cols(&secret, directory.public(), &response[HEADER_BYTES..], COLS)
+        .unwrap();
+    let at = target as usize * ROW_BYTES;
+    assert_eq!(row, data[at..at + ROW_BYTES]);
+    let entry = lookup_entry(&d, &row, &t).unwrap().unwrap();
+    assert_eq!((entry.count, entry.last), (2, 1));
+
+    // `Client` frames its own fresh query the same way, and a companion session answers a
+    // slot under its own ID while refusing the directory's queries.
+    let public = Arc::new(directory.public().to_vec());
+    let client = Client::new(directory.session().clone(), public).unwrap();
+    let query = client.prepare(target).unwrap();
     assert_eq!(query.body().len(), request.len());
     assert_eq!(query.body()[..36], request[..36]);
-    let answer = server.respond(query.body()).unwrap();
-    assert_eq!(
-        client.decode(query, &answer).unwrap(),
-        Some(records[1].clone())
-    );
+    assert!(matches!(
+        companion.respond(query.body()),
+        Err(Error::Revision)
+    ));
+    let answer = directory.respond(query.body()).unwrap();
+    assert_eq!(client.decode(query, &answer).unwrap(), row);
+    let public = Arc::new(companion.public().to_vec());
+    let slots = Client::new(companion.session().clone(), public).unwrap();
+    let query = slots.prepare(slot_row(entry.first + 1)).unwrap();
+    let answer = companion.respond(query.body()).unwrap();
+    let slot = slots.decode(query, &answer).unwrap();
+    let c = &companion.session().manifest;
+    let (record, payload) = lookup_slot(&d, c, &entry, entry.first + 1, &slot).unwrap();
+    assert_eq!((record.page, payload), (1, paid[1].2));
 
     let got = [
         ("row index", target.to_string()),
-        ("session", hex::encode(id)),
-        ("public", digest(server.public())),
+        ("session", hex::encode(directory.id())),
+        ("companion", hex::encode(companion.id())),
+        ("public", digest(directory.public())),
         ("request", digest(&request)),
         ("response", digest(&response)),
         ("row", digest(&row)),
     ];
-    // The 289-byte record with its witness ordinal changes the row bytes, so the public
-    // setup, session and framed digests. Native setup and row placement are unchanged.
     let want = [
-        ("row index", "2600"),
+        ("row index", "468"),
         (
             "session",
-            "dfef4a80bc698477eb33fed0147973a6a44a7177f9c726862c059ddeff53582f",
+            "cebccdf8e740de49ec9663dda690719e81382baf53d0cd7c14ce542139309da3",
+        ),
+        (
+            "companion",
+            "e14e6dbad3fac3de839e94c446ea9d8acf0483509cbfd54f79ce67e92bf9d02c",
         ),
         (
             "public",
-            "9e381bd348e26d914d073535b99c548cfe49613aa3428c8fbfea00a550e5edc2",
+            "4b24d5237a55c7b65df816a08390c2bfdb404bdc5258a37cdc9b50adb5be5ea6",
         ),
         (
             "request",
-            "105648f0abe4d5b4a76e4e766b4abd2cfd6c059f59492a8ed80fda5119a33095",
+            "c83e85894acd3150ca72113428162b302c6017f385e30d02e90322c578c3fe65",
         ),
         (
             "response",
-            "b385ab684031e348ea954da2bf452107710f987f794d184643bbb440def6acd3",
+            "4516de869456fafe91cd74c24c3c2f23f562da0006530a05d814229ea223c99b",
         ),
         (
             "row",
-            "48713abae152674088b49f320f09aadaa9c3adbd8288e0a73832cd0f1d66aa88",
+            "525350321965ed90a8b13c21aa7aa9b5e4ccb8d0288a5b25f3ec26982436ecde",
         ),
     ];
     assert_eq!(got, want.map(|(name, value)| (name, value.to_owned())));
-}
-
-/// A companion witness session answers an ordinal's payload under its own session ID,
-/// bound to exactly one payment session, and refuses the payment session's queries.
-#[test]
-fn witness_sessions_answer_ordinals_and_bind_their_payment_table() {
-    use zakura_pir_client::receiver::witness::{Manifest, PAYLOAD_BYTES, PROFILE, Table};
-    let records = [record(0, 2), record(1, 2)];
-    let payments = Server::new(Snapshot::build(manifest(MIN_ROWS), &records).unwrap()).unwrap();
-    let directory = &payments.manifest().directory;
-    let table = |tree_height: u32| Manifest {
-        profile: PROFILE.into(),
-        genesis: directory.genesis,
-        history_revision: directory.history_revision,
-        payments: directory.revision().unwrap(),
-        payloads: 0,
-        rows: MIN_ROWS,
-        tree_height,
-        tree_hash: if tree_height == directory.end_height {
-            directory.end_hash
-        } else {
-            [9; 32]
-        },
-        tree_size: directory.end_position,
-        data_sha256: [0; 32],
-    };
-    let payloads = [[0x11; PAYLOAD_BYTES], [0x22; PAYLOAD_BYTES]];
-    let witnesses = WitnessServer::new(
-        Table::build(table(directory.end_height), &payloads).unwrap(),
-        &payments,
-    )
-    .unwrap();
-    let publication = Publication {
-        payments: payments.manifest().clone(),
-        witnesses: witnesses.manifest().clone(),
-    };
-    publication.validate().unwrap();
-    assert_eq!(
-        hex::encode(witnesses.id()),
-        "c024b19ad537bf88414d54b4d602a319800665ef9633a9f1693278050bdf9300"
-    );
-    let client = WitnessClient::new(witnesses.manifest().clone(), witnesses.public()).unwrap();
-    for (ordinal, payload) in payloads.iter().enumerate() {
-        let query = client.prepare(ordinal as u32).unwrap();
-        assert!(matches!(
-            payments.respond(query.body()),
-            Err(zakura_pir_client::receiver::session::Error::Revision)
-        ));
-        let answer = witnesses.respond(query.body()).unwrap();
-        assert_eq!(client.decode(query, &answer).unwrap(), *payload);
-    }
-    assert!(client.prepare(2).is_err());
-    // A witness-only replacement is a new witness session over the same payment session.
-    let replaced = WitnessServer::new(
-        Table::build(table(directory.end_height + 1), &payloads).unwrap(),
-        &payments,
-    )
-    .unwrap();
-    assert_ne!(replaced.id(), witnesses.id());
-    Publication {
-        payments: payments.manifest().clone(),
-        witnesses: replaced.manifest().clone(),
-    }
-    .validate()
-    .unwrap();
-    // Another payment table's companion is refused.
-    let other = Server::new(Snapshot::build(manifest(MIN_ROWS), &records[..0]).unwrap()).unwrap();
-    assert!(
-        WitnessServer::new(
-            Table::build(table(directory.end_height), &payloads).unwrap(),
-            &other
-        )
-        .is_err()
-    );
-    let mut mixed = publication;
-    mixed.payments = other.manifest().clone();
-    assert!(mixed.validate().is_err());
 }

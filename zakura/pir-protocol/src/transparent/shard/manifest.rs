@@ -229,10 +229,11 @@ pub struct ShardManifest {
     pub schema: String,
     /// The range filter profile, distinct from the per-block one.
     ///
-    /// Not the table geometry: this string is keyed into the shard's filter and
-    /// into its directory bucket salt, and it names the *filter* profile. The
-    /// geometry has its own field below, and confusing the two would silently
-    /// change where a script hashes to.
+    /// Not the table geometry: this string is keyed into the shard's filter,
+    /// and it names the *filter* profile. The directory's bucket salts take
+    /// only the shard id (see [`super::choice::bucket_salts`]). The geometry
+    /// has its own field below, and confusing the two would silently change
+    /// where a script hashes to in the filter.
     pub profile: String,
     /// The table geometry this shard was built at, by registry name.
     ///

@@ -8,8 +8,16 @@
 //! [BIP 174: Partially Signed Bitcoin Transaction Format]: https://github.com/bitcoin/bips/blob/master/bip-0174.mediawiki
 //! [BIP 370: PSBT Version 2]: https://github.com/bitcoin/bips/blob/master/bip-0370.mediawiki
 //!
-#![cfg_attr(feature = "std", doc = "## Feature flags")]
-#![cfg_attr(feature = "std", doc = document_features::document_features!())]
+//! Enable both `std` and `document-features` when building documentation to include
+//! the generated feature table.
+#![cfg_attr(
+    all(doc, feature = "std", feature = "document-features"),
+    doc = "## Feature flags"
+)]
+#![cfg_attr(
+    all(doc, feature = "std", feature = "document-features"),
+    doc = document_features::document_features!()
+)]
 //!
 
 #![no_std]
@@ -54,6 +62,11 @@ pub mod common;
 pub mod orchard;
 pub mod sapling;
 pub mod transparent;
+
+mod serde_arrays;
+
+#[cfg(test)]
+mod serde_arrays_tests;
 
 pub(crate) const MAGIC_BYTES: &[u8; 4] = b"PCZT";
 pub(crate) const PCZT_VERSION_1: u32 = 1;

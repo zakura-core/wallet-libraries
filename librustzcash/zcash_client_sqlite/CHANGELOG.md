@@ -9,10 +9,95 @@ and this library adheres to Rust's notion of
 
 ### Added
 
+- Migration `transactions_mined_height_index` adds an index on
+  `transactions.mined_height`.
+- Migration `transparent_spend_map_prevout_index` indexes `transparent_spend_map`
+  by `(prevout_txid, prevout_output_index)`.
+
+### Changed
+
+- Generating the crate's feature table now requires the optional
+  `document-features` feature. Ordinary builds omit the documentation macro;
+  docs.rs continues to include the table.
+
+- Use `schemerz` 0.3 and `schemerz-rusqlite` 0.371 for wallet migrations,
+  sharing the dependency family required by the LRZ facade. Applications naming
+  migration errors or implementing external migrations must use these versions
+  for `MigratorError` and `RusqliteMigration` respectively. Migration UUIDs and
+  the database schema are unchanged.
+
+- Storing a scanned block uses the new index to attach transactions first learned
+  from a transparent UTXO query, avoiding a scan of the whole transactions table.
+- Storing a received transparent output no longer scans `transparent_spend_map`
+  to learn whether a wallet transaction already spends it.
+- An account's first `begin_one_time_recovery` reads its untouched receive
+  bootstrap lookups only through the publication's end and places the filter
+  marker there, even without `complete`. Turning one-time recovery on no longer
+  makes the first receive address wait for the Receiver publication to reach
+  the wallet's tip. Every other lookup target is unchanged.
+- `WalletDb::prepare_receive_reservation` takes a `tip: BlockHeight` argument,
+  the caller's live chain tip, as `reserve_refund_key` does. A new receive
+  address needs the account's filter marker within 10 blocks of the newer of
+  that tip and the saved chain tip, so a wallet no longer has to save the live
+  tip with `update_chain_tip` first. Resuming a live draft now needs the same
+  fresh marker, so a draft isn't quoted again while another device's payment to
+  it may sit in blocks filters haven't read.
+- `WalletDb::recheck_one_time_history_for` replaces
+  `WalletDb::check_one_time_history_for`. Each account's new history check
+  first forgets its history results, as `reset_one_time_history` does, in the
+  same transaction that starts the batch, so an account refusing the
+  publication rolls back every reset too. An account whose check is unfinished
+  resumes it with the history it kept. An account named more than once in the
+  batch is checked once, so a repeat can't restart a check the first occurrence
+  just finished and forget its pending payments.
+- `WalletDb::reserve_refund_key` allocates a refund key only once the wallet is
+  fully scanned to within 1 block of the chain tip, the newer of `tip` and the
+  saved chain tip, rather than 10. Funding memos arrive through ordinary block
+  scanning, so this narrows the unread blocks in which another device's memo
+  for the same index can hide. Wallets such as Vizor now wait for ordinary sync
+  to reach within 1 block of the tip before quoting a refund, and get
+  `ReservationPolicy::FundingHistory` until then.
+- Consolidation's additional Ironwood candidates stop rebuilding one-time-key
+  notes once they hold their half of the limit, so a proposal costs about its
+  limit rather than every unspent one-time-key note. The selection is unchanged.
+
+### Removed
+
+- The unreachable `SchedulingError::Distribution` variant and its
+  `From<rand_distr::ExpError>` conversion. Transparent-address check scheduling
+  keeps the same exponential sampler in a private module, with `rand_distr`
+  retained only as a test oracle.
+
+## [0.1.0-rc9.6] - 2026-10-30
+
+### Added
+
 - `WalletDb` implements `WalletWrite::get_addresses_for_index_range`, looking up the account, deriving its incoming viewing key and reading the chain tip once for the whole range. Exposing a deep window of addresses (a transparent recovery window on restore) is about seven times faster than one index at a time.
 
 ### Changed
 
+- `WalletDb::record_one_time_lookup` stores each new candidate with its witness payload and admits it in the same transaction, and refuses a lookup captured under another birthday. The `one_time_reset` migration renames the candidate columns for directory sessions. `WalletDb::{record_one_time_witness, refresh_one_time_witness}` are removed.
+
+- Refund memos are read on demand, as before this change, with no queue. Storing blocks accepts the refund memos stored on the wallet transactions those blocks mine, which covers a memo stored before its block and one a reorg's replacement chain mines again. Storing a decrypted, sent or privately enhanced transaction accepts that transaction's memo, so a memo retrieved after the last block batch registers its key at once. Enabling, each round's start and refund issuance read every memo of the account, which accepts a memo the 100-index gap deferred once the gap closes. A mined memo that decodes enables recovery for its account, enabled or not, and one that doesn't decode is ignored.
+- `WalletDb::prepare_receive_reservation` hands out a new receive address only once the account's filter marker is within 10 blocks of the chain tip, as well as after the address's own lookup completed. Otherwise it returns `ReservationPolicy::ReceiveHistory`, and `RecoveryStatus::round_due` asks for the round that catches the marker up.
+- A refund key known only from its funding memo stays watched until the account's filter marker reaches 90 days of chain time after its canonical funding height, instead of seven days of account progress. With no marker it stays watched. A reorg above the funding height clears it until the replacement chain mines the funding again.
+- One-time IVK filters are only a trigger, and each account keeps one marker, the block through which filters were read. `WalletDb::record_one_time_filter_span` commits a sparse filter range only when it starts just past the marker with the marker's hash as its parent (or at Ironwood activation with no marker) and ends at a fully scanned block with the same hash, and returns a `FilterOutcome`; any other start is an error. Each hit queues a lookup from its key's history start through the hit. `WalletDb::one_time_receivers` returns the watched receivers alone. Every key that starts being watched gets one bootstrap lookup from its history start through the processed frontier, so a fresh account's seed walk takes its four receive lookups. A new migration, `one_time_reset`, resets one-time progress: it drops payment candidates and clears lookups, cursors, the seed walk and the marker. It doesn't rebuild use markers, receive windows or bootstrap lookups, so a development wallet with one-time data should be recreated. A development database that ran an earlier build of this change no longer opens and must be recreated.
+- `WalletDb::begin_one_time_recovery` takes `complete` instead of `direct`: a complete check reads every monitored key, paid ones included, from its last PIR check through the publication's end, so it finds repeat payments, and moves the marker there, capped at the fully scanned block. Direct catch-up, which skipped completed paid keys, is gone.
+- Corrections and earlier birthdays clear the filter marker, and reorgs move it back to the fork. A correction no longer reads every monitored key by PIR: the next round's complete check does, and only pending lookups and open reservations are read again directly.
+
+- Each account keeps a one-time use marker, reported as `RecoveryStatus::used`. Handing out a receive address or refund key, recording the wallet's own refund funding, storing a payment candidate at or after the birthday, or accepting a refund memo sets it in the same transaction, whether or not recovery is enabled. Nothing clears it.
+- One-time recovery ignores payments before the account birthday. A lookup passes over such a record before storing a candidate, so it is neither credited nor counted as use, and no longer marks its key paid or extends the seed walk. The `one_time_reset` migration drops `ironwood_one_time_keys.prebirthday_height`.
+- `WalletDb::check_one_time_history_for` starts the history check of several accounts in one transaction. If any account refuses, none start and the call returns that account.
+- `WalletDb::reset_one_time_history` forgets an account's one-time history results as a history correction does, so the next round reads every watched address again from its history start. A wallet calls it after switching to another receiver service.
+- Starting a history check makes the account's backed-off lookups due at once, so a check after an outage doesn't wait out the outage's backoff.
+- A rewind or history correction no longer reopens a finished history check. The next `WalletDb::check_one_time_history` starts fresh at the new publication's end instead of resuming under the old frontier, so it finds a repeat payment mined after that frontier.
+- `WalletDb::one_time_recovery` takes the captured inventory's end. The four listed lookups are then ones that inventory can answer, so lookups waiting for a later publication no longer hide a runnable one. Its `round_due` tells the app when to run a round for the account (see `RecoveryStatus::round_due`).
+
+- `WalletDb::enable_one_time_recovery` replaces `WalletDb::set_one_time_recovery_enabled`. One-time recovery can no longer be paused: an enabled account stays enabled. An account that isn't enabled exposes no work, including the repair-only work a paused account used to run, and re-enabling no longer resets lookup progress.
+
+### Removed
+
+- `WalletDb::record_one_time_filters`, its per-block identities and 256-block cap, and `WalletDb::one_time_direct_query_count`.
 - `testing::db::TestDb` implements the wallet traits by forwarding every method, including those with default bodies, to its `WalletDb` by hand rather than through `ambassador`, which the `test-dependencies` feature no longer depends on. Its behavior is unchanged.
 - Storing a received Sapling or Orchard note looks up the note's address row by diversifier index before deriving its unified address, so the derivation runs only when the row is absent. The exposure-height update is unchanged.
 

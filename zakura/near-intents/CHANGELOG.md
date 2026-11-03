@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc5] - 2026-10-30
+
+### Changed
+
+- `near_observation` reads a refund key's receipts from both chains, since NEAR sometimes files a ZEC refund under the destination chain's transaction hashes.
+
 ## [0.0.1-rc4] - 2026-10-23
 
 ### Changed

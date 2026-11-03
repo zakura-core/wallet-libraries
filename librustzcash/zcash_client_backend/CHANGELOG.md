@@ -9,7 +9,60 @@ and this library adheres to Rust's notion of
 
 ### Added
 
+- Add the `tor-client` feature for generic Tor client and HTTP APIs without
+  exchange-rate helpers. The existing `tor` feature continues to enable the
+  full Tor API, including cryptocurrency exchange-rate queries.
+- `tor::Error::is_tor_name_resolution_failure` classifies Tor-reported remote
+  hostname lookup failures without requiring callers to depend on Arti.
+- `tor::{ErrorKind, HasKind}` re-export Arti's existing typed error
+  classification, without introducing a new SDK error enum or trait.
+
+### Changed
+
+- Generating the crate's feature table now requires the optional
+  `document-features` feature. Ordinary builds omit the documentation macro;
+  docs.rs continues to include the table.
+
+- The `tor` feature pins the streamlined embedded Arti snapshot `2a392f77`.
+  Embedded bootstrap, Tokio/Rustls/Ring, ordinary Tor and onion connections,
+  directory/storage builders, and permission policy are retained. Applications
+  using restricted onion services with persistent authentication keys must
+  explicitly enable `keymgr` on the same Arti package and source revision.
+  The fork removes unused hosting, RPC, bridge/transport management,
+  configuration-file loading, alternative TLS/runtime backends, and obsolete
+  helper packages; its per-crate `semver.md` files inventory dependency API
+  changes. Wallet-owned Rust declarations and signatures are unchanged.
+
+- The `tor` feature uses Zakura's embedded Arti 0.47 fork. The `DormantMode`
+  re-export, `Error::Tor` payload and its `From` conversion now use
+  `zakura-arti-client` types. The permission-builder closures accepted by
+  `Client::{create, create_with_timeouts}` use `zakura-fs-mistrust` 0.16 types.
+  Callers that explicitly name these dependency types must use the same fork
+  family; inferred permission-builder closures retain their existing syntax.
+- Embedded Tor directory downloads use `deflate` or `identity` encoding instead
+  of optional XZ/Zstandard compression, avoiding the native codec dependencies.
+  Downloads may be larger; embedded Tor and onion-service connections remain
+  supported.
+
+## [0.1.0-rc9.6] - 2026-10-30
+
+### Added
+
 - `data_api::WalletWrite::get_addresses_for_index_range`: generates, persists and marks as exposed the addresses at every diversifier index in a range, equivalent to `get_address_for_index` per index. The default implementation does exactly that; a store can override it to pay the per-call costs once for the range.
+- `data_api::one_time_ivk::restore::{FilterSpan, FilterOutcome}` for committing filter ranges against the account's marker.
+- `one_time_ivk::restore::RecoveryStatus::awaiting_admission` counts recovered payments waiting for ordinary sync to admit them.
+- `one_time_ivk::restore::RecoveryStatus::used` reports the account's one-time use marker.
+- `one_time_ivk::restore::RecoveryStatus::{waits_for_retry, waits_for_publication}` say whether a pending lookup waits out a retry delay or for a publication past the inventory end the status was read against.
+- `one_time_ivk::restore::RecoveryStatus::round_due` says whether the app should run a round for the account now: a lookup is due, the seed walk hasn't captured a publication, or the account's filter marker is missing or more than 10 blocks below the fully scanned block.
+
+### Changed
+
+- Breaking: one-time lookups read Receiver's directory and companion tables. `LookupPage` carries `LookupRecord`s, each a record with its witness payload, and `SegmentRef` names the directory and companion sessions and the companion's construction tree. `LookupWork::birthday` sets the lookup's floor with `from`.
+
+### Removed
+
+- `one_time_ivk::restore::{WitnessRequest, WitnessAnswer}` and `RecoveryStatus::witnesses`: payloads arrive with their records.
+- `one_time_ivk::restore::RecoveryStatus::skipped_through`: no catch-up skips history any more.
 
 ### Removed
 

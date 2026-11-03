@@ -1,3 +1,4 @@
+#[cfg(feature = "sync-decryptor")]
 use flume as channel;
 use std::collections::HashMap;
 use std::fmt;
@@ -12,6 +13,9 @@ use zcash_note_encryption::{
     BatchDomain, COMPACT_NOTE_SIZE, Domain, ENC_CIPHERTEXT_SIZE, ShieldedOutput, batch,
 };
 use zcash_primitives::{block::BlockHash, transaction::TxId};
+
+#[cfg(not(feature = "sync-decryptor"))]
+mod channel;
 
 /// A decrypted transaction output.
 pub(crate) struct DecryptedOutput<IvkTag, D: Domain, M> {
@@ -138,11 +142,11 @@ pub(crate) struct BatchReceiver<IvkTag, D: Domain, M>(channel::Receiver<OutputIt
 
 impl<IvkTag, D: Domain, M> DynamicUsage for BatchReceiver<IvkTag, D, M> {
     fn dynamic_usage(&self) -> usize {
-        // We count the memory usage of items still buffered in the channel on the
-        // receiver side. This is a loose lower bound rather than an exact figure:
-        // `flume` stores queued items in an internal buffer that may be over-allocated
-        // relative to its length and carries per-item bookkeeping, so the true heap use
-        // can exceed this. It is only used as a soft memory-pressure heuristic.
+        // Count result payloads on the receiver side, without channel capacity or
+        // bookkeeping. The standard channel also counts a send just before it is
+        // published, briefly overcounting buffered items while that send is in
+        // flight. This remains a soft memory-pressure heuristic, not exact heap
+        // accounting.
         self.0.len() * std::mem::size_of::<OutputItem<IvkTag, D, M>>()
     }
 

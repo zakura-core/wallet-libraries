@@ -24,6 +24,7 @@ python3 scripts/dev.py verify
 | `default` | Workspace except the facade, the PIR client and the one-time IVK scenarios; default features |
 | `sync` | Ordinary sync with Orchard and Ironwood enabled |
 | `tor` | Embedded Tor, HTTP deadlines and exchange queries, with TLS lightwalletd |
+| `tor-client` | Embedded Tor and HTTP deadlines without exchange queries, with TLS lightwalletd |
 | `zewif` | Wallet interchange import and atomic rollback, with the SQLite test fixtures |
 | `orchard` | Backend + SQLite; `orchard,test-dependencies` |
 | `transparent` | Backend + SQLite; `orchard,transparent-inputs,test-dependencies,unstable` |
@@ -77,6 +78,25 @@ warnings to errors. Inspect warnings on changed code and compare with the base
 when needed. `cargo fmt --all -- --check` remains the read-only formatting check.
 A runtime/sandbox rejection is an environment issue; formatting does not need
 broader permissions, Cargo compilation, or a shared build lock.
+
+## Feature documentation
+
+The backend, SQLite, and PCZT crates keep their generated feature tables behind
+the optional `document-features` feature, so ordinary builds do not compile the
+documentation macro. Plain `cargo doc` still documents the enabled Rust APIs;
+enable the feature to include the tables:
+
+```sh
+cargo doc -p zakura-client-backend --no-deps --features document-features
+cargo doc -p zakura-client-sqlite --no-deps --features document-features
+cargo doc -p zakura-pczt --no-deps --features document-features
+```
+
+For these commands, set `CARGO_TARGET_DIR` to a directory owned by the
+documentation run, separate from development leases and other Cargo processes.
+The PCZT table also requires its default `std` feature. To document it with
+default features disabled, explicitly enable `std,document-features`.
+The existing docs.rs feature selections enable the tables automatically.
 
 ## Build ownership and results
 
@@ -133,6 +153,23 @@ parameters. Enable `proving-tests` for real proving fixtures; the `proving` and
 `pczt` configurations retain that coverage. This feature is only for tests.
 `python3 scripts/dev.py verify --only dependency-graph` checks fresh external
 consumers, including fixture availability and the engine's transport-free graph.
+It also compares endpoint normalization with the previous URL parser in an
+external consumer. This keeps the independent oracle and its URL/ICU stack out
+of ordinary workspace test builds.
+
+IPIR's previous setup, codec, metadata and Receiver scan implementations also
+run in a fresh verification consumer. Ordinary golden tests use an independent
+bit-by-bit encoder, and local metadata/scan tests use frozen provider outputs.
+Dependency verification recomputes those fixtures with the pinned old provider
+and checks both codecs, mask derivation, invalid shapes and row coefficients.
+Thus ordinary test builds omit the IPIR server/client wrappers and SimplePIR
+kernel without losing the previous-provider comparisons.
+
+The pinned rust-bitcoin codec, official BIP 158 vectors, parent precision and
+Receiver payload comparisons run as four external test targets in that lane.
+They use the original test sources and vector file. Local malformed-input,
+corruption and output-failure tests remain in ordinary configurations, which
+no longer build the Bitcoin transaction/key library or its secp256k1 backend.
 
 The PIR clients temporarily pin the IPIR family to the main revision that merged
 [IPIR PR 39](https://github.com/valargroup/ipir-sp/pull/39). Native setup derivation and byte framing live in the shared protocol package;

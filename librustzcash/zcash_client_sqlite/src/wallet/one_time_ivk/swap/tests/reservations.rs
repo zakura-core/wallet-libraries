@@ -14,14 +14,14 @@ fn reserve_receive(st: &mut State, now: i64) -> OneTimeKey {
     match st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, now)
+        .prepare_receive_reservation(account, now, NO_LIVE_TIP)
         .unwrap()
     {
         Err(ReservationPolicy::ReceiveHistory) => {
             check_window(st);
             st.wallet_mut()
                 .db_mut()
-                .prepare_receive_reservation(account, now)
+                .prepare_receive_reservation(account, now, NO_LIVE_TIP)
                 .unwrap()
                 .unwrap()
         }
@@ -75,7 +75,7 @@ fn four_slot_quotes_do_not_widen_the_window() {
     assert!(matches!(
         st.wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, now)
+            .prepare_receive_reservation(account, now, NO_LIVE_TIP)
             .unwrap(),
         Err(ReservationPolicy::Limit)
     ));
@@ -95,7 +95,7 @@ fn four_slot_expiry_recycles_without_advancing() {
         let key = st
             .wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, at + 60)
+            .prepare_receive_reservation(account, at + 60, NO_LIVE_TIP)
             .unwrap()
             .unwrap();
         assert_eq!(key.key_id().index(), 0);
@@ -150,7 +150,7 @@ fn four_slot_processing_keeps_ownership() {
         let next = st
             .wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, now + 60)
+            .prepare_receive_reservation(account, now + 60, NO_LIVE_TIP)
             .unwrap()
             .unwrap();
         assert_eq!(key.index(), 0);
@@ -167,7 +167,7 @@ fn expiry_uses_the_earlier_clock() {
     let (_, request) = quote(&mut st, now, "pending", false);
     let db = st.wallet_mut().db_mut();
     let key = db
-        .prepare_receive_reservation(account, now + 3600)
+        .prepare_receive_reservation(account, now + 3600, NO_LIVE_TIP)
         .unwrap()
         .unwrap();
     assert_eq!(key.key_id().index(), 0);
@@ -211,30 +211,6 @@ fn outcomes_and_started_request_ownership_are_stable() {
     ));
 }
 
-/// Disabling the feature prevents new addresses and start instructions without deleting requests.
-#[test]
-fn disabled_feature_refuses_issuance() {
-    let mut st = scanned_wallet();
-    let now = clock_now();
-    let account = st.test_account().unwrap().id();
-    let (key, request) = quote(&mut st, now, "pending", false);
-    let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, false).unwrap();
-    assert!(matches!(
-        db.prepare_receive_reservation(account, now).unwrap(),
-        Err(ReservationPolicy::Disabled)
-    ));
-    assert!(matches!(
-        db.begin_receive_operation(account, key.index(), now + 60, now)
-            .unwrap(),
-        Err(ReservationPolicy::Disabled)
-    ));
-    assert!(matches!(
-        db.start_receive_operation(account, &request, now).unwrap(),
-        Err(ReservationPolicy::Disabled)
-    ));
-}
-
 /// A swap the provider reports as finished with no refund retires its funded refund key:
 /// a newer frontier no longer queues its history, though no refund ever reached it.
 #[test]
@@ -266,7 +242,11 @@ fn success_without_refund_retires_an_unpaid_funded_key() {
             .begin_one_time_recovery(account, publication, true)
             .unwrap()
     );
-    let status = st.wallet().db().one_time_recovery(account, now).unwrap();
+    let status = st
+        .wallet()
+        .db()
+        .one_time_recovery(account, now, None)
+        .unwrap();
     // A newer frontier is what makes the next direct check necessary.
     assert!(status.lookups.is_empty());
     st.generate_and_scan_empty_blocks(1);
@@ -321,24 +301,26 @@ fn promise_payout(st: &mut State, deposit: &str, receipts: &[TxId], at: i64) {
         .unwrap();
 }
 
-/// Runs direct catch-up through a new block and returns the receive indexes it queued.
+/// Runs a complete check through a new block and returns the receive indexes that still
+/// owed a promised payout when it started (see `restore::queue::UNSETTLED`).
 fn catch_up(st: &mut State) -> Vec<u64> {
     let account = st.test_account().unwrap().id();
     st.generate_and_scan_empty_blocks(1);
     let publication = store::restore::tests::discovery::publication_at(st, tip(st).height);
+    let queued: Vec<Vec<u8>> = column(
+        st.wallet().conn(),
+        &format!(
+            "SELECT k.key_index FROM ironwood_one_time_keys k
+             WHERE k.purpose = 1 AND {} ORDER BY k.key_index",
+            store::restore::queue::UNSETTLED
+        ),
+        [],
+    );
     assert!(
         st.wallet_mut()
             .db_mut()
             .begin_one_time_recovery(account, publication, true)
             .unwrap()
-    );
-    let queued: Vec<Vec<u8>> = column(
-        st.wallet().conn(),
-        "SELECT k.key_index FROM ironwood_one_time_lookups l
-         JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
-         WHERE k.purpose = 1 AND l.target_height = ?1 AND l.read_complete = 0
-         ORDER BY k.key_index",
-        [u32::from(publication.end.height)],
     );
     store::restore::tests::discovery::drain(st, account, publication);
     queued
@@ -393,18 +375,17 @@ fn another_devices_later_payment_does_not_settle_a_reused_address() {
     assert!(catch_up(&mut st).contains(&0));
 }
 
-/// An earlier payment whose block timestamp runs ahead of the device clock looks newer than
-/// the quote, but cannot settle it. The quote's own reported payout does.
+/// A payment the provider never named, whose block timestamp runs ahead of the device clock,
+/// looks newer than the quote, but cannot settle it. The quote's own reported payout does.
 #[test]
 fn a_block_timestamp_ahead_of_the_device_clock_does_not_settle_a_quote() {
     let mut st = scanned_wallet();
     let now = clock_now();
-    // The payment lands after index 0's history was read, so issuance cannot know it.
-    check_window(&mut st);
-    let earlier =
-        store::restore::tests::discovery::pay_candidate(&mut st, KeyId::new(Purpose::Receive, 0));
+    // The payment lands after index 0 was handed out, so issuance cannot know it.
     let (key, _) = quote(&mut st, now, "quote", true);
     assert_eq!(key.index(), 0);
+    let earlier =
+        store::restore::tests::discovery::pay_candidate(&mut st, KeyId::new(Purpose::Receive, 0));
     mined_at(&st, earlier.height, now + 600);
     promise_payout(&mut st, "quote", &[], now + 120);
     assert!(catch_up(&mut st).contains(&0));
@@ -463,7 +444,7 @@ fn a_mined_payout_opens_the_next_indexes_until_a_reorg_drops_it() {
     assert!(matches!(
         st.wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, now)
+            .prepare_receive_reservation(account, now, NO_LIVE_TIP)
             .unwrap(),
         Err(ReservationPolicy::Limit)
     ));
@@ -473,7 +454,7 @@ fn a_mined_payout_opens_the_next_indexes_until_a_reorg_drops_it() {
     if let Ok(key) = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, now)
+        .prepare_receive_reservation(account, now, NO_LIVE_TIP)
         .unwrap()
     {
         assert!(key.key_id().index() < 4);
@@ -490,12 +471,12 @@ fn a_restored_seeds_paid_index_is_not_issued_before_its_history() {
     store::restore::tests::discovery::pay_candidate(&mut st, KeyId::new(Purpose::Receive, 0));
     st.wallet_mut()
         .db_mut()
-        .set_one_time_recovery_enabled(account, true)
+        .enable_one_time_recovery(account)
         .unwrap();
     assert!(matches!(
         st.wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, now)
+            .prepare_receive_reservation(account, now, NO_LIVE_TIP)
             .unwrap(),
         Err(ReservationPolicy::ReceiveHistory)
     ));
@@ -503,7 +484,7 @@ fn a_restored_seeds_paid_index_is_not_issued_before_its_history() {
     let key = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, now)
+        .prepare_receive_reservation(account, now, NO_LIVE_TIP)
         .unwrap()
         .unwrap();
     assert_eq!(key.key_id().index(), 1);
@@ -519,7 +500,7 @@ fn a_new_account_issues_once_the_index_history_completes() {
     assert!(matches!(
         st.wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, now)
+            .prepare_receive_reservation(account, now, NO_LIVE_TIP)
             .unwrap(),
         Err(ReservationPolicy::ReceiveHistory)
     ));
@@ -530,7 +511,11 @@ fn a_new_account_issues_once_the_index_history_completes() {
             .begin_one_time_recovery(account, publication, true)
             .unwrap()
     );
-    let state = st.wallet().db().one_time_recovery(account, now).unwrap();
+    let state = st
+        .wallet()
+        .db()
+        .one_time_recovery(account, now, None)
+        .unwrap();
     let first = state
         .lookups
         .iter()
@@ -548,7 +533,7 @@ fn a_new_account_issues_once_the_index_history_completes() {
     let key = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, now)
+        .prepare_receive_reservation(account, now, NO_LIVE_TIP)
         .unwrap()
         .unwrap();
     assert_eq!(key.key_id().index(), 0);
@@ -594,7 +579,7 @@ fn an_orphaned_promised_payout_keeps_its_address_out_of_reuse() {
         let next = st
             .wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, now + 180)
+            .prepare_receive_reservation(account, now + 180, NO_LIVE_TIP)
             .unwrap()
             .unwrap();
         assert_eq!(next.key_id().index(), 1);
@@ -606,7 +591,7 @@ fn an_orphaned_promised_payout_keeps_its_address_out_of_reuse() {
         let next = st
             .wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, now + 180)
+            .prepare_receive_reservation(account, now + 180, NO_LIVE_TIP)
             .unwrap()
             .unwrap();
         assert_ne!(next.key_id().index(), 0, "positive {positive}");
@@ -624,7 +609,7 @@ fn filter(st: &mut State, hits: &[KeyId]) {
     let frontier = st
         .wallet()
         .db()
-        .one_time_recovery(account, clock_now())
+        .one_time_recovery(account, clock_now(), None)
         .unwrap()
         .filter_frontier
         .unwrap()
@@ -632,12 +617,13 @@ fn filter(st: &mut State, hits: &[KeyId]) {
     st.generate_and_scan_empty_blocks(1);
     let (token, _) = st.wallet().db().one_time_receivers(account).unwrap();
     let blocks = store::restore::tests::discovery::blocks_above(st, frontier);
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .record_one_time_filters(account, token, token.history_revision, &blocks, hits)
-            .unwrap()
-    );
+    assert!(store::restore::tests::discovery::record_span(
+        st.wallet_mut().db_mut(),
+        account,
+        token,
+        &blocks,
+        hits
+    ));
 }
 /// Runs recovery at the tip under the account's current correction generation until every
 /// due lookup and witness is answered, so invalidated histories settle again.
@@ -646,7 +632,7 @@ fn settle(st: &mut State) {
     let revision = st
         .wallet()
         .db()
-        .one_time_recovery(account, clock_now())
+        .one_time_recovery(account, clock_now(), None)
         .unwrap()
         .token
         .history_revision;
@@ -679,7 +665,7 @@ fn an_invalidating_event_after_reservation_holds_its_receiver() {
             let key = st
                 .wallet_mut()
                 .db_mut()
-                .prepare_receive_reservation(account, now)
+                .prepare_receive_reservation(account, now, NO_LIVE_TIP)
                 .unwrap()
                 .unwrap();
             assert_eq!(key.key_id().index(), 0);
@@ -696,7 +682,7 @@ fn an_invalidating_event_after_reservation_holds_its_receiver() {
             assert_eq!(
                 st.wallet_mut()
                     .db_mut()
-                    .prepare_receive_reservation(account, now)
+                    .prepare_receive_reservation(account, now, NO_LIVE_TIP)
                     .unwrap()
                     .unwrap()
                     .key_id()
@@ -746,7 +732,7 @@ fn an_invalidating_event_after_reservation_holds_its_receiver() {
                 let db = st.wallet_mut().db_mut();
                 match step {
                     "resume" => db
-                        .prepare_receive_reservation(account, now)
+                        .prepare_receive_reservation(account, now, NO_LIVE_TIP)
                         .unwrap()
                         .map(|key| assert_eq!(key.key_id().index(), 0)),
                     "begin" => db
@@ -785,14 +771,14 @@ fn a_rewound_reservation_is_released_by_its_queued_recheck() {
     assert!(
         st.wallet()
             .db()
-            .one_time_recovery(account, now)
+            .one_time_recovery(account, now, None)
             .unwrap()
             .restore_complete
     );
     let prepare = |st: &mut State| {
         st.wallet_mut()
             .db_mut()
-            .prepare_receive_reservation(account, now)
+            .prepare_receive_reservation(account, now, NO_LIVE_TIP)
             .unwrap()
             .map(|key| key.key_id().index())
     };
@@ -812,20 +798,14 @@ fn a_rewound_reservation_is_released_by_its_queued_recheck() {
         "the rewind queued a runnable recheck"
     );
 
-    let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, false).unwrap();
-    assert_eq!(prepare(&mut st), Err(ReservationPolicy::Disabled));
-    st.wallet_mut()
-        .db_mut()
-        .set_one_time_recovery_enabled(account, true)
-        .unwrap();
     settle(&mut st);
     assert_eq!(prepare(&mut st), Ok(0));
 }
 
 /// Every key that entered automatic monitoring since `before` was read, with the filter
-/// frontier then at `frontier`, has history settled through that frontier or a runnable
-/// lookup reaching it, since filters never watched it there. Returns the monitored keys
+/// frontier then at `frontier`, has history settled through that frontier, a runnable
+/// lookup reaching it, or a funding height past it, since filters never watched it there.
+/// Returns the monitored keys
 /// and frontier for the next check.
 fn assert_entered_with_history(
     st: &State,
@@ -843,7 +823,7 @@ fn assert_entered_with_history(
                  JOIN accounts a ON a.id = k.account_id
                  LEFT JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id
                  WHERE a.uuid = ?1 AND k.purpose = ?2 AND k.key_index = ?3
-                   AND (l.done_height >= ?4
+                   AND (l.done_height >= ?4 OR k.funding_height > ?4
                      OR (l.target_height >= ?4 AND l.reasons & 3 != 0 AND l.read_complete = 0)
                      OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
                          WHERE p.one_time_key_id = k.id)))",
@@ -862,7 +842,7 @@ fn assert_entered_with_history(
     let frontier = st
         .wallet()
         .db()
-        .one_time_recovery(account, clock_now())
+        .one_time_recovery(account, clock_now(), None)
         .unwrap()
         .filter_frontier
         .map(|f| f.height);
@@ -898,7 +878,7 @@ fn seeded_reservation_sequences_never_hold_without_work() {
             let has_frontier = st
                 .wallet()
                 .db()
-                .one_time_recovery(account, now)
+                .one_time_recovery(account, now, None)
                 .unwrap()
                 .filter_frontier
                 .is_some();
@@ -914,7 +894,7 @@ fn seeded_reservation_sequences_never_hold_without_work() {
                     let _ = st
                         .wallet_mut()
                         .db_mut()
-                        .prepare_receive_reservation(account, now)
+                        .prepare_receive_reservation(account, now, NO_LIVE_TIP)
                         .unwrap();
                 }
                 2 if has_frontier => hint(&mut st, below(4)),
@@ -943,9 +923,8 @@ fn seeded_reservation_sequences_never_hold_without_work() {
                 }
                 6 => {
                     let db = st.wallet_mut().db_mut();
-                    db.set_one_time_recovery_enabled(account, false).unwrap();
+                    db.enable_one_time_recovery(account).unwrap();
                     status(db, account);
-                    db.set_one_time_recovery_enabled(account, true).unwrap();
                 }
                 7 => {
                     store::restore::tests::discovery::pay_candidate(
@@ -1102,7 +1081,7 @@ fn a_draft_is_reusable_until_its_latest_request_expires() {
         chain_agrees(st.wallet().db(), expiry - 1);
         let db = st.wallet_mut().db_mut();
         let resumed = db
-            .prepare_receive_reservation(account, expiry - 1)
+            .prepare_receive_reservation(account, expiry - 1, NO_LIVE_TIP)
             .unwrap()
             .unwrap();
         assert_eq!(resumed.key_id().index(), 0, "{outcome}");
@@ -1124,7 +1103,7 @@ fn a_draft_is_reusable_until_its_latest_request_expires() {
         assert_eq!(operations(&st), before);
         let db = st.wallet_mut().db_mut();
         let reissued = db
-            .prepare_receive_reservation(account, expiry)
+            .prepare_receive_reservation(account, expiry, NO_LIVE_TIP)
             .unwrap()
             .unwrap();
         assert_eq!(reissued.key_id().index(), 0, "{outcome}");
@@ -1212,7 +1191,7 @@ fn a_reservation_without_a_floor_counts_every_request() {
     );
     let db = st.wallet_mut().db_mut();
     let resumed = db
-        .prepare_receive_reservation(account, now + 60)
+        .prepare_receive_reservation(account, now + 60, NO_LIVE_TIP)
         .unwrap()
         .unwrap();
     assert_eq!(resumed.key_id().index(), 0);
@@ -1270,7 +1249,7 @@ fn a_started_reservation_needs_a_fresh_conclusive_status() {
     let _ = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, now + 300)
+        .prepare_receive_reservation(account, now + 300, NO_LIVE_TIP)
         .unwrap();
     assert!(held(&st, 0), "a stale status reclaims nothing");
     assert!(report(
@@ -1319,7 +1298,7 @@ fn issue(st: &mut State, now: i64) -> Option<u64> {
     let account = st.test_account().unwrap().id();
     st.wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, now)
+        .prepare_receive_reservation(account, now, NO_LIVE_TIP)
         .unwrap()
         .ok()
         .map(|key| key.key_id().index())
@@ -1380,7 +1359,9 @@ fn a_payment_after_a_silent_quote_is_released_is_still_recovered() {
     assert!(!report(&mut st, ("unquoted", None), Active, false, later));
     assert!(!held(&st, 0));
     store::restore::tests::discovery::pay_candidate(&mut st, key);
-    assert!(catch_up(&mut st).contains(&0));
+    let (_, receivers) = st.wallet().db().one_time_receivers(account).unwrap();
+    assert!(receivers.iter().any(|r| r.key == key), "still monitored");
+    catch_up(&mut st);
     assert_eq!(
         store::restore::tests::discovery::one_time_notes(&st),
         [(100_000, false)]
@@ -1388,7 +1369,7 @@ fn a_payment_after_a_silent_quote_is_released_is_still_recovered() {
     let next = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, later)
+        .prepare_receive_reservation(account, later, NO_LIVE_TIP)
         .unwrap();
     assert!(next.is_err() || next.unwrap().key_id().index() != 0);
 }
@@ -1830,7 +1811,7 @@ fn paid_reservation_closes_once_every_quote_settles() {
     let next = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, now + 300)
+        .prepare_receive_reservation(account, now + 300, NO_LIVE_TIP)
         .unwrap();
     assert!(next.is_err() || next.unwrap().key_id().index() != 0);
 }
@@ -1890,7 +1871,7 @@ fn statuses_reclaim_abandoned_reservations_and_release_paid_ones() {
     assert_eq!(operations(&st), 1);
     let db = st.wallet_mut().db_mut();
     assert_eq!(
-        db.prepare_receive_reservation(account, now + 120)
+        db.prepare_receive_reservation(account, now + 120, NO_LIVE_TIP)
             .unwrap()
             .unwrap()
             .key_id()
@@ -1915,7 +1896,7 @@ fn statuses_reclaim_abandoned_reservations_and_release_paid_ones() {
     let next = st
         .wallet_mut()
         .db_mut()
-        .prepare_receive_reservation(account, now + 120)
+        .prepare_receive_reservation(account, now + 120, NO_LIVE_TIP)
         .unwrap();
     assert!(next.is_err() || next.unwrap().key_id().index() != 0);
 }
@@ -1955,6 +1936,8 @@ fn quoting_waits_for_a_queued_payment_to_its_address() {
         db.start_receive_operation(account, &request, now).unwrap(),
         Err(ReservationPolicy::ReceiveHistory)
     );
-    let next = db.prepare_receive_reservation(account, now).unwrap();
+    let next = db
+        .prepare_receive_reservation(account, now, NO_LIVE_TIP)
+        .unwrap();
     assert!(next.is_err() || next.unwrap().key_id().index() != 0);
 }

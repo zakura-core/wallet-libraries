@@ -79,7 +79,7 @@ pub(super) fn scanned_wallet() -> State {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
-    db.set_one_time_recovery_enabled(account, true).unwrap();
+    db.enable_one_time_recovery(account).unwrap();
     st
 }
 
@@ -90,6 +90,10 @@ pub(super) fn restored_wallet() -> State {
     st.generate_and_scan_empty_blocks(1);
     st
 }
+
+/// A live tip no newer than the saved chain tip, so receive issuance checks the marker
+/// against the tip sync saved.
+pub(super) const NO_LIVE_TIP: BlockHeight = BlockHeight::from_u32(0);
 
 pub(super) fn start() -> BlockHeight {
     BlockHeight::from_u32(100)
@@ -165,7 +169,8 @@ pub(crate) fn reserve_key(
 }
 
 /// Registers `key` as a restore discovers it, from `from`, with its history due for a
-/// lookup unless this wallet scanned it.
+/// lookup unless this wallet scanned it. A receive key's history from activation is queued
+/// as a complete check would queue it.
 pub(super) fn recover(
     db: &mut Db,
     account: AccountUuid,
@@ -176,6 +181,10 @@ pub(super) fn recover(
         let (id, key) = register(c, p, account, key)?;
         if key.key_id().purpose() == Purpose::Refund {
             store::restore::queue::funded(c, p, id, from)?;
+        } else {
+            let owner = crate::wallet::get_account_ref(c, account)?;
+            let start = store::restore::queue::activation(p);
+            store::restore::queue::queue_history(c, owner.0, id, start)?;
         }
         Ok(key)
     })
@@ -486,7 +495,7 @@ pub(crate) fn scan_and_recover(st: &mut State, from: BlockHeight, count: usize) 
     for account in accounts {
         let publication = store::restore::tests::discovery::publication_at(st, tip(st).height);
         let db = st.wallet_mut().db_mut();
-        db.set_one_time_recovery_enabled(account, true).unwrap();
+        db.enable_one_time_recovery(account).unwrap();
         assert!(
             db.begin_one_time_recovery(account, publication, false)
                 .unwrap()
@@ -659,6 +668,7 @@ mod key_access;
 mod marker;
 mod scanning;
 mod selection;
+mod used;
 
 /// Reservations survive a reopen, and each purpose and account has its own index space,
 /// whose keys another account cannot look up.

@@ -92,7 +92,10 @@ pub struct Input {
     /// - Each entry is set by a Signer, and should contain an ECDSA signature that is
     ///   valid under the corresponding pubkey.
     /// - These are required by the Spend Finalizer to assemble `script_sig`.
-    #[serde(with = "serde_with::As::<BTreeMap<[serde_with::Same; 33], serde_with::Same>>")]
+    #[serde(
+        serialize_with = "crate::serde_arrays::serialize_map",
+        deserialize_with = "crate::serde_arrays::deserialize_map"
+    )]
     pub(crate) partial_signatures: BTreeMap<[u8; 33], Vec<u8>>,
 
     /// The sighash type to be used for this input.
@@ -111,7 +114,10 @@ pub struct Input {
     /// - Individual entries may be required by a Signer.
     /// - It is not required that the map include entries for all of the used pubkeys.
     ///   In particular, it is not possible to include entries for non-BIP-32 pubkeys.
-    #[serde(with = "serde_with::As::<BTreeMap<[serde_with::Same; 33], serde_with::Same>>")]
+    #[serde(
+        serialize_with = "crate::serde_arrays::serialize_map",
+        deserialize_with = "crate::serde_arrays::deserialize_map"
+    )]
     pub(crate) bip32_derivation: BTreeMap<[u8; 33], Zip32Derivation>,
 
     /// Mappings of the form `key = RIPEMD160(value)`.
@@ -170,7 +176,10 @@ pub struct Output {
     /// - Individual entries may be required by a Signer.
     /// - It is not required that the map include entries for all of the used pubkeys.
     ///   In particular, it is not possible to include entries for non-BIP-32 pubkeys.
-    #[serde(with = "serde_with::As::<BTreeMap<[serde_with::Same; 33], serde_with::Same>>")]
+    #[serde(
+        serialize_with = "crate::serde_arrays::serialize_map",
+        deserialize_with = "crate::serde_arrays::deserialize_map"
+    )]
     pub(crate) bip32_derivation: BTreeMap<[u8; 33], Zip32Derivation>,
 
     /// The user-facing address to which this output is being sent, if any.

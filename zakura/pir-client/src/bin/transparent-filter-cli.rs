@@ -6,7 +6,10 @@
 //! filters, which a real wallet must never do. It exists to exercise the fetch,
 //! validate and match path end to end against a live service.
 
-use clap::{Parser, Subcommand};
+#[path = "../cli_args.rs"]
+mod cli_args;
+
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, Write};
 use zakura_pir_client::transparent::filter::{
     BlockHash, ChainMap, FilterLimits, RangeRequest, ScriptBytes, filter_hash, http::HttpTransport,
@@ -14,44 +17,26 @@ use zakura_pir_client::transparent::filter::{
 };
 use zakura_pir_publisher::transparent::filter::build_filter;
 
-#[derive(Parser)]
-#[command(
-    name = "transparent-filter-cli",
-    about = "Transparent activity filter client"
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
+#[derive(Debug, PartialEq, Eq)]
 enum Command {
     /// Fetch, validate and match a range against a running filter service.
     Sync {
-        #[arg(long)]
         server: String,
         /// File of hex-encoded wallet scripts, one per line.
-        #[arg(long)]
         scripts: std::path::PathBuf,
         /// First height to cover. Defaults to the service's start height.
-        #[arg(long)]
         start_height: Option<u64>,
         /// Last height to cover. Defaults to the service's coverage tip.
-        #[arg(long)]
         stop_height: Option<u64>,
         /// Take the accepted chain from the service being tested.
         ///
         /// A real wallet supplies its own. Required here because this client
         /// has no chain of its own, and named so the compromise is visible in
         /// every command line that relies on it.
-        #[arg(long)]
         accept_server_chain: bool,
     },
     /// Report what the service says about itself.
-    Info {
-        #[arg(long)]
-        server: String,
-    },
+    Info { server: String },
     /// Build filters from element sets. One JSON object per input line:
     /// `{"block_hash_display": "...", "elements": ["<hex>", ...]}`.
     ///
@@ -61,6 +46,193 @@ enum Command {
     /// Match scripts against filters. One JSON object per input line:
     /// `{"block_hash_display": "...", "filter": "<hex>", "scripts": ["<hex>", ...]}`.
     BatchMatch,
+}
+
+const HELP_ROOT: &str = r##"Transparent activity filter client
+
+Usage: {program} <COMMAND>
+
+Commands:
+  sync         Fetch, validate and match a range against a running filter service
+  info         Report what the service says about itself
+  batch-build  Build filters from element sets. One JSON object per input line: `{"block_hash_display": "...", "elements": ["<hex>", ...]}`
+  batch-match  Match scripts against filters. One JSON object per input line: `{"block_hash_display": "...", "filter": "<hex>", "scripts": ["<hex>", ...]}`
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+"##;
+const HELP_SYNC: &str = r##"Fetch, validate and match a range against a running filter service
+
+Usage: {program} sync [OPTIONS] --server <SERVER> --scripts <SCRIPTS>
+
+Options:
+      --server <SERVER>
+
+
+      --scripts <SCRIPTS>
+          File of hex-encoded wallet scripts, one per line
+
+      --start-height <START_HEIGHT>
+          First height to cover. Defaults to the service's start height
+
+      --stop-height <STOP_HEIGHT>
+          Last height to cover. Defaults to the service's coverage tip
+
+      --accept-server-chain
+          Take the accepted chain from the service being tested.
+
+          A real wallet supplies its own. Required here because this client has no chain of its own, and named so the compromise is visible in every command line that relies on it.
+
+  -h, --help
+          Print help
+"##;
+const HELP_INFO: &str = r##"Report what the service says about itself
+
+Usage: {program} info --server <SERVER>
+
+Options:
+      --server <SERVER>
+  -h, --help             Print help
+"##;
+const HELP_BATCH_BUILD: &str = r##"Build filters from element sets. One JSON object per input line: `{"block_hash_display": "...", "elements": ["<hex>", ...]}`.
+
+Batched on purpose: the harness makes one call for a whole generation rather than one process per script.
+
+Usage: {program} batch-build
+
+Options:
+  -h, --help
+          Print help
+"##;
+const HELP_BATCH_MATCH: &str = r##"Match scripts against filters. One JSON object per input line: `{"block_hash_display": "...", "filter": "<hex>", "scripts": ["<hex>", ...]}`
+
+Usage: {program} batch-match
+
+Options:
+  -h, --help  Print help
+"##;
+const HELP_HELP: &str = r##"Print this message or the help of the given subcommand(s)
+
+Usage: {program} help [COMMAND]...
+
+Arguments:
+  [COMMAND]...  Print help for the subcommand(s)
+"##;
+
+#[derive(Debug, PartialEq, Eq)]
+enum Parsed {
+    Command(Command),
+    Help(&'static str),
+}
+
+fn help(command: &str) -> Option<&'static str> {
+    match command {
+        "sync" => Some(HELP_SYNC),
+        "info" => Some(HELP_INFO),
+        "batch-build" => Some(HELP_BATCH_BUILD),
+        "batch-match" => Some(HELP_BATCH_MATCH),
+        "help" => Some(HELP_HELP),
+        _ => None,
+    }
+}
+
+fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
+    let mut arguments = arguments.into_iter();
+    let argument = arguments.next().ok_or("a subcommand is required")?;
+    if cli_args::is_help(&argument) {
+        return Ok(Parsed::Help(HELP_ROOT));
+    }
+    let name = argument.to_str().ok_or("invalid UTF-8 in subcommand")?;
+    if name == "help" {
+        let topic = match arguments.next() {
+            None => HELP_ROOT,
+            Some(topic) => topic
+                .to_str()
+                .and_then(help)
+                .ok_or("unrecognized help subcommand")?,
+        };
+        if arguments.next().is_some() {
+            return Err("unrecognized help subcommand".into());
+        }
+        return Ok(Parsed::Help(topic));
+    }
+    let usage = help(name)
+        .filter(|_| name != "help")
+        .ok_or("unrecognized subcommand")?;
+    let mut server = None;
+    let mut scripts = None;
+    let mut start_height = None;
+    let mut stop_height = None;
+    let mut accept_server_chain = false;
+    while let Some(argument) = arguments.next() {
+        if cli_args::is_help(&argument) {
+            return Ok(Parsed::Help(usage));
+        }
+        if argument == "--" {
+            if arguments.next().is_some() {
+                return Err("unexpected positional argument".into());
+            }
+            break;
+        }
+        if matches!(name, "sync" | "info")
+            && let Some(value) = cli_args::take_value(&argument, "--server", &mut arguments)
+        {
+            if server.is_some() {
+                return Err("--server cannot be used multiple times".into());
+            }
+            server = Some(
+                value?
+                    .into_string()
+                    .map_err(|_| "--server requires UTF-8")?,
+            );
+        } else if name == "sync" {
+            if let Some(value) = cli_args::take_value(&argument, "--scripts", &mut arguments) {
+                if scripts.is_some() {
+                    return Err("--scripts cannot be used multiple times".into());
+                }
+                scripts = Some(std::path::PathBuf::from(value?));
+            } else if let Some(value) =
+                cli_args::take_value(&argument, "--start-height", &mut arguments)
+            {
+                if start_height.is_some() {
+                    return Err("--start-height cannot be used multiple times".into());
+                }
+                start_height = Some(cli_args::number(value?, "--start-height")?);
+            } else if let Some(value) =
+                cli_args::take_value(&argument, "--stop-height", &mut arguments)
+            {
+                if stop_height.is_some() {
+                    return Err("--stop-height cannot be used multiple times".into());
+                }
+                stop_height = Some(cli_args::number(value?, "--stop-height")?);
+            } else if argument == "--accept-server-chain" {
+                if accept_server_chain {
+                    return Err("--accept-server-chain cannot be used multiple times".into());
+                }
+                accept_server_chain = true;
+            } else {
+                return Err("unexpected argument; use --help for usage".into());
+            }
+        } else {
+            return Err("unexpected argument; use --help for usage".into());
+        }
+    }
+    Ok(Parsed::Command(match name {
+        "sync" => Command::Sync {
+            server: server.ok_or("--server is required")?,
+            scripts: scripts.ok_or("--scripts is required")?,
+            start_height,
+            stop_height,
+            accept_server_chain,
+        },
+        "info" => Command::Info {
+            server: server.ok_or("--server is required")?,
+        },
+        "batch-build" => Command::BatchBuild,
+        "batch-match" => Command::BatchMatch,
+        _ => unreachable!("command was validated before parsing options"),
+    }))
 }
 
 fn read_scripts(path: &std::path::Path) -> Result<Vec<ScriptBytes>, String> {
@@ -76,8 +248,8 @@ fn read_scripts(path: &std::path::Path) -> Result<Vec<ScriptBytes>, String> {
         .collect()
 }
 
-fn run() -> Result<(), String> {
-    match Cli::parse().command {
+fn run(command: Command) -> Result<(), String> {
+    match command {
         Command::Info { server } => {
             let transport = HttpTransport::new(&server).map_err(|e| e.to_string())?;
             let info = transport.info().map_err(|e| e.to_string())?;
@@ -252,8 +424,129 @@ fn run() -> Result<(), String> {
 }
 
 fn main() {
-    if let Err(error) = run() {
+    let mut arguments = std::env::args_os();
+    let executable = arguments.next().unwrap_or_default();
+    let program = std::path::Path::new(&executable)
+        .file_name()
+        .unwrap_or(OsStr::new("transparent-filter-cli"))
+        .to_string_lossy();
+    let command = match parse_args(arguments) {
+        Ok(Parsed::Command(command)) => command,
+        Ok(Parsed::Help(text)) => {
+            print!("{}", text.replace("{program}", &program));
+            return;
+        }
+        Err(error) => {
+            eprintln!(
+                "error: {error}\n\n{}",
+                HELP_ROOT.replace("{program}", &program)
+            );
+            std::process::exit(2);
+        }
+    };
+    if let Err(error) = run(command) {
         eprintln!("transparent-filter-cli: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(arguments: &[&str]) -> Result<Parsed, String> {
+        parse_args(arguments.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn commands_and_sync_defaults_remain_available() {
+        assert_eq!(
+            parse(&["batch-build"]),
+            Ok(Parsed::Command(Command::BatchBuild))
+        );
+        assert_eq!(
+            parse(&["batch-match", "--"]),
+            Ok(Parsed::Command(Command::BatchMatch))
+        );
+        assert_eq!(
+            parse(&["info", "--server="]),
+            Ok(Parsed::Command(Command::Info {
+                server: String::new()
+            }))
+        );
+        assert_eq!(
+            parse(&[
+                "sync",
+                "--server",
+                "https://example.invalid",
+                "--scripts",
+                "scripts.txt"
+            ]),
+            Ok(Parsed::Command(Command::Sync {
+                server: "https://example.invalid".into(),
+                scripts: "scripts.txt".into(),
+                start_height: None,
+                stop_height: None,
+                accept_server_chain: false,
+            })),
+        );
+        assert_eq!(
+            parse(&[
+                "sync",
+                "--scripts=scripts.txt",
+                "--stop-height",
+                "18446744073709551615",
+                "--accept-server-chain",
+                "--server=x",
+                "--start-height=+1"
+            ]),
+            Ok(Parsed::Command(Command::Sync {
+                server: "x".into(),
+                scripts: "scripts.txt".into(),
+                start_height: Some(1),
+                stop_height: Some(u64::MAX),
+                accept_server_chain: true,
+            })),
+        );
+    }
+
+    #[test]
+    fn help_paths_and_terminators() {
+        assert_eq!(parse(&["--help", "--unknown"]), Ok(Parsed::Help(HELP_ROOT)));
+        assert_eq!(parse(&["help", "sync"]), Ok(Parsed::Help(HELP_SYNC)));
+        assert_eq!(parse(&["sync", "-hfoo"]), Ok(Parsed::Help(HELP_SYNC)));
+        assert_eq!(parse(&["help", "help"]), Ok(Parsed::Help(HELP_HELP)));
+        for arguments in [
+            vec![],
+            vec!["--", "batch-build"],
+            vec!["sync", "--", "--help"],
+            vec!["help", "sync", "extra"],
+            vec!["help", "--help"],
+        ] {
+            assert!(parse(&arguments).is_err(), "{arguments:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_options_cannot_be_hidden_by_help() {
+        for arguments in [
+            vec!["sync", "--server", "--help"],
+            vec!["sync", "--start-height=bad", "--help"],
+            vec!["sync", "--stop-height=18446744073709551616", "--help"],
+            vec!["sync", "--start-height=-1", "--help"],
+            vec![
+                "sync",
+                "--accept-server-chain",
+                "--accept-server-chain",
+                "--help",
+            ],
+            vec!["sync", "--accept-server-chain=true"],
+            vec!["sync", "--server=x", "--server=x", "--help"],
+            vec!["info", "--scripts=f"],
+            vec!["batch-build", "--server=x"],
+            vec!["batch-match", "extra"],
+        ] {
+            assert!(parse(&arguments).is_err(), "{arguments:?}");
+        }
     }
 }

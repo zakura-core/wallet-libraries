@@ -27,7 +27,6 @@ rand_core = { workspace = true, optional = true }
 # Encoding
 postcard.workspace = true
 serde.workspace = true
-serde_with = { version = "3", default-features = false, features = ["alloc"] }
 
 # Payment protocols
 # - Transparent
@@ -59,7 +58,7 @@ sapling = { workspace = true, features = ["zip32-addresses"] }
 hex.workspace = true
 incrementalmerkletree.workspace = true
 rand_chacha_10 = { package = "rand_chacha", version = "0.10" }
-secp256k1 = { workspace = true, features = ["rand"] }
+secp256k1.workspace = true
 shardtree.workspace = true
 zcash_primitives = { workspace = true, features = [
     "test-dependencies",
@@ -71,7 +70,7 @@ zip32.workspace = true
 
 [features]
 default = ["std"]
-std = ["document-features"]
+std = []
 ## Enables functionality that requires Orchard protocol types.
 orchard = [
     "dep:ff",

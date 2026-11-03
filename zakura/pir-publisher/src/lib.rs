@@ -1,4 +1,6 @@
 //! publisher operations, independent of wallet clients.
+#[cfg(any(feature = "transparent", feature = "receiver"))]
+pub mod directory;
 pub mod native;
 #[cfg(feature = "enhance")]
 pub mod enhance {

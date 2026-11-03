@@ -12,9 +12,7 @@ use tempfile::NamedTempFile;
 use zakura_one_time_ivk::{KeyId, Purpose};
 use zakura_pir_client::receiver::{
     lookup, publication,
-    session::Error as DirectoryError,
     transport::{Inventories, InventoryClient},
-    witness,
 };
 use zcash_client_backend::{
     data_api::{
@@ -79,7 +77,7 @@ impl Device {
         let (account, usk) = db
             .create_account("scenario", &SecretVec::new(seed.to_vec()), &birthday, None)
             .unwrap();
-        db.set_one_time_recovery_enabled(account, true).unwrap();
+        db.enable_one_time_recovery(account).unwrap();
         Self {
             db,
             account,
@@ -138,12 +136,12 @@ impl Device {
     /// Reads the durable queue without initiating network traffic.
     pub fn status(&self, chain: &Chain) -> RecoveryStatus {
         self.db
-            .one_time_recovery(self.account, chain.now())
+            .one_time_recovery(self.account, chain.now(), None)
             .unwrap()
     }
 
     /// Asserts the no-stall invariant that the wallet's own restore fixtures also check:
-    /// recovery is complete, exposes a lookup or witness, or waits only on time (a backoff,
+    /// recovery is complete, exposes a lookup, or waits only on time (a backoff,
     /// made due here by a far-future clock), a publication or ordinary sync, or the user
     /// (feature or manual search paused, which leaves a cancelled search's lookups without
     /// a reason).
@@ -178,7 +176,7 @@ impl Device {
                  EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
                  JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
                  JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id
-                 WHERE k.account_id = ?1 AND p.payments IS NULL
+                 WHERE k.account_id = ?1 AND p.directory IS NULL
                    AND l.reasons & 3 != 0 AND (l.read_complete = 1 OR l.target_height IS NULL))",
                 [owner],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -187,7 +185,10 @@ impl Device {
         assert!(!settled, "a settled request keeps a target nothing clears");
         assert!(!cursor, "a completed read keeps a segment cursor");
         assert!(!unbound, "an unbound candidate has no read to rebind it");
-        let state = self.db.one_time_recovery(self.account, i64::MAX).unwrap();
+        let state = self
+            .db
+            .one_time_recovery(self.account, i64::MAX, None)
+            .unwrap();
         if state.enabled {
             let held: bool = self
                 .conn()
@@ -211,11 +212,7 @@ impl Device {
                 "a reserved receiver is held with no work to release it"
             );
         }
-        if !state.enabled
-            || state.upgrade_required
-            || !state.lookups.is_empty()
-            || !state.witnesses.is_empty()
-        {
+        if !state.enabled || state.upgrade_required || !state.lookups.is_empty() {
             return;
         }
         let (unstarted, syncing, hidden): (bool, bool, bool) = self
@@ -263,42 +260,21 @@ impl Device {
         InventoryClient::new(ORIGIN, directory, inventory, true)
     }
 
-    /// Completes the real encrypted lookup and witness pipeline, preserving database
-    /// boundaries. A witness bound to another session is read again under this one.
+    /// Completes the real encrypted lookups, whose records carry their witness payloads,
+    /// preserving database boundaries.
     pub async fn drain(&mut self, chain: &Chain, client: &InventoryClient<&Directory>) {
         for _ in 0..256 {
             self.assert_no_stall();
             let state = self.status(chain);
-            if let Some(work) = state.lookups.first() {
-                let page = lookup(client, work).await.unwrap();
-                assert!(
-                    self.db
-                        .record_one_time_lookup(self.account, work, &page, chain.now())
-                        .unwrap()
-                );
-            } else if let Some(request) = state.witnesses.first() {
-                match witness(client, request).await {
-                    Ok(answer) => assert!(
-                        self.db
-                            .record_one_time_witness(
-                                self.account,
-                                state.token,
-                                *request,
-                                &answer,
-                                chain.now()
-                            )
-                            .unwrap()
-                    ),
-                    Err(DirectoryError::Revision) => assert!(
-                        self.db
-                            .refresh_one_time_witness(self.account, state.token, *request)
-                            .unwrap()
-                    ),
-                    Err(e) => panic!("witness query failed: {e}"),
-                }
-            } else {
+            let Some(work) = state.lookups.first() else {
                 return;
-            }
+            };
+            let page = lookup(client, work).await.unwrap();
+            assert!(
+                self.db
+                    .record_one_time_lookup(self.account, work, &page, chain.now())
+                    .unwrap()
+            );
         }
         panic!("private recovery did not converge");
     }
@@ -315,13 +291,23 @@ impl Device {
         self.drain(chain, &client).await;
     }
 
-    /// Records a canonical transparent refund operation with no global provider feed.
-    pub fn quote_refund(&mut self, chain: &Chain) -> RefundSwap {
-        let key = self
+    /// Records a canonical transparent refund operation with no global provider feed, first
+    /// running the prepared refund index's own lookup when issuance waits for it.
+    pub async fn quote_refund(&mut self, chain: &Chain) -> RefundSwap {
+        let mut key = self
             .db
             .reserve_refund_key(self.account, chain.tip())
-            .unwrap()
             .unwrap();
+        if key.is_err() {
+            let directory = Directory::publish(chain, 0, 0, 256, 0);
+            let client = self.connect(&directory).await;
+            self.drain(chain, &client).await;
+            key = self
+                .db
+                .reserve_refund_key(self.account, chain.tip())
+                .unwrap();
+        }
+        let key = key.unwrap();
         let deposit = Address::Transparent(
             transparent::address::TransparentAddress::PublicKeyHash([23; 20]),
         )
