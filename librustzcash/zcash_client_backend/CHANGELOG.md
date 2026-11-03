@@ -14,6 +14,8 @@ and this library adheres to Rust's notion of
   full Tor API, including cryptocurrency exchange-rate queries.
 - `tor::Error::is_tor_name_resolution_failure` classifies Tor-reported remote
   hostname lookup failures without requiring callers to depend on Arti.
+- `tor::{ErrorKind, HasKind}` re-export Arti's existing typed error
+  classification, without introducing a new SDK error enum or trait.
 
 ### Changed
 
