@@ -264,7 +264,7 @@ mod tests {
             .collect();
         drop(sender);
 
-        let received = thread::scope(|scope| {
+        let (mut received, drained_counts) = thread::scope(|scope| {
             for (producer, senders) in producer_senders.into_iter().enumerate() {
                 let barrier = &barrier;
                 scope.spawn(move || {
@@ -277,20 +277,23 @@ mod tests {
             }
 
             let mut received = Vec::new();
+            let mut drained_counts = Vec::new();
             let mut results = receiver.into_iter();
             for _ in 0..ROUNDS {
                 barrier.wait();
                 for _ in 0..PRODUCERS {
                     received.push(results.next().unwrap());
                 }
-                assert_eq!(queued.load(Ordering::Relaxed), 0);
+                drained_counts.push(queued.load(Ordering::Relaxed));
                 barrier.wait();
             }
             assert!(results.next().is_none());
-            received
+            (received, drained_counts)
         });
 
-        let mut received = received;
+        // Check accounting after the producers join, so a failed assertion
+        // cannot leave them waiting at a barrier.
+        assert!(drained_counts.into_iter().all(|count| count == 0));
         received.sort_unstable();
         assert_eq!(received, (0..PRODUCERS * ROUNDS).collect::<Vec<_>>());
         assert_eq!(queued.load(Ordering::Relaxed), 0);
