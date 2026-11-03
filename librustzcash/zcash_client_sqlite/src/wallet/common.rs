@@ -968,10 +968,20 @@ where
         )?;
     #[cfg(feature = "orchard")]
     let funding_covered = Cell::new(false);
+    // Once smallest-first selection holds its share of one-time-key notes, the rest are
+    // skipped without being rebuilt.
+    #[cfg(feature = "orchard")]
+    let one_time_full = Cell::new(false);
     let notes = stmt_select_notes.query_and_then(&sql_params[..], |row| {
         #[cfg(feature = "orchard")]
-        if funding_covered.get() && row.get::<_, Option<i64>>("one_time_key_id")?.is_none() {
-            return Ok(None);
+        {
+            let one_time = || {
+                row.get::<_, Option<i64>>("one_time_key_id")
+                    .map(|k| k.is_some())
+            };
+            if (funding_covered.get() && !one_time()?) || (one_time_full.get() && one_time()?) {
+                return Ok(None);
+            }
         }
         let tx_trust_status = row.get::<_, bool>("trust_status")?;
         let max_shielding_input_height = row
@@ -1047,9 +1057,11 @@ where
             {
                 if note.one_time_key_id().is_some() {
                     if one_time_count >= limit / 2 {
+                        one_time_full.set(true);
                         continue;
                     }
                     one_time_count += 1;
+                    one_time_full.set(one_time_count >= limit / 2);
                 } else {
                     // Other notes sort after every one-time-key note.
                     if other_count >= limit - limit / 2 {

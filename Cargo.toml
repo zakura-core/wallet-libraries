@@ -7,6 +7,9 @@
 # they depend on is resolved from the published zakura-* crates, and every
 # other librustzcash component from its crates.io release, so exactly one copy
 # of each package can ever enter a consumer's graph.
+#
+# Dependency comments below describe the upstream workspace. Version and feature
+# overrides in manifests/sources.toml take precedence over those upstream notes.
 
 [workspace]
 members = [
@@ -46,14 +49,14 @@ categories = ["cryptography::cryptocurrencies"]
 # Intra-workspace dependencies
 equihash = { version = "0.3", default-features = false }
 zcash_address = { version = "4.0.0", default-features = false, package = "zakura-address" }
-zcash_client_backend = { version = "0.1.0-rc9.5", path = "librustzcash/zcash_client_backend", package = "zakura-client-backend" }
+zcash_client_backend = { version = "0.1.0-rc9.6", path = "librustzcash/zcash_client_backend", package = "zakura-client-backend" }
 # zcash_encoding 0.5.0 is a breaking release (MSRV bump + `CompactSize::write` now
 # rejects values above `MAX_COMPACT_SIZE`). To avoid forcing every dependent to
 # migrate at once, the workspace default stays pinned to the published 0.4; only
 # `zcash_history` (a leaf crate, and the sole consumer of the new API) takes an
 # explicit path dependency on the local 0.5. Migrate the remaining crates one at a
 # time, then flip this back to `path = "components/zcash_encoding"` at "0.5".
-zcash_encoding = { version = "0.4", default-features = false }
+zcash_encoding = { version = "0.5", default-features = false }
 zcash_keys = { version = "4.0.0", default-features = false, package = "zakura-keys" }
 zcash_pool_migration = { version = "0.1.0-rc.6" }
 zcash_protocol = { version = "4.0.0", default-features = false, package = "zakura-protocol" }
@@ -146,7 +149,7 @@ tracing = { version = "0.1", default-features = false }
 corez = { version = "0.1.1", default-features = false, features = ["alloc"] }
 
 # Parallel processing
-flume = "0.11"
+flume = { version = "0.11", default-features = false, features = ["async"] }
 maybe-rayon = { version = "0.1.0", default-features = false }
 rayon = "1.5"
 
@@ -167,8 +170,8 @@ subtle = { version = "2.2.3", default-features = false }
 #   CocoaPods, due to being bound to React Native. We need to ensure that the SQLite
 #   version required for `rusqlite` is a version that is available through CocoaPods.
 rusqlite = { version = "0.37", features = ["bundled"] }
-schemerz = "0.2"
-schemerz-rusqlite = "0.370"
+schemerz = { version = "0.3" }
+schemerz-rusqlite = { version = "0.371" }
 time = { version = "0.3.22", default-features = false }
 uuid = "1.1"
 
@@ -187,11 +190,11 @@ incrementalmerkletree-testing = "0.3"
 # Tor
 # - `arti-client` depends on `rusqlite`, and a version mismatch there causes a compilation
 #   failure due to incompatible `libsqlite3-sys` versions.
-arti-client = { version = "0.35", default-features = false, features = ["compression", "rustls", "tokio"] }
+arti-client = { version = "=0.47.0-zakura.1", default-features = false, features = ["rustls", "tokio"], package = "zakura-arti-client", git = "https://github.com/zakura-core/arti.git", rev = "145e2136558c49692088b506f0ba6747772be2c2" }
 dynosaur = "0.3"
-fs-mistrust = "0.12"
+fs-mistrust = { version = "=0.16.0-zakura.1", package = "zakura-fs-mistrust", git = "https://github.com/zakura-core/arti.git", rev = "145e2136558c49692088b506f0ba6747772be2c2" }
 tokio = "1"
-tor-rtcompat = "0.35"
+tor-rtcompat = { version = "=0.47.0-zakura.1", package = "zakura-tor-rtcompat", git = "https://github.com/zakura-core/arti.git", rev = "145e2136558c49692088b506f0ba6747772be2c2" }
 tower = "0.5"
 trait-variant = "0.1"
 

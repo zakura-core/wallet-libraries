@@ -2,8 +2,14 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc5] - 2026-10-30
+
 ### Changed
 
+- Breaking: `receiver::server::Server` serves P8 directory and companion
+  tables, each checked whole and prepared on its own, replacing `Server` and
+  `WitnessServer`. A directory query covers every row; a companion query
+  covers every row or exactly its `query_rows` prefix.
 - The Receiver evaluator performs its native-ring matrix scan directly, keeping
   IPIR's server, client and kernel wrappers out of production dependencies. IPIR
   remains a development dependency for independent comparisons. Wire formats,

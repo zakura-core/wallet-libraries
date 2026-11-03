@@ -7,9 +7,11 @@
 use zakura_pir_query_server::native::{pack, parse_selection, parse_with};
 use zakura_pir_server_core::native::{hint, preprocess, publish};
 
-use ipir_native_client::bits::u64s_to_contiguous_bytes;
+#[path = "../support/reference_bits.rs"]
+mod reference_bits;
 use rand::RngCore;
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
+use reference_bits::u64s_to_contiguous_bytes;
 use sha2::{Digest, Sha256};
 use zakura_pir_client::native::*;
 

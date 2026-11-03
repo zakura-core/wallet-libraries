@@ -30,7 +30,7 @@ versioned prefix and then the operation:
 | Enhance | `/enhance/v1` | `init`, `session/{id}`, `query` |
 | Status | `/status/v1` | `init`, `session/{id}`, `query` |
 | Transparent | `/transparent/v1` | `shards/init`, `shards/{id}/revisions/{rev}/…`, `filters/shards…`, `filters/info`, `txid/…` |
-| Receiver | `/receiver/v1` | `inventory`, `inventory/{inventory}/{chunk}`, `block-filters/…`, `shard-filters/{digest}`, `public/{id}`, `query` |
+| Receiver | `/receiver/v1` | `inventory`, `inventory/{inventory}/{chunk}`, `block-filters/…`, `shard-filters/{digest}`, `choice/{digest}`, `public/{id}`, `query` |
 
 For example, the base `https://wallet-pir.valargroup.dev` serves Enhance at
 `https://wallet-pir.valargroup.dev/enhance/v1/init`; a base path such as

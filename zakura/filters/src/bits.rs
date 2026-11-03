@@ -2,8 +2,8 @@
 // Extracted from rust-bitcoin 0.32.102, src/bip158.rs (CC0-1.0).
 // Upstream credits Tamas Blummer's murmel implementation, relicensed CC0.
 
-use bitcoin_io::{self as io, Read, Write};
 use std::cmp;
+use std::io::{self, Read, Write};
 
 /// Bitwise stream reader.
 pub struct BitStreamReader<'a, R: ?Sized> {
@@ -35,15 +35,12 @@ impl<'a, R: Read + ?Sized> BitStreamReader<'a, R> {
     /// ```
     pub fn read(&mut self, mut nbits: u8) -> Result<u64, io::Error> {
         if nbits > 64 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "can not read more than 64 bits at once",
-            ));
+            return Err(io::Error::other("can not read more than 64 bits at once"));
         }
         let mut data = 0u64;
         while nbits > 0 {
             if self.offset == 8 {
-                self.reader.read_exact(&mut self.buffer)?;
+                crate::read_exact(self.reader, &mut self.buffer)?;
                 self.offset = 0;
             }
             let bits = cmp::min(8 - self.offset, nbits);
@@ -76,10 +73,7 @@ impl<'a, W: Write> BitStreamWriter<'a, W> {
     /// Writes nbits bits from data.
     pub fn write(&mut self, data: u64, mut nbits: u8) -> Result<usize, io::Error> {
         if nbits > 64 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "can not write more than 64 bits at once",
-            ));
+            return Err(io::Error::other("can not write more than 64 bits at once"));
         }
         let mut wrote = 0;
         while nbits > 0 {
@@ -97,7 +91,7 @@ impl<'a, W: Write> BitStreamWriter<'a, W> {
     /// flush bits not yet written.
     pub fn flush(&mut self) -> Result<usize, io::Error> {
         if self.offset > 0 {
-            self.writer.write_all(&self.buffer)?;
+            crate::write_all(self.writer, &self.buffer)?;
             self.buffer[0] = 0u8;
             self.offset = 0;
             Ok(1)

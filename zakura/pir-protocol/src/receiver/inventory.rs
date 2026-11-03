@@ -1,15 +1,11 @@
 //! Sealed Receiver shards and the immutable inventory that lists them.
 //!
 //! History is split into contiguous shards: immutable sealed shards, then at most one
-//! recent tier replaced each publication. Each shard has one or more fixed-geometry
-//! segments (a payment session and its companion witness session) and, when sealed, may
-//! name a GCS receiver filter. A small [`Head`] identifies an inventory fetched in bounded
+//! recent tier replaced each publication. Each shard has one or more segments (a
+//! directory session and its companion session) and, when sealed, may name a GCS
+//! receiver filter. A small [`Head`] identifies an inventory fetched in bounded
 //! [`Chunk`]s; the digest it carries proves the chunks are the complete, ordered list.
-use super::{
-    Hash,
-    session::{Error, Publication},
-    shards, witness,
-};
+use super::{Coverage, Hash, Publication, session::Error, shards, wire};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -49,20 +45,20 @@ pub struct Shard {
     pub end_height: u32,
     pub end_hash: Hash,
     pub end_position: u64,
-    /// Each segment's payment table covers exactly this shard; pages are segment-local.
+    /// Each segment's tables cover exactly this shard; pages are segment-local.
     pub segments: Vec<Publication>,
     pub filter: Option<FilterRef>,
 }
 
 impl Shard {
     /// Whether this shard can no longer change on its chain under its correction
-    /// generation: it is sealed and every segment's witness payloads are final, because the
-    /// Ironwood shard holding its last position was full when they were built.
+    /// generation: it is sealed and every segment's companion payloads are final, because
+    /// the Ironwood shard holding its last position was full when they were built.
     pub fn settled(&self) -> bool {
         self.sealed
             && self.segments.iter().all(|segment| {
                 self.end_position == self.start_position
-                    || witness::is_final(self.end_position - 1, segment.witnesses.table.tree_size)
+                    || wire::is_final(self.end_position - 1, segment.companion.manifest.tree.size)
             })
     }
 
@@ -91,25 +87,26 @@ impl Shard {
         {
             return Err(Error::Malformed);
         }
+        let coverage = Coverage {
+            genesis: *genesis,
+            history_revision,
+            start_height: self.start_height,
+            start_parent: self.start_parent,
+            start_position: self.start_position,
+            end_height: self.end_height,
+            end_hash: self.end_hash,
+            end_position: self.end_position,
+        };
         for segment in &self.segments {
             segment.validate()?;
-            let d = &segment.payments.directory;
-            if &d.genesis != genesis
-                || d.history_revision != history_revision
-                || d.start_height != self.start_height
-                || d.start_parent != self.start_parent
-                || d.start_position != self.start_position
-                || d.end_height != self.end_height
-                || d.end_hash != self.end_hash
-                || d.end_position != self.end_position
-            {
+            if segment.directory.manifest.coverage != coverage {
                 return Err(Error::Malformed);
             }
         }
         Ok(())
     }
 
-    /// Binds every field, including each segment's payment and witness session IDs.
+    /// Binds every field, including each segment's directory and companion session IDs.
     fn digest(&self) -> Result<Hash, Error> {
         let mut h = Sha256::new();
         h.update(b"ironwood-receiver-inventory/v1/shard\0");
@@ -123,8 +120,8 @@ impl Shard {
         h.update(self.end_position.to_le_bytes());
         h.update((self.segments.len() as u32).to_le_bytes());
         for segment in &self.segments {
-            h.update(segment.payments.id()?);
-            h.update(segment.witnesses.id()?);
+            h.update(segment.directory.id()?);
+            h.update(segment.companion.id()?);
         }
         match &self.filter {
             None => h.update([0]),

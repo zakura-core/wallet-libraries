@@ -4,7 +4,7 @@ use zcash_client_backend::data_api::chain::scan_cached_blocks;
 
 use super::{scanning::DuringScan, *};
 use crate::wallet::one_time_ivk::restore::tests::discovery::{
-    key8, late_fixture, one_time_notes, request_for, witness_answer,
+    history, key8, one_time_notes, pay_candidate, publication_at, whole_at, work_of,
 };
 
 /// The journal's entries as `(height, tx_index, txid)`.
@@ -220,10 +220,19 @@ fn deleting_an_account_drops_its_exclusive_journal_entries() {
 /// loaded the wallet's nullifiers, is marked spent when the batch is stored.
 #[test]
 fn a_note_admitted_during_a_batch_is_spent_by_it() {
-    let (mut st, candidate, _) = late_fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
-    let request = request_for(&st, key8(), &candidate);
-    let answer = witness_answer(&st, &request, tip(&st).height);
+    let candidate = pay_candidate(&mut st, key8());
+    recover(st.wallet_mut().db_mut(), account, key8(), candidate.height);
+    let publication = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.begin_one_time_recovery(account, publication, false)
+            .unwrap()
+    );
+    let work = work_of(&st, key8());
+    let records = history(work.work.receiver, &[&candidate]);
+    let page = whole_at(&st, publication, records, publication.end);
     let prior = st.latest_cached_block().unwrap().chain_state().clone();
     let note = candidate
         .encrypted_note
@@ -246,14 +255,10 @@ fn a_note_admitted_during_a_batch_is_spent_by_it() {
         reads: Cell::new(0),
         run: || {
             let mut db = WalletDb::for_path(path_to_db, network, test_clock(), test_rng()).unwrap();
-            db.record_one_time_witness(
-                account,
-                db.one_time_recovery(account, clock_now()).unwrap().token,
-                request,
-                &answer,
-                clock_now(),
-            )
-            .unwrap();
+            assert!(
+                db.record_one_time_lookup(account, &work, &page, clock_now())
+                    .unwrap()
+            );
         },
     };
     scan_cached_blocks(&network, &source, &mut scanning_db, height, &prior, 1).unwrap();

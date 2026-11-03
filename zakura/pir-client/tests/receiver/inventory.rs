@@ -1,46 +1,33 @@
 //! Sealed shard inventories: contiguous coverage, bounded chunks and complete capture.
 mod common;
-use common::manifest;
+use common::empty_segment;
 use zakura_pir_client::receiver::{
+    Coverage, Publication, Tree,
     inventory::{CHUNK_SHARDS, Chunk, FilterRef, Inventory, MAX_SEGMENTS, Shard},
-    session::{Manifest, PROTOCOL, Publication, WitnessManifest},
-    snapshot::MIN_ROWS,
-    witness::{Manifest as WitnessTable, PROFILE},
 };
 
-/// Session manifests for one empty segment covering heights `start..=end` and positions
-/// `start..=end` (a toy position scale), with its companion witness table. Public setup
-/// digests are placeholders: the inventory binds session IDs, not evaluation.
+/// The genesis hash every fixture shard covers.
+const GENESIS: [u8; 32] = [1; 32];
+
+/// The sessions of one empty segment covering heights `start..=end` and positions
+/// `start..=end` (a toy position scale), its companion built at the end.
 fn segment(start: u32, end: u32) -> Publication {
-    let mut directory = manifest(MIN_ROWS);
-    (directory.start_height, directory.end_height) = (start, end);
-    directory.start_parent = parent(start);
-    directory.end_hash = hash(end);
-    (directory.start_position, directory.end_position) = (u64::from(start), u64::from(end) + 1);
-    let table = WitnessTable {
-        profile: PROFILE.into(),
-        genesis: directory.genesis,
-        history_revision: directory.history_revision,
-        payments: directory.revision().unwrap(),
-        payloads: 0,
-        rows: MIN_ROWS,
-        tree_height: directory.end_height,
-        tree_hash: directory.end_hash,
-        tree_size: directory.end_position,
-        data_sha256: [0; 32],
+    let coverage = Coverage {
+        genesis: GENESIS,
+        history_revision: 0,
+        start_height: start,
+        start_parent: parent(start),
+        start_position: u64::from(start),
+        end_height: end,
+        end_hash: hash(end),
+        end_position: u64::from(end) + 1,
     };
-    Publication {
-        payments: Manifest {
-            protocol: PROTOCOL.into(),
-            directory,
-            public_digest: [7; 32],
-        },
-        witnesses: WitnessManifest {
-            protocol: PROTOCOL.into(),
-            table,
-            public_digest: [8; 32],
-        },
-    }
+    let tree = Tree {
+        height: end,
+        hash: hash(end),
+        size: u64::from(end) + 1,
+    };
+    empty_segment(coverage, tree)
 }
 
 /// A toy block hash for `height`.
@@ -296,43 +283,4 @@ fn a_capture_stops_at_its_byte_budget() {
         .is_err()
     );
     assert_eq!(http.requests.get(), 2);
-}
-
-/// A witness request finds its segment by payment session in the index the client builds
-/// once per capture: every segment of every shard is found at its own coordinates, the
-/// first a linear scan of the inventory would reach, and an unknown session is not.
-#[test]
-fn witness_requests_find_their_segment_by_payment_session() {
-    use zakura_pir_client::receiver::transport::InventoryClient;
-    let mut listed = shards(3);
-    for (i, shard) in listed.iter_mut().enumerate() {
-        *shard = Shard {
-            segments: (0..3u8)
-                .map(|s| {
-                    let mut segment = shard.segments[0].clone();
-                    segment.payments.public_digest = [i as u8 * 3 + s; 32];
-                    segment
-                })
-                .collect(),
-            ..shard.clone()
-        };
-    }
-    let inventory = Inventory::build([1; 32], 0, listed).unwrap();
-    let (_, http) = served(|_, _| {});
-    let client = InventoryClient::new("https://receiver", http, inventory.clone(), true);
-    for shard in inventory.shards() {
-        for (s, segment) in shard.segments.iter().enumerate() {
-            let id = segment.payments.id().unwrap();
-            let scanned = inventory.shards().iter().find_map(|shard| {
-                shard
-                    .segments
-                    .iter()
-                    .position(|segment| segment.payments.id().unwrap() == id)
-                    .map(|segment| (shard.index, segment as u32))
-            });
-            assert_eq!(client.find_segment(&id), Some((shard.index, s as u32)));
-            assert_eq!(client.find_segment(&id), scanned);
-        }
-    }
-    assert_eq!(client.find_segment(&[0xee; 32]), None);
 }

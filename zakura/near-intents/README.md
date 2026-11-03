@@ -7,8 +7,8 @@ and receipt expectations as a `NearStatus`. This crate makes no network requests
 
 A status never proves or discovers a payment. Wallets find payments through PIR.
 Its reported Zcash transaction hashes only attribute an authenticated payment to
-the operation: the destination chain's for an incoming key and the origin chain's
-for a refund key. An empty history never ends a funded refund key's monitoring.
+the operation: the destination chain's for an incoming key, and both chains' for a
+refund key, since NEAR sometimes files a ZEC refund under the destination. An empty history never ends a funded refund key's monitoring.
 The wallet stops monitoring it automatically only once every local operation on it
 is conclusive: the provider reported that no refund is coming, or the expected
 refund was received and settled.

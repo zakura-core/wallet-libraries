@@ -211,7 +211,10 @@ mod v1 {
     pub(super) struct SpendAuthSignature {
         pub(super) value_pool: ValuePool,
         pub(super) action_index: u32,
-        #[serde(with = "serde_with::As::<[serde_with::Same; 64]>")]
+        #[serde(
+            serialize_with = "crate::serde_arrays::serialize",
+            deserialize_with = "crate::serde_arrays::deserialize"
+        )]
         pub(super) signature: [u8; 64],
     }
 
@@ -510,7 +513,10 @@ mod tests {
         struct RawSpendAuthSignature {
             value_pool: u8,
             action_index: u32,
-            #[serde(with = "serde_with::As::<[serde_with::Same; 64]>")]
+            #[serde(
+                serialize_with = "crate::serde_arrays::serialize",
+                deserialize_with = "crate::serde_arrays::deserialize"
+            )]
             signature: [u8; 64],
         }
 

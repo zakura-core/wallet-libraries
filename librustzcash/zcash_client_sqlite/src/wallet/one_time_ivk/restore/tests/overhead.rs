@@ -5,9 +5,7 @@ use std::time::Instant;
 
 use zcash_client_backend::data_api::{AccountBirthday, chain::ChainState};
 
-use super::discovery::{
-    drain, one_time_notes, pay_candidate, publication_at, queue_late, send_witness,
-};
+use super::discovery::{drain, one_time_notes, pay_candidate, publication_at, queue_late};
 use super::*;
 
 /// Timed repetitions of each measurement.
@@ -39,7 +37,7 @@ fn overhead_wallet(accounts: u8, enabled: bool) -> State {
         let publication = publication_at(&st, anchor.height);
         for account in ids {
             let db = st.wallet_mut().db_mut();
-            db.set_one_time_recovery_enabled(account, true).unwrap();
+            db.enable_one_time_recovery(account).unwrap();
             assert!(
                 db.begin_one_time_recovery(account, publication, true)
                     .unwrap()
@@ -69,6 +67,7 @@ fn one_time_batch_overhead() {
                             db.conn.0,
                             db.params,
                             &db.one_time_sessions(),
+                            &[],
                             clock_now(),
                         )
                     })
@@ -115,7 +114,6 @@ fn quiet_batches_do_not_delay_admission_or_the_window() {
     st.generate_and_scan_empty_blocks(2);
     let key = KeyId::new(Purpose::Receive, 3);
     let candidate = pay_candidate(&mut st, key);
-    queue_late(&mut st, key, &candidate);
     // Admission waits on spend coverage of the paying block until a rescan covers it.
     let tip = u32::from(candidate.height);
     for sql in [
@@ -125,7 +123,7 @@ fn quiet_batches_do_not_delay_admission_or_the_window() {
     ] {
         exec(st.wallet().conn(), sql, [tip]);
     }
-    send_witness(&mut st, key, &candidate);
+    queue_late(&mut st, key, &candidate);
     assert!(one_time_notes(&st).is_empty(), "admission waits");
     assert_eq!(receive_end(&st), 4u64.to_be_bytes());
     st.scan_cached_blocks(candidate.height, 1);

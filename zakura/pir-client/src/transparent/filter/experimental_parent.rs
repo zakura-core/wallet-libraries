@@ -37,7 +37,7 @@ mod tests {
         }
     }
     #[test]
-    fn precision_matches_upstream_and_strictly_rejects_corruption() {
+    fn precision_matches_and_strictly_rejects_corruption() {
         let scripts: BTreeSet<_> = (0u32..500).map(|i| i.to_le_bytes().to_vec()).collect();
         for m in [100, 1000, 10000] {
             let mut p = parent(m);
@@ -45,13 +45,6 @@ mod tests {
             let valid = p.validate(&bytes).unwrap();
             assert!(
                 p.matches(&valid, &scripts.iter().cloned().collect::<Vec<_>>())
-                    .unwrap()
-            );
-            let keys = p.keys().unwrap();
-            let reader = bitcoin::bip158::GcsFilterReader::new(keys.k0, keys.k1, m, p.p);
-            assert!(
-                reader
-                    .match_all(&mut bytes.as_slice(), scripts.iter().map(Vec::as_slice))
                     .unwrap()
             );
             for script in &scripts {
