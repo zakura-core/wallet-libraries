@@ -179,7 +179,7 @@ def main():
         "zakura-tor-general-addr",
     }
     cases = [
-        ("scanning", "librustzcash/zcash_client_backend", [], {"nanorand", "futures-core", "futures-sink"}, {"flume"}),
+        ("scanning", "librustzcash/zcash_client_backend", [], {"flume", "nanorand", "futures-core", "futures-sink"}, set()),
         ("async-scanning", "librustzcash/zcash_client_backend", ["sync-decryptor"], {"nanorand"}, {"flume", "futures-core", "futures-sink", "tokio"}),
         ("wallet-sync", "librustzcash/zcash_client_backend", ["sync"], {"futures-macro"}, {"futures-util", "tonic"}),
         ("record-types", "zakura/pir-protocol", ["enhance"], endpoint_stack | server_roles | {"http", "bytes", "ipir-native-client", "reinspiring"}, set()),
