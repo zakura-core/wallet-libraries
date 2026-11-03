@@ -1028,7 +1028,15 @@ pub(crate) fn generate_gap_addresses<P: consensus::Parameters>(
         if address_range_present(conn, account_id, key_scope, range.clone())? {
             return Ok(());
         }
-        generate_address_range(conn, params, account_id, key_scope, request, range, require_key)?;
+        generate_address_range(
+            conn,
+            params,
+            account_id,
+            key_scope,
+            request,
+            range,
+            require_key,
+        )?;
     }
 
     Ok(())

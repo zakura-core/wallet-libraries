@@ -15,6 +15,7 @@ mod add_transaction_views;
 mod add_transparent_receiver_address_index;
 mod add_transparent_value_index;
 mod add_utxo_account;
+mod addresses_account_scope_child_index;
 mod addresses_table;
 mod drop_zip318_pool_migration;
 mod ensure_default_transparent_address;
@@ -142,6 +143,7 @@ pub mod ids {
         add_transparent_receiver_address_index::MIGRATION_ID as ADD_TRANSPARENT_RECEIVER_ADDRESS_INDEX,
         add_transparent_value_index::MIGRATION_ID as ADD_TRANSPARENT_VALUE_INDEX,
         add_utxo_account::MIGRATION_ID as ADD_UTXO_ACCOUNT,
+        addresses_account_scope_child_index::MIGRATION_ID as ADDRESSES_ACCOUNT_SCOPE_CHILD_INDEX,
         addresses_table::MIGRATION_ID as ADDRESSES_TABLE,
         drop_zip318_pool_migration::MIGRATION_ID as DROP_ZIP318_POOL_MIGRATION,
         ensure_default_transparent_address::MIGRATION_ID as ENSURE_DEFAULT_TRANSPARENT_ADDRESS,
@@ -424,6 +426,7 @@ pub(super) fn all_migrations<
         Box::new(v_transactions_zip318_kind::Migration),
         Box::new(transparent_spend_map_prevout_index::Migration),
         Box::new(transactions_mined_height_index::Migration),
+        Box::new(addresses_account_scope_child_index::Migration),
         Box::new(orchard_ironwood_migration_tables::Migration),
         Box::new(tree_retained_checkpoints::Migration),
         Box::new(note_locking::Migration),
@@ -710,7 +713,7 @@ pub(crate) fn forget_txid_enhancement(conn: &rusqlite::Connection) {
 }
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transactions_mined_height_index::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[addresses_account_scope_child_index::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -818,6 +821,7 @@ pub(crate) mod tests {
             ids::ADD_TRANSPARENT_RECEIVER_ADDRESS_INDEX,
             ids::ADD_TRANSPARENT_VALUE_INDEX,
             ids::ADD_UTXO_ACCOUNT,
+            ids::ADDRESSES_ACCOUNT_SCOPE_CHILD_INDEX,
             ids::ADDRESSES_TABLE,
             ids::DROP_ZIP318_POOL_MIGRATION,
             ids::ENSURE_DEFAULT_TRANSPARENT_ADDRESS,

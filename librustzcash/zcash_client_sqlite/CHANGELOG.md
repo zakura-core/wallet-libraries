@@ -13,9 +13,13 @@ and this library adheres to Rust's notion of
   `transactions.mined_height`.
 - Migration `transparent_spend_map_prevout_index` indexes `transparent_spend_map`
   by `(prevout_txid, prevout_output_index)`.
+- Migration `addresses_account_scope_child_index` indexes `addresses` by
+  `(account_id, key_scope, transparent_child_index)`, which the gap search
+  probes.
 
 ### Changed
 
+- Gap-limit regeneration finds the start of the gap by probing the account's addresses of the requested scope through their indexes instead of materialising `v_address_first_use` over every received note in the wallet, and skips address derivation when the gap's addresses are already stored. The result is unchanged. The `transparent_gap_limit_handling` migration keeps the view-based search, which matches the schema at that point in the migration graph.
 - Generating the crate's feature table now requires the optional
   `document-features` feature. Ordinary builds omit the documentation macro;
   docs.rs continues to include the table.
@@ -99,7 +103,6 @@ and this library adheres to Rust's notion of
 
 - `WalletDb::record_one_time_filters`, its per-block identities and 256-block cap, and `WalletDb::one_time_direct_query_count`.
 - `testing::db::TestDb` implements the wallet traits by forwarding every method, including those with default bodies, to its `WalletDb` by hand rather than through `ambassador`, which the `test-dependencies` feature no longer depends on. Its behavior is unchanged.
-- Gap-limit regeneration finds the start of the gap by probing the account's addresses of the requested scope through their indexes instead of materialising `v_address_first_use` over every received note in the wallet, and skips address derivation when the gap's addresses are already stored. The result is unchanged. The `transparent_gap_limit_handling` migration keeps the view-based search, which matches the schema at that point in the migration graph.
 
 ## [0.1.0-rc9.5] - 2026-10-26
 
