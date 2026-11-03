@@ -70,12 +70,12 @@ version = "0.1.0-rc9"
 [[crate]]
 path = "zcash_client_backend"
 package = "zakura-client-backend"
-version = "0.1.0-rc9.5"
+version = "0.1.0-rc9.6"
 
 [[crate]]
 path = "zcash_client_sqlite"
 package = "zakura-client-sqlite"
-version = "0.1.0-rc9.5"
+version = "0.1.0-rc9.6"
 
 # Minimum compatible Common release; Cargo.lock records the tested versions.
 # The upstream dependency key is kept, so crate sources continue to say
@@ -96,10 +96,18 @@ orchard = { features = ["backend-halo2"], package = "zakura-orchard", version = 
 sapling = { package = "zakura-sapling-crypto", version = "4.0.0" }
 redjubjub = { package = "zakura-redjubjub", version = "4.0.0" }
 pasta_curves = { package = "zakura-pasta-curves", version = "4.0.0" }
+# Scan workers use sync and async channels, not Flume's selector.
+flume = { version = "0.11", default-features = false, features = ["async"] }
 
-# Non-renamed ecosystem crates whose public traits changed with the 1.0 crypto
-# family. The generated workspace keeps upstream's other dependency metadata
-# while replacing these version requirements.
+# Keep the embedded Tor client, filesystem policy and runtime on one fork revision.
+# Disabling the optional directory codecs retains deflate and identity support.
+arti-client = { package = "zakura-arti-client", version = "=0.47.0-zakura.1", git = "https://github.com/zakura-core/arti.git", rev = "145e2136558c49692088b506f0ba6747772be2c2", remove_features = ["compression"] }
+fs-mistrust = { package = "zakura-fs-mistrust", version = "=0.16.0-zakura.1", git = "https://github.com/zakura-core/arti.git", rev = "145e2136558c49692088b506f0ba6747772be2c2" }
+tor-rtcompat = { package = "zakura-tor-rtcompat", version = "=0.47.0-zakura.1", git = "https://github.com/zakura-core/arti.git", rev = "145e2136558c49692088b506f0ba6747772be2c2" }
+
+# Non-renamed ecosystem crates selected independently of upstream. The generated
+# workspace keeps upstream's other dependency metadata while replacing these
+# version requirements.
 [versions]
 ff = "0.14"
 group = "0.14"
@@ -109,6 +117,12 @@ rand_distr = "0.6"
 bip32 = "0.6"
 secp256k1 = "0.33"
 zcash_script = "0.6"
+# The backend uses only Optional, unchanged since 0.4. CompactSize's new write
+# bound does not affect the shard persistence codec.
+zcash_encoding = "0.5"
+# Share the released migration graph family already required by the LRZ facade.
+schemerz = "0.3"
+schemerz-rusqlite = "0.371"
 
 # Wallet-owned packages must never import the Zakura node or wallet-pir,
 # including optional, development, build and target-specific dependencies.

@@ -1,10 +1,10 @@
 //! Incoming reservations, which live on their key's row, and their quote operations.
 use rusqlite::{Connection, OptionalExtension, named_params, params};
 use zakura_one_time_ivk::swap::Observation;
-use zcash_protocol::consensus::Parameters;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{RESERVED, ReservationPolicy, lifecycle::record};
-use crate::wallet::one_time_ivk::restore::queue::RECEIVE_PENDING;
+use crate::wallet::one_time_ivk::restore::queue::{RECEIVE_PENDING, mark_used};
 use crate::wallet::one_time_ivk::{
     KeyId, OneTimeKey, Purpose, account_key, decode_index, index_after, invalid, key_by_id,
     register,
@@ -66,11 +66,11 @@ pub(in crate::wallet::one_time_ivk) fn recovery_end(
     let tip = wallet::chain_tip_height(conn)?.map(u32::from);
     let paid: Option<Vec<u8>> = conn.query_row(
         "SELECT MAX(k.key_index) FROM ironwood_one_time_keys k
-         WHERE k.account_id = :account AND k.purpose = 1 AND (k.prebirthday_height <= :tip
-             OR EXISTS(SELECT 1 FROM ironwood_received_notes n
+         WHERE k.account_id = :account AND k.purpose = 1
+             AND EXISTS(SELECT 1 FROM ironwood_received_notes n
                  JOIN transactions t ON t.id_tx = n.transaction_id
                  JOIN blocks b ON b.height = t.mined_height
-                 WHERE n.one_time_key_id = k.id AND t.mined_height <= :tip))",
+                 WHERE n.one_time_key_id = k.id AND t.mined_height <= :tip)",
         named_params![":account": account, ":tip": tip],
         |r| r.get(0),
     )?;
@@ -364,16 +364,32 @@ pub(in crate::wallet::one_time_ivk) fn record_status<P: Parameters>(
     Ok(!operations.is_empty())
 }
 
-/// Resumes a live draft or reserves the lowest unpaid hole inside the mined window.
+/// Resumes a live draft or reserves the lowest unpaid hole inside the mined window. Either
+/// needs the account's marker within 10 blocks of the newer of `tip` and the saved chain tip.
 pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     now: i64,
+    tip: BlockHeight,
 ) -> Result<Result<OneTimeKey, ReservationPolicy>, SqliteClientError> {
     let (owner, _) = account_key(conn, params, account)?;
     let end = recovery_end(conn, owner.0)?;
     let clock = deadline_clock(conn, now)?;
+    // Filters carry a key's history forward only up to the account's marker, so another
+    // device's payment to it after the marker isn't seen yet. Handing out a key, new or a
+    // draft quoted again, waits for filters within 10 blocks of the chain tip, a margin for
+    // Receiver publication lag. `RecoveryStatus::round_due` asks for that round once sync
+    // allows it.
+    let fresh = || -> Result<bool, SqliteClientError> {
+        let marker: Option<u32> = conn.query_row(
+            "SELECT filter_height FROM ironwood_one_time_recovery WHERE account_id = ?1",
+            [owner.0],
+            |r| r.get(0),
+        )?;
+        let tip = u32::from(tip.max(wallet::chain_tip_height(conn)?.unwrap_or(tip)));
+        Ok(marker.is_some_and(|m| tip.saturating_sub(m) <= 10))
+    };
     let rows = conn.prepare(&format!(
         "SELECT k.id, k.key_index, k.used, {RESERVED}, {STARTED}, {LATEST_DEADLINE},
             EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p WHERE p.one_time_key_id = k.id),
@@ -397,9 +413,10 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
             }
             if !started && deadline.is_none_or(|deadline| deadline > clock) {
                 // A positive hint since it was reserved may mean another device paid it.
-                if pending {
+                if pending || !fresh()? {
                     return Ok(Err(ReservationPolicy::ReceiveHistory));
                 }
+                mark_used(conn, owner.0)?;
                 return key_by_id(conn, params, account, id).map(Ok);
             }
         }
@@ -423,6 +440,11 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     if !checked {
         return Ok(Err(ReservationPolicy::ReceiveHistory));
     }
+    // That lookup may be old (see `fresh`).
+    if !fresh()? {
+        return Ok(Err(ReservationPolicy::ReceiveHistory));
+    }
+    mark_used(conn, owner.0)?;
     conn.execute(
         "UPDATE ironwood_one_time_keys SET reserved_at = ?2, released_at = NULL,
             reservation_floor = IFNULL((SELECT MAX(id) FROM ironwood_one_time_operations

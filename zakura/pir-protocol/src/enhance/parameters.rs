@@ -713,24 +713,20 @@ mod metadata_compatibility {
     use super::*;
     #[test]
     fn transport_metadata_matches_the_previous_parameter_provider() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../testdata/previous_provider_metadata.json"
+        ))
+        .unwrap();
         for rows in [2048, 4096, 8192, 16384, 32768] {
-            let (_, old) = ipir_sp::params_for_simplepir_profile(
-                rows,
-                ITEM_SIZE_BITS,
-                ipir_sp::SimplePirProfile::P16Q48,
-            )
-            .unwrap();
+            let old = &fixtures[rows.to_string()];
             assert_eq!(
-                serde_json::to_vec(&TransportParameters::q48(rows).unwrap()).unwrap(),
-                serde_json::to_vec(&old).unwrap()
+                serde_json::to_string(&TransportParameters::q48(rows).unwrap()).unwrap(),
+                old["q48"].as_str().unwrap()
             );
             if rows >= 4096 {
-                let mut served = old;
-                served.query_bits = native::QUERY_BITS;
-                served.q_prime_1 = 1 << native::RESPONSE_BITS;
                 assert_eq!(
-                    serde_json::to_vec(&parameters(rows).unwrap()).unwrap(),
-                    serde_json::to_vec(&served).unwrap()
+                    serde_json::to_string(&parameters(rows).unwrap()).unwrap(),
+                    old["served"].as_str().unwrap()
                 );
             }
         }

@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::transparent::native::TableProfile;
-use axum::http::{Request, Response};
 use base64::Engine as _;
+use http::{Request, Response};
 use sha2::{Digest, Sha256};
 use zakura_pir_protocol::transparent::filter::ShardMap;
 use zakura_pir_protocol::transparent::shard::display::setup_seed_in;

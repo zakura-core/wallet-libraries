@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1 - 2026-10-30
+
+- Use PIR protocol `0.0.1-rc5`.
+
 ## 0.1.0 - 2026-10-26
 
 - Add the wallet PIR configuration profile with required static hash pins,

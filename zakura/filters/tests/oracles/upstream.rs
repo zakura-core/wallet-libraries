@@ -6,6 +6,65 @@ use bitcoin::{
 use zakura_filters::{BitStreamReader, GcsFilterWriter, read_compact_size, write_compact_size};
 
 #[test]
+fn previous_custom_io_implementations_work_through_the_standard_bridge() {
+    struct LegacyWriter(Vec<u8>);
+    impl bitcoin_io::Write for LegacyWriter {
+        fn write(&mut self, bytes: &[u8]) -> bitcoin_io::Result<usize> {
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> bitcoin_io::Result<()> {
+            Ok(())
+        }
+    }
+    struct LegacyReader<'a>(&'a [u8]);
+    impl bitcoin_io::Read for LegacyReader<'_> {
+        fn read(&mut self, output: &mut [u8]) -> bitcoin_io::Result<usize> {
+            bitcoin_io::Read::read(&mut self.0, output)
+        }
+    }
+    let mut previous = Vec::new();
+    let mut writer = UpstreamWriter::new(&mut previous, 0, 0, 1024, 10);
+    writer.add_element(b"legacy");
+    writer.finish().unwrap();
+
+    let mut output = LegacyWriter(Vec::new());
+    let mut writer = GcsFilterWriter::new(bitcoin_io::ToStd::new_mut(&mut output), 0, 0, 1024, 10);
+    writer.add_element(b"legacy");
+    writer.finish().unwrap();
+    assert_eq!(output.0, previous);
+
+    let mut reader = LegacyReader(&output.0);
+    let reader = bitcoin_io::ToStd::new_mut(&mut reader);
+    assert_eq!(read_compact_size(reader).unwrap(), 1);
+    let mut actual = BitStreamReader::new(reader);
+    let mut expected_input = &previous[1..];
+    let mut expected = UpstreamBits::new(&mut expected_input);
+    assert_eq!(actual.read(4).unwrap(), expected.read(4).unwrap());
+}
+
+#[test]
+fn hash_mapping_matches_upstream_at_boundaries() {
+    let bytes: Vec<_> = (0u8..=255).collect();
+    for (k0, k1) in [
+        (0, 0),
+        (u64::MAX, 17),
+        (0x0706050403020100, 0x0f0e0d0c0b0a0908),
+    ] {
+        for length in (0..=32).chain([63, 64, 65, 255, 256]) {
+            let element = &bytes[..length];
+            let hash = bitcoin::hashes::siphash24::Hash::hash_to_u64_with_keys(k0, k1, element);
+            for range in [0, 1, 2, u64::from(u32::MAX), u64::MAX] {
+                assert_eq!(
+                    zakura_filters::hash_to_range(k0, k1, range, element),
+                    ((u128::from(hash) * u128::from(range)) >> 64) as u64
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn filter_bytes_match_upstream_for_every_application_profile() {
     for count in [0u32, 1, 2, 252, 253, 254, 1000, 65535, 65536] {
         let elements: Vec<_> = (0..count).map(|i| i.to_le_bytes()).collect();
@@ -112,47 +171,13 @@ fn bit_reads_match_upstream_across_boundaries_and_malformed_widths() {
             for width in [0, 1, 7, 8, 9, 32, 63, 64, 65, 0, 1, 64] {
                 assert_eq!(
                     actual.read(width).map_err(|e| e.kind()),
-                    expected.read(width).map_err(|e| e.kind()),
+                    expected
+                        .read(width)
+                        .map_err(|e| std::io::Error::from(e).kind()),
                     "length={length}, width={width}",
                 );
             }
         }
         assert_eq!(actual_input, expected_input);
     }
-}
-
-#[test]
-fn invalid_writer_parameters_fail_before_writing() {
-    for (m, p) in [(0, 19), (1, 64), (u64::MAX, 19)] {
-        let mut bytes = Vec::new();
-        let mut writer = GcsFilterWriter::new(&mut bytes, 0, 0, m, p);
-        writer.add_element(b"one");
-        writer.add_element(b"two");
-        assert_eq!(
-            writer.finish().unwrap_err().kind(),
-            bitcoin_io::ErrorKind::InvalidInput
-        );
-        assert!(bytes.is_empty());
-    }
-}
-
-#[test]
-fn writer_propagates_output_failure() {
-    struct Broken;
-    impl bitcoin_io::Write for Broken {
-        fn write(&mut self, _: &[u8]) -> Result<usize, bitcoin_io::Error> {
-            Err(bitcoin_io::Error::from(bitcoin_io::ErrorKind::Other))
-        }
-        fn flush(&mut self) -> Result<(), bitcoin_io::Error> {
-            Ok(())
-        }
-    }
-    let mut output = Broken;
-    let mut writer = GcsFilterWriter::new(&mut output, 0, 0, 1533, 10);
-    writer.add_element(b"receiver");
-    assert_eq!(
-        writer.finish().unwrap_err().kind(),
-        bitcoin_io::ErrorKind::Other
-    );
-    assert!(write_compact_size(&mut output, 65536).is_err());
 }

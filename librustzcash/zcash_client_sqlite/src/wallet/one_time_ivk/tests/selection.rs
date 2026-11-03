@@ -501,3 +501,77 @@ fn rejected_one_time_candidates_leave_spare_slots_to_ordinary_notes() {
     assert_eq!(actions, plain_actions);
     assert_eq!(unspent.iter().flatten().count(), 4);
 }
+
+/// Consolidation's additional candidates take at most half their limit in one-time-key notes,
+/// and once that half is taken the remaining one-time-key notes are skipped without being
+/// rebuilt, so a wallet holding many of them pays for its limit rather than for every note.
+/// Funding alone, with no additional candidates, gives the rebuilds that pass costs.
+#[test]
+fn additional_candidates_rebuild_only_the_one_time_key_notes_they_take() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    let refund = reserve_key(st.wallet_mut().db_mut(), account, Purpose::Refund, start());
+    let (first, _) = st.generate_empty_block();
+    let ordinary = [10_000_000, 20_000, 30_000, 40_000];
+    let one_time = [11_000, 12_000, 13_000, 14_000, 15_000, 16_000];
+    let paid = ordinary
+        .iter()
+        .map(|v| (parent(&st), *v))
+        .chain(
+            one_time
+                .iter()
+                .map(|v| (refund.full_viewing_key().clone(), *v)),
+        )
+        .collect::<Vec<_>>();
+    for (fvk, value) in &paid {
+        let value = Zatoshis::const_from_u64(*value);
+        st.generate_next_block(
+            &IronwoodFvk(fvk.clone()),
+            AddressType::DefaultExternal,
+            value,
+        );
+    }
+    for _ in 0..10 {
+        st.generate_empty_block();
+    }
+    let tip = st.generate_empty_block().0;
+    scan_and_recover(&mut st, first, paid.len() + 12);
+
+    let policy =
+        LockedInputPolicy::PreferUnlocked(NonEmptyBTreeSet::singleton(LockOwner::new([1; 32])));
+    let select = |limit| {
+        let db = st.wallet().db();
+        let rebuilt = std::cell::Cell::new(0);
+        let (_, additional) = crate::wallet::common::select_spendable_notes_for_consolidation(
+            &db.conn,
+            &db.params,
+            account,
+            Zatoshis::const_from_u64(5_000_000),
+            TargetHeight::from(tip + 1),
+            ConfirmationsPolicy::default(),
+            &[],
+            ShieldedPool::Ironwood,
+            |params, pool, row| {
+                let note = crate::wallet::orchard::to_received_note(&db.conn, params, pool, row)?;
+                if note.as_ref().is_some_and(|n| n.one_time_key_id().is_some()) {
+                    rebuilt.set(rebuilt.get() + 1);
+                }
+                Ok(note)
+            },
+            LockFilter::Policy(&policy),
+            limit,
+        )
+        .unwrap();
+        let mut values: Vec<_> = additional
+            .iter()
+            .map(|note| note.note().value().inner())
+            .collect();
+        values.sort_unstable();
+        (values, rebuilt.get())
+    };
+    let (none, funding) = select(0);
+    assert!(none.is_empty());
+    let (additional, rebuilt) = select(4);
+    assert_eq!(additional, [11_000, 12_000, 20_000, 30_000]);
+    assert_eq!(rebuilt - funding, 2);
+}

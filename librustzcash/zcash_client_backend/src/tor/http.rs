@@ -23,6 +23,32 @@ use tracing::{debug, error};
 
 use super::{Client, Error, Timeouts};
 
+#[cfg(test)]
+mod retry_tests;
+
+// This task-local seam bypasses Tor/TLS opening only in explicitly scoped unit
+// tests. Successful scripts still send real HTTP over an in-memory stream.
+#[cfg(test)]
+enum ScriptedAttempt {
+    Error(Error),
+    Http(tokio::io::DuplexStream),
+    Pending(std::sync::Arc<std::sync::atomic::AtomicBool>),
+}
+
+#[cfg(test)]
+struct AttemptScript {
+    attempts: std::collections::VecDeque<ScriptedAttempt>,
+    clients: Vec<usize>,
+    data_frames: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    frames_before_open: Vec<usize>,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static ATTEMPT_SCRIPT: std::sync::Arc<std::sync::Mutex<AttemptScript>>;
+}
+
+#[cfg(feature = "tor")]
 pub mod cryptex;
 
 /// How a particular connection failure should be retried.
@@ -328,6 +354,37 @@ where
 {
     let (is_https, host, port) = parse_url(&url)?;
 
+    #[cfg(test)]
+    if let Ok(attempt) = ATTEMPT_SCRIPT.try_with(|script| {
+        let mut script = script.lock().unwrap();
+        script.clients.push(std::ptr::from_ref(tor_client).addr());
+        let frames = script.data_frames.load(std::sync::atomic::Ordering::SeqCst);
+        script.frames_before_open.push(frames);
+        script.attempts.pop_front().expect("script exhausted")
+    }) {
+        return match attempt {
+            ScriptedAttempt::Error(error) => Err(error),
+            ScriptedAttempt::Http(stream) => {
+                with_timeout(
+                    timeouts.request,
+                    TimeoutPhase::Request,
+                    make_http_request(stream, url, request, body),
+                )
+                .await
+            }
+            ScriptedAttempt::Pending(dropped) => {
+                struct PendingOpen(std::sync::Arc<std::sync::atomic::AtomicBool>);
+                impl Drop for PendingOpen {
+                    fn drop(&mut self) {
+                        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                let _pending = PendingOpen(dropped);
+                std::future::pending().await
+            }
+        };
+    }
+
     debug!("Connecting through Tor to {}:{}", host, port);
 
     // The Tor stream and the TLS handshake are bounded together, so that
@@ -442,9 +499,8 @@ pub enum HttpError {
     Timeout(TimeoutPhase),
     /// The status code indicated that the request was unsuccessful.
     ///
-    /// This is only returned by APIs that make specific queries, such as
-    /// [`Client::get_latest_zec_to_usd_rate`]. Generic APIs like [`Client::http_get`]
-    /// will not return this error variant.
+    /// This is only returned by exchange-specific APIs enabled by the `tor`
+    /// feature. Generic APIs like [`Client::http_get`] do not return this variant.
     Unsuccessful(hyper::http::StatusCode),
 }
 

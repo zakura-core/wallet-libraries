@@ -7,6 +7,7 @@ use zakura_one_time_ivk::KeyId;
 use zcash_protocol::consensus::BlockHeight;
 
 use crate::data_api::transparent_ledger::ChainPoint;
+use zcash_primitives::block::BlockHash;
 
 pub mod recovery;
 
@@ -76,18 +77,30 @@ pub struct LookupWork {
     pub from: BlockHeight,
     /// An answer below this height cannot complete the request.
     pub through: BlockHeight,
+    /// The account's birthday. A segment whose payments to the receiver all lie below this
+    /// or `from` is read as a miss.
+    pub birthday: BlockHeight,
     pub cursor: Option<LookupCursor>,
 }
 
-/// The payment and witness sessions of the segment a step read, which bind its records'
-/// ordinals.
+/// The directory and companion sessions of the segment a step read, which bind its
+/// records' ordinals, and the tree the companion's payloads were built at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SegmentRef {
     pub shard: u32,
     pub segment: u32,
-    pub payments: [u8; 32],
-    /// The segment's companion witness session, which its candidates must use.
-    pub witnesses: [u8; 32],
+    pub directory: [u8; 32],
+    pub companion: [u8; 32],
+    /// The block whose tree the payloads describe (see `decode_witness_payload`).
+    pub tree: PublicationEnd,
+}
+
+/// One record a step read, with its untrusted witness payload. The wallet checks the
+/// payload against its own tree before crediting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LookupRecord {
+    pub record: DirectoryRecord,
+    pub payload: [u8; WITNESS_PAYLOAD_BYTES],
 }
 
 /// One shard a lookup step visited, as the captured inventory lists it.
@@ -102,7 +115,8 @@ pub struct StepShard {
 }
 
 /// One bounded step against one captured inventory: shards a negative filter excluded,
-/// then consecutive pages of at most one segment.
+/// then consecutive pages of at most one segment. A miss, or a hit whose payments all lie
+/// below `max(from, birthday)`, reads no page and completes the segment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LookupPage {
     pub publication: RecoveryPublication,
@@ -113,7 +127,7 @@ pub struct LookupPage {
     pub shards: Vec<StepShard>,
     /// The segment `records` come from, if the step read one.
     pub segment: Option<SegmentRef>,
-    pub records: Vec<DirectoryRecord>,
+    pub records: Vec<LookupRecord>,
     /// Every required shard ending at or below this height is covered: excluded by a
     /// validated filter of this inventory or read through its final page in every segment.
     pub checked_through: Option<BlockHeight>,
@@ -132,11 +146,11 @@ impl LookupPage {
     /// request or one whose cursor names another inventory, at the shard holding
     /// `work.from` (the first shard ending at or after it), every shard before the last was
     /// covered by filter, and `checked_through` and `next` are exactly the coverage the
-    /// visited shards and the records read justify. `checked_through` is the end of the last shard the
-    /// step completed, or unset if it completed none. `next` continues the read segment
-    /// after a record that is not its last page, or else moves to the next segment, the
-    /// next shard, or completion at the inventory's last shard. Record contents are checked
-    /// separately.
+    /// visited shards and the records read justify. `checked_through` is the end of the
+    /// last shard the step completed, or unset if it completed none. `next` continues the
+    /// read segment after a record that is not its last page, or else moves to the next
+    /// segment, the next shard, or completion at the inventory's last shard. Record
+    /// contents are checked separately.
     pub fn valid_step(&self, work: &LookupWork) -> bool {
         let inventory = self.publication.id;
         let cursor = work.cursor.as_ref().filter(|c| c.inventory == inventory);
@@ -217,7 +231,7 @@ impl LookupPage {
             {
                 return false;
             }
-            let after = self.records.last().cloned().or(prior);
+            let after = self.records.last().map(|r| r.record.clone()).or(prior);
             match after {
                 Some(record) if record.page.checked_add(1) != Some(record.total) => (
                     excluded_end,
@@ -237,34 +251,6 @@ impl LookupPage {
     }
 }
 
-/// A candidate waiting for its lower inclusion path. The ordinal is meaningful only in the
-/// companion witness table of the payment table `payments` that returned the candidate.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WitnessRequest {
-    pub key: KeyId,
-    pub position: u32,
-    pub cmx: [u8; 32],
-    /// The identity of the payment session whose record carried `ordinal`.
-    pub payments: [u8; 32],
-    /// The companion witness session captured with that payment session. A witness-only
-    /// replacement keeps `payments`, so this alone tells two companions apart.
-    pub witnesses: [u8; 32],
-    pub ordinal: u32,
-}
-
-/// An untrusted companion witness payload, with the witness revision and construction tree
-/// it was served under. The wallet checks it against its own tree before crediting.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WitnessAnswer {
-    /// The payment session the request named.
-    pub payments: [u8; 32],
-    /// The witness session that served `payload`.
-    pub revision: [u8; 32],
-    /// The block whose tree `payload` describes (see `decode_witness_payload`).
-    pub context: PublicationEnd,
-    pub payload: [u8; WITNESS_PAYLOAD_BYTES],
-}
-
 /// Resumable explicit historical search. Refund indexes are only the known funded keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ManualProgress {
@@ -275,24 +261,86 @@ pub struct ManualProgress {
     pub receive_end: u64,
 }
 
+/// A filter range as the wallet received it: the heights it covers, the hash of the block
+/// before them and its end block. The wallet trusts the publisher for which chain the sets
+/// were built on and checks the end against its own chain where it can.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FilterSpan {
+    /// The history revision the range was served under.
+    pub revision: u64,
+    pub from: BlockHeight,
+    /// The hash of the block at `from - 1`.
+    pub parent: BlockHash,
+    pub end: ChainPoint,
+}
+
+/// What a store did with a [`FilterSpan`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilterOutcome {
+    /// The account's marker is now the span's end, and every hit has queued a lookup.
+    Committed,
+    /// The captured token or receiver set is no longer current. Recapture, match again and
+    /// retry.
+    Stale,
+    /// The span ends above the wallet's fully scanned block, so it cannot be checked yet.
+    /// Retry after more scanning.
+    Wait,
+    /// The span's end or parent hash disagrees with the wallet's own block or the account's
+    /// marker. Nothing changed.
+    Mismatch,
+    /// A history correction cleared the marker. Run a complete check.
+    Restart,
+}
+
 /// One account's durable progress and a bounded batch of due work.
-/// With discovery disabled, work is restricted to repairing already-owned receipts.
+/// An account whose discovery isn't enabled exposes no work.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryStatus {
     pub enabled: bool,
+    /// The account has used one-time addresses: one was handed out, it funded a refund, a
+    /// payment to one was found, or a refund memo was accepted. Set whether or not recovery
+    /// is enabled, and never cleared.
+    pub used: bool,
     /// The receiver service needs a newer client. No work is exposed until a capture this
     /// client supports begins recovery again; every pending request is kept.
     pub upgrade_required: bool,
     pub token: RecoveryToken,
+    /// The account's marker, the block through which filters were read: the end of the last
+    /// committed filter span, or where a complete check moved it. `None` means the next round
+    /// runs a complete check.
     pub filter_frontier: Option<ChainPoint>,
-    /// Direct catch-up deliberately skipped completed old addresses through this height.
-    pub skipped_through: Option<BlockHeight>,
     pub restore_next: u64,
     pub restore_gap: u8,
     pub restore_complete: bool,
     pub manual: Option<ManualProgress>,
+    /// Recovered payments with their witness payload, waiting for ordinary sync, or the
+    /// rescan it queued, to admit them. The account is not settled while this is nonzero.
+    pub awaiting_admission: u32,
+    /// Up to four due lookups, those the given inventory end reaches when one is given.
     pub lookups: Vec<LookupWork>,
-    pub witnesses: Vec<WitnessRequest>,
+    /// A pending lookup waits out a retry delay.
+    pub waits_for_retry: bool,
+    /// A due lookup's target is past the given inventory end, so it waits for a later
+    /// publication.
+    pub waits_for_publication: bool,
+    /// Whether the app should run a round for this account now. It is the only signal an app
+    /// needs for that. It holds while recovery is enabled and any of these does:
+    ///
+    /// - `lookups` is not empty: a lookup is due, whether a filter hit, a bootstrap, a
+    ///   refund memo, a witness refresh, a correction, a rewind or a manual history check
+    ///   queued it. Every step of the seed walk and of a manual check leaves its next
+    ///   lookup pending, so their progress shows here.
+    /// - The seed walk hasn't captured a publication yet.
+    /// - The account has no filter marker, or its marker is more than 10 blocks below the
+    ///   wallet's fully scanned block. That is also the catch-up receive issuance waits for
+    ///   before it hands out an address.
+    ///
+    /// A lookup waiting out its retry delay (`waits_for_retry`) or for a later publication
+    /// (`waits_for_publication`) doesn't make a round due, and neither does a payment
+    /// awaiting admission, which ordinary sync settles. The marker never passes the fully
+    /// scanned block, so a wallet still syncing isn't asked for rounds it can't finish. An
+    /// account waiting for a client upgrade is never due.
+    pub round_due: bool,
 }
 
 #[cfg(test)]
@@ -301,15 +349,17 @@ mod tests {
     use zakura_one_time_ivk::{KeyId, Purpose};
 
     const INVENTORY: [u8; 32] = [3; 32];
+    /// The height of every test payment.
+    const PAID: u32 = 1000;
 
-    /// Page `page` of a receiver history `total` pages long.
+    /// Page `page` of a receiver history `total` pages long, all paid at [`PAID`].
     fn record(page: u32, total: u32) -> DirectoryRecord {
         DirectoryRecord {
             receiver: [1; 43],
             page,
             total,
             payment: DirectoryPayment {
-                height: 100 + page,
+                height: PAID,
                 block_hash: [0; 32],
                 txid: [0; 32],
                 tx_index: 1,
@@ -353,6 +403,7 @@ mod tests {
             },
             from: BlockHeight::from(from),
             through: BlockHeight::from(1),
+            birthday: BlockHeight::from(1),
             cursor,
         }
     }
@@ -394,10 +445,21 @@ mod tests {
             segment: segment.map(|segment| SegmentRef {
                 shard: read,
                 segment,
-                payments: [0; 32],
-                witnesses: [0; 32],
+                directory: [5; 32],
+                companion: [0; 32],
+                tree: PublicationEnd {
+                    height: BlockHeight::from(PAID),
+                    hash: [0; 32],
+                    tree_size: 1 << 20,
+                },
             }),
-            records,
+            records: records
+                .into_iter()
+                .map(|record| LookupRecord {
+                    record,
+                    payload: [0; WITNESS_PAYLOAD_BYTES],
+                })
+                .collect(),
             checked_through: checked_through.map(BlockHeight::from),
             next,
         }
@@ -635,7 +697,11 @@ mod tests {
                     .then(|| record(below(u64::from(total - 1)) as u32, total));
                 at(shard, segment, last)
             });
-            let from = 1 + below(u64::from(10 * n)) as u32;
+            // A saved cursor's coverage reaches its shard, as the wallet records it.
+            let from = match &start {
+                Some(c) => 10 * c.shard + 1,
+                None => 1 + below(u64::from(10 * n)) as u32,
+            };
             let (work, valid) = reference(&excluded, &histories, start, from, 1 + below(2) as u32);
             assert!(
                 valid.valid_step(&work),
@@ -660,7 +726,7 @@ mod tests {
                 3 => mutated.next = Some(at(below(u64::from(n) + 1) as u32, below(3) as u32, None)),
                 4 => {
                     if let Some(r) = mutated.records.last_mut() {
-                        r.total = r.page + 1;
+                        r.record.total = r.record.page + 1;
                     }
                 }
                 5 => {

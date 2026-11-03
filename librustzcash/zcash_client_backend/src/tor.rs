@@ -1,6 +1,9 @@
 //! Tor support for Zcash wallets.
+//!
+//! Enable `tor-client` for the client and generic HTTP APIs. The `tor` feature
+//! also includes cryptocurrency exchange-rate helpers.
 
-use std::{fmt, io, path::Path, time::Duration};
+use std::{fmt, io, path::Path, sync::Arc, time::Duration};
 
 use arti_client::{TorClient, config::TorClientConfigBuilder};
 use tor_rtcompat::PreferredRuntime;
@@ -11,9 +14,8 @@ mod grpc;
 
 pub mod http;
 
-// Re-exported as this is currently the only `arti_client` type users would need to use
-// our minimal client API.
-pub use arti_client::DormantMode;
+// Re-export the client types callers need without a direct Arti dependency.
+pub use arti_client::{DormantMode, ErrorKind, HasKind};
 
 /// Deadlines applied to network operations performed by a [`Client`].
 ///
@@ -102,7 +104,7 @@ impl Timeouts {
 /// A Tor client that exposes capabilities designed for Zcash wallets.
 #[derive(Clone)]
 pub struct Client {
-    inner: TorClient<PreferredRuntime>,
+    inner: Arc<TorClient<PreferredRuntime>>,
     timeouts: Timeouts,
 }
 
@@ -232,6 +234,17 @@ pub enum Error {
     Io(io::Error),
     /// A Tor-specific error.
     Tor(arti_client::Error),
+}
+
+impl Error {
+    /// Returns whether Tor reported a remote name-resolution failure.
+    ///
+    /// This identifies [`ErrorKind::RemoteHostResolutionFailed`], including a
+    /// failed hostname lookup reported by an exit relay. It does not establish
+    /// that the hostname exists or that the failure is transient.
+    pub fn is_tor_name_resolution_failure(&self) -> bool {
+        matches!(self, Self::Tor(error) if error.kind() == ErrorKind::RemoteHostResolutionFailed)
+    }
 }
 
 impl fmt::Display for Error {

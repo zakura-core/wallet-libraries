@@ -356,11 +356,10 @@ mod tests {
         for (row, col) in [(0, 0), (0, 2_047), (1, 5), (1, 2_047)] {
             assert_eq!(
                 row_coefficient(&rows, 4_096, row, col) as u64,
-                ipir_native_client::bits::read_bits(
-                    &rows[row * 4_096..(row + 1) * 4_096],
-                    col * 16,
-                    16
-                )
+                (0..16).fold(0u64, |value, bit| {
+                    let offset = row * 4_096 * 8 + col * 16 + bit;
+                    value | (u64::from((rows[offset / 8] >> (offset % 8)) & 1) << bit)
+                })
             );
         }
     }
