@@ -38,11 +38,15 @@ fn main() {
             masks,
             previous.public_query_masks([3; 32], rows, cols).unwrap()
         );
-        let setup = previous_native::NativeSetup::new(previous.params(), [9; 32]);
+        // Each source owns its setup type; only protocol values cross between
+        // the frozen implementation and the published dependency family.
+        let setup_seed = [9; 32];
+        let old_setup = previous_native::NativeSetup::new(previous.params(), setup_seed);
+        let setup = candidate_protocol::native::NativeSetup::new(profile.params(), setup_seed);
         let old_hint = previous_native::hint(&masks, rows, cols, |col| &database[col]).unwrap();
         let hint = candidate_core::native::hint(&masks, rows, cols, |col| &database[col]).unwrap();
         assert_eq!(hint, old_hint);
-        let old_blocks = previous_native::preprocess(&setup, &old_hint).unwrap();
+        let old_blocks = previous_native::preprocess(&old_setup, &old_hint).unwrap();
         let blocks = candidate_core::native::preprocess(&setup, &hint).unwrap();
         let old_public = previous.publish(&old_blocks).unwrap();
         let public = profile.publish(&blocks).unwrap();
@@ -58,7 +62,7 @@ fn main() {
             .collect();
 
         // An old client sends its original width to the new serving operations.
-        let (secret, request) = previous.prepare(&setup, &masks, rows, target).unwrap();
+        let (secret, request) = previous.prepare(&old_setup, &masks, rows, target).unwrap();
         let (keys, selection) = profile.parse_accepted(&setup, &request, rows).unwrap();
         let response = profile
             .pack(&blocks, &keys, &scan(&database, &selection))
@@ -74,7 +78,7 @@ fn main() {
         let (secret, request) = profile
             .prepare_dithered(&setup, &masks, rows, target)
             .unwrap();
-        let (keys, selection) = previous.parse_accepted(&setup, &request, rows).unwrap();
+        let (keys, selection) = previous.parse_accepted(&old_setup, &request, rows).unwrap();
         let response = previous
             .pack(&old_blocks, &keys, &scan(&database, &selection))
             .unwrap();
