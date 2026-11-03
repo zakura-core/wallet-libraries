@@ -5,7 +5,7 @@
 
 use std::{fmt, io, path::Path, sync::Arc, time::Duration};
 
-use arti_client::{ErrorKind, HasKind, TorClient, config::TorClientConfigBuilder};
+use arti_client::{TorClient, config::TorClientConfigBuilder};
 use tor_rtcompat::PreferredRuntime;
 use tracing::debug;
 
@@ -14,9 +14,8 @@ mod grpc;
 
 pub mod http;
 
-// Re-exported as this is currently the only `arti_client` type users would need to use
-// our minimal client API.
-pub use arti_client::DormantMode;
+// Re-export the client types callers need without a direct Arti dependency.
+pub use arti_client::{DormantMode, ErrorKind, HasKind};
 
 /// Deadlines applied to network operations performed by a [`Client`].
 ///
