@@ -15,7 +15,7 @@
 
 use std::collections::HashSet;
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use uuid::Uuid;
 
 use super::status_inclusion_evidence;
@@ -30,7 +30,7 @@ const DEPENDENCIES: &[Uuid] = &[status_inclusion_evidence::MIGRATION_ID];
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }
@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn dependent_views_are_named_and_the_upgrade_rolls_back() {
         use crate::wallet::init::WalletMigrationError;
-        use schemerz::MigratorError;
+        use std::error::Error as _;
 
         let data_file = NamedTempFile::new().unwrap();
         let mut db_data = WalletDb::for_path(
@@ -253,11 +253,9 @@ mod tests {
             .init_or_migrate_to(&mut db_data, &[MIGRATION_ID]);
         assert!(
             matches!(
-                &result,
-                Err(MigratorError::Migration {
-                    error: WalletMigrationError::CorruptedData(reason),
-                    ..
-                }) if !reason.contains("ext_app_history") && !reason.contains("ext_zip318_history") && reason.contains("ext_app_migrations")
+                result.as_ref().err().and_then(|error| error.source()).and_then(|source| source.downcast_ref()),
+                Some(WalletMigrationError::CorruptedData(reason))
+                    if !reason.contains("ext_app_history") && !reason.contains("ext_zip318_history") && reason.contains("ext_app_migrations")
             ),
             "{result:?}"
         );
@@ -285,7 +283,7 @@ mod tests {
     #[test]
     fn dependent_triggers_are_named_and_the_upgrade_rolls_back() {
         use crate::wallet::init::WalletMigrationError;
-        use schemerz::MigratorError;
+        use std::error::Error as _;
 
         for table in ["ORCHARD_IRONWOOD_MIGRATIONS", "Orchard_Ironwood_Migrations"] {
             let file = NamedTempFile::new().unwrap();
@@ -309,9 +307,10 @@ mod tests {
                 .ignore_seed_relevance()
                 .init_or_migrate_to(&mut db, &[MIGRATION_ID]);
             assert!(
-                matches!(result, Err(MigratorError::Migration {
-                error: WalletMigrationError::CorruptedData(ref reason), ..
-            }) if reason.contains("ext_pool_trigger")),
+                matches!(
+                    result.as_ref().err().and_then(|error| error.source()).and_then(|source| source.downcast_ref()),
+                    Some(WalletMigrationError::CorruptedData(reason)) if reason.contains("ext_pool_trigger")
+                ),
                 "{result:?}"
             );
             assert!(table_exists(&db.conn, "orchard_ironwood_migrations"));

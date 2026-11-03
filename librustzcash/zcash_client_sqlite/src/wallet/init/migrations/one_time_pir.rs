@@ -2,8 +2,8 @@
 use super::{
     one_time_ivk_discovery, v_transactions_legacy_projection, v_tx_outputs_transparent_addresses,
 };
+use crate::migration::SqliteMigration as RusqliteMigration;
 use crate::wallet::init::WalletMigrationError;
-use schemerz_rusqlite::RusqliteMigration;
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -272,7 +272,7 @@ SELECT
     MAX(recipient_key_scope)    AS recipient_key_scope
 FROM unioned
 GROUP BY transaction_id, output_pool, output_index";
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     /// Returns the unique cutover identifier.
     fn id(&self) -> Uuid {
         MIGRATION_ID

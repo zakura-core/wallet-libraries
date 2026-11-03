@@ -5,7 +5,7 @@
 //! qualified, and nothing is suspended, so the upgrade grants no private authority.
 use std::collections::HashSet;
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use uuid::Uuid;
 
 use super::transparent_recovery_schema;
@@ -18,7 +18,7 @@ const DEPENDENCIES: &[Uuid] = &[transparent_recovery_schema::MIGRATION_ID];
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

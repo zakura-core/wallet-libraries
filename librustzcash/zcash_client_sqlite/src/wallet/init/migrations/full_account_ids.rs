@@ -1,7 +1,7 @@
 use std::{collections::HashSet, rc::Rc};
 
+use crate::migration::SqliteMigration as RusqliteMigration;
 use rusqlite::{OptionalExtension, Transaction, named_params};
-use schemerz_rusqlite::RusqliteMigration;
 use secrecy::{ExposeSecret, SecretVec};
 use uuid::Uuid;
 
@@ -31,7 +31,7 @@ const DEPENDENCIES: &[Uuid] = &[
     wallet_summaries::MIGRATION_ID,
 ];
 
-impl<P: consensus::Parameters> schemerz::Migration<Uuid> for Migration<P> {
+impl<P: consensus::Parameters> crate::migration::Migration for Migration<P> {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

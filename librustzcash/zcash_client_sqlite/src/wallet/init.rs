@@ -2,9 +2,8 @@
 
 use std::{borrow::BorrowMut, collections::HashSet, fmt, rc::Rc};
 
+use crate::{error::MigrationError, migration};
 use rand_core::Rng;
-use schemerz::{Migration as _, Migrator, MigratorError};
-use schemerz_rusqlite::{RusqliteAdapter, RusqliteMigration};
 use secrecy::SecretVec;
 use shardtree::error::ShardTreeError;
 use uuid::Uuid;
@@ -20,10 +19,13 @@ use crate::{WalletDb, error::SqliteClientError, util::Clock};
 
 pub mod migrations;
 
+#[cfg(test)]
+mod runner_tests;
+
 const SQLITE_MAJOR_VERSION: u32 = 3;
 const MIN_SQLITE_MINOR_VERSION: u32 = 35;
 
-const MIGRATIONS_TABLE: &str = "schemer_migrations";
+const MIGRATIONS_TABLE: &str = migration::TABLE;
 
 /// Errors that can occur when applying migrations to the wallet database.
 #[derive(Debug)]
@@ -69,7 +71,7 @@ pub enum WalletMigrationError {
     ///
     /// A newer build, or a build whose migrations were later withdrawn, wrote the database. This
     /// build cannot interpret its schema, so it refuses to open it rather than read or write state
-    /// whose meaning it does not know. External migrations must be supplied on every call.
+    /// whose meaning it does not know.
     UnknownMigrations(Vec<Uuid>),
 
     /// Some other unexpected violation of database business rules occurred
@@ -314,7 +316,7 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
 /// In order to correctly apply migrations to accounts derived from a seed, sometimes the
 /// optional `seed` argument is required. This function should first be invoked with
 /// `seed` set to `None`; if a pending migration requires the seed, the function returns
-/// `Err(schemerz::MigratorError::Migration { error: WalletMigrationError::SeedRequired, .. })`.
+/// an error whose source is [`WalletMigrationError::SeedRequired`].
 /// The caller can then re-call this function with the necessary seed.
 ///
 /// > Note that currently only one seed can be provided; as such, wallets containing
@@ -325,8 +327,7 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
 /// _relevance_: if any account in the wallet for which [`Account::source`] is
 /// [`AccountSource::Derived`] can be derived from the given seed, the seed is relevant to
 /// the wallet. If the given seed is not relevant, the function returns
-/// `Err(schemerz::MigratorError::Migration { error: WalletMigrationError::SeedNotRelevant, .. })`
-/// or `Err(schemerz::MigratorError::Adapter(WalletMigrationError::SeedNotRelevant))`.
+/// an error whose source is [`WalletMigrationError::SeedNotRelevant`].
 ///
 /// We do not check whether the seed is relevant to any imported account, because that
 /// would require brute-forcing the ZIP 32 account index space. Consequentially, seed-requiring
@@ -394,7 +395,7 @@ pub fn init_wallet_db<
 >(
     wdb: &mut WalletDb<C, P, CL, R>,
     seed: Option<SecretVec<u8>>,
-) -> Result<(), MigratorError<Uuid, WalletMigrationError>> {
+) -> Result<(), MigrationError<WalletMigrationError>> {
     if let Some(seed) = seed {
         WalletMigrator::new().with_seed(seed)
     } else {
@@ -414,7 +415,7 @@ pub fn init_wallet_db<
 /// In order to correctly apply migrations to accounts derived from a seed, sometimes the
 /// seed is required. The migrator should first be used without calling [`Self::with_seed`];
 /// if a pending migration requires the seed, [`Self::init_or_migrate`] returns
-/// `Err(schemerz::MigratorError::Migration { error: WalletMigrationError::SeedRequired, .. })`.
+/// an error whose source is [`WalletMigrationError::SeedRequired`].
 /// The caller can then call [`Self::with_seed`] and then re-call [`Self::init_or_migrate`]
 /// with the necessary seed.
 ///
@@ -426,8 +427,7 @@ pub fn init_wallet_db<
 /// account in the wallet for which [`Account::source`] is [`AccountSource::Derived`] can
 /// be derived from the given seed, the seed is relevant to the wallet. If the given seed
 /// is not relevant, [`Self::init_or_migrate`] returns
-/// `Err(schemerz::MigratorError::Migration { error: WalletMigrationError::SeedNotRelevant, .. })`
-/// or `Err(schemerz::MigratorError::Adapter(WalletMigrationError::SeedNotRelevant))`.
+/// an error whose source is [`WalletMigrationError::SeedNotRelevant`].
 ///
 /// We do not check whether the seed is relevant to any imported account, because that
 /// would require brute-forcing the ZIP 32 account index space. Consequentially, seed-requiring
@@ -486,7 +486,6 @@ pub fn init_wallet_db<
 pub struct WalletMigrator {
     seed: Option<SecretVec<u8>>,
     verify_seed_relevance: bool,
-    external_migrations: Option<Vec<Box<dyn RusqliteMigration<Error = WalletMigrationError>>>>,
 }
 
 impl Default for WalletMigrator {
@@ -501,7 +500,6 @@ impl WalletMigrator {
         Self {
             seed: None,
             verify_seed_relevance: true,
-            external_migrations: None,
         }
     }
 
@@ -518,72 +516,6 @@ impl WalletMigrator {
         self
     }
 
-    /// Sets the external migration graph to apply alongside the internal migrations.
-    ///
-    /// From a data management perspective, it can be useful to store additional data
-    /// alongside the `zcash_client_sqlite` wallet database. This method enables you to
-    /// provide an external [`schemerz`] migration graph that the migrator will apply to
-    /// the wallet database.
-    ///
-    /// # WARNING
-    ///
-    /// **DO NOT** depend on or modify internal details of the `zcash_client_sqlite`
-    /// schema!
-    ///
-    /// The internal migrations are written to take into account internal relationships
-    /// between the `zcash_client_sqlite` tables, but they will never take into account
-    /// external tables. In particular, this means that you **MUST NOT**:
-    /// - Modify the structure or contents of any internal table.
-    /// - Assume that internal IDs will exist indefinitely (instead have a backup plan for
-    ///   recovering your data relationships if a new internal migration affects your
-    ///   foreign keys).
-    ///
-    /// The `zcash_client_sqlite` schema does not have any common prefix it uses for
-    /// tables, indexes, or views. However, we promise to not use the prefix `ext_` for
-    /// any internal names. Schema created by external migrations **MUST** use name
-    /// prefixing with a prefix that is unlikely to collide with either the internal names
-    /// or other potential external schemas (e.g. `ext_myappname_*`).
-    ///
-    /// # Integration
-    ///
-    /// In order to enable anchoring your external migrations correctly with respect to
-    /// this library's internal migrations, we provide constants in the [`migrations`]
-    /// module (for each release that adds a migration) which you can include within your
-    /// [`schemerz::Migration::dependencies`] set. Prefer these release constants: each
-    /// names a state of the migration graph that a published release exposed, so it is
-    /// unaffected by the migrations that later releases add.
-    ///
-    /// When no released state is precise enough — most commonly when your migration
-    /// depends on schema that has been added since the most recent release — the
-    /// `migrations::ids` module, behind the `unstable` feature, provides the identifier
-    /// of each individual internal migration. Those identifiers are for developing
-    /// against unreleased schema; move the anchor to the release constant that covers
-    /// it once that release exists.
-    ///
-    /// Each migration runs inside a database transaction, which has the following
-    /// implications:
-    /// - `PRAGMA foreign_keys` has no effect inside a transaction, so the migrator
-    ///   handles foreign key enforcement itself:
-    ///   - `PRAGMA foreign_keys = OFF` is set before running any migrations.
-    ///   - `PRAGMA foreign_keys = ON` is set after all migrations are successful.
-    /// - `PRAGMA legacy_alter_table` should only be used in cases where its effect is
-    ///   explicitly intended, so the migrator does not use it globally. If you want to
-    ///   rename tables without breaking foreign key relationships, you need to do so
-    ///   yourself inside individual migrations:
-    ///   ```sql
-    ///   PRAGMA legacy_alter_table = ON;
-    ///   DROP TABLE table_name;
-    ///   ALTER TABLE table_name_new RENAME TO table_name;
-    ///   PRAGMA legacy_alter_table = OFF;
-    ///   ```
-    pub fn with_external_migrations(
-        mut self,
-        migrations: Vec<Box<dyn RusqliteMigration<Error = WalletMigrationError>>>,
-    ) -> Self {
-        self.external_migrations = Some(migrations);
-        self
-    }
-
     /// Sets up the internal structure of the given wallet database to be compatible with
     /// this library version.
     pub fn init_or_migrate<
@@ -594,7 +526,7 @@ impl WalletMigrator {
     >(
         self,
         wdb: &mut WalletDb<C, P, CL, R>,
-    ) -> Result<(), MigratorError<Uuid, WalletMigrationError>> {
+    ) -> Result<(), MigrationError<WalletMigrationError>> {
         self.init_or_migrate_to(wdb, &[])
     }
 
@@ -609,11 +541,10 @@ impl WalletMigrator {
         self,
         wdb: &mut WalletDb<C, P, CL, R>,
         target_migrations: &[Uuid],
-    ) -> Result<(), MigratorError<Uuid, WalletMigrationError>> {
+    ) -> Result<(), MigrationError<WalletMigrationError>> {
         init_wallet_db_internal(
             wdb,
             self.seed,
-            self.external_migrations,
             target_migrations,
             self.verify_seed_relevance,
         )
@@ -628,13 +559,12 @@ fn init_wallet_db_internal<
 >(
     wdb: &mut WalletDb<C, P, CL, R>,
     seed: Option<SecretVec<u8>>,
-    external_migrations: Option<Vec<Box<dyn RusqliteMigration<Error = WalletMigrationError>>>>,
     target_migrations: &[Uuid],
     verify_seed_relevance: bool,
-) -> Result<(), MigratorError<Uuid, WalletMigrationError>> {
+) -> Result<(), MigrationError<WalletMigrationError>> {
     let seed = seed.map(Rc::new);
 
-    verify_sqlite_version_compatibility(wdb.conn.borrow()).map_err(MigratorError::Adapter)?;
+    verify_sqlite_version_compatibility(wdb.conn.borrow()).map_err(MigrationError::from)?;
 
     // Turn off foreign key enforcement, to ensure that table replacement does not break foreign
     // key references in table definitions.
@@ -644,21 +574,10 @@ fn init_wallet_db_internal<
     wdb.conn
         .borrow()
         .execute_batch("PRAGMA foreign_keys = OFF;")
-        .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
+        .map_err(|e| MigrationError::from(WalletMigrationError::from(e)))?;
 
     let result = (|| {
-        // Temporarily take ownership of the connection in a wrapper to perform the initial migration
-        // table setup. This extra adapter creation could be omitted if `RusqliteAdapter` provided an
-        // accessor for the connection that it wraps, or if it provided a mechanism to query to
-        // determine whether a given migration has been applied. (see
-        // https://github.com/zcash/schemerz/issues/6)
-        {
-            let adapter = RusqliteAdapter::<'_, WalletMigrationError>::new(
-                wdb.conn.borrow_mut(),
-                Some(MIGRATIONS_TABLE.to_string()),
-            );
-            adapter.init().expect("Migrations table setup succeeds.");
-        }
+        migration::initialize(wdb.conn.borrow()).expect("Migrations table setup succeeds.");
 
         // Now that we are certain that the migrations table exists, refuse a database written by a
         // build whose migrations this one does not know, before reading any of its schema.
@@ -670,39 +589,22 @@ fn init_wallet_db_internal<
         );
         let known = internal_migrations
             .iter()
-            .chain(external_migrations.iter().flatten())
             .map(|migration| migration.id())
             .collect();
-        verify_no_unknown_migrations(wdb.conn.borrow(), &known).map_err(MigratorError::Adapter)?;
+        verify_no_unknown_migrations(wdb.conn.borrow(), &known).map_err(MigrationError::from)?;
 
         // Verify that if the database already contains account data, any stored UFVKs correspond to
         // the same network that the migrations are being run for.
         verify_network_compatibility(wdb.conn.borrow(), &wdb.params)
-            .map_err(MigratorError::Adapter)?;
+            .map_err(MigrationError::from)?;
 
-        // Now create the adapter that we're actually going to use to perform the migrations, and
-        // proceed.
-        let adapter =
-            RusqliteAdapter::new(wdb.conn.borrow_mut(), Some(MIGRATIONS_TABLE.to_string()));
-        let mut migrator = Migrator::new(adapter);
-        migrator
-            .register_multiple(internal_migrations.into_iter())
-            .expect("Wallet migration registration should have been successful.");
-        if let Some(migrations) = external_migrations {
-            migrator.register_multiple(migrations.into_iter())?;
-        }
-        if target_migrations.is_empty() {
-            migrator.up(None)?;
-        } else {
-            for target_migration in target_migrations {
-                migrator.up(Some(*target_migration))?;
-            }
-        }
-        // Now that the migration succeeded, check whether the seed is relevant to the wallet.
-        // We can only check this if we have migrated as far as `full_account_ids::MIGRATION_ID`,
-        // but unfortunately `schemer` does not currently expose its DAG of migrations. As a
-        // consequence, the caller has to choose whether or not this check should be performed
-        // based upon which migrations they're asking to apply.
+        migration::migrate(
+            wdb.conn.borrow_mut(),
+            &internal_migrations,
+            target_migrations,
+        )?;
+        // Seed relevance can only be checked once full_account_ids has run.
+        // Partial migration tests choose whether that schema is available.
         if verify_seed_relevance && let Some(seed) = seed {
             match wdb
                 .seed_relevance_to_derived_accounts(&seed)
@@ -727,7 +629,7 @@ fn init_wallet_db_internal<
         .conn
         .borrow()
         .execute_batch("PRAGMA foreign_keys = ON")
-        .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)));
+        .map_err(|e| MigrationError::from(WalletMigrationError::from(e)));
     result.and(restore)
 }
 
@@ -871,10 +773,9 @@ mod sqlite_version_tests {
 
 #[cfg(test)]
 pub(crate) mod testing {
+    use crate::error::MigrationError;
     use rand::Rng;
-    use schemerz::MigratorError;
     use secrecy::SecretVec;
-    use uuid::Uuid;
     use zcash_protocol::consensus;
 
     use crate::{WalletDb, util::Clock};
@@ -888,13 +789,15 @@ pub(crate) mod testing {
     >(
         wdb: &mut WalletDb<rusqlite::Connection, P, CL, R>,
         seed: Option<SecretVec<u8>>,
-    ) -> Result<(), MigratorError<Uuid, WalletMigrationError>> {
-        super::init_wallet_db_internal(wdb, seed, None, &[], true)
+    ) -> Result<(), MigrationError<WalletMigrationError>> {
+        super::init_wallet_db_internal(wdb, seed, &[], true)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use rand::Rng;
     use rusqlite::{self, Connection, ToSql, named_params};
     use secrecy::Secret;
@@ -1191,13 +1094,9 @@ mod tests {
     }
 
     /// A database carrying a migration this build does not know was written by a newer or
-    /// withdrawn build. It is refused before any schema is read or written, and external
-    /// migrations supplied by the caller count as known.
+    /// withdrawn build. It is refused before any migration SQL is applied.
     #[test]
     fn unknown_applied_migrations_are_refused() {
-        use schemerz::MigratorError;
-        use schemerz_rusqlite::RusqliteMigration;
-        use std::collections::HashSet;
         use uuid::Uuid;
 
         use super::{WalletMigrationError, WalletMigrator};
@@ -1205,28 +1104,6 @@ mod tests {
         // The `ironwood_compact_encryption` migration published in zakura-client-sqlite 0.1.0-rc6
         // and withdrawn in 0.1.0-rc7.
         const WITHDRAWN: Uuid = Uuid::from_u128(0x2eac815d_67ca_4fb4_b534_066102a0fba2);
-
-        struct External;
-        impl schemerz::Migration<Uuid> for External {
-            fn id(&self) -> Uuid {
-                WITHDRAWN
-            }
-            fn dependencies(&self) -> HashSet<Uuid> {
-                HashSet::new()
-            }
-            fn description(&self) -> &'static str {
-                "An external migration that reuses the withdrawn identifier."
-            }
-        }
-        impl RusqliteMigration for External {
-            type Error = WalletMigrationError;
-            fn up(&self, _: &rusqlite::Transaction) -> Result<(), WalletMigrationError> {
-                Ok(())
-            }
-            fn down(&self, _: &rusqlite::Transaction) -> Result<(), WalletMigrationError> {
-                Ok(())
-            }
-        }
 
         let data_file = NamedTempFile::new().unwrap();
         let mut db = WalletDb::for_path(
@@ -1245,17 +1122,17 @@ mod tests {
             .unwrap();
         let schema = describe_tables(&db.conn).unwrap();
 
+        let error = WalletMigrator::new().init_or_migrate(&mut db).unwrap_err();
         assert!(matches!(
-            WalletMigrator::new().init_or_migrate(&mut db),
-            Err(MigratorError::Adapter(WalletMigrationError::UnknownMigrations(ids)))
-                if ids == vec![WITHDRAWN]
+            error.source().and_then(|source| source.downcast_ref()),
+            Some(WalletMigrationError::UnknownMigrations(ids)) if ids == &[WITHDRAWN]
         ));
         assert_eq!(describe_tables(&db.conn).unwrap(), schema);
-
-        WalletMigrator::new()
-            .with_external_migrations(vec![Box::new(External)])
-            .init_or_migrate(&mut db)
-            .unwrap();
+        assert!(
+            db.conn
+                .pragma_query_value(None, "foreign_keys", |row| row.get::<_, bool>(0))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1788,9 +1665,10 @@ mod tests {
         );
         assert_matches!(
             init_wallet_db(&mut db_data, Some(Secret::new(other_seed.to_vec()))),
-            Err(schemerz::MigratorError::Adapter(
-                WalletMigrationError::SeedNotRelevant
-            ))
+            Err(error) if matches!(
+                error.source().and_then(|source| source.downcast_ref()),
+                Some(WalletMigrationError::SeedNotRelevant)
+            )
         );
 
         for tv in &test_vectors::UNIFIED[..3] {

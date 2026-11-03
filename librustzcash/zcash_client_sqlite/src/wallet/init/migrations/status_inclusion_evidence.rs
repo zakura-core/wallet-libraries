@@ -4,15 +4,15 @@ use super::{
     orchard_ironwood_migration_unsatisfiability, tree_retained_checkpoints,
     v_address_uses_ironwood,
 };
+use crate::migration::SqliteMigration as RusqliteMigration;
 use crate::wallet::init::WalletMigrationError;
-use schemerz_rusqlite::RusqliteMigration;
 use std::collections::HashSet;
 use uuid::Uuid;
 
 /// Widens local bounds whose historical rewind handling cannot be established.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xb6f3d060_803a_4b17_aecd_6a02d9cb2249);
 pub(super) struct Migration;
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }
@@ -55,7 +55,7 @@ mod tests {
     }
     #[test]
     fn legacy_local_bounds_widen_without_changing_schema_or_imports() {
-        use schemerz_rusqlite::RusqliteMigration;
+        use crate::migration::SqliteMigration as RusqliteMigration;
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE transactions (txid BLOB, target_height INTEGER, min_observed_height INTEGER NOT NULL, expiry_height INTEGER, mined_height INTEGER);
             INSERT INTO transactions VALUES (X'01', 500, 500, 540, NULL), (X'02', NULL, 600, NULL, NULL), (X'03', 400, 450, NULL, NULL);").unwrap();

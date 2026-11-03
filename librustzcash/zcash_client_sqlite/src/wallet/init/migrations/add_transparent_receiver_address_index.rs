@@ -21,8 +21,8 @@
 
 use std::collections::HashSet;
 
+use crate::migration::SqliteMigration as RusqliteMigration;
 use rusqlite::named_params;
-use schemerz_rusqlite::RusqliteMigration;
 use uuid::Uuid;
 use zcash_protocol::consensus;
 
@@ -169,7 +169,7 @@ fn resolve_cross_account_duplicate<P: consensus::Parameters>(
     Err(unresolvable_duplicate(addr))
 }
 
-impl<P> schemerz::Migration<Uuid> for Migration<P> {
+impl<P> crate::migration::Migration for Migration<P> {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

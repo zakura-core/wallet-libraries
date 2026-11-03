@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use uuid::Uuid;
 
 use crate::wallet::init::WalletMigrationError;
@@ -26,7 +26,7 @@ const DEPENDENCIES: &[Uuid] = &[witness_stabilized_notes::MIGRATION_ID];
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }
@@ -59,8 +59,8 @@ impl RusqliteMigration for Migration {
 
 #[cfg(test)]
 mod tests {
+    use crate::migration::SqliteMigration as RusqliteMigration;
     use rusqlite::{Connection, named_params};
-    use schemerz_rusqlite::RusqliteMigration;
 
     use super::Migration;
     use crate::wallet::init::migrations::tests::test_migrate;

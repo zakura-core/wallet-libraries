@@ -1,7 +1,7 @@
 //! The migration that adds initial support for transparent UTXOs to the wallet.
 use std::collections::HashSet;
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use uuid::Uuid;
 
 use crate::wallet::init::{WalletMigrationError, migrations::initial_setup};
@@ -13,7 +13,7 @@ const DEPENDENCIES: &[Uuid] = &[initial_setup::MIGRATION_ID];
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

@@ -21,7 +21,8 @@ use {
 };
 
 pub mod init;
-pub mod migrations;
+#[cfg(feature = "unstable")]
+mod migrations;
 
 /// Implements a traversal of `limit` blocks of the block cache database.
 ///

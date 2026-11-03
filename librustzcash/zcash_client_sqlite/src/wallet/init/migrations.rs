@@ -100,9 +100,9 @@ mod zip318_classification;
 
 use std::{rc::Rc, sync::Mutex};
 
+use crate::migration::SqliteMigration as RusqliteMigration;
 use rand_core::Rng;
 use rusqlite::{OptionalExtension, named_params};
-use schemerz_rusqlite::RusqliteMigration;
 use secrecy::SecretVec;
 use uuid::Uuid;
 use zcash_address::unified::{Encoding as _, Ufvk};
@@ -114,23 +114,11 @@ use super::WalletMigrationError;
 
 /// Identifiers of the individual migrations that make up this crate's internal migration graph.
 ///
-/// External migrations registered via
-/// [`WalletMigrator::with_external_migrations`] are applied as part of a single graph alongside
-/// the internal ones, so an external migration that reads or extends internal schema must
-/// declare a dependency that orders it after the migration which creates that schema.
-///
 /// These identifiers are unstable by nature, which is why they sit behind the `unstable`
 /// feature: each names an individual migration rather than a state of the graph that a
 /// published release exposed, so the set of them, and which of them are reachable, changes
 /// between releases. A release constant such as [`V_0_19_0`] carries no such risk. The
-/// intended shape is therefore to depend on an identifier here while developing against
-/// unreleased schema, and to move the anchor to the release constant that covers it once
-/// that release exists.
-///
-/// Depending on an identifier here only orders your migration *after* the named one; it does
-/// not prevent later internal migrations from being applied before yours.
-///
-/// [`WalletMigrator::with_external_migrations`]: super::WalletMigrator::with_external_migrations
+/// identifiers are useful when inspecting or testing an unreleased schema state.
 #[cfg(feature = "unstable")]
 pub mod ids {
     pub use super::{
@@ -778,7 +766,6 @@ pub(crate) mod tests {
         testing::db::{test_clock, test_rng},
         wallet::init::WalletMigrator,
     };
-    use schemerz::Migration;
 
     /// The migration state just before the transparent ledger schema, for upgrade fixtures.
     #[cfg(feature = "transparent-inputs")]
@@ -803,9 +790,9 @@ pub(crate) mod tests {
         assert_eq!(computed_leaves, listed_leaves);
     }
 
-    /// Every migration in the graph must have a publicly-exported identifier, so that an
-    /// external migration can always anchor itself precisely. Listing them here rather than
-    /// deriving them means a migration added without an `ids` entry fails this test.
+    /// Every migration must have a public identifier for inspecting the journal.
+    /// Listing them here rather than deriving them means a migration added
+    /// without an `ids` entry fails this test.
     #[test]
     #[cfg(feature = "unstable")]
     fn ids_module_covers_every_migration() {

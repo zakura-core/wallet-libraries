@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use uuid::Uuid;
 
 use super::ironwood_enhance;
@@ -14,7 +14,7 @@ pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x57756102_9583_4af5_b411_5eead49
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

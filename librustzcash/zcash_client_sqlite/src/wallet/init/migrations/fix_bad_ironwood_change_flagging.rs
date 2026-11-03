@@ -21,8 +21,8 @@
 
 use std::collections::HashSet;
 
+use crate::migration::SqliteMigration as RusqliteMigration;
 use rusqlite::named_params;
-use schemerz_rusqlite::RusqliteMigration;
 use uuid::Uuid;
 
 use crate::{
@@ -40,7 +40,7 @@ const DEPENDENCIES: &[Uuid] = &[ironwood_received_notes::MIGRATION_ID];
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }
@@ -89,8 +89,8 @@ impl RusqliteMigration for Migration {
 
 #[cfg(test)]
 mod tests {
+    use crate::migration::SqliteMigration as RusqliteMigration;
     use rusqlite::{Transaction, named_params};
-    use schemerz_rusqlite::RusqliteMigration;
     use zcash_client_backend::data_api::testing::TestBuilder;
     use zcash_primitives::block::BlockHash;
     use zcash_protocol::{PoolType, ShieldedPool};

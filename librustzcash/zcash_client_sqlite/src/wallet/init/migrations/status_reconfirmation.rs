@@ -7,7 +7,7 @@
 //! obligation dormant before it was ever served.
 use std::collections::HashSet;
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use uuid::Uuid;
 
 use super::unmined_status_obligations;
@@ -20,7 +20,7 @@ const DEPENDENCIES: &[Uuid] = &[unmined_status_obligations::MIGRATION_ID];
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

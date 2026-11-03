@@ -2,7 +2,7 @@
 //! ZIP 315 confirmations policy
 use std::collections::HashSet;
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use uuid::Uuid;
 
 use super::{fix_v_transactions_expired_unmined, tx_observation_height};
@@ -19,7 +19,7 @@ const DEPENDENCIES: &[Uuid] = &[
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

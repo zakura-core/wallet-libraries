@@ -9,8 +9,8 @@ use std::{
 };
 use uuid::Uuid;
 
+use crate::migration::SqliteMigration as RusqliteMigration;
 use rusqlite::{Transaction, named_params};
-use schemerz_rusqlite::RusqliteMigration;
 
 use zcash_address::ZcashAddress;
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedIncomingViewingKey};
@@ -52,7 +52,7 @@ pub(super) struct Migration<P, C, R> {
     pub(super) _rng: Rc<Mutex<R>>,
 }
 
-impl<P, C, R> schemerz::Migration<Uuid> for Migration<P, C, R> {
+impl<P, C, R> crate::migration::Migration for Migration<P, C, R> {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

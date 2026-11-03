@@ -1,8 +1,8 @@
 //! This migration ensures that an Orchard receiver exists in the wallet's default Unified address.
 use std::collections::HashSet;
 
+use crate::migration::SqliteMigration as RusqliteMigration;
 use rusqlite::named_params;
-use schemerz_rusqlite::RusqliteMigration;
 use uuid::Uuid;
 
 use zcash_keys::keys::{
@@ -22,7 +22,7 @@ pub(super) struct Migration<P> {
     pub(super) params: P,
 }
 
-impl<P> schemerz::Migration<Uuid> for Migration<P> {
+impl<P> crate::migration::Migration for Migration<P> {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

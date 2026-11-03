@@ -1,7 +1,7 @@
 //! Adds source-bound transaction facts without projecting fees into local send records.
 use super::transparent_activation_schema;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use crate::wallet::init::WalletMigrationError;
-use schemerz_rusqlite::RusqliteMigration;
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -9,7 +9,7 @@ use uuid::Uuid;
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x935cd436_09fd_4f4f_a808_260ee399cb21);
 const DEPENDENCIES: &[Uuid] = &[transparent_activation_schema::MIGRATION_ID];
 pub(super) struct Migration;
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

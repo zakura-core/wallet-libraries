@@ -194,6 +194,7 @@ use {
 
 pub mod chain;
 pub mod error;
+mod migration;
 pub mod util;
 pub mod wallet;
 #[cfg(feature = "zewif")]
@@ -410,8 +411,7 @@ const EXTENSION_SCHEMA_PREFIX: &str = "ext_";
 ///   table, so that extension statements may reference wallet data (for example, to
 ///   satisfy a foreign key into an account row);
 /// - **allows** `INSERT`, `UPDATE`, and `DELETE` only against tables whose names begin
-///   with the `ext_` prefix reserved for external migrations (see
-///   [`WalletMigrator::with_external_migrations`]); and
+///   with the `ext_` prefix reserved for application-owned tables; and
 /// - **denies** everything else, including all schema changes (DDL), `PRAGMA`,
 ///   `ATTACH`/`DETACH`, and transaction-control actions (`BEGIN`, `COMMIT`, `ROLLBACK`,
 ///   `SAVEPOINT`, `RELEASE`), so that extension statements cannot alter the wallet schema
@@ -424,7 +424,6 @@ const EXTENSION_SCHEMA_PREFIX: &str = "ext_";
 /// (an ordinary `INTEGER PRIMARY KEY` rowid, or an explicitly supplied key, works
 /// without it).
 ///
-/// [`WalletMigrator::with_external_migrations`]: crate::wallet::init::WalletMigrator::with_external_migrations
 pub struct ExtensionTransaction<'conn> {
     conn: &'conn rusqlite::Connection,
 }
@@ -903,7 +902,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// This behaves like [`WalletDb::transactionally`], but additionally provides an
     /// [`ExtensionTransaction`] handle sharing the same transaction. This allows an
     /// application to pair a wallet operation (such as importing an account) with writes to
-    /// its own tables created via [`WalletMigrator::with_external_migrations`], so that
+    /// its own application-managed tables, so that
     /// either both take effect or neither does.
     ///
     /// The extension handle restricts the statements it will execute; see
@@ -929,7 +928,6 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// })?;
     /// ```
     ///
-    /// [`WalletMigrator::with_external_migrations`]: crate::wallet::init::WalletMigrator::with_external_migrations
     pub fn transactionally_with_extension<F, A, E: From<rusqlite::Error>>(
         &mut self,
         f: F,

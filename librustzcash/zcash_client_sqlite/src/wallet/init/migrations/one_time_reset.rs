@@ -3,7 +3,7 @@
 //! operations, receipts and notes stay. Only development databases hold one-time data.
 use std::collections::HashSet;
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use uuid::Uuid;
 
 use super::one_time_pir;
@@ -17,7 +17,7 @@ const DEPENDENCIES: &[Uuid] = &[one_time_pir::MIGRATION_ID];
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     /// This migration's identifier.
     fn id(&self) -> Uuid {
         MIGRATION_ID

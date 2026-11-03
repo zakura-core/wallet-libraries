@@ -4,7 +4,7 @@
 //! Additive: existing work rows start with no content failures and keep their schedule.
 use std::collections::HashSet;
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use uuid::Uuid;
 
 use super::transparent_txid_enhancement;
@@ -17,7 +17,7 @@ const DEPENDENCIES: &[Uuid] = &[transparent_txid_enhancement::MIGRATION_ID];
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

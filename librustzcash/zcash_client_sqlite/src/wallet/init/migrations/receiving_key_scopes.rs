@@ -2,10 +2,10 @@
 
 use std::collections::HashSet;
 
+use crate::migration::SqliteMigration as RusqliteMigration;
 use group::ff::PrimeField;
 use incrementalmerkletree::Position;
 use rusqlite::named_params;
-use schemerz_rusqlite::RusqliteMigration;
 
 use shardtree::{ShardTree, store::ShardStore};
 use uuid::Uuid;
@@ -42,7 +42,7 @@ pub(super) struct Migration<P> {
     pub(super) params: P,
 }
 
-impl<P> schemerz::Migration<Uuid> for Migration<P> {
+impl<P> crate::migration::Migration for Migration<P> {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

@@ -1,5 +1,7 @@
 //! Error types for problems that may arise when reading or storing wallet data to SQLite.
 
+pub use crate::migration::MigrationError;
+
 use std::error;
 use std::fmt;
 use std::ops::Range;

@@ -16,15 +16,16 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- `wallet::init::init_wallet_db`, `WalletMigrator::init_or_migrate`, and
+  `chain::init::init_blockmeta_db` return the opaque, owned
+  `error::MigrationError<E>` instead of `schemerz::MigratorError<Uuid, E>`.
+  Its error source retains the underlying wallet or SQLite error. The internal
+  migration runner preserves migration SQL, identifiers, dependencies and the
+  existing journal format; the published engine is retained as a test oracle.
+
 - Generating the crate's feature table now requires the optional
   `document-features` feature. Ordinary builds omit the documentation macro;
   docs.rs continues to include the table.
-
-- Use `schemerz` 0.3 and `schemerz-rusqlite` 0.371 for wallet migrations,
-  sharing the dependency family required by the LRZ facade. Applications naming
-  migration errors or implementing external migrations must use these versions
-  for `MigratorError` and `RusqliteMigration` respectively. Migration UUIDs and
-  the database schema are unchanged.
 
 - Storing a scanned block uses the new index to attach transactions first learned
   from a transparent UTXO query, avoiding a scan of the whole transactions table.
@@ -67,6 +68,12 @@ and this library adheres to Rust's notion of
   `From<rand_distr::ExpError>` conversion. Transparent-address check scheduling
   keeps the same exponential sampler in a private module, with `rand_distr`
   retained only as a test oracle.
+
+- `WalletMigrator::with_external_migrations`, which registered custom wallet
+  migrations, and the public `chain::migrations` module, including its
+  `blockmeta::all_migrations` helper. Applications can no longer register custom
+  migration identifiers with the wallet migrator. The ordinary wallet
+  initializer already rejected unknown journal identifiers.
 
 ## [0.1.0-rc9.6] - 2026-10-30
 

@@ -1,7 +1,7 @@
 //! Retains derivation origins independently of receiver ownership after promotion.
 use std::collections::HashSet;
 
-use schemerz_rusqlite::RusqliteMigration;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use uuid::Uuid;
 
 use super::transparent_activity_metadata;
@@ -13,7 +13,7 @@ const DEPENDENCIES: &[Uuid] = &[transparent_activity_metadata::MIGRATION_ID];
 
 pub(super) struct Migration;
 
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }

@@ -1,7 +1,7 @@
 //! Adds empty historical inclusion receipts. Previously erased block identities cannot be rebuilt.
 use super::status_reconfirmation;
+use crate::migration::SqliteMigration as RusqliteMigration;
 use crate::wallet::{init::WalletMigrationError, transaction_reconfirmation::RECEIPT_SCHEMA};
-use schemerz_rusqlite::RusqliteMigration;
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -9,7 +9,7 @@ use uuid::Uuid;
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x96bc0e72_51cf_4cdb_b11f_85a460db37ab);
 const DEPENDENCIES: &[Uuid] = &[status_reconfirmation::MIGRATION_ID];
 pub(super) struct Migration;
-impl schemerz::Migration<Uuid> for Migration {
+impl crate::migration::Migration for Migration {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }
