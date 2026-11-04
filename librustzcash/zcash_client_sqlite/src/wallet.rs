@@ -1513,6 +1513,45 @@ pub(crate) fn get_last_generated_address_matching<P: consensus::Parameters>(
     .transpose()
 }
 
+/// Returns the external-scope address row already stored for `diversifier_index`, if any,
+/// lowering its exposure height the way [`upsert_address`]'s conflict branch would.
+///
+/// A received note's address row is created when the compact-block scan first sees the note,
+/// so by the time the full transaction is stored - the memo backfill, or a spend the wallet
+/// took part in - it is nearly always present. Deriving the unified address again (a Sapling
+/// diversifier, an Orchard address and a transparent child, each a scalar multiplication or
+/// key derivation) for an upsert to find the row and change nothing was the larger part of
+/// what storing a note cost.
+pub(crate) fn existing_address_at(
+    conn: &rusqlite::Connection,
+    account_id: AccountRef,
+    diversifier_index: DiversifierIndex,
+    exposed_at_height: Option<BlockHeight>,
+) -> Result<Option<AddressRef>, SqliteClientError> {
+    let di_be = encode_diversifier_index_be(diversifier_index);
+    conn.query_row(
+        "UPDATE addresses
+         SET exposed_at_height = COALESCE(
+                MIN(exposed_at_height, :exposed_at_height),
+                exposed_at_height,
+                :exposed_at_height
+            )
+         WHERE account_id = :account_id
+         AND diversifier_index_be = :diversifier_index_be
+         AND key_scope = :key_scope
+         RETURNING id",
+        named_params![
+            ":account_id": account_id.0,
+            ":diversifier_index_be": &di_be,
+            ":key_scope": KeyScope::EXTERNAL.encode(),
+            ":exposed_at_height": exposed_at_height.map(u32::from),
+        ],
+        |row| row.get::<_, i64>(0).map(AddressRef),
+    )
+    .optional()
+    .map_err(SqliteClientError::from)
+}
+
 /// Adds the given external address and diversifier index to the addresses table.
 ///
 /// Returns the primary key identifier for the newly-inserted address.
@@ -5291,18 +5330,41 @@ pub(crate) fn get_txs_spending_transparent_outputs_of<P: consensus::Parameters>(
 ) -> Result<Vec<(TxRef, Transaction)>, SqliteClientError> {
     // For each transaction that spends a transparent output of this transaction and does not
     // already have a known fee value.
+    //
+    // The correlation with `:transaction_id` has to be a WHERE predicate on the output row.
+    // Written as the ON clause of a LEFT OUTER JOIN it filtered nothing: an unmatched `tro`
+    // yields NULLs and the row survives, so every fee-less transaction spending any wallet
+    // transparent output was returned - and fully parsed - on every call, however unrelated
+    // to the transaction just stored. On a wallet with ~1,800 transparent outputs that was
+    // 2,375 rows (9 MB of raw transactions) per store, against one row for the same store
+    // with the predicate honoured.
+    //
+    // A spender is found two ways, because the spend of an output can be recorded before the
+    // output itself. A spender stored before this transaction left its spend in
+    // `transparent_spend_map`, keyed by the outpoint it spends; when this transaction's output
+    // was then stored, `put_transparent_output` linked it to at most one such spender through
+    // `transparent_received_output_spends` (several conflicting spenders can wait for the same
+    // output, only one of which will ever be mined). The second branch finds the others by
+    // the outpoint, so a conflicting spender stored first still gets its fee.
     let mut spending_txs_stmt = conn.prepare(
         "SELECT DISTINCT t.id_tx, t.raw, t.mined_height, t.expiry_height
          FROM transactions t
-         -- find transactions that spend transparent outputs of the decrypted tx
-         LEFT OUTER JOIN transparent_received_output_spends ts
-            ON ts.transaction_id = t.id_tx
-         LEFT OUTER JOIN transparent_received_outputs tro
-            ON tro.transaction_id = :transaction_id
-            AND tro.id = ts.transparent_received_output_id
+         JOIN (
+             -- spenders linked to an output of the decrypted tx
+             SELECT ts.transaction_id AS spender
+             FROM transparent_received_output_spends ts
+             JOIN transparent_received_outputs tro
+                ON tro.id = ts.transparent_received_output_id
+             WHERE tro.transaction_id = :transaction_id
+             UNION
+             -- spenders that recorded a spend of one of its outpoints before it was stored
+             SELECT tsm.spending_transaction_id
+             FROM transparent_spend_map tsm
+             JOIN transactions spent ON spent.id_tx = :transaction_id
+             WHERE tsm.prevout_txid = spent.txid
+         ) spenders ON spenders.spender = t.id_tx
          WHERE t.fee IS NULL
-         AND t.raw IS NOT NULL
-         AND ts.transaction_id IS NOT NULL",
+         AND t.raw IS NOT NULL",
     )?;
 
     spending_txs_stmt
@@ -7123,6 +7185,209 @@ mod tests {
                 .set_enhancement_mode(EnhancementMode::Standard);
             assert!(public(&st).contains(&protected_txid));
         }
+    }
+
+    /// The search for fee-less transactions that spend a stored transaction's transparent
+    /// outputs must be scoped to that transaction. It once put its only correlating predicate in
+    /// the ON clause of a LEFT OUTER JOIN, which filters nothing, so every fee-less transaction
+    /// spending any wallet transparent output came back - and was fully parsed - on every store.
+    #[test]
+    fn spending_tx_fee_search_is_scoped_to_the_stored_transaction() {
+        use zcash_primitives::transaction::{Authorized, TransactionData, TxVersion};
+        use zcash_protocol::consensus::BranchId;
+
+        let st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let account = st.test_account().unwrap();
+        let conn = st.wallet().conn();
+        let account_id = super::get_account_ref(conn, account.id()).unwrap();
+
+        // One address row for the outputs to reference.
+        conn.execute(
+            "INSERT INTO addresses
+                 (account_id, key_scope, address, cached_transparent_receiver_address,
+                  imported_transparent_receiver_pubkey, receiver_flags, exposed_at_height)
+             VALUES (:account_id, :scope, 'addr', 'taddr',
+                  X'020000000000000000000000000000000000000000000000000000000000000001', 1, 1)",
+            named_params! {
+                ":account_id": account_id.0,
+                ":scope": super::encoding::KeyScope::Foreign.encode(),
+            },
+        )
+        .unwrap();
+        let address_id = conn.last_insert_rowid();
+
+        // A syntactically valid, empty v5 transaction: what the search parses for each row.
+        let raw = {
+            let tx = TransactionData::<Authorized>::from_parts(
+                TxVersion::V5,
+                BranchId::Nu5,
+                0,
+                BlockHeight::from(10),
+                None,
+                None,
+                None,
+                None,
+            )
+            .freeze()
+            .unwrap();
+            let mut buf = Vec::new();
+            tx.write(&mut buf).unwrap();
+            buf
+        };
+
+        // Two funding transactions (1, 2), each with one wallet transparent output, and two
+        // fee-less spenders (3 spends 1's output, 4 spends 2's).
+        for id in 1..=4u8 {
+            conn.execute(
+                "INSERT INTO transactions (id_tx, txid, expiry_height, raw, min_observed_height)
+                 VALUES (:id, :txid, 10, :raw, 1)",
+                named_params! { ":id": id, ":txid": &[id; 32][..], ":raw": &raw[..] },
+            )
+            .unwrap();
+        }
+        for (output_id, funding_tx, spender) in [(1, 1, 3), (2, 2, 4)] {
+            conn.execute(
+                "INSERT INTO transparent_received_outputs
+                     (id, transaction_id, output_index, account_id, address, script, value_zat, address_id)
+                 VALUES (:id, :tx, 0, :account_id, 'taddr', X'00', 1000, :address_id)",
+                named_params! {
+                    ":id": output_id, ":tx": funding_tx,
+                    ":account_id": account_id.0, ":address_id": address_id,
+                },
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO transparent_received_output_spends
+                     (transparent_received_output_id, transaction_id)
+                 VALUES (:output, :spender)",
+                named_params! { ":output": output_id, ":spender": spender },
+            )
+            .unwrap();
+        }
+
+        let spenders_of = |tx_ref: i64| -> Vec<i64> {
+            super::get_txs_spending_transparent_outputs_of(conn, st.network(), TxRef(tx_ref))
+                .unwrap()
+                .into_iter()
+                .map(|(r, _)| r.0)
+                .collect()
+        };
+        assert_eq!(spenders_of(1), vec![3]);
+        assert_eq!(spenders_of(2), vec![4]);
+        // A transaction with no wallet transparent outputs has no spenders to look at.
+        assert_eq!(spenders_of(3), Vec::<i64>::new());
+    }
+
+    /// Two conflicting spenders stored before the output they both spend: storing the output
+    /// links only one of them (`put_transparent_output` picks a single waiting spender from
+    /// `transparent_spend_map`), so the fee search for the output's transaction must also find
+    /// the other through its spend-map row, or that spender's fee is never filled in.
+    #[test]
+    fn spending_tx_fee_search_finds_conflicting_spenders_recorded_before_the_output() {
+        use zcash_primitives::transaction::{Authorized, TransactionData, TxVersion};
+        use zcash_protocol::consensus::BranchId;
+
+        let st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let account = st.test_account().unwrap();
+        let conn = st.wallet().conn();
+        let account_id = super::get_account_ref(conn, account.id()).unwrap();
+
+        conn.execute(
+            "INSERT INTO addresses
+                 (account_id, key_scope, address, cached_transparent_receiver_address,
+                  imported_transparent_receiver_pubkey, receiver_flags, exposed_at_height)
+             VALUES (:account_id, :scope, 'addr', 'taddr',
+                  X'020000000000000000000000000000000000000000000000000000000000000001', 1, 1)",
+            named_params! {
+                ":account_id": account_id.0,
+                ":scope": super::encoding::KeyScope::Foreign.encode(),
+            },
+        )
+        .unwrap();
+        let address_id = conn.last_insert_rowid();
+
+        let raw = {
+            let tx = TransactionData::<Authorized>::from_parts(
+                TxVersion::V5,
+                BranchId::Nu5,
+                0,
+                BlockHeight::from(10),
+                None,
+                None,
+                None,
+                None,
+            )
+            .freeze()
+            .unwrap();
+            let mut buf = Vec::new();
+            tx.write(&mut buf).unwrap();
+            buf
+        };
+
+        // Funding transactions A (1) and B (2), each with one wallet output; conflicting
+        // spenders S1 (3) and S2 (4), each spending both outputs. Arrival order A, S1, S2, B:
+        // both spenders are linked to A's output; their spends of B's output sit in the spend
+        // map, and when B arrives only S1 is linked to it.
+        for id in 1..=4u8 {
+            conn.execute(
+                "INSERT INTO transactions (id_tx, txid, expiry_height, raw, min_observed_height)
+                 VALUES (:id, :txid, 10, :raw, 1)",
+                named_params! { ":id": id, ":txid": &[id; 32][..], ":raw": &raw[..] },
+            )
+            .unwrap();
+        }
+        for (output_id, funding_tx) in [(1, 1), (2, 2)] {
+            conn.execute(
+                "INSERT INTO transparent_received_outputs
+                     (id, transaction_id, output_index, account_id, address, script, value_zat, address_id)
+                 VALUES (:id, :tx, 0, :account_id, 'taddr', X'00', 1000, :address_id)",
+                named_params! {
+                    ":id": output_id, ":tx": funding_tx,
+                    ":account_id": account_id.0, ":address_id": address_id,
+                },
+            )
+            .unwrap();
+        }
+        for (output_id, spender) in [(1, 3), (1, 4), (2, 3)] {
+            conn.execute(
+                "INSERT INTO transparent_received_output_spends
+                     (transparent_received_output_id, transaction_id)
+                 VALUES (:output, :spender)",
+                named_params! { ":output": output_id, ":spender": spender },
+            )
+            .unwrap();
+        }
+        for spender in [3, 4] {
+            conn.execute(
+                "INSERT INTO transparent_spend_map
+                     (spending_transaction_id, prevout_txid, prevout_output_index)
+                 VALUES (:spender, :prevout_txid, 0)",
+                named_params! { ":spender": spender, ":prevout_txid": &[2u8; 32][..] },
+            )
+            .unwrap();
+        }
+
+        let spenders_of = |tx_ref: i64| -> Vec<i64> {
+            let mut v: Vec<i64> =
+                super::get_txs_spending_transparent_outputs_of(conn, st.network(), TxRef(tx_ref))
+                    .unwrap()
+                    .into_iter()
+                    .map(|(r, _)| r.0)
+                    .collect();
+            v.sort_unstable();
+            v
+        };
+        // Both spenders, through the link for S1 and the spend-map row for S2.
+        assert_eq!(spenders_of(2), vec![3, 4]);
+        // Both are linked to A directly; nothing else is dragged in.
+        assert_eq!(spenders_of(1), vec![3, 4]);
+        assert_eq!(spenders_of(3), Vec::<i64>::new());
     }
 
     #[test]

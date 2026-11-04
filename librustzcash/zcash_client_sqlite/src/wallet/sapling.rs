@@ -344,6 +344,16 @@ pub(crate) fn ensure_address<
             .decrypt_diversifier(&to)
             .expect("address corresponds to account");
 
+        // The scan created this row when it first saw the note; reuse it.
+        if let Some(existing) = super::existing_address_at(
+            conn,
+            account.internal_id(),
+            diversifier_index,
+            exposure_height,
+        )? {
+            return Ok(Some(existing));
+        }
+
         let ua = account
             .uivk()
             .address(diversifier_index, UnifiedAddressRequest::ALLOW_ALL)?;

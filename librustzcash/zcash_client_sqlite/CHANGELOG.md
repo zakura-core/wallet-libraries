@@ -20,6 +20,7 @@ and this library adheres to Rust's notion of
 ### Changed
 
 - Gap-limit regeneration finds the start of the gap by probing the account's addresses of the requested scope through their indexes instead of materialising `v_address_first_use` over every received note in the wallet, and skips address derivation when the gap's addresses are already stored. The result is unchanged. The `transparent_gap_limit_handling` migration keeps the view-based search, which matches the schema at that point in the migration graph.
+- Storing a received Sapling or Orchard note looks up the note's address row by diversifier index before deriving its unified address, so the derivation runs only when the row is absent. The exposure-height update is unchanged.
 - Generating the crate's feature table now requires the optional
   `document-features` feature. Ordinary builds omit the documentation macro;
   docs.rs continues to include the table.
@@ -71,6 +72,10 @@ and this library adheres to Rust's notion of
   `From<rand_distr::ExpError>` conversion. Transparent-address check scheduling
   keeps the same exponential sampler in a private module, with `rand_distr`
   retained only as a test oracle.
+
+### Fixed
+
+- `WalletWrite::store_decrypted_tx` no longer re-reads and re-parses every fee-less transaction that spent any wallet transparent output on each call. The search for transactions spending the stored transaction's outputs correlated with that transaction only in the `ON` clause of a `LEFT OUTER JOIN`, which filtered nothing; it now returns only the transactions that spend an output of the stored transaction, found through the output's spend record or, for a spender stored before the output and not linked to it when the output arrived, through its `transparent_spend_map` row.
 
 ## [0.1.0-rc9.6] - 2026-10-30
 
