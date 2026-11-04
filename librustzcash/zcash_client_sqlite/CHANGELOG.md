@@ -16,6 +16,7 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- Storing a received Sapling or Orchard note looks up the note's address row by diversifier index before deriving its unified address, so the derivation runs only when the row is absent. The exposure-height update is unchanged.
 - Generating the crate's feature table now requires the optional
   `document-features` feature. Ordinary builds omit the documentation macro;
   docs.rs continues to include the table.
