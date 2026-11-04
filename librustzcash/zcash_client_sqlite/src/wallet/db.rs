@@ -233,6 +233,12 @@ CREATE TABLE "addresses" (
         (diversifier_index_be IS NULL) == (key_scope = -1)
     )
 )"#;
+pub(super) const INDEX_ADDRESSES_ACCOUNT_SCOPE_CHILD: &str = r#"
+CREATE INDEX idx_addresses_account_scope_child ON addresses (
+    account_id ASC,
+    key_scope ASC,
+    transparent_child_index ASC
+)"#;
 pub(super) const INDEX_ADDRESSES_ACCOUNTS: &str = r#"
 CREATE INDEX idx_addresses_accounts ON addresses (
     account_id ASC

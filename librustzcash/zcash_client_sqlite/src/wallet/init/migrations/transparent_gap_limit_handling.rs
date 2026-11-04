@@ -29,7 +29,9 @@ use {
         GapLimits,
         wallet::{
             encoding::{decode_diversifier_index_be, encode_diversifier_index_be, epoch_seconds},
-            transparent::{find_gap_start, generate_address_range_internal, next_check_time},
+            transparent::{
+                find_gap_start_via_address_uses, generate_address_range_internal, next_check_time,
+            },
         },
     },
     ::transparent::keys::{IncomingViewingKey as _, NonHardenedChildIndex},
@@ -756,7 +758,9 @@ impl<P: consensus::Parameters, C: Clock, R: Rng> RusqliteMigration for Migration
                     }
                 };
 
-                if let Some(gap_start) = find_gap_start(conn, account_id, key_scope, gap_limit)? {
+                if let Some(gap_start) =
+                    find_gap_start_via_address_uses(conn, account_id, key_scope, gap_limit)?
+                {
                     generate_address_range_internal(
                         conn,
                         &self.params,
