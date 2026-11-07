@@ -36,7 +36,7 @@ use crate::{
 /// This migration adds decryption key scope to persisted information about received notes.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xee89ed2b_c1c2_421e_9e98_c1e3e54a7fc2);
 
-const DEPENDENCIES: &[Uuid] = &[shardtree_support::MIGRATION_ID];
+pub(super) const DEPENDENCIES: &[Uuid] = &[shardtree_support::MIGRATION_ID];
 
 pub(super) struct Migration<P> {
     pub(super) params: P,
@@ -294,7 +294,7 @@ mod tests {
         },
         decrypt_transaction,
         proto::compact_formats::{CompactBlock, CompactTx},
-        scanning::{Nullifiers, ScanningKeys, scan_block},
+        scanning::{SpendIdentifiers, ScanningKeys, scan_block},
         wallet::WalletTx,
     };
     use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
@@ -348,7 +348,7 @@ mod tests {
             .conn
             .execute(
                 "INSERT INTO accounts (account, ufvk, birthday_height) VALUES (0, ?, ?)",
-                params![ufvk0.encode(&db_data.params), u32::from(height)],
+                params![ufvk0.encode(&db_data.params).unwrap(), u32::from(height)],
             )
             .unwrap();
         let sapling_dfvk = ufvk0.sapling().unwrap();
@@ -669,7 +669,7 @@ mod tests {
             &params,
             block,
             &scanning_keys,
-            &Nullifiers::empty(),
+            &SpendIdentifiers::empty(),
             Some(&BlockMetadata::from_parts(
                 height - 1,
                 prev_hash,
@@ -679,6 +679,8 @@ mod tests {
                 #[cfg(feature = "orchard")]
                 Some(0),
             )),
+            #[cfg(feature = "transparent-inputs")]
+            |_addr| Ok::<_, std::convert::Infallible>(None),
         )
         .unwrap();
 

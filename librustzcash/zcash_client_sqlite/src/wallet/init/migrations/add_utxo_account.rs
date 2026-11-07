@@ -26,7 +26,8 @@ use {
 /// This migration adds an account identifier column to the UTXOs table.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x761884d6_30d8_44ef_b204_0b82551c4ca1);
 
-const DEPENDENCIES: &[Uuid] = &[utxos_table::MIGRATION_ID, addresses_table::MIGRATION_ID];
+pub(super) const DEPENDENCIES: &[Uuid] =
+    &[utxos_table::MIGRATION_ID, addresses_table::MIGRATION_ID];
 
 pub(super) struct Migration<P> {
     pub(super) _params: P,
@@ -215,10 +216,10 @@ fn get_legacy_transparent_address<P: consensus::Parameters>(
 
     if let Some(uvk_str) = ufvk_str {
         let ufvk = UnifiedFullViewingKey::decode(params, &uvk_str)
-            .map_err(SqliteClientError::CorruptedData)?;
+            .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?;
 
         // Derive the default transparent address (if it wasn't already part of a derived UA).
-        ufvk.transparent()
+        ufvk.p2pkh()
             .map(|tfvk| {
                 tfvk.derive_external_ivk()
                     .map(|tivk| tivk.default_address())
