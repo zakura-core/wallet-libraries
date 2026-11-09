@@ -5,9 +5,6 @@ use transparent::address::{Script, TransparentAddress};
 use transparent::bundle::{OutPoint, TxOut};
 use transparent_pq_keys::{Branch, KeyOrigin, ParameterSet, PublicKey};
 use transparent_pq_pool::{AccountPool, Issued};
-use zcash_primitives::transaction::fees::FeeRule as _;
-use zcash_primitives::transaction::fees::transparent::InputSize;
-use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule};
 use zcash_primitives::transaction::{Transaction, TxVersion};
 use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
 use zcash_protocol::value::Zatoshis;
@@ -107,8 +104,6 @@ pub enum SpendError<E> {
     },
     /// An amount overflowed.
     Overflow,
-    /// The fee rule rejected the sizes.
-    Fee(FeeError),
     /// The change pool refused to issue a key or to take the signer's refill.
     Pool(transparent_pq_pool::Error),
     /// The signer returned no key for the next change index. Change never goes to a
@@ -157,7 +152,6 @@ impl<E: fmt::Display> fmt::Display for SpendError<E> {
                 u32::from(*target_height)
             ),
             Self::Overflow => f.write_str("amount overflow"),
-            Self::Fee(error) => write!(f, "fee: {error}"),
             Self::Pool(error) => write!(f, "change pool: {error}"),
             Self::ChangeKeyNotDerived => f.write_str("the signer did not derive a change key"),
             Self::Signer(error) => write!(f, "signer: {error}"),
@@ -183,7 +177,7 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for SpendError<E> {}
 /// signer derives the missing ones first in a separate call. The pool also receives
 /// the keys the signer returns for its refill ranges, which include the next change
 /// key, so that separate call is needed only while the change branch is empty. Save the pool's state before
-/// broadcasting. The fee is ZIP 317's conventional fee for the exact sizes.
+/// broadcasting. The fee uses Zakura's byte and verification-work policy.
 ///
 /// `pq_activation` is the height the PQ rules start applying at, which the node reads as
 /// `network.params.pq_activation_height`. Below it a PQ output is claimable by an empty
@@ -216,7 +210,7 @@ pub fn build_spend<P: Parameters, S: PqSigner>(
             Ok(PqDestination::single_signer(&input.public_key))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let input_sizes: Vec<usize> = scripts.iter().map(input_size).collect();
+    let input_sizes: Vec<InputCharge> = scripts.iter().map(InputCharge::for_destination).collect();
     let available = sum(inputs.iter().map(|input| input.value))?;
     let change_parameters = change_pool.state().parameters;
     let quote = price(
@@ -295,7 +289,7 @@ pub fn build_spend<P: Parameters, S: PqSigner>(
     if script_sigs
         .iter()
         .zip(&input_sizes)
-        .any(|(script_sig, &size)| txin_size(script_sig) != size)
+        .any(|(script_sig, &size)| txin_size(script_sig) != size.bytes)
     {
         return Err(SpendError::FeeChanged);
     }
@@ -333,7 +327,7 @@ pub fn quote_spend<P: Parameters>(
     if inputs.is_empty() {
         return Err(SpendError::NoInputs);
     }
-    let size = template_input_size(parameters);
+    let size = template_input_charge(parameters);
     let available = sum(inputs.iter().copied())?;
     price(
         params,
@@ -361,7 +355,7 @@ pub fn max_payment<P: Parameters>(
     let fee = fee_for(
         params,
         target_height,
-        &vec![template_input_size(parameters); inputs.len()],
+        &vec![template_input_charge(parameters); inputs.len()],
         &[TxOut::new(Zatoshis::ZERO, recipient.script())],
     )?;
     (available - fee).ok_or(SpendError::InsufficientFunds {
@@ -375,7 +369,7 @@ fn price<P: Parameters, E>(
     params: &P,
     target_height: BlockHeight,
     change_parameters: ParameterSet,
-    input_sizes: &[usize],
+    input_sizes: &[InputCharge],
     available: Zatoshis,
     payments: &[Payment],
 ) -> Result<Quote, SpendError<E>> {
@@ -409,33 +403,61 @@ fn price<P: Parameters, E>(
     Ok(Quote { fee, change })
 }
 
-/// ZIP 317's conventional fee for these input and output sizes.
-fn fee_for<P: Parameters, E>(
-    params: &P,
-    target_height: BlockHeight,
-    input_sizes: &[usize],
-    outputs: &[TxOut],
-) -> Result<Zatoshis, SpendError<E>> {
-    FeeRule::standard()
-        .fee_required(
-            params,
-            target_height,
-            input_sizes.iter().map(|&size| InputSize::Known(size)),
-            outputs.iter().map(output_size),
-            0,
-            0,
-            0,
-            0,
-        )
-        .map_err(SpendError::Fee)
+/// The byte and verification charges for a canonical single-signature input.
+#[derive(Clone, Copy)]
+struct InputCharge {
+    bytes: usize,
+    work: usize,
 }
 
-/// The size of an input spent by any key of `parameters`: the body and the signature
-/// both have a size fixed by the parameter set.
-fn template_input_size(parameters: ParameterSet) -> usize {
+impl InputCharge {
+    fn for_destination(destination: &PqDestination) -> Self {
+        Self {
+            bytes: input_size(destination),
+            work: match destination.parameters() {
+                ParameterSet::Sha2_128f => 60,
+                ParameterSet::Sha2_192s => 30,
+            },
+        }
+    }
+}
+
+/// Zakura's transparent fee: 400 zatoshis per action, charging the larger of
+/// serialized bytes and potential signature work, with a two-action minimum.
+/// The wallet only constructs canonical single-signature inputs; their byte
+/// charge exceeds their work charge, but both are accounted for explicitly.
+fn fee_for<P: Parameters, E>(
+    _params: &P,
+    _target_height: BlockHeight,
+    input_sizes: &[InputCharge],
+    outputs: &[TxOut],
+) -> Result<Zatoshis, SpendError<E>> {
+    let total = |values: &mut dyn Iterator<Item = usize>| {
+        let mut sum = 0usize;
+        for value in values {
+            sum = sum.checked_add(value).ok_or(SpendError::Overflow)?;
+        }
+        Ok(sum)
+    };
+    let input_bytes = total(&mut input_sizes.iter().map(|input| input.bytes))?;
+    let work = total(&mut input_sizes.iter().map(|input| input.work))?;
+    let output_bytes = total(&mut outputs.iter().map(output_size))?;
+    let actions = 2usize
+        .max(input_bytes.div_ceil(150))
+        .max(output_bytes.div_ceil(34))
+        .max(work);
+    let fee = u64::try_from(actions)
+        .ok()
+        .and_then(|actions| actions.checked_mul(400))
+        .ok_or(SpendError::Overflow)?;
+    Zatoshis::from_u64(fee).map_err(|_| SpendError::Overflow)
+}
+
+/// Every canonical input has one signature and a size fixed by its parameter set.
+fn template_input_charge(parameters: ParameterSet) -> InputCharge {
     let key = PublicKey::from_bytes(parameters, &vec![0; parameters.public_key_bytes()])
         .expect("a buffer of the parameter set's key length");
-    input_size(&PqDestination::single_signer(&key))
+    InputCharge::for_destination(&PqDestination::single_signer(&key))
 }
 
 /// The next unused change key, deriving the missing ones first if none is left.

@@ -92,14 +92,14 @@ fn unified_address() -> UnifiedAddress {
         .expect("an Orchard receiver is enough for a Unified Address")
 }
 
-/// ZIP 317's conventional fee, re-derived from the specification rather than from this
-/// crate's fee code: one logical action per 150 bytes of transparent inputs or outputs,
-/// whichever is larger, with two actions granted free.
+/// Independent byte-fee oracle: input actions use 150 bytes, output actions use
+/// 34 bytes, with a two-action minimum. Canonical PQ inputs are byte dominated.
 fn conventional_fee(input_bytes: usize, output_bytes: usize) -> u64 {
-    const MARGINAL_FEE: u64 = 5_000;
+    const MARGINAL_FEE: u64 = 400;
     const GRACE_ACTIONS: u64 = 2;
-    let actions = |bytes: usize| (bytes as u64).div_ceil(150);
-    MARGINAL_FEE * GRACE_ACTIONS.max(actions(input_bytes).max(actions(output_bytes)))
+    let input_actions = u64::try_from(input_bytes).unwrap().div_ceil(150);
+    let output_actions = u64::try_from(output_bytes).unwrap().div_ceil(34);
+    MARGINAL_FEE * GRACE_ACTIONS.max(input_actions.max(output_actions))
 }
 
 /// The serialized sizes of a transaction's transparent inputs and outputs.
@@ -196,7 +196,7 @@ fn a_spend_verifies_pays_conventional_fee_and_sends_change_to_the_next_key() {
         u64::from(spend.fee),
         conventional_fee(input_bytes, output_bytes)
     );
-    assert_eq!(u64::from(spend.fee), 115 * 5_000);
+    assert_eq!(u64::from(spend.fee), 115 * 400);
     // Change rotation leaves the receiving index alone.
     assert_eq!(change_pool.state().receive.issued_end, 0);
 }
@@ -297,7 +297,7 @@ fn dust_change_goes_to_the_fee_and_shortfalls_are_reported() {
         1,
     );
     // Fee without change: 115 actions (the input dominates the output count).
-    let exact_fee = 115 * 5_000;
+    let exact_fee = 115 * 400;
     let mut change_pool = pool(ParameterSet::Sha2_128f);
     let spend = build_spend(
         &network(),
@@ -327,73 +327,63 @@ fn dust_change_goes_to_the_fee_and_shortfalls_are_reported() {
 
 #[test]
 fn the_quote_matches_the_built_spend_and_max_leaves_no_change() {
-    let seed = seed();
-    let inputs = [
-        utxo(
-            &seed,
-            origin(ParameterSet::Sha2_128f, 0, Branch::Receive, 0),
-            2_000_000,
-            1,
-        ),
-        utxo(
-            &seed,
-            origin(ParameterSet::Sha2_128f, 0, Branch::Receive, 1),
-            900_000,
-            2,
-        ),
-    ];
-    let values: Vec<Zatoshis> = inputs.iter().map(|input| input.value).collect();
-    let quote_for = |value| {
-        quote_spend(
+    for parameters in [ParameterSet::Sha2_128f, ParameterSet::Sha2_192s] {
+        let seed = seed();
+        let inputs = [
+            utxo(
+                &seed,
+                origin(parameters, 0, Branch::Receive, 0),
+                2_000_000,
+                1,
+            ),
+            utxo(&seed, origin(parameters, 0, Branch::Receive, 1), 900_000, 2),
+        ];
+        let values: Vec<Zatoshis> = inputs.iter().map(|input| input.value).collect();
+        let quote_for =
+            |value| quote_spend(&network(), target(), parameters, &values, &[payment(value)]);
+        let build = |value| {
+            build_spend(
+                &network(),
+                target(),
+                activation(),
+                &inputs,
+                &[payment(value)],
+                &mut pool(parameters),
+                &mut SeedSigner::new(self::seed()),
+            )
+            .unwrap()
+        };
+
+        // With change, and with a remainder too small for change.
+        let max = max_payment(
             &network(),
             target(),
-            ParameterSet::Sha2_128f,
+            parameters,
             &values,
-            &[payment(value)],
+            &legacy_recipient(),
         )
-    };
-    let build = |value| {
-        build_spend(
-            &network(),
-            target(),
-            activation(),
-            &inputs,
-            &[payment(value)],
-            &mut pool(ParameterSet::Sha2_128f),
-            &mut SeedSigner::new(self::seed()),
-        )
-        .unwrap()
-    };
+        .unwrap();
+        for value in [500_000, u64::from(max) - 50] {
+            let quote = quote_for(value).unwrap();
+            let spend = build(value);
+            assert_eq!(quote.fee, spend.fee);
+            assert_eq!(
+                quote.change,
+                spend
+                    .change
+                    .map(|_| spend.transaction.transparent_bundle().unwrap().vout[1].value())
+            );
+        }
+        assert!(quote_for(u64::from(max) - 50).unwrap().change.is_none());
 
-    // With change, and with a remainder too small for change.
-    let max = max_payment(
-        &network(),
-        target(),
-        ParameterSet::Sha2_128f,
-        &values,
-        &legacy_recipient(),
-    )
-    .unwrap();
-    for value in [500_000, u64::from(max) - 50] {
-        let quote = quote_for(value).unwrap();
-        let spend = build(value);
-        assert_eq!(quote.fee, spend.fee);
-        assert_eq!(
-            quote.change,
-            spend
-                .change
-                .map(|_| spend.transaction.transparent_bundle().unwrap().vout[1].value())
-        );
+        let all = quote_for(u64::from(max)).unwrap();
+        assert_eq!(all.change, None);
+        assert_eq!(u64::from(all.fee) + u64::from(max), 2_900_000);
+        assert!(matches!(
+            quote_for(u64::from(max) + 1),
+            Err(SpendError::InsufficientFunds { .. })
+        ));
     }
-    assert!(quote_for(u64::from(max) - 50).unwrap().change.is_none());
-
-    let all = quote_for(u64::from(max)).unwrap();
-    assert_eq!(all.change, None);
-    assert_eq!(u64::from(all.fee) + u64::from(max), 2_900_000);
-    assert!(matches!(
-        quote_for(u64::from(max) + 1),
-        Err(SpendError::InsufficientFunds { .. })
-    ));
 }
 
 #[test]
@@ -810,4 +800,81 @@ fn a_non_minimal_push_of_the_body_fails_verification() {
         verify_inputs(network().network_type(), &transaction, &spend.spent),
         Err(VerifyError::Invalid(0))
     );
+}
+
+#[test]
+fn many_outputs_set_the_fee_for_both_signature_schemes() {
+    for parameters in [ParameterSet::Sha2_128f, ParameterSet::Sha2_192s] {
+        let payments: Vec<_> = (0..100)
+            .map(|_| Payment {
+                recipient: Recipient::Pq {
+                    parameters,
+                    commitment: [9; 32],
+                },
+                value: Zatoshis::const_from_u64(10_000),
+            })
+            .collect();
+        // Exactly 100 outputs, each 44 bytes, and no change: ceil(4400/34)=130.
+        let available = 1_052_000;
+        let quote = quote_spend(
+            &network(),
+            target(),
+            parameters,
+            &[Zatoshis::const_from_u64(available)],
+            &payments,
+        )
+        .unwrap();
+        assert_eq!(u64::from(quote.fee), 52_000);
+        assert_eq!(quote.change, None);
+        let input = utxo(
+            &seed(),
+            origin(parameters, 0, Branch::Receive, 0),
+            available,
+            42,
+        );
+        let spend = build_spend(
+            &network(),
+            target(),
+            activation(),
+            &[input],
+            &payments,
+            &mut pool(parameters),
+            &mut SeedSigner::new(seed()),
+        )
+        .unwrap();
+        assert_eq!(spend.fee, quote.fee);
+        assert!(spend.change.is_none());
+        let (inputs, outputs) = transparent_sizes(&spend.transaction);
+        assert_eq!(outputs, 4_400);
+        assert_eq!(u64::from(spend.fee), conventional_fee(inputs, outputs));
+    }
+}
+
+#[test]
+fn mixed_signature_schemes_pay_for_their_combined_input_bytes() {
+    let inputs: Vec<_> = [ParameterSet::Sha2_128f, ParameterSet::Sha2_192s]
+        .into_iter()
+        .zip([1, 2])
+        .map(|(parameters, tag)| {
+            utxo(
+                &seed(),
+                origin(parameters, 0, Branch::Receive, 0),
+                1_000_000,
+                tag,
+            )
+        })
+        .collect();
+    let spend = build_spend(
+        &network(),
+        target(),
+        activation(),
+        &inputs,
+        &[payment(1_000_000)],
+        &mut pool(ParameterSet::Sha2_128f),
+        &mut SeedSigner::new(seed()),
+    )
+    .unwrap();
+    let (inputs, outputs) = transparent_sizes(&spend.transaction);
+    assert_eq!(u64::from(spend.fee), conventional_fee(inputs, outputs));
+    assert!(spend.change.is_some());
 }

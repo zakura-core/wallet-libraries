@@ -47,10 +47,13 @@ address issued today is not durable.
    at, which the node reads as `network.params.pq_activation_height`; below it such an
    output is claimable by an empty scriptSig. `build_spend` takes that height and refuses
    rather than create one early.
-2. **Fee.** ZIP 317 from exact sizes. Each PQ input is its outpoint, its sequence, and a
-   scriptSig of `PUSHDATA2(signature ‖ 0x01)` followed by a direct push of the body, whose
-   size is fixed by the parameter set. Common's fee code cannot size these inputs itself, so
-   the builder passes the sizes in.
+2. **Fee.** Zakura charges 400 zatoshis per action, with a two-action minimum.
+   The action count is the largest of input bytes divided by 150 (rounded up), output
+   bytes divided by 34 (rounded up), and potential verification work. A canonical input
+   costs 60 work units for SHA2-128f or 30 for SHA2-192s; its byte charge is larger.
+   Input sizes include the outpoint, sequence and the exact signature and body pushes.
+   Quotes, signed spends and send-max use this same local policy; Common's upstream
+   fee defaults are unchanged.
 3. **Change.** What remains after payments and fee goes to the next change key from the
    pool, so a later spend of that change uses a key that has not signed before. Change below
    the node's dust threshold (57 zatoshis for a 35-byte PQ output) is left to the fee
