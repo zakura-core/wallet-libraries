@@ -327,73 +327,63 @@ fn dust_change_goes_to_the_fee_and_shortfalls_are_reported() {
 
 #[test]
 fn the_quote_matches_the_built_spend_and_max_leaves_no_change() {
-    let seed = seed();
-    let inputs = [
-        utxo(
-            &seed,
-            origin(ParameterSet::Sha2_128f, 0, Branch::Receive, 0),
-            2_000_000,
-            1,
-        ),
-        utxo(
-            &seed,
-            origin(ParameterSet::Sha2_128f, 0, Branch::Receive, 1),
-            900_000,
-            2,
-        ),
-    ];
-    let values: Vec<Zatoshis> = inputs.iter().map(|input| input.value).collect();
-    let quote_for = |value| {
-        quote_spend(
+    for parameters in [ParameterSet::Sha2_128f, ParameterSet::Sha2_192s] {
+        let seed = seed();
+        let inputs = [
+            utxo(
+                &seed,
+                origin(parameters, 0, Branch::Receive, 0),
+                2_000_000,
+                1,
+            ),
+            utxo(&seed, origin(parameters, 0, Branch::Receive, 1), 900_000, 2),
+        ];
+        let values: Vec<Zatoshis> = inputs.iter().map(|input| input.value).collect();
+        let quote_for =
+            |value| quote_spend(&network(), target(), parameters, &values, &[payment(value)]);
+        let build = |value| {
+            build_spend(
+                &network(),
+                target(),
+                activation(),
+                &inputs,
+                &[payment(value)],
+                &mut pool(parameters),
+                &mut SeedSigner::new(self::seed()),
+            )
+            .unwrap()
+        };
+
+        // With change, and with a remainder too small for change.
+        let max = max_payment(
             &network(),
             target(),
-            ParameterSet::Sha2_128f,
+            parameters,
             &values,
-            &[payment(value)],
+            &legacy_recipient(),
         )
-    };
-    let build = |value| {
-        build_spend(
-            &network(),
-            target(),
-            activation(),
-            &inputs,
-            &[payment(value)],
-            &mut pool(ParameterSet::Sha2_128f),
-            &mut SeedSigner::new(self::seed()),
-        )
-        .unwrap()
-    };
+        .unwrap();
+        for value in [500_000, u64::from(max) - 50] {
+            let quote = quote_for(value).unwrap();
+            let spend = build(value);
+            assert_eq!(quote.fee, spend.fee);
+            assert_eq!(
+                quote.change,
+                spend
+                    .change
+                    .map(|_| spend.transaction.transparent_bundle().unwrap().vout[1].value())
+            );
+        }
+        assert!(quote_for(u64::from(max) - 50).unwrap().change.is_none());
 
-    // With change, and with a remainder too small for change.
-    let max = max_payment(
-        &network(),
-        target(),
-        ParameterSet::Sha2_128f,
-        &values,
-        &legacy_recipient(),
-    )
-    .unwrap();
-    for value in [500_000, u64::from(max) - 50] {
-        let quote = quote_for(value).unwrap();
-        let spend = build(value);
-        assert_eq!(quote.fee, spend.fee);
-        assert_eq!(
-            quote.change,
-            spend
-                .change
-                .map(|_| spend.transaction.transparent_bundle().unwrap().vout[1].value())
-        );
+        let all = quote_for(u64::from(max)).unwrap();
+        assert_eq!(all.change, None);
+        assert_eq!(u64::from(all.fee) + u64::from(max), 2_900_000);
+        assert!(matches!(
+            quote_for(u64::from(max) + 1),
+            Err(SpendError::InsufficientFunds { .. })
+        ));
     }
-    assert!(quote_for(u64::from(max) - 50).unwrap().change.is_none());
-
-    let all = quote_for(u64::from(max)).unwrap();
-    assert_eq!(all.change, None);
-    assert_eq!(u64::from(all.fee) + u64::from(max), 2_900_000);
-    assert!(matches!(
-        quote_for(u64::from(max) + 1),
-        Err(SpendError::InsufficientFunds { .. })
-    ));
 }
 
 #[test]
