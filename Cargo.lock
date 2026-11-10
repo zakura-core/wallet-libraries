@@ -4263,7 +4263,7 @@ dependencies = [
  "bs58",
  "corez",
  "proptest",
- "zakura-protocol 5.4.0",
+ "zakura-protocol",
 ]
 
 [[package]]
@@ -4431,7 +4431,7 @@ dependencies = [
  "zakura-pir-protocol",
  "zakura-primitives",
  "zakura-proofs",
- "zakura-protocol 5.4.0",
+ "zakura-protocol",
  "zakura-sapling-crypto",
  "zakura-tor-rtcompat",
  "zakura-transparent",
@@ -4487,7 +4487,7 @@ dependencies = [
  "zakura-pczt",
  "zakura-primitives",
  "zakura-proofs",
- "zakura-protocol 5.4.0",
+ "zakura-protocol",
  "zakura-sapling-crypto",
  "zakura-transparent",
  "zakura-zip321",
@@ -4601,7 +4601,7 @@ dependencies = [
  "secrecy",
  "zakura-address",
  "zakura-orchard",
- "zakura-protocol 5.4.0",
+ "zakura-protocol",
  "zakura-sapling-crypto",
  "zakura-transparent",
  "zip32 0.2.1",
@@ -4612,7 +4612,7 @@ name = "zakura-near-intents"
 version = "0.0.1-rc5"
 dependencies = [
  "zakura-one-time-ivk",
- "zakura-protocol 5.4.0",
+ "zakura-protocol",
 ]
 
 [[package]]
@@ -4640,7 +4640,7 @@ dependencies = [
  "shardtree 0.7.1",
  "zakura-orchard",
  "zakura-pasta-curves",
- "zakura-protocol 5.4.0",
+ "zakura-protocol",
  "zeroize",
 ]
 
@@ -4666,7 +4666,7 @@ dependencies = [
  "zakura-pir-publisher",
  "zakura-pir-query-server",
  "zakura-primitives",
- "zakura-protocol 5.4.0",
+ "zakura-protocol",
  "zakura-sapling-crypto",
  "zakura-transparent",
  "zakura-zip321",
@@ -4765,7 +4765,7 @@ dependencies = [
  "zakura-pasta-curves",
  "zakura-primitives",
  "zakura-proofs",
- "zakura-protocol 5.4.0",
+ "zakura-protocol",
  "zakura-redjubjub",
  "zakura-sapling-crypto",
  "zakura-transparent",
@@ -4813,7 +4813,7 @@ dependencies = [
  "zakura-pir-query-server",
  "zakura-pir-server-core",
  "zakura-primitives",
- "zakura-protocol 5.4.0",
+ "zakura-protocol",
  "zakura-transparent",
 ]
 
@@ -4849,7 +4849,7 @@ dependencies = [
  "zakura-filters",
  "zakura-note-encryption",
  "zakura-orchard",
- "zakura-protocol 5.4.0",
+ "zakura-protocol",
  "zakura-transparent",
 ]
 
@@ -4916,7 +4916,7 @@ dependencies = [
  "zakura-jubjub",
  "zakura-note-encryption",
  "zakura-orchard",
- "zakura-protocol 5.4.0",
+ "zakura-protocol",
  "zakura-redjubjub",
  "zakura-sapling-crypto",
  "zakura-transparent",
@@ -4939,17 +4939,6 @@ dependencies = [
  "zakura-jubjub",
  "zakura-primitives",
  "zakura-sapling-crypto",
-]
-
-[[package]]
-name = "zakura-protocol"
-version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b28415ef2e0210e62bc4f9277a1d2878aecdcf13d71dc92aac5582a108cd1ff5"
-dependencies = [
- "corez",
- "hex",
- "nonempty",
 ]
 
 [[package]]
@@ -5937,8 +5926,7 @@ dependencies = [
  "sha2 0.10.9",
  "zakura-orchard",
  "zakura-primitives",
- "zakura-protocol 4.0.0",
- "zakura-protocol 5.4.0",
+ "zakura-protocol",
 ]
 
 [[package]]
@@ -5959,7 +5947,7 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "zakura-address",
- "zakura-protocol 5.4.0",
+ "zakura-protocol",
  "zakura-zcash-script",
  "zcash_spec",
  "zip32 0.2.1",
@@ -6000,7 +5988,7 @@ dependencies = [
  "zakura-pczt",
  "zakura-primitives",
  "zakura-proofs",
- "zakura-protocol 5.4.0",
+ "zakura-protocol",
  "zakura-reddsa",
  "zakura-redjubjub",
  "zakura-sapling-crypto",
@@ -6048,7 +6036,7 @@ dependencies = [
  "nom",
  "percent-encoding",
  "zakura-address",
- "zakura-protocol 5.4.0",
+ "zakura-protocol",
 ]
 
 [[package]]
