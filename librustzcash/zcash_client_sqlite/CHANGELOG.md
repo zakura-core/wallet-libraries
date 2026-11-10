@@ -7,6 +7,11 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- Use the Common 5.4.0 dependency family. Consumers sharing Common types must
+  update their dependencies to the compatible 5.x family.
+
 ### Added
 
 - Migration `transactions_mined_height_index` adds an index on
