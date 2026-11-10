@@ -87,6 +87,7 @@ jubjub = { package = "zakura-jubjub", version = "5.4.0" }
 zcash_address = { package = "zakura-address", version = "5.4.0" }
 zcash_protocol = { package = "zakura-protocol", version = "5.4.0" }
 transparent = { package = "zakura-transparent", version = "5.4.0" }
+zcash_script = { package = "zakura-zcash-script", version = "0.0.1" }
 zip321 = { package = "zakura-zip321", version = "5.4.0" }
 zcash_note_encryption = { package = "zakura-note-encryption", version = "5.4.0" }
 zcash_primitives = { package = "zakura-primitives", version = "5.4.0" }
@@ -116,7 +117,6 @@ rand_core = "0.10"
 rand_distr = "0.6"
 bip32 = "0.6"
 secp256k1 = "0.33"
-zcash_script = "0.6"
 # The backend uses only Optional, unchanged since 0.4. CompactSize's new write
 # bound does not affect the shard persistence codec.
 zcash_encoding = "0.5"
@@ -211,6 +211,7 @@ forbidden = [
   "zcash_address",
   "zcash_protocol",
   "zcash_transparent",
+  "zcash_script",
   "zip321",
   "halo2_proofs",
   "halo2_gadgets",

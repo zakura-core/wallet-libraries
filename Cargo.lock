@@ -4435,9 +4435,9 @@ dependencies = [
  "zakura-sapling-crypto",
  "zakura-tor-rtcompat",
  "zakura-transparent",
+ "zakura-zcash-script",
  "zakura-zip321",
  "zcash_encoding",
- "zcash_script",
  "zip32 0.2.1",
 ]
 
@@ -4490,8 +4490,8 @@ dependencies = [
  "zakura-protocol",
  "zakura-sapling-crypto",
  "zakura-transparent",
+ "zakura-zcash-script",
  "zakura-zip321",
- "zcash_script",
  "zewif",
  "zip32 0.2.1",
 ]
@@ -4769,7 +4769,7 @@ dependencies = [
  "zakura-redjubjub",
  "zakura-sapling-crypto",
  "zakura-transparent",
- "zcash_script",
+ "zakura-zcash-script",
  "zip32 0.2.1",
 ]
 
