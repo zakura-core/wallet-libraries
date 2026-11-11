@@ -7,10 +7,13 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9.7] - 2026-11-10
+
 ### Changed
 
 - Use the Common 5.4.0 dependency family. Consumers sharing Common types must
   update their dependencies to the compatible 5.x family.
+- Use backend and SQLite `0.1.0-rc9.7` and PCZT `0.1.0-rc9.1` for the Zakura backend.
 
 ## [0.1.0-rc9.6] - 2026-10-30
 

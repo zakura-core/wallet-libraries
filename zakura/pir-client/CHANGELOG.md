@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc6] - 2026-11-10
+
+### Changed
+
+- Use the Common 5.4.0 dependency family. Consumers sharing Common types must
+  update their dependencies to the compatible 5.x family.
+- Use PIR protocol, publisher, query server and server core `0.0.1-rc6`, and backend and SQLite `0.1.0-rc9.7`.
+
 ## [0.0.1-rc5] - 2026-10-30
 
 ### Changed

@@ -49,7 +49,7 @@ categories = ["cryptography::cryptocurrencies"]
 # Intra-workspace dependencies
 equihash = { version = "0.3", default-features = false }
 zcash_address = { version = "5.4.0", default-features = false, package = "zakura-address" }
-zcash_client_backend = { version = "0.1.0-rc9.6", path = "librustzcash/zcash_client_backend", package = "zakura-client-backend" }
+zcash_client_backend = { version = "0.1.0-rc9.7", path = "librustzcash/zcash_client_backend", package = "zakura-client-backend" }
 # zcash_encoding 0.5.0 is a breaking release (MSRV bump + `CompactSize::write` now
 # rejects values above `MAX_COMPACT_SIZE`). To avoid forcing every dependent to
 # migrate at once, the workspace default stays pinned to the published 0.4; only
@@ -66,7 +66,7 @@ zcash_note_encryption = { version = "5.4.0", package = "zakura-note-encryption" 
 zcash_primitives = { version = "5.4.0", default-features = false, package = "zakura-primitives" }
 zcash_proofs = { version = "5.4.0", default-features = false, package = "zakura-proofs" }
 
-pczt = { version = "0.1.0-rc9", path = "librustzcash/pczt", package = "zakura-pczt" }
+pczt = { version = "0.1.0-rc9.1", path = "librustzcash/pczt", package = "zakura-pczt" }
 
 # Shielded protocols
 bellman = { version = "5.4.0", default-features = false, features = ["groth16"], package = "zakura-bellman" }
@@ -190,11 +190,11 @@ incrementalmerkletree-testing = "0.3"
 # Tor
 # - `arti-client` depends on `rusqlite`, and a version mismatch there causes a compilation
 #   failure due to incompatible `libsqlite3-sys` versions.
-arti-client = { version = "=0.47.0-zakura.1", default-features = false, features = ["rustls", "tokio"], package = "zakura-arti-client", git = "https://github.com/zakura-core/arti.git", rev = "145e2136558c49692088b506f0ba6747772be2c2" }
+arti-client = { version = "=0.47.0-zakura.1", default-features = false, features = ["rustls", "tokio"], package = "zakura-arti-client" }
 dynosaur = "0.3"
-fs-mistrust = { version = "=0.16.0-zakura.1", package = "zakura-fs-mistrust", git = "https://github.com/zakura-core/arti.git", rev = "145e2136558c49692088b506f0ba6747772be2c2" }
+fs-mistrust = { version = "=0.16.0-zakura.1", package = "zakura-fs-mistrust" }
 tokio = "1"
-tor-rtcompat = { version = "=0.47.0-zakura.1", package = "zakura-tor-rtcompat", git = "https://github.com/zakura-core/arti.git", rev = "145e2136558c49692088b506f0ba6747772be2c2" }
+tor-rtcompat = { version = "=0.47.0-zakura.1", package = "zakura-tor-rtcompat" }
 tower = "0.5"
 trait-variant = "0.1"
 
