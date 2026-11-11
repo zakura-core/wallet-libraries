@@ -7,6 +7,13 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9.8] - 2026-11-11
+
+### Fixed
+
+- Use backend and SQLite `0.1.0-rc9.8`. The Zakura backend of `0.1.0-rc9.7`
+  could not be built from crates.io through those dependencies.
+
 ## [0.1.0-rc9.7] - 2026-11-10
 
 ### Changed

@@ -63,6 +63,9 @@
 #![cfg_attr(docsrs, doc(auto_cfg))]
 // Catch documentation errors caused by code changes.
 #![deny(rustdoc::broken_intra_doc_links)]
+// The embedded Arti futures behind the exchange-rate queries exceed rustc's
+// default query depth when `tor` is built without the TLS root features.
+#![cfg_attr(feature = "tor", recursion_limit = "256")]
 
 pub mod data_api;
 mod decrypt;

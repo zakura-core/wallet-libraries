@@ -7,6 +7,16 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9.8] - 2026-11-11
+
+### Fixed
+
+- Use PIR protocol `0.0.1-rc7`. `0.1.0-rc9.7` could not be built from crates.io
+  because its PIR protocol dependency called a filter function missing from the
+  published filter codec.
+- The `tor` feature builds without the TLS root features again. In `0.1.0-rc9.7`
+  the embedded Arti exchange-rate futures exceeded rustc's default query depth.
+
 ## [0.1.0-rc9.7] - 2026-11-10
 
 ### Added

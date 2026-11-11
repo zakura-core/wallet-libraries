@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc7] - 2026-11-11
+
+### Fixed
+
+- Use filters `0.0.1-rc1`. `0.0.1-rc6` pinned filters `0.0.1-rc0`, which lacks
+  the `hash_to_range` mapping its filter matching calls, so it could not be
+  built from crates.io with default features.
+
 ## [0.0.1-rc6] - 2026-11-10
 
 ### Changed

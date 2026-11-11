@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc7] - 2026-11-11
+
+### Changed
+
+- Use PIR protocol, publisher, query server and server core `0.0.1-rc7`, and
+  backend and SQLite `0.1.0-rc9.8`.
+
 ## [0.0.1-rc6] - 2026-11-10
 
 ### Changed

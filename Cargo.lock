@@ -4377,7 +4377,7 @@ checksum = "2b842aa7c0887ea2c662dd1124916cacc80592cc4d9888dabe081a8b922f8a67"
 
 [[package]]
 name = "zakura-client-backend"
-version = "0.1.0-rc9.7"
+version = "0.1.0-rc9.8"
 dependencies = [
  "assert_matches",
  "async-trait",
@@ -4445,7 +4445,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-sqlite"
-version = "0.1.0-rc9.7"
+version = "0.1.0-rc9.8"
 dependencies = [
  "assert_matches",
  "bech32",
@@ -4510,7 +4510,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-filters"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "siphasher",
 ]
@@ -4778,7 +4778,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-client"
-version = "0.0.1-rc6"
+version = "0.0.1-rc7"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -4822,7 +4822,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-config"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "hex",
  "serde",
@@ -4835,7 +4835,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-protocol"
-version = "0.0.1-rc6"
+version = "0.0.1-rc7"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -4858,7 +4858,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-publisher"
-version = "0.0.1-rc6"
+version = "0.0.1-rc7"
 dependencies = [
  "hex",
  "incrementalmerkletree 0.8.2",
@@ -4873,7 +4873,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-query-server"
-version = "0.0.1-rc6"
+version = "0.0.1-rc7"
 dependencies = [
  "hex",
  "rayon",
@@ -4887,7 +4887,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-server-core"
-version = "0.0.1-rc6"
+version = "0.0.1-rc7"
 dependencies = [
  "hex",
  "rand 0.8.8",
@@ -6002,7 +6002,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-wallet-lib"
-version = "0.1.0-rc9.7"
+version = "0.1.0-rc9.8"
 dependencies = [
  "orchard",
  "pczt",
