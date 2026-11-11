@@ -81,21 +81,22 @@ version = "0.1.0-rc9.6"
 # The upstream dependency key is kept, so crate sources continue to say
 # `orchard::` and `zcash_primitives::` while resolving to the forks.
 [rewire]
-bellman = { package = "zakura-bellman", version = "4.0.0" }
-bls12_381 = { package = "zakura-bls12-381", version = "4.0.0" }
-jubjub = { package = "zakura-jubjub", version = "4.0.0" }
-zcash_address = { package = "zakura-address", version = "4.0.0" }
-zcash_protocol = { package = "zakura-protocol", version = "4.0.0" }
-transparent = { package = "zakura-transparent", version = "4.0.0" }
-zip321 = { package = "zakura-zip321", version = "4.0.0" }
-zcash_note_encryption = { package = "zakura-note-encryption", version = "4.0.0" }
-zcash_primitives = { package = "zakura-primitives", version = "4.0.0" }
-zcash_keys = { package = "zakura-keys", version = "4.0.0" }
-zcash_proofs = { package = "zakura-proofs", version = "4.0.0" }
-orchard = { features = ["backend-halo2"], package = "zakura-orchard", version = "4.0.0" }
-sapling = { package = "zakura-sapling-crypto", version = "4.0.0" }
-redjubjub = { package = "zakura-redjubjub", version = "4.0.0" }
-pasta_curves = { package = "zakura-pasta-curves", version = "4.0.0" }
+bellman = { package = "zakura-bellman", version = "5.4.0" }
+bls12_381 = { package = "zakura-bls12-381", version = "5.4.0" }
+jubjub = { package = "zakura-jubjub", version = "5.4.0" }
+zcash_address = { package = "zakura-address", version = "5.4.0" }
+zcash_protocol = { package = "zakura-protocol", version = "5.4.0" }
+transparent = { package = "zakura-transparent", version = "5.4.0" }
+zcash_script = { package = "zakura-zcash-script", version = "0.0.1" }
+zip321 = { package = "zakura-zip321", version = "5.4.0" }
+zcash_note_encryption = { package = "zakura-note-encryption", version = "5.4.0" }
+zcash_primitives = { package = "zakura-primitives", version = "5.4.0" }
+zcash_keys = { package = "zakura-keys", version = "5.4.0" }
+zcash_proofs = { package = "zakura-proofs", version = "5.4.0" }
+orchard = { features = ["backend-halo2"], package = "zakura-orchard", version = "5.4.0" }
+sapling = { package = "zakura-sapling-crypto", version = "5.4.0" }
+redjubjub = { package = "zakura-redjubjub", version = "5.4.0" }
+pasta_curves = { package = "zakura-pasta-curves", version = "5.4.0" }
 # Scan workers use sync and async channels, not Flume's selector.
 flume = { version = "0.11", default-features = false, features = ["async"] }
 
@@ -116,7 +117,6 @@ rand_core = "0.10"
 rand_distr = "0.6"
 bip32 = "0.6"
 secp256k1 = "0.33"
-zcash_script = "0.6"
 # The backend uses only Optional, unchanged since 0.4. CompactSize's new write
 # bound does not affect the shard persistence codec.
 zcash_encoding = "0.5"
@@ -211,6 +211,7 @@ forbidden = [
   "zcash_address",
   "zcash_protocol",
   "zcash_transparent",
+  "zcash_script",
   "zip321",
   "halo2_proofs",
   "halo2_gadgets",

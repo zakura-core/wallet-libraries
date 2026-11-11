@@ -9,6 +9,11 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- Use the Common 5.4.0 dependency family. Consumers sharing Common types must
+  update their dependencies to the compatible 5.x family.
+
+### Changed
+
 - The `std` feature no longer enables `document-features`. Generating the
   crate's feature table requires both features; docs.rs continues to include
   the table. PCZT types, encodings, and `no_std` support are unchanged.

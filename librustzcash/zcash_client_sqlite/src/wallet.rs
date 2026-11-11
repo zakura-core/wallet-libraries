@@ -1038,8 +1038,10 @@ pub(crate) fn import_standalone_transparent_script<P: consensus::Parameters>(
         }
     }
 
-    let script_pubkey = sh(&redeem_script);
-    // `sh()` always produces a valid P2SH scriptPubKey, so `from_script_pubkey`
+    let script_pubkey = sh(&redeem_script).map_err(|error| {
+        SqliteClientError::BadAccountData(format!("Invalid P2SH redeem script: {error}"))
+    })?;
+    // A successful `sh()` produces a valid P2SH scriptPubKey, so `from_script_pubkey`
     // should always succeed here. This is a defensive check.
     let addr = TransparentAddress::from_script_pubkey(&script_pubkey).ok_or_else(|| {
         SqliteClientError::CorruptedData(
