@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Publish the wallet release in dependency order; dry-run unless --publish is given."""
 import argparse
+import io
 import json
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import tomllib
@@ -134,6 +136,84 @@ def wait_for_publication(name, version):
         time.sleep(5)
 
 
+# Cargo rewrites Cargo.toml and regenerates these files on every packaging run,
+# and normalization differs between Cargo versions. Cargo.toml.orig keeps the
+# authored manifest, so it is still compared.
+GENERATED_PACKAGE_FILES = frozenset({"Cargo.toml", "Cargo.lock", ".cargo_vcs_info.json"})
+
+
+def crate_files(data, name, version):
+    """Map each archived path, minus its top directory, to its bytes, without extracting.
+
+    Generated files are left out (see `GENERATED_PACKAGE_FILES`). Non-file
+    entries map to their tar type, so they still compare by presence and kind.
+    """
+    prefix = f"{name}-{version}/"
+    files = {}
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            for member in archive:
+                if not member.name.startswith(prefix):
+                    raise ReleaseError(f"{name} {version} has an unexpected archive entry: {member.name}.")
+                path = member.name.removeprefix(prefix)
+                if path in GENERATED_PACKAGE_FILES or member.isdir():
+                    continue
+                files[path] = archive.extractfile(member).read() if member.isfile() else member.type
+    except (tarfile.TarError, EOFError, OSError) as error:
+        raise ReleaseError(f"Cannot read the {name} {version} archive: {type(error).__name__}.") from None
+    return files
+
+
+def registry_crate(name, version):
+    """Download the published .crate archive for one version."""
+    request = urllib.request.Request(
+        f"https://static.crates.io/crates/{name}/{name}-{version}.crate",
+        headers={"User-Agent": "wallet-libraries-release-script"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.read()
+    except urllib.error.HTTPError as error:
+        raise ReleaseError(f"Cannot download {name} {version}: registry HTTP {error.code}.") from None
+    except (urllib.error.URLError, TimeoutError) as error:
+        raise ReleaseError(f"Cannot download {name} {version}: {type(error).__name__}.") from None
+
+
+def check_published_sources(root, target, packages, published):
+    """Refuse a release whose already published versions differ from this checkout.
+
+    Packages every selected crate without building (so local dependencies
+    resolve through Cargo's overlay), then compares each name in `published`
+    with its crates.io archive. A changed crate that keeps its version would
+    otherwise pass verification against local sources and break on crates.io.
+    """
+    if not published:
+        return
+    command = ["cargo", "package", "--manifest-path", str(root / "Cargo.toml"),
+               "--target-dir", str(target), "--no-verify", "--locked"]
+    for package in packages:
+        command.extend(["--package", package["name"]])
+    print("Package selected crates to compare published versions with this checkout.", flush=True)
+    subprocess.run(command, cwd=root, check=True)
+    changed = []
+    for package in packages:
+        name, version = package["name"], package["version"]
+        if name not in published:
+            continue
+        local_path = Path(target) / "package" / f"{name}-{version}.crate"
+        local = crate_files(local_path.read_bytes(), name, version)
+        remote = crate_files(registry_crate(name, version), name, version)
+        differing = sorted(path for path in local.keys() | remote.keys()
+                           if local.get(path) != remote.get(path))
+        if differing:
+            changed.append(f"{name} {version} ({', '.join(differing)})")
+        else:
+            print(f"Published sources match: {name} {version}", flush=True)
+    if changed:
+        raise ReleaseError("Already published versions differ from this checkout: " + "; ".join(changed)
+                           + ". Bump each changed crate's version and the requirements on it.")
+
+
 def output_path(root, path):
     if path is None:
         return None
@@ -202,6 +282,7 @@ def run_release(root, publish=False, plan=False,
     print(f"Release commit: {head}", flush=True)
     print("Mode: " + ("plan only" if plan else "publish" if publishing else "dry run"), flush=True)
     missing = []
+    published = set()
     for name, version in upstream:
         status = registry_version(name, version)
         print(f"Upstream: {name} {version}: {status}", flush=True)
@@ -211,6 +292,8 @@ def run_release(root, publish=False, plan=False,
         name, version = package["name"], package["version"]
         status = observe_package(record, receipt, output)
         print(f"Release: {name} {version}: {status}", flush=True)
+        if status == "available":
+            published.add(name)
     if missing:
         raise ReleaseError("Publish the required upstream versions first: " + ", ".join(missing) + ".")
     if plan:
@@ -218,10 +301,15 @@ def run_release(root, publish=False, plan=False,
     # A fresh target directory belongs exclusively to this invocation. No shared
     # dev.py build lease or source-tree target is touched by Cargo packaging.
     with tempfile.TemporaryDirectory(prefix="wallet-crate-release-") as target:
+        # A verified receipt already passed this check for the same commit.
+        if publish_verified is None:
+            check_checkout(root, head)
+            check_published_sources(root, Path(target) / "published-sources", packages, published)
         if not publishing:
             # Cargo overlays all selected .crate archives on the registry while
             # verifying, so unpublished workspace versions can resolve each other.
-            # Include published versions too: the goal is to verify this checkout.
+            # Include published versions too: the goal is to verify this checkout,
+            # which check_published_sources has matched against those archives.
             command = ["cargo", "publish", "--manifest-path", str(root / "Cargo.toml"),
                        "--registry", "crates-io", "--target-dir", target,
                        "--dry-run", "--keep-going", "--locked"]
