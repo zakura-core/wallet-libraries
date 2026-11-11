@@ -298,8 +298,14 @@ publishing dry run before it is uploaded. It waits for the version to appear
 on crates.io before moving on, and stops on the first error. Rerun the same
 command after resolving a failure: versions already available are skipped.
 A yanked version or a dirty or changed checkout stops the release. Already
-published versions are skipped by name and version; the script does not claim
-that their contents match this checkout.
+published versions are skipped, but only after their sources match this
+checkout. The script packages the selected crates without building, downloads
+each published `.crate` and compares the files, including `Cargo.toml.orig`.
+It ignores `Cargo.lock` and `.cargo_vcs_info.json`, which Cargo regenerates.
+From the generated `Cargo.toml` it compares only what workspace inheritance can
+change: edition, `rust-version`, `links`, features and dependency declarations.
+A difference stops the release and names the files. Bump that
+crate's version, and the requirements on it, rather than reusing a published one.
 
 Verify packages without uploading (also the default when no mode is specified):
 
@@ -308,7 +314,8 @@ python3 scripts/publish-crates.py --dry-run
 ```
 
 `--plan`, `--dry-run`, and `--publish` are mutually exclusive. Dry-run mode
-verifies every selected crate together, including versions already published.
+verifies every selected crate together, including versions already published,
+after the source comparison above.
 Cargo temporarily overlays the packaged workspace crates on the registry, so
 unpublished local dependencies do not block verification. It uses `--keep-going`
 to continue independent build verification after failures and uploads nothing.
@@ -325,7 +332,8 @@ registry versions and confirm the corresponding changelog dates.
 `--output PATH` writes a JSON receipt and partial progress outside the checkout.
 CI uses `--publish-verified RECEIPT` instead of `--publish` to upload without
 recompiling only after checking a successful receipt against the clean checkout,
-commit, selection, and ordered versions. Ordinary `--publish` retains its dry-run
+commit, selection, and ordered versions, so it relies on that run's source
+comparison. Ordinary `--publish` retains its source comparison and dry-run
 checks before uploads. Every packaging command uses `--locked`; release commands
 must not rewrite the workspace lockfile.
 

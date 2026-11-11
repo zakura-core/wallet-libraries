@@ -1,7 +1,9 @@
 import importlib.util
+import io
 from pathlib import Path
 import subprocess
 import json
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,6 +18,17 @@ def package(name, dependencies=None):
             "manifest": {"dependencies": dependencies or {}}}
 
 
+def crate_archive(name, files, version="1.0.0"):
+    """Build an in-memory .crate archive holding `files` under `<name>-<version>/`."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for path, content in files.items():
+            info = tarfile.TarInfo(f"{name}-{version}/{path}")
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+    return buffer.getvalue()
+
+
 class PublishingTests(unittest.TestCase):
     def run_with(self, packages, statuses, **options):
         wait_error = options.pop("wait_error", None)
@@ -24,8 +37,10 @@ class PublishingTests(unittest.TestCase):
              patch.object(release, "release_packages", return_value=(packages, options.pop("upstream", []))), \
              patch.object(release, "registry_version", side_effect=lambda name, version: statuses[name]), \
              patch.object(release, "wait_for_publication", side_effect=wait_error), \
+             patch.object(release, "check_published_sources") as sources, \
              patch.object(release.subprocess, "run") as cargo:
             release.run_release(Path("."), **options)
+            self.published_checks = sources.call_args_list
             return cargo.call_args_list
 
     def test_uploads_follow_successful_dry_runs_in_dependency_order(self):
@@ -68,6 +83,100 @@ class PublishingTests(unittest.TestCase):
         self.assertIn("--keep-going", command)
         self.assertEqual(command[-4:], ["--package", "first", "--package", "second"])
         self.assertNotIn("--all-features", command)
+
+    def check_sources(self, local, remote, selection=None, published=("first",)):
+        """Run the published-source check with fixture archives instead of Cargo and crates.io."""
+        selection = selection or [package("first")]
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            (target / "package").mkdir()
+            for name, files in local.items():
+                (target / "package" / f"{name}-1.0.0.crate").write_bytes(crate_archive(name, files))
+            with patch.object(release.subprocess, "run") as cargo, \
+                 patch.object(release, "registry_crate",
+                              side_effect=lambda name, version: crate_archive(name, remote[name])) as registry:
+                release.check_published_sources(Path("."), target, selection, set(published))
+                return cargo, registry
+
+    def test_published_sources_match_despite_generated_files(self):
+        sources = {"Cargo.toml.orig": b"[package]\n", "src/lib.rs": b"pub fn f() {}\n"}
+        # Cargo regenerates these differently across versions and runs. Only the
+        # normalized manifest's spelling differs here, not its dependency contract.
+        local = {**sources, "Cargo.lock": b"new", ".cargo_vcs_info.json": b'{"sha1": "new"}',
+                 "Cargo.toml": b'[package]\nname = "first"\nedition = "2024"\nautolib = false\n'
+                               b'[features]\nall = ["b", "a"]\n'
+                               b'[dependencies.serde]\nversion = "1"\ndefault-features = false\n'
+                               b'features = ["std", "derive"]\n'}
+        remote = {**sources, "Cargo.lock": b"old", ".cargo_vcs_info.json": b'{"sha1": "old"}',
+                  "Cargo.toml": b'# Generated\n[package]\nedition = "2024"\nname = "first"\n'
+                                b'[features]\nall = ["a", "b"]\n'
+                                b'[dependencies]\nserde = { version = "1", default_features = false, '
+                                b'features = ["derive", "std"] }\n'}
+        cargo, registry = self.check_sources({"first": local, "second": {}}, {"first": remote},
+                                             selection=[package("first"), package("second")])
+        command = cargo.call_args.args[0]
+        self.assertEqual(command[:2], ["cargo", "package"])
+        self.assertIn("--no-verify", command)
+        self.assertIn("--locked", command)
+        self.assertEqual(command[-4:], ["--package", "first", "--package", "second"])
+        # Only the already published package is downloaded.
+        registry.assert_called_once_with("first", "1.0.0")
+
+    def test_changed_published_sources_name_the_package_and_files(self):
+        local = {"Cargo.toml.orig": b"[package]\nedition = 2024\n", "src/lib.rs": b"pub fn hash_to_range() {}\n",
+                 "src/new.rs": b"", "README.md": b"same"}
+        remote = {"Cargo.toml.orig": b"[package]\n", "src/lib.rs": b"", "src/old.rs": b"", "README.md": b"same"}
+        with self.assertRaises(release.ReleaseError) as error:
+            self.check_sources({"first": local}, {"first": remote})
+        message = str(error.exception)
+        self.assertIn("first 1.0.0 (Cargo.toml.orig, src/lib.rs, src/new.rs, src/old.rs)", message)
+        self.assertNotIn("README.md", message)
+        self.assertIn("Bump", message)
+
+    def test_changed_workspace_inheritance_is_caught_in_the_normalized_manifest(self):
+        # The authored manifest says `workspace = true` in both, so only Cargo.toml shows the change.
+        sources = {"Cargo.toml.orig": b'[dependencies]\nzcash_protocol = { workspace = true }\n'}
+        published = b'[package]\nrust-version = "1.97"\n[dependencies.zcash_protocol]\nversion = "0.7"\n'
+        for manifest in (b'[package]\nrust-version = "1.97"\n[dependencies.zcash_protocol]\nversion = "0.8"\n',
+                         b'[package]\nrust-version = "1.98"\n[dependencies.zcash_protocol]\nversion = "0.7"\n',
+                         b'[package]\nrust-version = "1.97"\n[target."cfg(unix)".dependencies.zcash_protocol]\n'
+                         b'version = "0.7"\n'):
+            with self.subTest(manifest=manifest), self.assertRaisesRegex(
+                    release.ReleaseError, r"first 1\.0\.0 \(Cargo\.toml \(resolved dependencies or build settings\)\)"):
+                self.check_sources({"first": {**sources, "Cargo.toml": manifest}},
+                                   {"first": {**sources, "Cargo.toml": published}})
+
+    def test_no_published_versions_skip_packaging_and_downloads(self):
+        cargo, registry = self.check_sources({}, {}, published=())
+        cargo.assert_not_called()
+        registry.assert_not_called()
+
+    def test_archive_entries_outside_the_crate_directory_are_refused(self):
+        with self.assertRaisesRegex(release.ReleaseError, "unexpected archive entry"):
+            release.crate_files(crate_archive("other", {"src/lib.rs": b""}), "first", "1.0.0")
+
+    def test_dry_run_and_publish_compare_published_versions_first(self):
+        for options in ({}, {"publish": True}):
+            with self.subTest(options=options):
+                self.run_with([package("first"), package("second")],
+                              {"first": "available", "second": "absent"}, **options)
+                self.assertEqual(len(self.published_checks), 1)
+                self.assertEqual(self.published_checks[0].args[3], {"first"})
+
+    def test_changed_published_version_stops_before_cargo_verification(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(release, "git", return_value="commit"), \
+             patch.object(release, "check_checkout"), \
+             patch.object(release, "release_packages", return_value=([package("first")], [])), \
+             patch.object(release, "registry_version", return_value="available"), \
+             patch.object(release, "check_published_sources", side_effect=release.ReleaseError("differ")), \
+             patch.object(release.subprocess, "run") as cargo:
+            output = Path(directory) / "progress.json"
+            for options in ({}, {"publish": True}):
+                with self.subTest(options=options), self.assertRaises(release.ReleaseError):
+                    release.run_release(Path("."), output=output, **options)
+                self.assertIs(json.loads(output.read_text())["verification_passed"], False)
+            cargo.assert_not_called()
 
     def test_publish_resume_skips_already_published_versions(self):
         calls = self.run_with([package("first"), package("second")],
@@ -309,6 +418,8 @@ class PublishingTests(unittest.TestCase):
                 self.assertNotIn("--dry-run", command)
             self.assertEqual([p["result"] for p in json.loads(output.read_text())["packages"]],
                              ["published", "published"])
+            # The receipt's dry run already compared published versions.
+            self.assertEqual(self.published_checks, [])
 
     def test_bad_receipts_stop_before_registry_queries_or_uploads(self):
         packages = [package("first"), package("second")]
