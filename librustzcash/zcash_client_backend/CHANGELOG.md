@@ -7,10 +7,7 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
-### Changed
-
-- Use the Common 5.4.0 dependency family. Consumers sharing Common types must
-  update their dependencies to the compatible 5.x family.
+## [0.1.0-rc9.7] - 2026-11-10
 
 ### Added
 
@@ -24,6 +21,9 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- Use the Common 5.4.0 dependency family. Consumers sharing Common types must
+  update their dependencies to the compatible 5.x family.
+- Use PIR protocol `0.0.1-rc6`, one-time IVK `0.0.1-rc5` and PCZT `0.1.0-rc9.1`.
 - Generating the crate's feature table now requires the optional
   `document-features` feature. Ordinary builds omit the documentation macro;
   docs.rs continues to include the table.

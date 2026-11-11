@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2 - 2026-11-10
+
+- Use PIR protocol `0.0.1-rc6`.
+
 ## 0.1.1 - 2026-10-30
 
 - Use PIR protocol `0.0.1-rc5`.

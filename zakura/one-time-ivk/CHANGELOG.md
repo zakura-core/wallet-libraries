@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc5] - 2026-11-10
+
+### Changed
+
+- Use the Common 5.4.0 dependency family. Consumers sharing Common types must
+  update their dependencies to the compatible 5.x family.
+
 ## [0.0.1-rc4] - 2026-10-23
 
 ### Changed

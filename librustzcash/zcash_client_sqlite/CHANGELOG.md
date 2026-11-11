@@ -7,10 +7,7 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
-### Changed
-
-- Use the Common 5.4.0 dependency family. Consumers sharing Common types must
-  update their dependencies to the compatible 5.x family.
+## [0.1.0-rc9.7] - 2026-11-10
 
 ### Added
 
@@ -24,6 +21,9 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
+- Use the Common 5.4.0 dependency family. Consumers sharing Common types must
+  update their dependencies to the compatible 5.x family.
+- Use backend `0.1.0-rc9.7`, one-time IVK `0.0.1-rc5` and PCZT `0.1.0-rc9.1`.
 - Gap-limit regeneration finds the start of the gap by probing the account's addresses of the requested scope through their indexes instead of materialising `v_address_first_use` over every received note in the wallet, and skips address derivation when the gap's addresses are already stored. The result is unchanged. The `transparent_gap_limit_handling` migration keeps the view-based search, which matches the schema at that point in the migration graph.
 - Storing a received Sapling or Orchard note looks up the note's address row by diversifier index before deriving its unified address, so the derivation runs only when the row is absent. The exposure-height update is unchanged.
 - Generating the crate's feature table now requires the optional

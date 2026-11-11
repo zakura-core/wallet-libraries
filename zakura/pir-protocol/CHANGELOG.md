@@ -2,8 +2,12 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc6] - 2026-11-10
+
 ### Changed
 
+- Use the Common 5.4.0 dependency family. Consumers sharing Common types must
+  update their dependencies to the compatible 5.x family.
 - Transparent and Receiver filter matching share the codec's SipHash-2-4
   mapping, removing Bitcoin hash/I/O wrapper dependencies. Filter bytes, keys,
   mapped values and membership behavior are unchanged.
