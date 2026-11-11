@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc1] - 2026-11-11
+
 ### Added
 
 - `hash_to_range`, the shared BIP 158 SipHash-2-4 mapping used by encoding and
