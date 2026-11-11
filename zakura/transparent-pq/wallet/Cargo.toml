@@ -1,0 +1,32 @@
+[package]
+name = "transparent-pq-wallet"
+version = "0.1.0"
+description = "PQ transparent outputs, their Unified Address receiver, and signed spends with fresh PQ change"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+# Builds on the unpublished key derivation and the git-pinned Common PQ rules.
+publish = false
+
+[dependencies]
+transparent = { workspace = true, features = ["std", "pq"] }
+transparent-pq-keys = { path = "../keys" }
+transparent-pq-pool = { path = "../pool" }
+zcash_address = { workspace = true, features = ["std"] }
+zcash_keys = { workspace = true, features = ["std", "orchard", "backend-halo2"] }
+zcash_primitives = { workspace = true, features = ["std", "pq", "backend-halo2"] }
+zcash_protocol.workspace = true
+zcash_script.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+# A real Orchard receiver, so a Unified Address carrying a PQ receiver can be encoded.
+orchard = { workspace = true, features = ["backend-halo2", "wallet", "zip32-addresses"] }
+serde_json.workspace = true
+tempfile.workspace = true
+zcash_protocol = { workspace = true, features = ["local-consensus"] }
+
+[lints]
+workspace = true

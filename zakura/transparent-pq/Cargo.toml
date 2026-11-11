@@ -1,0 +1,46 @@
+# The post-quantum transparent crates are their own workspace.
+#
+# They need Common 5, which is not published yet, and the wallet workspace next door
+# resolves the published Common 4 releases. One graph cannot hold both: two versions of a
+# zakura fork in the same build is exactly what `scripts/verify-zakura-graph.sh` refuses,
+# because the two sets of types meet in whichever consumer uses both and the failure
+# surfaces far from its cause. So these crates resolve on their own, with their own lock
+# file, and nothing in the wallet workspace depends on them. Fold them back into it when
+# Common 5 is published and the whole repository moves to it together.
+[workspace]
+members = ["keys", "pool", "wallet"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.97"
+repository = "https://github.com/zakura-core/wallet-libraries"
+license = "MIT OR Apache-2.0"
+categories = ["cryptography::cryptocurrencies"]
+
+[workspace.dependencies]
+# The Common revision is the head of Common PR #724, the branch the Zakura post-quantum
+# node (#2186) also builds against. Repin to the crates.io release once Common 5 ships.
+transparent = { package = "zakura-transparent", version = "=5.3.0", git = "https://github.com/zakura-core/common.git", rev = "334aeae3772f0e74bbef930da73b1433753765a1", default-features = false }
+zcash_address = { package = "zakura-address", version = "=5.3.0", git = "https://github.com/zakura-core/common.git", rev = "334aeae3772f0e74bbef930da73b1433753765a1", default-features = false }
+zcash_keys = { package = "zakura-keys", version = "=5.3.0", git = "https://github.com/zakura-core/common.git", rev = "334aeae3772f0e74bbef930da73b1433753765a1", default-features = false }
+zcash_primitives = { package = "zakura-primitives", version = "=5.3.0", git = "https://github.com/zakura-core/common.git", rev = "334aeae3772f0e74bbef930da73b1433753765a1", default-features = false }
+zcash_protocol = { package = "zakura-protocol", version = "=5.3.0", git = "https://github.com/zakura-core/common.git", rev = "334aeae3772f0e74bbef930da73b1433753765a1", default-features = false }
+zcash_script = { package = "zakura-zcash-script", version = "=0.0.1", git = "https://github.com/zakura-core/common.git", rev = "334aeae3772f0e74bbef930da73b1433753765a1", default-features = false }
+orchard = { package = "zakura-orchard", version = "=5.3.0", git = "https://github.com/zakura-core/common.git", rev = "334aeae3772f0e74bbef930da73b1433753765a1", default-features = false }
+
+# Matches Common's post-quantum primitive, so the build holds one copy of it.
+slh-dsa = { version = "=0.2.0-rc.5", default-features = false }
+
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+hkdf = { version = "0.12.4", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = "1"
+sha2 = { version = "0.10", default-features = false }
+tempfile = "3.5.0"
+zeroize = { version = "1.7", default-features = false }
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(zcash_unstable, values("nu7"))',
+] }

@@ -84,6 +84,16 @@ There is no `[patch.crates-io]` anywhere in this design. Package names differ
 from their upstream originals, so consumers declare these crates directly and
 every edge is explicit — the same reasoning `libraries` documents.
 
+One set of crates sits outside that table, and outside this workspace. The
+post-quantum transparent crates in `zakura/transparent-pq/` need Common 5, which
+is not published yet, while `[rewire]` points every crate here at the published
+Common 4 releases. Both cannot share a graph: two versions of a zakura fork in
+one build is what `scripts/verify-zakura-graph.sh` refuses, because the two sets
+of types meet in whichever consumer uses both. So those crates are their own
+workspace with their own lock file, nothing here depends on them, and their
+`dev.py` configurations name their manifest. They fold back in when Common 5 is
+published and the whole repository moves to it together.
+
 ## Wallet integration
 
 See [Transparent PIR wallet integration](docs/transparent-pir-wallet-integration.md)

@@ -1,0 +1,25 @@
+[package]
+name = "transparent-pq-keys"
+version = "0.1.0"
+description = "Deterministic SLH-DSA transparent wallet key lifecycle"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+# The derivation is versioned and not yet released for wallet use.
+publish = false
+
+[dependencies]
+hkdf.workspace = true
+sha2.workspace = true
+slh-dsa = { workspace = true, features = ["zeroize"] }
+zeroize = { workspace = true, features = ["alloc"] }
+
+[dev-dependencies]
+hex.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+[lints]
+workspace = true
