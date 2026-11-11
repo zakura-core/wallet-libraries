@@ -301,8 +301,10 @@ A yanked version or a dirty or changed checkout stops the release. Already
 published versions are skipped, but only after their sources match this
 checkout. The script packages the selected crates without building, downloads
 each published `.crate` and compares the files, including `Cargo.toml.orig`.
-It ignores `Cargo.toml`, `Cargo.lock` and `.cargo_vcs_info.json`, which Cargo
-regenerates. A difference stops the release and names the files. Bump that
+It ignores `Cargo.lock` and `.cargo_vcs_info.json`, which Cargo regenerates.
+From the generated `Cargo.toml` it compares only what workspace inheritance can
+change: edition, `rust-version`, `links`, features and dependency declarations.
+A difference stops the release and names the files. Bump that
 crate's version, and the requirements on it, rather than reusing a published one.
 
 Verify packages without uploading (also the default when no mode is specified):

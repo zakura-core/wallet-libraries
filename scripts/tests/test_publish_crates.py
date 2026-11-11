@@ -100,11 +100,18 @@ class PublishingTests(unittest.TestCase):
 
     def test_published_sources_match_despite_generated_files(self):
         sources = {"Cargo.toml.orig": b"[package]\n", "src/lib.rs": b"pub fn f() {}\n"}
-        # Cargo regenerates these differently across versions and runs.
-        local = {**sources, "Cargo.toml": b"new normalization", "Cargo.lock": b"new",
-                 ".cargo_vcs_info.json": b'{"sha1": "new"}'}
-        remote = {**sources, "Cargo.toml": b"old normalization", "Cargo.lock": b"old",
-                  ".cargo_vcs_info.json": b'{"sha1": "old"}'}
+        # Cargo regenerates these differently across versions and runs. Only the
+        # normalized manifest's spelling differs here, not its dependency contract.
+        local = {**sources, "Cargo.lock": b"new", ".cargo_vcs_info.json": b'{"sha1": "new"}',
+                 "Cargo.toml": b'[package]\nname = "first"\nedition = "2024"\nautolib = false\n'
+                               b'[features]\nall = ["b", "a"]\n'
+                               b'[dependencies.serde]\nversion = "1"\ndefault-features = false\n'
+                               b'features = ["std", "derive"]\n'}
+        remote = {**sources, "Cargo.lock": b"old", ".cargo_vcs_info.json": b'{"sha1": "old"}',
+                  "Cargo.toml": b'# Generated\n[package]\nedition = "2024"\nname = "first"\n'
+                                b'[features]\nall = ["a", "b"]\n'
+                                b'[dependencies]\nserde = { version = "1", default_features = false, '
+                                b'features = ["derive", "std"] }\n'}
         cargo, registry = self.check_sources({"first": local, "second": {}}, {"first": remote},
                                              selection=[package("first"), package("second")])
         command = cargo.call_args.args[0]
@@ -125,6 +132,19 @@ class PublishingTests(unittest.TestCase):
         self.assertIn("first 1.0.0 (Cargo.toml.orig, src/lib.rs, src/new.rs, src/old.rs)", message)
         self.assertNotIn("README.md", message)
         self.assertIn("Bump", message)
+
+    def test_changed_workspace_inheritance_is_caught_in_the_normalized_manifest(self):
+        # The authored manifest says `workspace = true` in both, so only Cargo.toml shows the change.
+        sources = {"Cargo.toml.orig": b'[dependencies]\nzcash_protocol = { workspace = true }\n'}
+        published = b'[package]\nrust-version = "1.97"\n[dependencies.zcash_protocol]\nversion = "0.7"\n'
+        for manifest in (b'[package]\nrust-version = "1.97"\n[dependencies.zcash_protocol]\nversion = "0.8"\n',
+                         b'[package]\nrust-version = "1.98"\n[dependencies.zcash_protocol]\nversion = "0.7"\n',
+                         b'[package]\nrust-version = "1.97"\n[target."cfg(unix)".dependencies.zcash_protocol]\n'
+                         b'version = "0.7"\n'):
+            with self.subTest(manifest=manifest), self.assertRaisesRegex(
+                    release.ReleaseError, r"first 1\.0\.0 \(Cargo\.toml \(resolved dependencies or build settings\)\)"):
+                self.check_sources({"first": {**sources, "Cargo.toml": manifest}},
+                                   {"first": {**sources, "Cargo.toml": published}})
 
     def test_no_published_versions_skip_packaging_and_downloads(self):
         cargo, registry = self.check_sources({}, {}, published=())

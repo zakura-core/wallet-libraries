@@ -136,10 +136,40 @@ def wait_for_publication(name, version):
         time.sleep(5)
 
 
-# Cargo rewrites Cargo.toml and regenerates these files on every packaging run,
-# and normalization differs between Cargo versions. Cargo.toml.orig keeps the
-# authored manifest, so it is still compared.
-GENERATED_PACKAGE_FILES = frozenset({"Cargo.toml", "Cargo.lock", ".cargo_vcs_info.json"})
+# Cargo regenerates these on every packaging run. Cargo.toml is also generated,
+# but it alone shows settings inherited from the workspace, so it is compared
+# through `manifest_contract`.
+GENERATED_PACKAGE_FILES = frozenset({"Cargo.lock", ".cargo_vcs_info.json"})
+DEPENDENCY_KINDS = {"dependencies": "dependencies", "dev-dependencies": "dev-dependencies",
+                    "dev_dependencies": "dev-dependencies", "build-dependencies": "build-dependencies",
+                    "build_dependencies": "build-dependencies"}
+
+
+def manifest_contract(data, name, version):
+    """Return the build-relevant parts of a normalized Cargo.toml.
+
+    Cargo spells the rest of the file differently across versions, but these
+    parts resolve workspace inheritance, which Cargo.toml.orig does not show:
+    edition, rust-version, links, features and every dependency declaration.
+    """
+    try:
+        manifest = tomllib.loads(data.decode())
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        raise ReleaseError(f"Cannot parse the {name} {version} Cargo.toml.") from None
+    package = manifest.get("package", {})
+    contract = {"package": {key: package.get(key) for key in ("edition", "rust-version", "links")},
+                "features": {key: sorted(value) for key, value in manifest.get("features", {}).items()}}
+    sections = {"": manifest, **{f"target.{key}.": value for key, value in manifest.get("target", {}).items()}}
+    for label, section in sections.items():
+        for key, kind in DEPENDENCY_KINDS.items():
+            for alias, dep in section.get(key, {}).items():
+                dep = {"version": dep} if isinstance(dep, str) else dict(dep)
+                if "default_features" in dep:
+                    dep["default-features"] = dep.pop("default_features")
+                if "features" in dep:
+                    dep["features"] = sorted(dep["features"])
+                contract[f"{label}{kind}.{alias}"] = dep
+    return contract
 
 
 def crate_files(data, name, version):
@@ -184,7 +214,8 @@ def check_published_sources(root, target, packages, published):
 
     Packages every selected crate without building (so local dependencies
     resolve through Cargo's overlay), then compares each name in `published`
-    with its crates.io archive. A changed crate that keeps its version would
+    with its crates.io archive: the files byte for byte, and Cargo.toml through
+    `manifest_contract`. A changed crate that keeps its version would
     otherwise pass verification against local sources and break on crates.io.
     """
     if not published:
@@ -203,8 +234,14 @@ def check_published_sources(root, target, packages, published):
         local_path = Path(target) / "package" / f"{name}-{version}.crate"
         local = crate_files(local_path.read_bytes(), name, version)
         remote = crate_files(registry_crate(name, version), name, version)
+        manifests = [files.pop("Cargo.toml", None) for files in (local, remote)]
         differing = sorted(path for path in local.keys() | remote.keys()
                            if local.get(path) != remote.get(path))
+        if None in manifests:
+            if manifests[0] != manifests[1]:
+                differing.append("Cargo.toml (missing)")
+        elif manifest_contract(manifests[0], name, version) != manifest_contract(manifests[1], name, version):
+            differing.append("Cargo.toml (resolved dependencies or build settings)")
         if differing:
             changed.append(f"{name} {version} ({', '.join(differing)})")
         else:
