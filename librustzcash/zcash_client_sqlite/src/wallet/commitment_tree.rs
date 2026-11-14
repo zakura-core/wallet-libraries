@@ -23,7 +23,10 @@ use zcash_client_backend::{
     serialization::shardtree::{read_shard, write_shard},
 };
 use zcash_primitives::merkle_tree::HashSer;
-use zcash_protocol::{ShieldedPool, consensus::BlockHeight};
+use zcash_protocol::{
+    ShieldedPool,
+    consensus::{self, BlockHeight},
+};
 
 use crate::{error::SqliteClientError, sapling_tree};
 
@@ -1332,18 +1335,28 @@ pub(crate) fn put_shard_roots<
     Ok(())
 }
 
+<<<<<<< HEAD
 pub(crate) fn check_witnesses(
     nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
+=======
+pub(crate) fn check_witnesses<P: consensus::Parameters>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
     conn: &rusqlite::Transaction<'_>,
+    params: &P,
     anchor_height: BlockHeight,
 ) -> Result<Vec<Range<BlockHeight>>, SqliteClientError> {
     let wallet_birthday = super::wallet_birthday(conn)?.ok_or(SqliteClientError::AccountUnknown)?;
+<<<<<<< HEAD
     let unspent_sapling_note_meta = super::sapling::select_unspent_note_meta(
         nu7_activation_height,
         conn,
         wallet_birthday,
         anchor_height,
     )?;
+=======
+    let unspent_sapling_note_meta =
+        super::sapling::select_unspent_note_meta(conn, params, wallet_birthday, anchor_height)?;
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
 
     let mut scan_ranges = vec![];
     let mut sapling_incomplete = vec![];
@@ -1367,12 +1380,17 @@ pub(crate) fn check_witnesses(
 
     #[cfg(feature = "orchard")]
     {
+<<<<<<< HEAD
         let unspent_orchard_note_meta = super::orchard::select_unspent_note_meta(
             nu7_activation_height,
             conn,
             wallet_birthday,
             anchor_height,
         )?;
+=======
+        let unspent_orchard_note_meta =
+            super::orchard::select_unspent_note_meta(conn, params, wallet_birthday, anchor_height)?;
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         let mut orchard_incomplete = vec![];
         let orchard_tree = orchard_tree(conn)?;
         for m in unspent_orchard_note_meta.iter() {
@@ -1395,6 +1413,7 @@ pub(crate) fn check_witnesses(
         let unspent_ironwood_note_meta = super::common::select_unspent_note_meta(
             nu7_activation_height,
             conn,
+            params,
             ShieldedPool::Ironwood,
             wallet_birthday,
             anchor_height,

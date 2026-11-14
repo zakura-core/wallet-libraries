@@ -6,6 +6,7 @@
 use std::{fmt, io, path::Path, sync::Arc, time::Duration};
 
 use arti_client::{TorClient, config::TorClientConfigBuilder};
+use tokio_rustls::rustls::crypto::{CryptoProvider, ring};
 use tor_rtcompat::PreferredRuntime;
 use tracing::debug;
 
@@ -120,6 +121,9 @@ impl Client {
     /// This default will enable permissions checks unless the
     /// `ARTI_FS_DISABLE_PERMISSION_CHECKS` env variable is set.
     ///
+    /// Tor requires a process-level `rustls` [`CryptoProvider`]. If the application has
+    /// not installed one, this installs the `ring` provider as the process default.
+    ///
     /// Returns an error if `tor_dir` does not exist, or if bootstrapping fails.
     pub async fn create(
         tor_dir: &Path,
@@ -138,6 +142,12 @@ impl Client {
         with_permissions: impl FnOnce(&mut fs_mistrust::MistrustBuilder),
         timeouts: Timeouts,
     ) -> Result<Self, Error> {
+        if CryptoProvider::get_default().is_none() {
+            // An error means that another thread installed a provider first. That
+            // provider stays in place.
+            let _provider_already_installed = ring::default_provider().install_default();
+        }
+
         let runtime = PreferredRuntime::current()?;
 
         if !tokio::fs::try_exists(tor_dir).await? {
