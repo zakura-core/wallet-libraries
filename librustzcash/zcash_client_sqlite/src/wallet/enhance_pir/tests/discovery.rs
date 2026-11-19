@@ -2792,6 +2792,23 @@ fn one_time_key_notes_bind_metadata_without_private_memos_after_reopen() {
             .unwrap();
         assert_eq!(memo, None);
         assert!(key_ref.is_some());
+        // A memo the wallet never retrieves leaves nothing outstanding.
+        {
+            use zcash_client_backend::data_api::transparent_ledger::{
+                DetailCompleteness, TransparentLedgerRead,
+            };
+            let history = st
+                .wallet()
+                .db()
+                .transaction_history_details(account, &[request.request_id().txid()])
+                .unwrap();
+            assert_eq!(history.len(), 1, "{purpose:?}");
+            assert_eq!(
+                history[0].payment_details,
+                DetailCompleteness::Complete,
+                "{purpose:?}"
+            );
+        }
         assert!(!visible(&st, request));
         assert!(
             st.wallet()
