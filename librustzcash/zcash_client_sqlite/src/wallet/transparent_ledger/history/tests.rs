@@ -16,6 +16,7 @@ fn memo_fixture() -> rusqlite::Connection {
             account_id INTEGER, transaction_id INTEGER, pool INTEGER,
             output_index INTEGER, memo BLOB, id_within_pool_table INTEGER);
          CREATE TABLE ironwood_one_time_disputed_receipts (note_id INTEGER PRIMARY KEY);
+         CREATE TABLE ironwood_received_notes (id INTEGER PRIMARY KEY, one_time_key_id INTEGER);
          CREATE TABLE sent_notes (
             from_account_id INTEGER, transaction_id INTEGER, output_pool INTEGER,
             output_index INTEGER, memo BLOB);
@@ -65,6 +66,31 @@ fn matching_recovered_memos_work_in_every_shielded_pool_but_do_not_hide_other_mi
         .unwrap();
         assert!(has_unretrieved_memo(&conn, 1, 2).unwrap());
     }
+}
+
+#[test]
+fn a_one_time_key_note_owes_no_memo() {
+    let conn = memo_fixture();
+    conn.execute("DELETE FROM sent_notes", []).unwrap();
+    conn.execute_batch(
+        "INSERT INTO ironwood_received_notes (id, one_time_key_id) VALUES (7, 1), (8, NULL);
+         INSERT INTO v_received_outputs
+             (account_id, transaction_id, pool, output_index, memo, id_within_pool_table)
+             VALUES (1, 2, 4, 0, NULL, 7);",
+    )
+    .unwrap();
+    // A one-time key's note: its memo is never retrieved, so nothing is outstanding.
+    assert!(!has_unretrieved_memo(&conn, 1, 2).unwrap());
+
+    // An account-key note in the same transaction still owes its memo.
+    conn.execute(
+        "INSERT INTO v_received_outputs
+             (account_id, transaction_id, pool, output_index, memo, id_within_pool_table)
+             VALUES (1, 2, 4, 1, NULL, 8)",
+        [],
+    )
+    .unwrap();
+    assert!(has_unretrieved_memo(&conn, 1, 2).unwrap());
 }
 
 #[cfg(feature = "orchard")]

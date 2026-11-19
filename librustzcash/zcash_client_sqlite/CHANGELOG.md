@@ -7,6 +7,12 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Fixed
+
+- A transaction whose only memo-less shielded output is a note a one-time key
+  received no longer reports incomplete payment details. Such notes have no
+  memo to retrieve, so the history read kept them incomplete indefinitely.
+
 ## [0.1.0-rc9.8] - 2026-11-11
 
 ### Fixed

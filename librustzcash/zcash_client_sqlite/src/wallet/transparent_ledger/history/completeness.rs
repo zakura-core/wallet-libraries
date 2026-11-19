@@ -136,6 +136,8 @@ fn has_unlinked_shielded_spend(
 /// Compact scanning does not retrieve memos. For an owned sent output, a recovered received
 /// memo satisfies the requirement only for the same account, transaction, pool, and output index.
 /// A known empty memo is recovered; SQL NULL is unknown. Other received memos remain independent.
+/// A note a one-time key received has no memo to retrieve (see `wallet::one_time_ivk`), so its
+/// unknown memo leaves nothing outstanding.
 pub(super) fn has_unretrieved_memo(
     conn: &rusqlite::Connection,
     account_id: i64,
@@ -148,6 +150,8 @@ pub(super) fn has_unretrieved_memo(
               (SELECT note_id FROM ironwood_one_time_disputed_receipts))) ro
              WHERE account_id = :account_id AND transaction_id = :transaction_id
              AND pool != 0 AND memo IS NULL
+             AND NOT (pool = 4 AND id_within_pool_table IN
+                 (SELECT id FROM ironwood_received_notes WHERE one_time_key_id IS NOT NULL))
          ) OR EXISTS (
              SELECT 1 FROM sent_notes s
              WHERE s.from_account_id = :account_id AND s.transaction_id = :transaction_id
