@@ -13,7 +13,7 @@ use super::shardtree_support;
 /// This migration adds a birthday height to each account record.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xeeec0d0d_fee0_4231_8c68_5f3a7c7c2245);
 
-const DEPENDENCIES: &[Uuid] = &[shardtree_support::MIGRATION_ID];
+pub(super) const DEPENDENCIES: &[Uuid] = &[shardtree_support::MIGRATION_ID];
 
 pub(super) struct Migration<P> {
     pub(super) params: P,
@@ -81,7 +81,7 @@ mod tests {
     use secrecy::Secret;
     use tempfile::NamedTempFile;
     use zcash_keys::keys::UnifiedSpendingKey;
-    use zcash_protocol::consensus::Network;
+    use zcash_protocol::{consensus::Network};
     use zip32::AccountId;
 
     use super::{DEPENDENCIES, MIGRATION_ID};
@@ -107,7 +107,7 @@ mod tests {
 
         let usk =
             UnifiedSpendingKey::from_seed(&network, &seed_bytes[..], AccountId::ZERO).unwrap();
-        let ufvk_str = usk.to_unified_full_viewing_key().encode(&network);
+        let ufvk_str = usk.to_unified_full_viewing_key().encode(&network).unwrap();
 
         db_data
             .conn

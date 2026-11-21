@@ -1,20 +1,31 @@
 //! Utilities for testing wallets based upon the [`crate::data_api`] traits.
 
 use std::{
+    cell::Cell,
     collections::{BTreeMap, HashMap, HashSet},
     convert::Infallible,
     fmt,
     hash::Hash,
+<<<<<<< HEAD
     num::{NonZeroU8, NonZeroU32, NonZeroU64},
+=======
+    num::NonZeroU32,
+    ops::Range,
+    time::Duration,
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
 };
 
 #[cfg(feature = "proving-tests")]
 use super::wallet::{create_pczt_from_proposal, extract_and_store_transaction_from_pczt};
 use assert_matches::assert_matches;
 use group::ff::Field;
-use incrementalmerkletree::{Marking, Retention};
+use incrementalmerkletree::{Marking, Position, Retention};
 use nonempty::NonEmpty;
+<<<<<<< HEAD
 use rand_08::{CryptoRng as CryptoRng08, Rng as Rng08, RngCore as RngCore08, SeedableRng};
+=======
+use rand::{CryptoRng, Rng, RngExt, SeedableRng};
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
 use rand_chacha::ChaChaRng;
 use secrecy::{ExposeSecret, Secret, SecretVec};
 use shardtree::{
@@ -33,15 +44,21 @@ use {
         },
     },
     crate::wallet::TransparentAddressMetadata,
-    ::transparent::address::TransparentAddress,
+    ::transparent::{
+        address::{Script, TransparentAddress},
+        bundle::OutPoint,
+        keys::TransparentKeyScope,
+    },
     zcash_keys::keys::transparent::gap_limits::GapLimits,
 };
 
 use ::sapling::{
+    Rseed,
     note_encryption::{SaplingDomain, sapling_note_encryption},
     prover::mock::{MockOutputProver, MockSpendProver},
     util::generate_random_rseed,
-    zip32::DiversifiableFullViewingKey,
+    value::NoteValue as SaplingNoteValue,
+    zip32::{DiversifiableFullViewingKey, ExtendedSpendingKey},
 };
 use zcash_address::ZcashAddress;
 use zcash_keys::{
@@ -64,28 +81,31 @@ use zcash_protocol::{
 };
 #[cfg(feature = "transparent-key-import")]
 use zcash_script::script;
-use zip32::DiversifierIndex;
+use zip32::{DiversifierIndex, Scope};
 use zip321::Payment;
 #[cfg(feature = "orchard")]
 use {
     super::ORCHARD_SHARD_HEIGHT,
     crate::proto::compact_formats::CompactOrchardAction,
     ::orchard::{
+        keys::{FullViewingKey as OrchardFullViewingKey, SpendingKey as OrchardSpendingKey},
         note::{ExtractedNoteCommitment, Note as OrchardNote, NoteVersion, RandomSeed, Rho},
         note_encryption::{IronwoodDomain, IronwoodNoteEncryption},
         tree::MerkleHashOrchard,
+        value::NoteValue as OrchardNoteValue,
     },
     group::ff::PrimeField,
     pasta_curves::pallas,
     zcash_note_encryption::ShieldedOutput,
+    zcash_protocol::consensus::NetworkConstants,
 };
 
 use super::{
     Account, AccountBalance, AccountBirthday, AccountMeta, AccountPurpose, AccountSource,
-    AddressInfo, BlockMetadata, DecryptedTransaction, InputSource, NoteFilter, NullifierQuery,
-    ReceivedNotes, ReceivedTransactionOutput, SAPLING_SHARD_HEIGHT, ScannedBlock, SeedRelevance,
-    SentTransaction, TransactionDataRequest, TransactionStatus, WalletCommitmentTrees, WalletRead,
-    WalletSummary, WalletTest, WalletWrite, Zip32Derivation,
+    AddressInfo, BlockMetadata, ChangeReceivers, DecryptedTransaction, InputSource, NoteFilter,
+    NullifierQuery, ReceivedNotes, ReceivedTransactionOutput, SAPLING_SHARD_HEIGHT, ScannedBlock,
+    SeedRelevance, SentTransaction, TransactionDataRequest, TransactionStatus,
+    WalletCommitmentTrees, WalletRead, WalletSummary, WalletTest, WalletWrite, Zip32Derivation,
     anchor_retention::AnchorRetentionInterval,
     chain::{BlockSource, ChainState, CommitmentTreeRoot, ScanSummary, scan_cached_blocks},
     enhance_pir::EnhancePirRead,
@@ -261,6 +281,7 @@ use crate::{
     proto::compact_formats::{
         self, CompactBlock, CompactSaplingOutput, CompactSaplingSpend, CompactTx,
     },
+    util::testing::FixedClock,
     wallet::{
         LockOwner, Note, NoteId, OutputRef, OvkPolicy, ReceivedNote, WalletTransparentOutput,
     },
@@ -681,6 +702,10 @@ pub trait Reset: WalletTest + Sized {
 }
 
 /// The state for a `zcash_client_backend` test.
+/// The fixed instant (2025-02-25T00:00:00Z) at which a [`TestState`]'s clock starts,
+/// as an offset from the Unix epoch.
+const TEST_CLOCK_EPOCH_OFFSET: Duration = Duration::from_secs(1740441600);
+
 pub struct TestState<Cache, DataStore: WalletTest, Network> {
     cache: Cache,
     cached_blocks: BTreeMap<BlockHeight, CachedBlock>,
@@ -688,10 +713,20 @@ pub struct TestState<Cache, DataStore: WalletTest, Network> {
     wallet_data: DataStore,
     network: Network,
     test_account: Option<(SecretVec<u8>, TestAccount<DataStore::Account>)>,
+<<<<<<< HEAD
     rng: TestRng,
+=======
+    rng: ChaChaRng,
+    clock: FixedClock,
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
 }
 
 impl<Cache, DataStore: WalletTest, Network> TestState<Cache, DataStore, Network> {
+    /// Exposes the fixed clock that this test state passes to wallet operations.
+    pub fn clock(&self) -> &FixedClock {
+        &self.clock
+    }
+
     /// Exposes an immutable reference to the test's `DataStore`.
     pub fn wallet(&self) -> &DataStore {
         &self.wallet_data
@@ -873,6 +908,72 @@ where
         );
 
         (height, res, nfs)
+    }
+
+    /// Adds a block at the next height containing a single transparent-only transaction that
+    /// spends `vin` and creates an output of each `(address, value)` in `vout`, and inserts it
+    /// into the cache.
+    ///
+    /// The transaction is placed at index 1 within the block, behind a placeholder occupying the
+    /// coinbase position, so that the outputs it creates are not subject to the coinbase maturity
+    /// rule. Returns the height of the block and the id of the transparent transaction.
+    #[cfg(feature = "transparent-inputs")]
+    pub fn generate_next_block_transparent(
+        &mut self,
+        vin: &[OutPoint],
+        vout: &[(TransparentAddress, Zatoshis)],
+    ) -> (BlockHeight, Cache::InsertResult, TxId) {
+        let pre_activation_block = CachedBlock::none(self.sapling_activation_height() - 1);
+        let prior_cached_block = self
+            .latest_cached_block()
+            .unwrap_or(&pre_activation_block)
+            .clone();
+        let height = prior_cached_block.height() + 1;
+
+        let mut coinbase = fake_compact_tx(&mut self.rng);
+        coinbase.index = 0;
+
+        let mut ctx = fake_compact_tx(&mut self.rng);
+        ctx.index = 1;
+        ctx.vin = vin
+            .iter()
+            .map(|outpoint| compact_formats::CompactTxIn {
+                prevout_txid: outpoint.hash().to_vec(),
+                prevout_index: outpoint.n(),
+            })
+            .collect();
+        ctx.vout = vout
+            .iter()
+            .map(|(addr, value)| compact_formats::TxOut {
+                value: value.into_u64(),
+                script_pub_key: Script::from(addr.script()).0.0,
+            })
+            .collect();
+        let txid = TxId::from_bytes(ctx.txid[..].try_into().expect("txid is 32 bytes"));
+
+        let mut cb = CompactBlock {
+            hash: {
+                let mut hash = vec![0; 32];
+                self.rng.fill_bytes(&mut hash);
+                hash
+            },
+            height: height.into(),
+            ..Default::default()
+        };
+        cb.prev_hash
+            .extend_from_slice(&prior_cached_block.chain_state.block_hash().0);
+        cb.vtx.push(coinbase);
+        cb.vtx.push(ctx);
+        cb.chain_metadata = Some(compact_formats::ChainMetadata {
+            sapling_commitment_tree_size: prior_cached_block.sapling_end_size,
+            orchard_commitment_tree_size: prior_cached_block.orchard_end_size,
+            ironwood_commitment_tree_size: prior_cached_block.ironwood_end_size,
+        });
+
+        let res = self.cache_block(&prior_cached_block, cb);
+        self.latest_block_height = Some(height);
+
+        (height, res, txid)
     }
 
     /// Adds an empty block to the cache, advancing the simulated chain height.
@@ -1380,9 +1481,12 @@ where
             None,
         )?;
 
+        let clock = self.clock.clone();
         create_proposed_transactions(
-            self.wallet_mut(),
+            &mut self.wallet_data,
             &network,
+            &clock,
+            &mut self.rng,
             &MockSpendProver,
             &MockOutputProver,
             &SpendingKeys::from_unified_spending_key(usk.clone()),
@@ -1631,9 +1735,12 @@ where
         FeeRuleT: FeeRule,
     {
         let network = self.network().clone();
+        let clock = self.clock.clone();
         create_proposed_transactions(
-            self.wallet_mut(),
+            &mut self.wallet_data,
             &network,
+            &clock,
+            &mut self.rng,
             &MockSpendProver,
             &MockOutputProver,
             &SpendingKeys::from_unified_spending_key(usk.clone()),
@@ -1664,9 +1771,12 @@ where
     {
         let network = self.network().clone();
 
+        let clock = self.clock.clone();
         create_pczt_from_proposal(
-            self.wallet_mut(),
+            &mut self.wallet_data,
             &network,
+            &clock,
+            &mut self.rng,
             spend_from_account,
             ovk_policy,
             proposal,
@@ -1690,10 +1800,18 @@ where
         let prover = real_test_prover();
         let (spend_vk, output_vk) = prover.verifying_keys();
 
+<<<<<<< HEAD
         let params = self.network().clone();
         extract_and_store_transaction_from_pczt(
             self.wallet_mut(),
             &params,
+=======
+        let clock = self.clock.clone();
+        extract_and_store_transaction_from_pczt(
+            &mut self.wallet_data,
+            &clock,
+            &mut self.rng,
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
             pczt,
             Some((&spend_vk, &output_vk)),
             None,
@@ -1721,9 +1839,12 @@ where
         ChangeT: ChangeStrategy<MetaSource = DbT>,
     {
         let network = self.network().clone();
+        let clock = self.clock.clone();
         shield_transparent_funds(
-            self.wallet_mut(),
+            &mut self.wallet_data,
             &network,
+            &clock,
+            &mut self.rng,
             &MockSpendProver,
             &MockOutputProver,
             input_selector,
@@ -1963,11 +2084,20 @@ impl TestBuilder<(), ()> {
         heartwood: Some(BlockHeight::from_u32(100_000)),
         canopy: Some(BlockHeight::from_u32(100_000)),
         nu5: Some(BlockHeight::from_u32(100_000)),
+<<<<<<< HEAD
         nu6: Some(BlockHeight::from_u32(100_000)),
         nu6_1: Some(BlockHeight::from_u32(100_000)),
         nu6_2: Some(BlockHeight::from_u32(100_000)),
         nu6_3: Some(BlockHeight::from_u32(100_000)),
+=======
+        nu6: None,
+        nu6_1: None,
+        nu6_2: None,
+        nu6_3: None,
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         nu7: None,
+        #[cfg(zcash_unstable = "nutachyon")]
+        nu_tachyon: None,
     };
 
     /// Constructs a new test environment builder.
@@ -2336,6 +2466,7 @@ impl<Cache, DsFactory: DataStoreFactory> TestBuilder<Cache, DsFactory> {
             network: self.network,
             test_account,
             rng: self.rng,
+            clock: FixedClock::new(std::time::UNIX_EPOCH + TEST_CLOCK_EPOCH_OFFSET),
         }
     }
 }
@@ -2358,7 +2489,11 @@ pub trait TestFvk: Clone {
 
     /// Adds a single spend to the given [`CompactTx`] of a note previously received by
     /// this full viewing key.
+<<<<<<< HEAD
     fn add_spend<R: TestRngCore>(&self, ctx: &mut CompactTx, nf: Self::Nullifier, rng: &mut R);
+=======
+    fn add_spend<R: Rng + CryptoRng>(&self, ctx: &mut CompactTx, nf: Self::Nullifier, rng: &mut R);
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
 
     /// Adds a single output to the given [`CompactTx`], where the output will be discovered when
     /// scanning with an incoming viewing key corresponding to this FVK. Its outputs will also be
@@ -2370,7 +2505,11 @@ pub trait TestFvk: Clone {
     /// Returns the nullifier of the newly created note, so that tests can readily have it on hand
     /// for the purpose of spending that note.
     #[allow(clippy::too_many_arguments)]
+<<<<<<< HEAD
     fn add_output<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_output<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2398,7 +2537,11 @@ pub trait TestFvk: Clone {
     /// Returns the nullifier full the newly created note which will need to be revealed when that
     /// note is later spent.
     #[allow(clippy::too_many_arguments)]
+<<<<<<< HEAD
     fn add_logical_action<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_logical_action<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2426,11 +2569,19 @@ impl<A: TestFvk> TestFvk for &A {
         (*self).ovk_bytes(scope)
     }
 
+<<<<<<< HEAD
     fn add_spend<R: TestRngCore>(&self, ctx: &mut CompactTx, nf: Self::Nullifier, rng: &mut R) {
         (*self).add_spend(ctx, nf, rng)
     }
 
     fn add_output<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_spend<R: Rng + CryptoRng>(&self, ctx: &mut CompactTx, nf: Self::Nullifier, rng: &mut R) {
+        (*self).add_spend(ctx, nf, rng)
+    }
+
+    fn add_output<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2455,7 +2606,11 @@ impl<A: TestFvk> TestFvk for &A {
         )
     }
 
+<<<<<<< HEAD
     fn add_logical_action<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_logical_action<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2495,12 +2650,20 @@ impl TestFvk for DiversifiableFullViewingKey {
         self.to_ovk(scope).0
     }
 
+<<<<<<< HEAD
     fn add_spend<R: TestRngCore>(&self, ctx: &mut CompactTx, nf: Self::Nullifier, _: &mut R) {
+=======
+    fn add_spend<R: Rng + CryptoRng>(&self, ctx: &mut CompactTx, nf: Self::Nullifier, _: &mut R) {
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         let cspend = CompactSaplingSpend { nf: nf.to_vec() };
         ctx.spends.push(cspend);
     }
 
+<<<<<<< HEAD
     fn add_output<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_output<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2523,11 +2686,15 @@ impl TestFvk for DiversifiableFullViewingKey {
             compact_sapling_output(params, height, recipient, value, sender_ovk.copied(), rng);
         ctx.outputs.push(cout);
 
-        note.nf(&self.fvk().vk.nk, u64::from(position))
+        note.nf(self.fvk().vk.nk(), u64::from(position))
     }
 
     #[allow(clippy::too_many_arguments)]
+<<<<<<< HEAD
     fn add_logical_action<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_logical_action<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         &self,
         ctx: &mut CompactTx,
         params: &P,
@@ -2566,7 +2733,11 @@ impl TestFvk for ::orchard::keys::FullViewingKey {
         *self.to_ovk(scope).as_ref()
     }
 
+<<<<<<< HEAD
     fn add_spend<R: TestRngCore>(
+=======
+    fn add_spend<R: Rng + CryptoRng>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         &self,
         ctx: &mut CompactTx,
         nullifier_to_reveal: Self::Nullifier,
@@ -2589,7 +2760,11 @@ impl TestFvk for ::orchard::keys::FullViewingKey {
         ctx.actions.push(cact);
     }
 
+<<<<<<< HEAD
     fn add_output<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_output<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         &self,
         ctx: &mut CompactTx,
         _: &P,
@@ -2623,7 +2798,11 @@ impl TestFvk for ::orchard::keys::FullViewingKey {
         note.nullifier(self)
     }
 
+<<<<<<< HEAD
     fn add_logical_action<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_logical_action<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         &self,
         ctx: &mut CompactTx,
         _: &P,
@@ -2676,7 +2855,11 @@ impl TestFvk for IronwoodFvk {
         *self.0.to_ovk(scope).as_ref()
     }
 
+<<<<<<< HEAD
     fn add_spend<R: TestRngCore>(
+=======
+    fn add_spend<R: Rng + CryptoRng>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         &self,
         ctx: &mut CompactTx,
         nullifier_to_reveal: Self::Nullifier,
@@ -2699,7 +2882,11 @@ impl TestFvk for IronwoodFvk {
         ctx.ironwood_actions.push(cact);
     }
 
+<<<<<<< HEAD
     fn add_output<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_output<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         &self,
         ctx: &mut CompactTx,
         _: &P,
@@ -2733,7 +2920,11 @@ impl TestFvk for IronwoodFvk {
         note.nullifier(&self.0)
     }
 
+<<<<<<< HEAD
     fn add_logical_action<P: consensus::Parameters, R: TestRngCore>(
+=======
+    fn add_logical_action<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         &self,
         ctx: &mut CompactTx,
         _: &P,
@@ -2786,7 +2977,11 @@ pub enum AddressType {
 /// Creates a `CompactSaplingOutput` at the given height paying the given recipient.
 ///
 /// Returns the `CompactSaplingOutput` and the new note.
+<<<<<<< HEAD
 fn compact_sapling_output<P: consensus::Parameters, R: TestRngCore>(
+=======
+fn compact_sapling_output<P: consensus::Parameters, R: Rng + CryptoRng>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
     params: &P,
     height: BlockHeight,
     recipient: ::sapling::PaymentAddress,
@@ -2814,7 +3009,7 @@ fn compact_sapling_output<P: consensus::Parameters, R: TestRngCore>(
         CompactSaplingOutput {
             cmu,
             ephemeral_key,
-            ciphertext: enc_ciphertext[..52].to_vec(),
+            ciphertext: enc_ciphertext.0[..::sapling::note_encryption::COMPACT_NOTE_SIZE].to_vec(),
         },
         note,
     )
@@ -2824,7 +3019,11 @@ fn compact_sapling_output<P: consensus::Parameters, R: TestRngCore>(
 ///
 /// Returns the `CompactOrchardAction` and the new note.
 #[cfg(feature = "orchard")]
+<<<<<<< HEAD
 fn compact_orchard_action<R: TestRngCore>(
+=======
+fn compact_orchard_action<R: Rng + CryptoRng>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
     nf_old: ::orchard::note::Nullifier,
     recipient: ::orchard::Address,
     value: Zatoshis,
@@ -2844,16 +3043,17 @@ fn compact_orchard_action<R: TestRngCore>(
             nullifier: compact_action.nullifier().to_bytes().to_vec(),
             cmx: compact_action.cmx().to_bytes().to_vec(),
             ephemeral_key:
-                ShieldedOutput::<::orchard::note_encryption::OrchardDomain, 52>::ephemeral_key(
+                ShieldedOutput::<::orchard::note_encryption::OrchardDomain>::ephemeral_key(
                     &compact_action,
                 )
                 .0
                 .to_vec(),
             ciphertext:
-                ShieldedOutput::<::orchard::note_encryption::OrchardDomain, 52>::enc_ciphertext(
+                ShieldedOutput::<::orchard::note_encryption::OrchardDomain>::enc_ciphertext_compact(
                     &compact_action,
-                )[..52]
-                    .to_vec(),
+                )
+                .0
+                .to_vec(),
         },
         note,
     )
@@ -2864,7 +3064,11 @@ fn compact_orchard_action<R: TestRngCore>(
 /// `CompactOrchardAction` and the note. This mirrors [`compact_orchard_action`], but constructs the
 /// action directly because the orchard crate's `fake_compact_action` only produces version 2 notes.
 #[cfg(feature = "orchard")]
+<<<<<<< HEAD
 fn compact_ironwood_action<R: TestRngCore>(
+=======
+fn compact_ironwood_action<R: Rng + CryptoRng>(
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
     nf_old: ::orchard::note::Nullifier,
     recipient: ::orchard::Address,
     value: Zatoshis,
@@ -2900,14 +3104,18 @@ fn compact_ironwood_action<R: TestRngCore>(
             nullifier: nf_old.to_bytes().to_vec(),
             cmx: cmx.to_bytes().to_vec(),
             ephemeral_key: ephemeral_key.0.to_vec(),
-            ciphertext: enc_ciphertext[..52].to_vec(),
+            ciphertext: enc_ciphertext.0[..::orchard::note_encryption::COMPACT_NOTE_SIZE].to_vec(),
         },
         note,
     )
 }
 
 /// Creates a fake `CompactTx` with a random transaction ID and no spends or outputs.
+<<<<<<< HEAD
 fn fake_compact_tx<R: TestRngCore>(rng: &mut R) -> CompactTx {
+=======
+fn fake_compact_tx<R: Rng + CryptoRng>(rng: &mut R) -> CompactTx {
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
     let mut ctx = CompactTx::default();
     let mut txid = vec![0; 32];
     RngCore08::fill_bytes(rng, &mut txid);
@@ -2940,11 +3148,15 @@ impl<Fvk> FakeCompactOutput<Fvk> {
 
     /// Constructs a new random fake external output to the given FVK with a value in the range
     /// 10000..1000000 ZAT.
+<<<<<<< HEAD
     pub fn random<R: RngCore08>(rng: &mut R, recipient_fvk: Fvk) -> Self {
+=======
+    pub fn random<R: Rng>(rng: &mut R, recipient_fvk: Fvk) -> Self {
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         Self {
             recipient_fvk,
             recipient_address_type: AddressType::DefaultExternal,
-            value: Zatoshis::const_from_u64(rng.gen_range(10000..1000000)),
+            value: Zatoshis::const_from_u64(rng.random_range(10000..1000000)),
         }
     }
 }
@@ -2963,7 +3175,11 @@ fn fake_compact_block<P: consensus::Parameters, Fvk: TestFvk>(
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
     initial_ironwood_tree_size: u32,
+<<<<<<< HEAD
     mut rng: impl TestRngCore,
+=======
+    mut rng: impl CryptoRng,
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
 ) -> (CompactBlock, Vec<Fvk::Nullifier>) {
     // Create a fake CompactBlock containing the note
     let mut ctx = fake_compact_tx(&mut rng);
@@ -3005,7 +3221,11 @@ fn fake_compact_block_from_tx(
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
     initial_ironwood_tree_size: u32,
+<<<<<<< HEAD
     rng: impl RngCore08,
+=======
+    rng: impl Rng,
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
 ) -> CompactBlock {
     // Create a fake CompactTx containing the transaction.
     let mut ctx = CompactTx {
@@ -3062,7 +3282,11 @@ fn fake_compact_block_spending<P: consensus::Parameters, Fvk: TestFvk>(
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
     initial_ironwood_tree_size: u32,
+<<<<<<< HEAD
     mut rng: impl TestRngCore,
+=======
+    mut rng: impl CryptoRng,
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
 ) -> CompactBlock {
     let mut ctx = fake_compact_tx(&mut rng);
 
@@ -3086,7 +3310,7 @@ fn fake_compact_block_spending<P: consensus::Parameters, Fvk: TestFvk>(
             compact_sapling_output(
                 params,
                 height,
-                recipient,
+                *recipient,
                 value,
                 Some(::sapling::keys::OutgoingViewingKey(ovk_bytes)),
                 &mut rng,
@@ -3160,7 +3384,11 @@ fn fake_compact_block_from_compact_tx(
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
     initial_ironwood_tree_size: u32,
+<<<<<<< HEAD
     mut rng: impl RngCore08,
+=======
+    mut rng: impl Rng,
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
 ) -> CompactBlock {
     let mut cb = CompactBlock {
         hash: {
@@ -3360,6 +3588,13 @@ impl InputSource for MockWalletDb {
         Err(())
     }
 
+    fn get_change_receivers(&self, account: Self::AccountId) -> Result<ChangeReceivers, ()> {
+        self.ufvks_by_account
+            .get(&account)
+            .map(|ufvk| ChangeReceivers::from_uivk(&ufvk.to_unified_incoming_viewing_key()))
+            .ok_or(())
+    }
+
     fn get_account_metadata(
         &self,
         _account: Self::AccountId,
@@ -3542,6 +3777,23 @@ impl WalletRead for MockWalletDb {
     }
 
     #[cfg(feature = "transparent-inputs")]
+    fn get_unspent_transparent_outpoints(
+        &self,
+    ) -> Result<HashMap<OutPoint, Self::AccountId>, Self::Error> {
+        Ok(HashMap::new())
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn get_transparent_receiver_accounts(
+        &self,
+    ) -> Result<
+        HashMap<TransparentAddress, (Self::AccountId, Option<TransparentKeyScope>)>,
+        Self::Error,
+    > {
+        Ok(HashMap::new())
+    }
+
+    #[cfg(feature = "transparent-inputs")]
     fn get_transparent_receivers(
         &self,
         _account: Self::AccountId,
@@ -3665,6 +3917,14 @@ impl WalletWrite for MockWalletDb {
         todo!()
     }
 
+    fn set_account_name(
+        &mut self,
+        _account: <Self as WalletRead>::AccountId,
+        _name: &str,
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        todo!()
+    }
+
     #[cfg(feature = "transparent-key-import")]
     fn import_standalone_transparent_pubkey(
         &mut self,
@@ -3722,6 +3982,13 @@ impl WalletWrite for MockWalletDb {
         _retain_with_priority: Option<ScanPriority>,
     ) -> Result<u64, <Self as WalletRead>::Error> {
         Ok(0)
+    }
+
+    fn queue_rescan(
+        &mut self,
+        _range: Range<BlockHeight>,
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        Ok(())
     }
 
     fn store_decrypted_tx(
@@ -3934,5 +4201,361 @@ impl WalletCommitmentTrees for MockWalletDb {
                     }),
             )
         })
+    }
+}
+
+/// How [`FixedNotes`] treats a filter argument (`sources` or `exclude`) of the selection
+/// methods of [`InputSource`].
+#[derive(Clone, Copy)]
+enum FilterHandling {
+    /// The filter is applied, as [`InputSource`] requires.
+    Honored,
+    /// The filter is ignored, breaking the contract of [`InputSource`], for tests of what input
+    /// selection does against such a source.
+    Ignored,
+}
+
+/// Errors of [`FixedNotes`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum FixedNotesError {
+    /// More selections were made than [`FixedNotes::with_selection_limit`] allows.
+    SelectionLimitReached,
+    /// The fixture does not implement the operation.
+    Unsupported,
+}
+
+impl fmt::Display for FixedNotesError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SelectionLimitReached => {
+                write!(f, "the fixture's selection limit was reached")
+            }
+            Self::Unsupported => write!(f, "the fixture does not implement the operation"),
+        }
+    }
+}
+
+impl std::error::Error for FixedNotesError {}
+
+/// A Sapling note of `value` to the default address of the master key of the empty seed.
+fn fixed_sapling_note(value: Zatoshis) -> ::sapling::Note {
+    let (_, recipient) = ExtendedSpendingKey::master(&[])
+        .expect("the master key of the empty seed is valid")
+        .default_address();
+    ::sapling::Note::from_parts(
+        recipient,
+        SaplingNoteValue::from_raw(value.into_u64()),
+        Rseed::AfterZip212([0; 32]),
+    )
+}
+
+/// An Orchard-protocol note of `value` and `version` to the default address of the account
+/// derived from the all-zero seed.
+#[cfg(feature = "orchard")]
+fn fixed_orchard_note(value: Zatoshis, version: NoteVersion) -> OrchardNote {
+    let sk = OrchardSpendingKey::from_zip32_seed(
+        &[0; 32],
+        NetworkConstants::coin_type(&Network::TestNetwork),
+        zip32::AccountId::ZERO,
+    )
+    .expect("the all-zero seed derives a valid Orchard spending key");
+    let recipient = OrchardFullViewingKey::from(&sk).address_at(0u32, Scope::External);
+    let rho = Option::from(Rho::from_bytes(&[0; 32])).expect("zero is a canonical rho");
+    let mut rng = ChaChaRng::from_seed([0; 32]);
+    let rseed = loop {
+        if let Some(rseed) = Option::from(RandomSeed::from_bytes(rng.random(), &rho)) {
+            break rseed;
+        }
+    };
+    Option::from(OrchardNote::from_parts(
+        recipient,
+        OrchardNoteValue::from_raw(value.into_u64()),
+        rho,
+        rseed,
+        version,
+    ))
+    .expect("the parts form a valid Orchard note")
+}
+
+/// A note held by [`FixedNotes`].
+enum FixedNote {
+    Sapling(ReceivedNote<u32, ::sapling::Note>),
+    #[cfg(feature = "orchard")]
+    Orchard(ReceivedNote<u32, OrchardNote>),
+    #[cfg(feature = "orchard")]
+    Ironwood(ReceivedNote<u32, OrchardNote>),
+}
+
+impl FixedNote {
+    /// Builds a note of `value` in `pool`, received at `output_index` of the all-zero txid.
+    fn new(pool: ShieldedPool, id: u32, value: Zatoshis, output_index: u16) -> Self {
+        fn received<NoteT>(id: u32, output_index: u16, note: NoteT) -> ReceivedNote<u32, NoteT> {
+            ReceivedNote::from_parts(
+                id,
+                TxId::from_bytes([0; 32]),
+                output_index,
+                note,
+                Scope::External,
+                Position::from(u64::from(output_index)),
+                None,
+                None,
+            )
+        }
+        match pool {
+            ShieldedPool::Sapling => {
+                Self::Sapling(received(id, output_index, fixed_sapling_note(value)))
+            }
+            #[cfg(feature = "orchard")]
+            ShieldedPool::Orchard => Self::Orchard(received(
+                id,
+                output_index,
+                fixed_orchard_note(value, NoteVersion::V2),
+            )),
+            #[cfg(feature = "orchard")]
+            ShieldedPool::Ironwood => Self::Ironwood(received(
+                id,
+                output_index,
+                fixed_orchard_note(value, NoteVersion::V3),
+            )),
+            #[cfg(not(feature = "orchard"))]
+            ShieldedPool::Orchard | ShieldedPool::Ironwood => {
+                panic!("Orchard and Ironwood notes need the `orchard` feature")
+            }
+        }
+    }
+
+    fn pool(&self) -> ShieldedPool {
+        match self {
+            Self::Sapling(_) => ShieldedPool::Sapling,
+            #[cfg(feature = "orchard")]
+            Self::Orchard(_) => ShieldedPool::Orchard,
+            #[cfg(feature = "orchard")]
+            Self::Ironwood(_) => ShieldedPool::Ironwood,
+        }
+    }
+
+    fn id(&self) -> u32 {
+        match self {
+            Self::Sapling(note) => *note.internal_note_id(),
+            #[cfg(feature = "orchard")]
+            Self::Orchard(note) | Self::Ironwood(note) => *note.internal_note_id(),
+        }
+    }
+
+    fn value(&self) -> Zatoshis {
+        match self {
+            Self::Sapling(note) => note.note_value(),
+            #[cfg(feature = "orchard")]
+            Self::Orchard(note) | Self::Ironwood(note) => note.note_value(),
+        }
+        .expect("the note was built from a valid value")
+    }
+}
+
+/// An [`InputSource`] holding a fixed list of shielded notes, for tests that drive input
+/// selection without a wallet database.
+///
+/// Selection takes the notes in the order given, within the pools asked for, until the target
+/// value is reached. Unlike `zcash_client_sqlite`, it does not withhold notes at or below the
+/// marginal fee. Every note is spendable by any account, and every account can receive change
+/// in every shielded pool and has no transparent receiver. The selection methods,
+/// [`InputSource::select_unspent_notes`] and [`InputSource::get_change_receivers`] are
+/// implemented; every other operation returns [`FixedNotesError::Unsupported`].
+pub struct FixedNotes {
+    notes: Vec<FixedNote>,
+    sources_handling: FilterHandling,
+    exclude_handling: FilterHandling,
+    selection_limit: Option<usize>,
+    selections: Cell<usize>,
+}
+
+impl FixedNotes {
+    /// Holds one note per entry, given as its pool, identifier and value in selection order.
+    /// Each note is received at its own output index of a single transaction.
+    ///
+    /// # Panics
+    ///
+    /// When the notes' total value exceeds the monetary range, when there are more notes than
+    /// a `u16` output index can number, and without the `orchard` feature on an Orchard or
+    /// Ironwood entry.
+    pub fn new(notes: &[(ShieldedPool, u32, Zatoshis)]) -> Self {
+        let notes: Vec<FixedNote> = notes
+            .iter()
+            .zip(0u16..)
+            .map(|((pool, id, value), output_index)| {
+                FixedNote::new(*pool, *id, *value, output_index)
+            })
+            .collect();
+        notes
+            .iter()
+            .map(FixedNote::value)
+            .sum::<Option<Zatoshis>>()
+            .expect("the notes' total value fits the monetary range");
+        Self {
+            notes,
+            sources_handling: FilterHandling::Honored,
+            exclude_handling: FilterHandling::Honored,
+            selection_limit: None,
+            selections: Cell::new(0),
+        }
+    }
+
+    /// Returns the source with the `sources` argument of the selection methods ignored, so
+    /// that it returns notes from pools it was not asked for, breaking the contract of
+    /// [`InputSource`].
+    pub fn ignoring_sources(self) -> Self {
+        Self {
+            sources_handling: FilterHandling::Ignored,
+            ..self
+        }
+    }
+
+    /// Returns the source with the `exclude` argument of the selection methods ignored, so
+    /// that it returns excluded notes, breaking the contract of [`InputSource`].
+    pub fn ignoring_exclude(self) -> Self {
+        Self {
+            exclude_handling: FilterHandling::Ignored,
+            ..self
+        }
+    }
+
+    /// Returns the source failing with [`FixedNotesError::SelectionLimitReached`] past `limit`
+    /// calls to [`InputSource::select_spendable_notes`], so that a test of input selection's
+    /// termination fails instead of hanging.
+    pub fn with_selection_limit(self, limit: usize) -> Self {
+        Self {
+            selection_limit: Some(limit),
+            ..self
+        }
+    }
+
+    /// Returns the notes in `sources` not excluded, in order, until their value reaches
+    /// `target`, or all of them when `target` is `None`.
+    fn select(
+        &self,
+        sources: &[ShieldedPool],
+        exclude: &[u32],
+        target: Option<Zatoshis>,
+    ) -> ReceivedNotes<u32> {
+        let in_sources = |pool: ShieldedPool| match self.sources_handling {
+            FilterHandling::Honored => sources.contains(&pool),
+            FilterHandling::Ignored => true,
+        };
+        let excluded = |id: u32| match self.exclude_handling {
+            FilterHandling::Honored => exclude.contains(&id),
+            FilterHandling::Ignored => false,
+        };
+        let mut selected_value = Zatoshis::ZERO;
+        let mut sapling = vec![];
+        #[cfg(feature = "orchard")]
+        let mut orchard = vec![];
+        #[cfg(feature = "orchard")]
+        let mut ironwood = vec![];
+        for note in &self.notes {
+            if target.is_some_and(|target| selected_value >= target) {
+                break;
+            }
+            if !in_sources(note.pool()) || excluded(note.id()) {
+                continue;
+            }
+            selected_value = (selected_value + note.value())
+                .expect("a partial sum of a total in the monetary range is in it too");
+            match note {
+                FixedNote::Sapling(note) => sapling.push(note.clone()),
+                #[cfg(feature = "orchard")]
+                FixedNote::Orchard(note) => orchard.push(note.clone()),
+                #[cfg(feature = "orchard")]
+                FixedNote::Ironwood(note) => ironwood.push(note.clone()),
+            }
+        }
+        ReceivedNotes::new(
+            sapling,
+            #[cfg(feature = "orchard")]
+            orchard,
+            #[cfg(feature = "orchard")]
+            ironwood,
+        )
+    }
+}
+
+impl InputSource for FixedNotes {
+    type Error = FixedNotesError;
+    type AccountId = u32;
+    type NoteRef = u32;
+
+    fn get_spendable_note(
+        &self,
+        _txid: &TxId,
+        _protocol: ShieldedPool,
+        _index: u32,
+        _target_height: TargetHeight,
+        _lock_filter: LockFilter<'_>,
+    ) -> Result<Option<ReceivedNote<Self::NoteRef, Note>>, Self::Error> {
+        Err(FixedNotesError::Unsupported)
+    }
+
+    fn anchor_computable(
+        &self,
+        _protocol: ShieldedPool,
+        _height: BlockHeight,
+    ) -> Result<bool, Self::Error> {
+        Err(FixedNotesError::Unsupported)
+    }
+
+    fn select_spendable_notes(
+        &self,
+        _account: Self::AccountId,
+        target_value: TargetValue,
+        sources: &[ShieldedPool],
+        _target_height: TargetHeight,
+        _confirmations_policy: ConfirmationsPolicy,
+        exclude: &[Self::NoteRef],
+        _lock_filter: LockFilter<'_>,
+    ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
+        let selections = self.selections.get() + 1;
+        if self.selection_limit.is_some_and(|limit| selections > limit) {
+            return Err(FixedNotesError::SelectionLimitReached);
+        }
+        self.selections.set(selections);
+        let target = match target_value {
+            TargetValue::AtLeast(target) => Some(target),
+            TargetValue::AllFunds(_) => None,
+        };
+        Ok(self.select(sources, exclude, target))
+    }
+
+    fn select_unspent_notes(
+        &self,
+        _account: Self::AccountId,
+        sources: &[ShieldedPool],
+        _target_height: TargetHeight,
+        exclude: &[Self::NoteRef],
+        _lock_filter: LockFilter<'_>,
+    ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
+        Ok(self.select(sources, exclude, None))
+    }
+
+    fn get_change_receivers(
+        &self,
+        _account: Self::AccountId,
+    ) -> Result<ChangeReceivers, Self::Error> {
+        Ok(ChangeReceivers::new(
+            true,
+            true,
+            #[cfg(feature = "transparent-inputs")]
+            None,
+        ))
+    }
+
+    fn get_account_metadata(
+        &self,
+        _account: Self::AccountId,
+        _selector: &NoteFilter,
+        _target_height: TargetHeight,
+        _exclude: &[Self::NoteRef],
+        _lock_filter: LockFilter<'_>,
+    ) -> Result<AccountMeta, Self::Error> {
+        Err(FixedNotesError::Unsupported)
     }
 }

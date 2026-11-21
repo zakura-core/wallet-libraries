@@ -1,7 +1,11 @@
 [package]
 name = "zakura-client-backend"
 description = "APIs for creating shielded Zcash light clients"
+<<<<<<< HEAD
 version = "0.1.0-rc9.8"
+=======
+version = "0.25.0"
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
 authors = [
     "Jack Grigg <jack@z.cash>",
     "Kris Nuttycombe <kris@electriccoin.co>"
@@ -147,9 +151,14 @@ assert_matches.workspace = true
 incrementalmerkletree = { workspace = true, features = ["test-dependencies"] }
 jubjub.workspace = true
 proptest.workspace = true
+<<<<<<< HEAD
 rand.workspace = true
 rand_08 = { package = "rand", version = "0.8" }
+=======
+rand = { workspace = true, features = ["sys_rng"] }
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
 rand_chacha.workspace = true
+redjubjub.workspace = true
 shardtree = { workspace = true, features = ["test-dependencies"] }
 tempfile = "3.5.0"
 tokio = { version = "1.21.0", features = ["macros", "rt-multi-thread"] }
@@ -165,7 +174,16 @@ name = "diversify-address"
 test = true
 
 [features]
+<<<<<<< HEAD
 default = ["time/default"]
+=======
+default = ["time/default", "orchard", "zeroize"]
+
+## Erases shielded spending key material from memory on drop.
+zeroize = ["zcash_keys/zeroize"]
+
+zip-233 = ["zcash_primitives/zip-233"]
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
 
 ## Enables the `tonic` gRPC client bindings for connecting to a `lightwalletd` server.
 lightwalletd-tonic = ["dep:tonic", "dep:tonic-prost", "hyper-util?/tokio"]
@@ -274,6 +292,7 @@ tor-client = [
     "dep:tokio",
     "tokio?/time",
     "dep:tokio-rustls",
+    "tokio-rustls?/ring",
     "dep:tor-rtcompat",
     "dep:tower",
     "dep:webpki-roots",
@@ -287,6 +306,11 @@ test-dependencies = [
     "dep:assert_matches",
     "dep:proptest",
     "dep:jubjub",
+<<<<<<< HEAD
+=======
+    "dep:rand",
+    "rand/sys_rng",
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
     "dep:rand_chacha",
     "dep:rand_08",
     "transparent/test-dependencies",

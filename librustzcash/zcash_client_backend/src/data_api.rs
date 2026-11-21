@@ -72,6 +72,7 @@ use std::{
     hash::Hash,
     io,
     num::{NonZeroU32, TryFromIntError},
+    ops::Range,
 };
 
 use incrementalmerkletree::{Retention, frontier::Frontier};
@@ -117,14 +118,19 @@ use {
     crate::{fees::StandardFeeRule, wallet::TransparentAddressMetadata},
     getset::{CopyGetters, Getters},
     std::time::SystemTime,
-    transparent::{address::TransparentAddress, bundle::OutPoint, keys::TransparentKeyScope},
+    transparent::{
+        address::TransparentAddress,
+        bundle::{OutPoint, TxOut},
+        keys::TransparentKeyScope,
+    },
+    zcash_primitives::transaction::fees::transparent::OutputView as _,
 };
 
 #[cfg(all(
     feature = "transparent-inputs",
     any(test, feature = "test-dependencies")
 ))]
-use {std::ops::Range, transparent::keys::NonHardenedChildIndex};
+use transparent::keys::NonHardenedChildIndex;
 
 #[cfg(feature = "zcashd-compat")]
 use zcash_keys::keys::zcashd;
@@ -1501,6 +1507,97 @@ impl PoolMeta {
     }
 }
 
+/// The kind of output in which an account receives transparent change.
+#[cfg(feature = "transparent-inputs")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransparentChangeKind {
+    /// A P2PKH output, to a [BIP 44] internal-scope address.
+    ///
+    /// [BIP 44]: https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki
+    P2pkh,
+    /// A P2SH output, to a [ZIP 48] internal-scope multisig address.
+    ///
+    /// [ZIP 48]: https://zips.z.cash/zip-0048
+    P2sh,
+}
+
+#[cfg(feature = "transparent-inputs")]
+impl TransparentChangeKind {
+    /// Returns the serialized size of a change output of this kind.
+    pub(crate) fn output_size(self) -> usize {
+        // Any address of the kind has the same script length.
+        let address = match self {
+            TransparentChangeKind::P2pkh => TransparentAddress::PublicKeyHash([0; 20]),
+            TransparentChangeKind::P2sh => TransparentAddress::ScriptHash([0; 20]),
+        };
+        TxOut::new(Zatoshis::ZERO, address.script().into()).serialized_size()
+    }
+}
+
+/// The outputs in which an account can receive change, as determined by the items of its
+/// unified viewing key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChangeReceivers {
+    sapling: bool,
+    orchard: bool,
+    #[cfg(feature = "transparent-inputs")]
+    transparent: Option<TransparentChangeKind>,
+}
+
+impl ChangeReceivers {
+    /// Returns the given outputs, for a caller that determines where change goes without
+    /// an account viewing key to read it from.
+    ///
+    /// The Orchard and Ironwood pools share one flag, as they share the account's Orchard
+    /// key. A value in which nothing can receive is permitted, and means change cannot be
+    /// placed; see [`Self::from_uivk`] for the viewing-key-derived case.
+    pub fn new(
+        sapling: bool,
+        orchard: bool,
+        #[cfg(feature = "transparent-inputs")] transparent: Option<TransparentChangeKind>,
+    ) -> Self {
+        Self {
+            sapling,
+            orchard,
+            #[cfg(feature = "transparent-inputs")]
+            transparent,
+        }
+    }
+
+    /// Returns the outputs in which an account with the given viewing key can receive change.
+    pub fn from_uivk(uivk: &UnifiedIncomingViewingKey) -> Self {
+        Self {
+            sapling: uivk.has_sapling(),
+            orchard: uivk.has_orchard(),
+            #[cfg(feature = "transparent-inputs")]
+            transparent: match (uivk.p2pkh(), uivk.p2sh()) {
+                (Some(_), _) => Some(TransparentChangeKind::P2pkh),
+                (None, Some(_)) => Some(TransparentChangeKind::P2sh),
+                (None, None) => None,
+            },
+        }
+    }
+
+    /// Returns whether the account can receive change in the given pool. The Orchard and
+    /// Ironwood pools share the account's Orchard key.
+    pub fn can_receive(&self, pool: PoolType) -> bool {
+        match pool {
+            PoolType::Shielded(ShieldedPool::Sapling) => self.sapling,
+            PoolType::Shielded(ShieldedPool::Orchard | ShieldedPool::Ironwood) => self.orchard,
+            #[cfg(feature = "transparent-inputs")]
+            PoolType::Transparent => self.transparent.is_some(),
+            #[cfg(not(feature = "transparent-inputs"))]
+            PoolType::Transparent => false,
+        }
+    }
+
+    /// Returns the kind of output in which the account receives transparent change, if it can.
+    #[cfg(feature = "transparent-inputs")]
+    pub fn transparent(&self) -> Option<TransparentChangeKind> {
+        self.transparent
+    }
+}
+
 /// Metadata about the structure of the wallet for a particular account.
 ///
 /// At present this just contains counts of unspent outputs in each pool, but it may be extended in
@@ -1517,6 +1614,7 @@ pub struct AccountMeta {
     sapling: Option<PoolMeta>,
     orchard: Option<PoolMeta>,
     ironwood: Option<PoolMeta>,
+    change_receivers: ChangeReceivers,
 }
 
 impl AccountMeta {
@@ -1527,12 +1625,20 @@ impl AccountMeta {
         sapling: Option<PoolMeta>,
         orchard: Option<PoolMeta>,
         ironwood: Option<PoolMeta>,
+        change_receivers: ChangeReceivers,
     ) -> Self {
         Self {
             sapling,
             orchard,
             ironwood,
+            change_receivers,
         }
+    }
+
+    /// Returns the outputs in which the account for which this was generated can receive
+    /// change.
+    pub fn change_receivers(&self) -> &ChangeReceivers {
+        &self.change_receivers
     }
 
     /// Returns metadata about Sapling notes belonging to the account for which this was generated.
@@ -1801,9 +1907,10 @@ pub trait InputSource {
     ) -> Result<Option<ReceivedNote<Self::NoteRef, Note>>, Self::Error>;
 
     /// Returns a list of spendable notes sufficient to cover the specified target value, if
-    /// possible. Only spendable notes corresponding to the specified shielded protocol will
-    /// be included. Locked outputs are selected according to `lock_filter` (see [`LockFilter`];
-    /// a [`LockFilter::Policy`] carrying the default `Exclude` selects none).
+    /// possible. Only spendable notes from the pools in `sources` will be included, and a
+    /// note in `exclude` is never returned. Locked outputs are selected according to
+    /// `lock_filter` (see [`LockFilter`]; a [`LockFilter::Policy`] carrying the default
+    /// `Exclude` selects none).
     #[allow(clippy::too_many_arguments)]
     fn select_spendable_notes(
         &self,
@@ -1816,7 +1923,14 @@ pub trait InputSource {
         lock_filter: LockFilter<'_>,
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error>;
 
+<<<<<<< HEAD
     /// Returns notes for consolidation-aware selection from `source`.
+=======
+    /// Returns the OLDEST single spendable note whose value alone is at least `value`, drawn
+    /// from the first pool in `sources` (in the given preference order) that holds one. A note
+    /// in `exclude` is never returned. The returned collection contains at most one note; it is
+    /// empty when no single eligible note covers the value.
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
     ///
     /// The `funding` part of the result contains notes selected toward `value`. The `additional`
     /// part contains at most `max_additional_notes` disjoint notes that may be added
@@ -1863,6 +1977,14 @@ pub trait InputSource {
         exclude: &[Self::NoteRef],
         lock_filter: LockFilter<'_>,
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error>;
+
+    /// Returns the outputs in which the specified account can receive change.
+    ///
+    /// Returns an error if the account is not known to the wallet.
+    fn get_change_receivers(
+        &self,
+        account: Self::AccountId,
+    ) -> Result<ChangeReceivers, Self::Error>;
 
     /// Returns metadata describing the structure of the wallet for the specified account.
     ///
@@ -2105,6 +2227,10 @@ pub trait WalletRead {
     ) -> Result<Option<Self::Account>, Self::Error>;
 
     /// Returns information about every address tracked for this account.
+    ///
+    /// An exposed unified address can omit the transparent receiver that the wallet tracks
+    /// at its diversifier index. The result then also contains that receiver, as an
+    /// [`Address::Transparent`] entry whose [`AddressSource`] has the same diversifier index.
     fn list_addresses(&self, account: Self::AccountId) -> Result<Vec<AddressInfo>, Self::Error>;
 
     /// Returns the wallet account that controls the given address, if any.
@@ -2205,6 +2331,47 @@ pub trait WalletRead {
     /// This will return `Ok(None)` if the height of the current consensus chain tip is unknown.
     fn chain_height(&self) -> Result<Option<BlockHeight>, Self::Error>;
 
+<<<<<<< HEAD
+=======
+    /// Returns the interval on which this wallet retains note commitment tree checkpoints as
+    /// durable anchors.
+    ///
+    /// A ZIP 318 pool migration anchors each of its pool-crossing transfers to a boundary of this
+    /// interval, and proves the transfer long after that boundary has passed; the proof can only be
+    /// constructed if the wallet kept the boundary's checkpoint. Reading the grid back off the
+    /// wallet that maintains it — rather than configuring the migration separately — is what
+    /// guarantees the two agree.
+    ///
+    /// The default implementation returns [`AnchorRetentionInterval::ZIP_318`], which matches the
+    /// retention a backend performs if it does not configure the interval. A backend that DOES make
+    /// retention configurable must override this to report the interval it actually retains, or
+    /// migrations over it will draw anchors it has pruned.
+    ///
+    /// [`AnchorRetentionInterval::ZIP_318`]: anchor_retention::AnchorRetentionInterval::ZIP_318
+    fn anchor_retention_interval(&self) -> anchor_retention::AnchorRetentionInterval {
+        anchor_retention::AnchorRetentionInterval::ZIP_318
+    }
+
+    /// Returns the ZIP 318 pool-migration parameters in force for this wallet on the network that
+    /// `params` describe: the specified values, with the anchor bucket grid taken from
+    /// [`Self::anchor_retention_interval`].
+    ///
+    /// Every decision that depends on the grid must consult this rather than the network defaults,
+    /// so that a wallet retaining a non-standard interval is treated consistently: bucketing an
+    /// anchor and judging the resulting transaction a canonical crossing are the same question
+    /// asked twice, and they must be asked of the same grid. Overriding
+    /// [`Self::anchor_retention_interval`] is sufficient; this composes it.
+    fn pool_migration_params<P: consensus::Parameters>(
+        &self,
+        params: &P,
+    ) -> anchor_retention::PoolMigrationParams {
+        anchor_retention::PoolMigrationParams::new(
+            zcash_protocol::zip318::BlockSpacing::for_network(params),
+            self.anchor_retention_interval(),
+        )
+    }
+
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
     /// Returns the block hash for the block at the given height, if the
     /// associated block data is available. Returns `Ok(None)` if the hash
     /// is not found in the database.
@@ -2327,6 +2494,43 @@ pub trait WalletRead {
         &self,
         query: NullifierQuery,
     ) -> Result<Vec<(Self::AccountId, orchard::note::Nullifier)>, Self::Error>;
+
+    /// Returns the outpoints of the transparent outputs that the wallet holds and does not know
+    /// to have been spent, each mapped to the account that received it.
+    ///
+    /// The result is the transparent counterpart of
+    /// [`get_sapling_nullifiers(NullifierQuery::Unspent)`](Self::get_sapling_nullifiers): it is
+    /// the set of identifiers whose appearance in a scanned block reveals a spend of wallet
+    /// funds. Unlike the queries that serve input selection, it applies no confirmation,
+    /// coinbase-maturity or note-locking filter; an output is included whenever the wallet could
+    /// still observe a spend of it.
+    ///
+    /// This is a required method rather than one defaulting to a panic, for the same reason as
+    /// [`Self::get_ironwood_nullifiers`]: it is called on the scan path, so a backend that did
+    /// not override it would abort the process on the first scan.
+    #[cfg(feature = "transparent-inputs")]
+    fn get_unspent_transparent_outpoints(
+        &self,
+    ) -> Result<HashMap<OutPoint, Self::AccountId>, Self::Error>;
+
+    /// Returns every transparent receiver the wallet knows of, mapped to the account that
+    /// controls it and, for an HD-derived receiver, the change-level key scope used to derive it.
+    ///
+    /// The map covers receivers of every provenance: external and change receivers, ephemeral
+    /// receivers, and addresses imported without key material. A scanned transparent output pays
+    /// the wallet exactly when its recipient address is a key of this map.
+    ///
+    /// This is a required method rather than one defaulting to a panic, for the same reason as
+    /// [`Self::get_ironwood_nullifiers`]: it is called on the scan path, so a backend that did
+    /// not override it would abort the process on the first scan.
+    #[cfg(feature = "transparent-inputs")]
+    #[allow(clippy::type_complexity)]
+    fn get_transparent_receiver_accounts(
+        &self,
+    ) -> Result<
+        HashMap<TransparentAddress, (Self::AccountId, Option<TransparentKeyScope>)>,
+        Self::Error,
+    >;
 
     /// Returns the set of non-ephemeral transparent receivers associated with the given
     /// account controlled by this wallet.
@@ -2849,12 +3053,18 @@ pub struct ScannedBlock<AccountId> {
     orchard: ScannedBundles<orchard::tree::MerkleHashOrchard, orchard::note::Nullifier>,
     #[cfg(feature = "orchard")]
     ironwood: ScannedBundles<orchard::tree::MerkleHashOrchard, orchard::note::Nullifier>,
+<<<<<<< HEAD
     #[cfg(feature = "orchard")]
     scanned_accounts: Vec<AccountId>,
+=======
+    #[cfg(feature = "transparent-inputs")]
+    transparent_spend_map: Vec<(TxIndex, TxId, Vec<OutPoint>)>,
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
 }
 
 impl<AccountId> ScannedBlock<AccountId> {
     /// Constructs a new `ScannedBlock`
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         block_height: BlockHeight,
         block_hash: BlockHash,
@@ -2869,7 +3079,15 @@ impl<AccountId> ScannedBlock<AccountId> {
             orchard::tree::MerkleHashOrchard,
             orchard::note::Nullifier,
         >,
+<<<<<<< HEAD
         #[cfg(feature = "orchard")] scanned_accounts: Vec<AccountId>,
+=======
+        #[cfg(feature = "transparent-inputs")] transparent_spend_map: Vec<(
+            TxIndex,
+            TxId,
+            Vec<OutPoint>,
+        )>,
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
     ) -> Self {
         Self {
             block_height,
@@ -2881,8 +3099,13 @@ impl<AccountId> ScannedBlock<AccountId> {
             orchard,
             #[cfg(feature = "orchard")]
             ironwood,
+<<<<<<< HEAD
             #[cfg(feature = "orchard")]
             scanned_accounts,
+=======
+            #[cfg(feature = "transparent-inputs")]
+            transparent_spend_map,
+>>>>>>> cdb5ed47cadcd2bb03c12719ab6382965aaa18a6
         }
     }
 
@@ -2936,6 +3159,22 @@ impl<AccountId> ScannedBlock<AccountId> {
         &self,
     ) -> &ScannedBundles<orchard::tree::MerkleHashOrchard, orchard::note::Nullifier> {
         &self.ironwood
+    }
+
+    /// Returns, for each transaction in the block, the outpoints spent by its transparent inputs
+    /// that do not spend any transparent output the wallet already knows of.
+    ///
+    /// This is the transparent counterpart of [`ScannedBundles::nullifier_map`], and exists for
+    /// the same reason: an output created in a block range the wallet has not yet scanned cannot
+    /// be recognized as its own at the time the spend is observed. Recording the spending
+    /// transaction against the outpoint allows the spend to be resolved if that output is
+    /// discovered later.
+    ///
+    /// Each entry is keyed by both transaction index within the block and transaction ID, so that
+    /// a caller may identify the transaction by either.
+    #[cfg(feature = "transparent-inputs")]
+    pub fn transparent_spend_map(&self) -> &[(TxIndex, TxId, Vec<OutPoint>)] {
+        &self.transparent_spend_map
     }
 
     /// Consumes `self` and returns the lists of Sapling, Orchard, and Ironwood note commitments
@@ -3686,6 +3925,48 @@ pub trait WalletWrite:
         account: <Self as WalletRead>::AccountId,
     ) -> Result<(), <Self as WalletRead>::Error>;
 
+    /// Sets the human-readable name of the specified account, replacing any existing name.
+    ///
+    /// Only the account's name is changed; its keys, birthday, and all other wallet state are
+    /// left unchanged. The new name is subsequently returned by [`Account::name`].
+    ///
+    /// Account names carry no uniqueness guarantee: the wallet does not reject a name that is
+    /// already used by another account. Applications that require distinct names must enforce
+    /// that themselves.
+    ///
+    /// Returns an error if the specified account is not known to the wallet.
+    fn set_account_name(
+        &mut self,
+        account: <Self as WalletRead>::AccountId,
+        name: &str,
+    ) -> Result<(), <Self as WalletRead>::Error>;
+
+    /// Imports the given transparent address into the account as a watch-only address, without
+    /// any associated key material.
+    ///
+    /// The imported address will contribute to the balance of the account, but the wallet holds
+    /// neither the public key (P2PKH) nor the redeem script (P2SH) from which the address was
+    /// derived, so funds received by it cannot be spent — its outputs are excluded from spendable
+    /// input selection, and it must not be included in the addresses passed to
+    /// [`propose_shielding`]. Subsequently importing the corresponding key material with
+    /// [`import_standalone_transparent_pubkey`] or [`import_standalone_transparent_script`]
+    /// upgrades the address in place, after which the spending limitations of those methods
+    /// apply instead.
+    ///
+    /// [`import_standalone_transparent_pubkey`]: Self::import_standalone_transparent_pubkey
+    /// [`import_standalone_transparent_script`]: Self::import_standalone_transparent_script
+    /// [`propose_shielding`]: crate::data_api::wallet::propose_shielding
+    #[cfg(feature = "transparent-key-import")]
+    fn import_standalone_transparent_address(
+        &mut self,
+        _account: <Self as WalletRead>::AccountId,
+        _address: TransparentAddress,
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        unimplemented!(
+            "WalletWrite::import_standalone_transparent_address must be overridden for wallets to use the `transparent-key-import` feature"
+        )
+    }
+
     /// Imports the given pubkey into the account without key derivation information, and adds the
     /// associated transparent p2pkh address.
     ///
@@ -3877,9 +4158,57 @@ pub trait WalletWrite:
         retain_with_priority: Option<ScanPriority>,
     ) -> Result<u64, <Self as WalletRead>::Error>;
 
+    /// Queues `range` to be scanned again, overriding the record of any part of it that has
+    /// already been scanned.
+    ///
+    /// The range is queued at [`ScanPriority::Historic`], so it is scanned only once no
+    /// higher-priority work remains. Queue entries within `range` whose priority exceeds
+    /// [`ScanPriority::Historic`] are left as they are, since they already require the blocks
+    /// they cover to be scanned at least as urgently; entries recording the range as
+    /// [`ScanPriority::Scanned`] or [`ScanPriority::Ignored`] are overridden.
+    ///
+    /// This destroys nothing: no block, transaction, note, note commitment tree state, or
+    /// witness is removed, and no account birthday is altered. It records only that the blocks
+    /// in `range` must be processed again. Re-scanning a block that was already scanned is
+    /// idempotent with respect to the wallet's contents.
+    ///
+    /// Scanning is performed against every account's viewing keys, so this re-scans `range`
+    /// for the whole wallet.
+    ///
+    /// Neither end of `range` is clamped; it is queued exactly as given. Below the wallet's
+    /// birthday, blocks that no account can hold notes in are queued and scanned to no effect.
+    /// Above the wallet's view of the chain tip, a [`ScanPriority::Historic`] entry is left
+    /// covering heights that do not yet exist, and [`WalletRead::suggest_scan_ranges`] will
+    /// offer it. Neither case is destructive, and the second self-corrects as the chain grows
+    /// into the queued heights. A caller that wants neither should clamp `range` itself,
+    /// against [`WalletRead::get_wallet_birthday`] and [`WalletRead::chain_height`].
+    ///
+    /// An empty range queues nothing and is not an error.
+    ///
+    /// In contrast to [`truncate_to_chain_state`] and [`rewind_to_chain_state`], this does not
+    /// require a [`ChainState`]: a range that re-enters the queue is scanned from a frontier
+    /// supplied at scan time, so the wallet needs no note commitment tree state at the range's
+    /// start in order to queue it.
+    ///
+    /// [`truncate_to_chain_state`]: WalletWrite::truncate_to_chain_state
+    /// [`rewind_to_chain_state`]: WalletWrite::rewind_to_chain_state
+    fn queue_rescan(
+        &mut self,
+        range: Range<BlockHeight>,
+    ) -> Result<(), <Self as WalletRead>::Error>;
+
     /// Updates the state of the wallet database by persisting the provided block information,
     /// along with the note commitments that were detected when scanning the block for transactions
     /// pertaining to this wallet.
+    ///
+    /// Each scanned transaction's shielded outputs and transparent outputs that pay a wallet
+    /// account are recorded as received. Outputs the wallet sent to an external recipient are
+    /// not; those are recorded when complete transaction data reaches
+    /// [`wallet::decrypt_and_store_transaction`].
+    ///
+    /// The operation is atomic: implementations must apply the whole batch or none of it. After
+    /// an error the caller may assume that no part of any block in `blocks` was persisted, and
+    /// that the call may be retried.
     ///
     /// ### Arguments
     /// - `from_state` must be the chain state for the block height prior to the first
@@ -3925,6 +4254,11 @@ pub trait WalletWrite:
     /// stored transactions. Once spend records exist, the outputs are protected from
     /// double-selection by the spend tracking mechanism, so the explicit locks are no
     /// longer needed.
+    ///
+    /// Implementations must be idempotent: storing a transaction the wallet has already
+    /// recorded replaces that record rather than failing, so that a caller which stores a
+    /// transaction and then dies before transmitting it can store the same transaction again
+    /// when it resumes.
     fn store_transactions_to_be_sent(
         &mut self,
         transactions: &[SentTransaction<<Self as WalletRead>::AccountId>],
@@ -4675,10 +5009,58 @@ mod tests {
 
     use super::*;
 
+    /// The Orchard and Ironwood pools share the account's Orchard key, so one flag has to
+    /// answer for both; and a value in which nothing can receive is representable, which
+    /// is what lets a caller say change has nowhere to go.
+    #[test]
+    fn change_receivers_new_reports_what_it_was_given() {
+        let receivers = ChangeReceivers::new(
+            true,
+            false,
+            #[cfg(feature = "transparent-inputs")]
+            None,
+        );
+        assert!(receivers.can_receive(PoolType::SAPLING));
+        assert!(!receivers.can_receive(PoolType::ORCHARD));
+        assert!(!receivers.can_receive(PoolType::IRONWOOD));
+        assert!(!receivers.can_receive(PoolType::Transparent));
+
+        let receivers = ChangeReceivers::new(
+            false,
+            true,
+            #[cfg(feature = "transparent-inputs")]
+            Some(TransparentChangeKind::P2sh),
+        );
+        assert!(!receivers.can_receive(PoolType::SAPLING));
+        assert!(receivers.can_receive(PoolType::ORCHARD));
+        assert!(receivers.can_receive(PoolType::IRONWOOD));
+        #[cfg(feature = "transparent-inputs")]
+        {
+            assert!(receivers.can_receive(PoolType::Transparent));
+            assert_eq!(receivers.transparent(), Some(TransparentChangeKind::P2sh));
+        }
+
+        let nothing = ChangeReceivers::new(
+            false,
+            false,
+            #[cfg(feature = "transparent-inputs")]
+            None,
+        );
+        for pool in [
+            PoolType::SAPLING,
+            PoolType::ORCHARD,
+            PoolType::IRONWOOD,
+            PoolType::Transparent,
+        ] {
+            assert!(!nothing.can_receive(pool), "{pool:?} should not receive");
+        }
+    }
+
     #[cfg(feature = "orchard")]
     use crate::data_api::error::FindAccountForAddressError;
-    use crate::data_api::testing::{
-        MockWalletDb, pool::ShieldedPoolTester, sapling::SaplingPoolTester,
+    use crate::{
+        data_api::testing::{MockWalletDb, pool::ShieldedPoolTester, sapling::SaplingPoolTester},
+        fees::tests::all_change_receivers,
     };
 
     use transparent::address::TransparentAddress;
@@ -4888,6 +5270,7 @@ mod tests {
             Some(PoolMeta::new(2, Zatoshis::const_from_u64(200))),
             Some(PoolMeta::new(3, Zatoshis::const_from_u64(300))),
             Some(PoolMeta::new(5, Zatoshis::const_from_u64(500))),
+            all_change_receivers(),
         );
         assert_eq!(meta.note_count(ShieldedPool::Ironwood), Some(5));
         assert_eq!(meta.total_note_count(), Some(10));
@@ -4898,6 +5281,7 @@ mod tests {
             None,
             None,
             Some(PoolMeta::new(4, Zatoshis::const_from_u64(400))),
+            all_change_receivers(),
         );
         assert_eq!(ironwood_only.note_count(ShieldedPool::Ironwood), Some(4));
         assert_eq!(ironwood_only.total_note_count(), Some(4));
@@ -4926,7 +5310,7 @@ mod tests {
 
     fn sapling_address_for_tag(tag: u8) -> sapling::PaymentAddress {
         match SaplingPoolTester::sk_default_address(&SaplingPoolTester::sk(&[tag; 32])) {
-            Address::Sapling(pa) => pa,
+            Address::Sapling(pa) => *pa,
             other => panic!("expected Sapling address, got {other:?}"),
         }
     }
@@ -4941,6 +5325,8 @@ mod tests {
             Some(orchard).flatten(),
             Some(sapling).flatten(),
             transparent,
+            None,
+            None,
         )
         .expect("test UA must be valid")
         .into()
@@ -5057,7 +5443,7 @@ mod tests {
 
         let result = wallet.find_account_for_address(
             &zcash_protocol::consensus::Network::MainNetwork,
-            &Address::Unified(ua),
+            &Address::Unified(Box::new(ua)),
         );
 
         assert_eq!(result.unwrap(), Some(1));
@@ -5078,7 +5464,7 @@ mod tests {
 
         let result = wallet.find_account_for_address(
             &zcash_protocol::consensus::Network::MainNetwork,
-            &Address::Unified(ua_from_other_seed),
+            &Address::Unified(Box::new(ua_from_other_seed)),
         );
 
         assert_eq!(result.unwrap(), None);
@@ -5104,7 +5490,7 @@ mod tests {
         // resolve it.
         let result = wallet.find_account_for_address(
             &zcash_protocol::consensus::Network::MainNetwork,
-            &Address::Sapling(sapling_pa),
+            &Address::Sapling(Box::new(sapling_pa)),
         );
 
         assert_eq!(result.unwrap(), Some(1));
@@ -5125,7 +5511,7 @@ mod tests {
 
         let result = wallet.find_account_for_address(
             &zcash_protocol::consensus::Network::MainNetwork,
-            &Address::Sapling(sapling_address_for_tag(1)),
+            &Address::Sapling(Box::new(sapling_address_for_tag(1))),
         );
         assert_eq!(result.unwrap(), None);
     }
@@ -5153,12 +5539,14 @@ mod tests {
             Some(ua2.orchard().copied().expect("orchard receiver")),
             Some(ua1.sapling().copied().expect("sapling receiver")),
             None,
+            None,
+            None,
         )
         .expect("sapling+orchard UA must be valid");
 
         let result = wallet.find_account_for_address(
             &zcash_protocol::consensus::Network::MainNetwork,
-            &Address::Unified(frankenstein),
+            &Address::Unified(Box::new(frankenstein)),
         );
 
         assert!(matches!(
