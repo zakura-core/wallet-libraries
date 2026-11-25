@@ -88,8 +88,8 @@ if grep -Eq "$forbidden" <<<"$default_tree"; then
   exit 1
 fi
 
-check_mode lrz "^zakura-" \
-  "a Zakura fork entered the upstream build:"
+check_mode lrz "^(zakura|zcashlabs)-" \
+  "a fork entered the upstream build:"
 
 check_mode zakura "$forbidden" \
   "a crates.io original entered the Zakura build:"
