@@ -7,6 +7,16 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+- The `shardtree` dependency is now the `zcashlabs-shardtree` package, at
+  `0.7.2`. `shardtree::error::ShardTreeError` appears in this crate's public
+  API, so a consumer must take its `shardtree` dependency from the same
+  package:
+
+      shardtree = { package = "zcashlabs-shardtree", version = "0.7.2" }
+
+  No `use` path changes: the library target is still named `shardtree`.
+
 ### Fixed
 
 - A transaction whose only memo-less shielded output is a note a one-time key

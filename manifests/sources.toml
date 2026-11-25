@@ -97,6 +97,7 @@ orchard = { features = ["backend-halo2"], package = "zakura-orchard", version = 
 sapling = { package = "zakura-sapling-crypto", version = "5.4.0" }
 redjubjub = { package = "zakura-redjubjub", version = "5.4.0" }
 pasta_curves = { package = "zakura-pasta-curves", version = "5.4.0" }
+shardtree = { package = "zcashlabs-shardtree", version = "0.7.2" }
 # Scan workers use sync and async channels, not Flume's selector.
 flume = { version = "0.11", default-features = false, features = ["async"] }
 
@@ -202,6 +203,7 @@ wallet_pir_packages = [
 [graph]
 forbidden = [
   "orchard",
+  "shardtree",
   "equihash",
   "sapling-crypto",
   "zcash_primitives",

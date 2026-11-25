@@ -3199,21 +3199,6 @@ dependencies = [
 
 [[package]]
 name = "shardtree"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8147447aed7be4736e271825b8c3a4432efb7182e71363169b572371ddef452e"
-dependencies = [
- "assert_matches",
- "bitflags 2.13.2",
- "either",
- "incrementalmerkletree 0.8.2",
- "incrementalmerkletree-testing",
- "proptest",
- "tracing",
-]
-
-[[package]]
-name = "shardtree"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "211c5ae6ff1fda9efe2cd8b90737744b3b3989f98740319284946bf110b862ed"
@@ -4408,7 +4393,6 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "shardtree 0.7.1",
  "subtle",
  "tempfile",
  "time",
@@ -4440,6 +4424,7 @@ dependencies = [
  "zakura-zcash-script",
  "zakura-zip321",
  "zcash_encoding",
+ "zcashlabs-shardtree",
  "zip32 0.2.1",
 ]
 
@@ -4472,7 +4457,6 @@ dependencies = [
  "secp256k1",
  "secrecy",
  "serde",
- "shardtree 0.7.1",
  "subtle",
  "tempfile",
  "time",
@@ -4494,6 +4478,7 @@ dependencies = [
  "zakura-transparent",
  "zakura-zcash-script",
  "zakura-zip321",
+ "zcashlabs-shardtree",
  "zewif",
  "zip32 0.2.1",
 ]
@@ -4640,10 +4625,10 @@ dependencies = [
  "hex",
  "incrementalmerkletree 0.8.2",
  "rand 0.10.3",
- "shardtree 0.7.1",
  "zakura-orchard",
  "zakura-pasta-curves",
  "zakura-protocol",
+ "zcashlabs-shardtree",
  "zeroize",
 ]
 
@@ -4762,7 +4747,6 @@ dependencies = [
  "rand_core 0.10.1",
  "secp256k1",
  "serde",
- "shardtree 0.7.1",
  "zakura-note-encryption",
  "zakura-orchard",
  "zakura-pasta-curves",
@@ -4773,6 +4757,7 @@ dependencies = [
  "zakura-sapling-crypto",
  "zakura-transparent",
  "zakura-zcash-script",
+ "zcashlabs-shardtree",
  "zip32 0.2.1",
 ]
 
@@ -6119,7 +6104,7 @@ dependencies = [
  "rayon",
  "sapling-crypto",
  "secrecy",
- "shardtree 0.8.0",
+ "shardtree",
  "subtle",
  "time",
  "tonic",
@@ -6167,7 +6152,7 @@ dependencies = [
  "schemerz",
  "schemerz-rusqlite",
  "secrecy",
- "shardtree 0.8.0",
+ "shardtree",
  "static_assertions",
  "subtle",
  "time",
@@ -6251,7 +6236,7 @@ dependencies = [
  "orchard",
  "pczt",
  "rand_core 0.10.1",
- "shardtree 0.8.0",
+ "shardtree",
  "zcash_client_backend",
  "zcash_keys",
  "zcash_primitives",
@@ -6348,6 +6333,21 @@ dependencies = [
  "zcash_script",
  "zcash_spec",
  "zip32 0.3.0",
+]
+
+[[package]]
+name = "zcashlabs-shardtree"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "160c73e47d52f5ef2e774538f1f50c8fbfaf2deefb6dd98328dbab5ff44ff91b"
+dependencies = [
+ "assert_matches",
+ "bitflags 2.13.2",
+ "either",
+ "incrementalmerkletree 0.8.2",
+ "incrementalmerkletree-testing",
+ "proptest",
+ "tracing",
 ]
 
 [[package]]
