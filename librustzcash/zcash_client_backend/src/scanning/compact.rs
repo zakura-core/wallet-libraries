@@ -12,7 +12,9 @@ use zcash_protocol::{
     consensus::{self, BlockHeight, NetworkUpgrade, TxIndex},
 };
 
-use super::{Nullifiers, PositionTracker, ScanError, ScanningKeys, find_received, find_spent};
+use super::{
+    InternalPass, Nullifiers, PositionTracker, ScanError, ScanningKeys, find_received, find_spent,
+};
 use crate::{
     data_api::{BlockMetadata, ScannedBlock, ScannedBundles},
     proto::compact_formats::{ChainMetadata, CompactBlock, CompactTx},
@@ -244,6 +246,7 @@ pub(crate) fn scan_block_with_runners<P, AccountId, IvkTag, TS, TO, TI>(
     block: CompactBlock,
     scanning_keys: &ScanningKeys<AccountId, IvkTag>,
     nullifiers: &Nullifiers<AccountId>,
+    internal_pass: Option<&InternalPass<AccountId, IvkTag>>,
     prior_block_metadata: Option<&BlockMetadata>,
     mut batch_runners: Option<&mut BatchRunners<IvkTag, TS, TO, TI>>,
 ) -> Result<ScannedBlock<AccountId>, ScanError>
@@ -400,6 +403,21 @@ where
             spent_from_accounts.chain(ironwood_spends.iter().map(|spend| spend.account_id()));
         let spent_from_accounts = spent_from_accounts.copied().collect::<HashSet<_>>();
 
+        // The internal-scope keys this transaction is to be trial-decrypted with in addition to
+        // the batch's, if the pass's triggers select it. A coinbase transaction's null input is
+        // absent from a compact block, so its position in the block stands in for it.
+        let has_shielded_outputs = !tx.outputs.is_empty() || !tx.actions.is_empty();
+        #[cfg(feature = "orchard")]
+        let has_shielded_outputs = has_shielded_outputs || !tx.ironwood_actions.is_empty();
+        let inline_keys = internal_pass.filter(|pass| {
+            pass.triggers.fire(
+                &txid,
+                !spent_from_accounts.is_empty(),
+                !tx.vin.is_empty() || tx.index == 0,
+                has_shielded_outputs,
+            )
+        });
+
         #[cfg(feature = "orchard")]
         // Explicit non-Ironwood fields require LWD. Empty transparent lists are
         // only provisional: PIR shape flags may reveal an omitted bundle.
@@ -411,6 +429,7 @@ where
             txid,
             |output_idx| pos_tracker.sapling_note_position(output_idx),
             &scanning_keys.sapling,
+            inline_keys.map(|pass| &pass.keys.sapling),
             &spent_from_accounts,
             &tx.outputs
                 .iter()
@@ -451,6 +470,7 @@ where
             txid,
             |output_idx| pos_tracker.orchard_note_position(output_idx),
             &scanning_keys.orchard,
+            inline_keys.map(|pass| &pass.keys.orchard),
             &spent_from_accounts,
             &tx.actions
                 .iter()
@@ -489,6 +509,7 @@ where
             txid,
             |output_idx| pos_tracker.ironwood_note_position(output_idx),
             &scanning_keys.ironwood,
+            inline_keys.map(|pass| &pass.keys.ironwood),
             &spent_from_accounts,
             &tx.ironwood_actions
                 .iter()
@@ -948,6 +969,7 @@ mod tests {
                 cb,
                 &scanning_keys,
                 &Nullifiers::empty(),
+                None,
                 Some(&BlockMetadata::from_parts(
                     BlockHeight::from(0),
                     BlockHash([0u8; 32]),
@@ -1100,6 +1122,7 @@ mod tests {
                 cb,
                 &scanning_keys,
                 &Nullifiers::empty(),
+                None,
                 Some(&BlockMetadata::from_parts(
                     BlockHeight::from(0),
                     BlockHash([0u8; 32]),
@@ -1171,6 +1194,7 @@ mod tests {
             cb,
             &scanning_keys,
             &Nullifiers::empty(),
+            None,
             Some(&BlockMetadata::from_parts(
                 BlockHeight::from(0),
                 BlockHash([0u8; 32]),
@@ -1232,6 +1256,7 @@ mod tests {
                 cb,
                 &scanning_keys,
                 &Nullifiers::empty(),
+                None,
                 None,
                 batch_runners.as_mut(),
             )

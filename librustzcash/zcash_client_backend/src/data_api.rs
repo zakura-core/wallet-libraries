@@ -2275,6 +2275,19 @@ pub trait WalletRead {
     /// transaction is not known to the wallet or not in the main chain.
     fn get_tx_height(&self, txid: TxId) -> Result<Option<BlockHeight>, Self::Error>;
 
+    /// Returns the txids of the transactions this wallet stores that a scan of `range` may
+    /// encounter: those not associated with a scanned block, and those whose mined height lies
+    /// in `range`.
+    ///
+    /// Returns `Ok(None)` when the backend cannot answer, in which case a caller must not rely
+    /// on the answer.
+    fn get_txids_for_scan(
+        &self,
+        _range: core::ops::Range<BlockHeight>,
+    ) -> Result<Option<HashSet<TxId>>, Self::Error> {
+        Ok(None)
+    }
+
     /// Returns all unified full viewing keys known to this wallet.
     fn get_unified_full_viewing_keys(
         &self,

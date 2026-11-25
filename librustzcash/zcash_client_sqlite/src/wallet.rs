@@ -3652,6 +3652,29 @@ pub(crate) fn get_tx_height(
     Ok(tx_height.filter(|h| h <= &chain_tip_height))
 }
 
+/// Returns the txids of the stored transactions that a scan of `range` may encounter: those not
+/// associated with a scanned block, and those whose scanned or recorded mined height lies in
+/// `range`.
+pub(crate) fn get_txids_for_scan(
+    conn: &rusqlite::Connection,
+    range: core::ops::Range<BlockHeight>,
+) -> Result<HashSet<TxId>, SqliteClientError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT txid FROM transactions
+         WHERE block IS NULL
+         OR (block >= :start AND block < :end)
+         OR (mined_height >= :start AND mined_height < :end)",
+    )?;
+    let rows = stmt.query_map(
+        named_params![
+            ":start": u32::from(range.start),
+            ":end": u32::from(range.end),
+        ],
+        |row| row.get::<_, [u8; 32]>(0).map(TxId::from_bytes),
+    )?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 /// Returns the block hash for the block at the specified height,
 /// if any.
 pub(crate) fn get_block_hash(

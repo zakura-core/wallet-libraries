@@ -39,8 +39,14 @@ pub mod db;
 // The shielded-pool testers are used only by this crate's own in-crate tests, not by external
 // consumers of the exposed harness, so they stay test-only and keep their heavier test-only
 // dependencies (proptest, incrementalmerkletree-testing) out of the `test-dependencies` build.
+#[cfg(all(test, feature = "orchard"))]
+mod external_only_policy;
+#[cfg(all(test, feature = "orchard", feature = "transparent-inputs"))]
+mod local_transactions;
 #[cfg(test)]
 pub(crate) mod pool;
+#[cfg(all(test, feature = "orchard", feature = "transparent-inputs"))]
+mod restore_with_shielding;
 
 /// An in-memory compact-block cache backed by a temporary [`BlockDb`], implementing the
 /// `zcash_client_backend` testing framework's [`TestCache`].

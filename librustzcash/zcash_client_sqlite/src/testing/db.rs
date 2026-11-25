@@ -512,6 +512,13 @@ impl WalletRead for TestDb {
         self.wallet_db.get_tx_height(txid)
     }
 
+    fn get_txids_for_scan(
+        &self,
+        range: core::ops::Range<BlockHeight>,
+    ) -> Result<Option<HashSet<TxId>>, Self::Error> {
+        self.wallet_db.get_txids_for_scan(range)
+    }
+
     fn get_unified_full_viewing_keys(
         &self,
     ) -> Result<HashMap<Self::AccountId, UnifiedFullViewingKey>, Self::Error> {

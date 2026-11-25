@@ -602,6 +602,7 @@ where
                     txid,
                     |output_idx| pos_tracker.sapling_note_position(output_idx),
                     &scanning_keys.sapling,
+                    None,
                     &spent_from_accounts,
                     &bundle
                         .shielded_outputs()
@@ -628,6 +629,7 @@ where
                     txid,
                     |output_idx| pos_tracker.orchard_note_position(output_idx),
                     &scanning_keys.orchard,
+                    None,
                     &spent_from_accounts,
                     &bundle
                         .actions()
@@ -654,6 +656,7 @@ where
                     txid,
                     |output_idx| pos_tracker.ironwood_note_position(output_idx),
                     &scanning_keys.ironwood,
+                    None,
                     &spent_from_accounts,
                     &bundle
                         .actions()

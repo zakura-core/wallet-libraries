@@ -109,6 +109,7 @@ fn owned_ironwood_spend_captures_every_action_for_outgoing_recovery() {
         block,
         &scanning_keys,
         &nullifiers,
+        None,
         Some(&BlockMetadata::from_parts(
             BlockHeight::from(0),
             BlockHash([0; 32]),
@@ -162,6 +163,7 @@ fn owned_ironwood_spend_captures_every_action_for_outgoing_recovery() {
         mixed_block,
         &scanning_keys,
         &nullifiers,
+        None,
         Some(&BlockMetadata::from_parts(
             BlockHeight::from(0),
             BlockHash([0; 32]),
@@ -265,6 +267,7 @@ fn wallet_owned_ironwood_outputs_are_not_outgoing_candidates() {
         block,
         &scanning_keys,
         &Nullifiers::new(vec![], vec![], vec![(account, owned_nf)]),
+        None,
         Some(&BlockMetadata::from_parts(
             BlockHeight::from(0),
             BlockHash([0; 32]),

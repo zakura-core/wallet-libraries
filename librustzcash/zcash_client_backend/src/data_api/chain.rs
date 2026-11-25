@@ -180,6 +180,7 @@ pub mod error;
 use error::Error;
 
 use super::WalletRead;
+use crate::scanning::{InternalPass, InternalPassTriggers};
 
 /// A struct containing metadata about a subtree root of the note commitment tree.
 ///
@@ -654,6 +655,229 @@ where
         from_height,
         limit,
         &scanning_keys,
+        None,
+    )?;
+
+    data_db
+        .put_blocks(from_state, scanned_blocks)
+        .map_err(Error::Wallet)?;
+    Ok(scan_summary)
+}
+
+/// How far a caller has retrieved and stored the transactions that involve the wallet's
+/// transparent addresses.
+///
+/// A compact block carries the transparent inputs of its transactions only when the client asks
+/// the server for the transparent pool, which no current light wallet does. A transaction that
+/// shields transparent funds into an account's internal receiver is therefore indistinguishable,
+/// in compact data alone, from a payment to a third party.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransparentHistory {
+    /// Every transaction that involves a transparent address of the wallet and is mined at or
+    /// below the given height is already stored in the wallet.
+    SyncedTo(BlockHeight),
+    /// The caller gives no such guarantee.
+    Unsynced,
+}
+
+impl TransparentHistory {
+    /// Whether the guarantee extends to `height`.
+    fn covers(&self, height: BlockHeight) -> bool {
+        match self {
+            Self::SyncedTo(synced) => height <= *synced,
+            Self::Unsynced => false,
+        }
+    }
+}
+
+/// What a caller guarantees about the blocks that precede a scan.
+///
+/// A driver that writes the result of one batch while it decrypts the next leaves the wallet's
+/// own frontier behind the batch it is about to scan. `writes_issued_through` lets such a driver
+/// declare the batches it has issued, so that the scan is still recognized as linear.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinearScanGuarantee {
+    transparent_history: TransparentHistory,
+    writes_issued_through: Option<BlockHeight>,
+}
+
+impl LinearScanGuarantee {
+    /// A guarantee that rests on the wallet's stored state alone.
+    pub const fn new(transparent_history: TransparentHistory) -> Self {
+        Self {
+            transparent_history,
+            writes_issued_through: None,
+        }
+    }
+
+    /// Declares that every block up to and including `height` has been scanned, and that its
+    /// writes have been issued to the wallet in block order.
+    ///
+    /// The declaration is a precondition the scan cannot check. A caller that declares a block
+    /// whose writes it has not issued, or that issues writes out of block order, makes the scan
+    /// treat a gap as linear, and an output paying an internal receiver within that gap is not
+    /// found.
+    pub const fn with_writes_issued_through(self, height: BlockHeight) -> Self {
+        Self {
+            writes_issued_through: Some(height),
+            ..self
+        }
+    }
+
+    /// The caller's transparent-history guarantee.
+    pub const fn transparent_history(&self) -> TransparentHistory {
+        self.transparent_history
+    }
+}
+
+/// How [`scan_cached_blocks_with_policy`] chooses the viewing-key scopes it trial-decrypts with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrialDecryptionPolicy {
+    /// Every output is trial-decrypted with the external and internal viewing keys of every
+    /// account: the behaviour of [`scan_cached_blocks`].
+    AllScopes,
+    /// When the scan is linear and the guarantee covers every block the scan may reach, outputs
+    /// are trial-decrypted with external keys only, and the outputs of the wallet's own
+    /// transactions are also trial-decrypted with internal keys; otherwise this behaves as
+    /// [`Self::AllScopes`].
+    ExternalWhenLinear(LinearScanGuarantee),
+}
+
+/// Returns the greatest height a scan of at most `limit` blocks from `from_height` can reach.
+fn batch_end(from_height: BlockHeight, limit: usize) -> BlockHeight {
+    let limit = u32::try_from(limit).unwrap_or(u32::MAX);
+    BlockHeight::from(u32::from(from_height).saturating_add(limit.saturating_sub(1)))
+}
+
+/// Returns whether every block from the wallet's birthday up to `from_height` has been scanned.
+fn is_linear<DbT: WalletRead>(
+    db: &DbT,
+    from_height: BlockHeight,
+    writes_issued_through: Option<BlockHeight>,
+) -> Result<bool, DbT::Error> {
+    let stored = match db.block_fully_scanned()? {
+        Some(meta) => Some(meta.block_height() + 1),
+        None => db.get_wallet_birthday()?,
+    };
+    let declared = writes_issued_through.map(|height| height + 1);
+    let frontier = match (stored, declared) {
+        (Some(stored), Some(declared)) => Some(std::cmp::max(stored, declared)),
+        (frontier, None) | (None, frontier) => frontier,
+    };
+    Ok(frontier.is_some_and(|frontier| from_height <= frontier))
+}
+
+/// The triggers of the external-only mode, or `None` if the wallet cannot enumerate the
+/// transactions it stores.
+fn linear_triggers<DbT: WalletRead>(
+    db: &DbT,
+    from_height: BlockHeight,
+    limit: usize,
+) -> Result<Option<InternalPassTriggers>, DbT::Error> {
+    let limit = u32::try_from(limit).unwrap_or(u32::MAX);
+    let end = BlockHeight::from(u32::from(from_height).saturating_add(limit));
+    Ok(db
+        .get_txids_for_scan(from_height..end)?
+        .map(|known_txids| InternalPassTriggers {
+            wallet_spend: true,
+            known_txids,
+            transparent_inputs_or_coinbase: true,
+        }))
+}
+
+/// Scans as [`scan_cached_blocks`] does, trial-decrypting with the scopes `policy` selects.
+///
+/// ## Panics
+///
+/// This method will panic if `from_height != from_state.block_height() + 1`.
+#[tracing::instrument(skip(params, block_source, data_db, from_state))]
+#[allow(clippy::type_complexity)]
+pub fn scan_cached_blocks_with_policy<ParamsT, DbT, BlockSourceT>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &mut DbT,
+    from_height: BlockHeight,
+    from_state: &ChainState,
+    limit: usize,
+    policy: TrialDecryptionPolicy,
+) -> Result<ScanSummary, Error<<DbT as WalletRead>::Error, BlockSourceT::Error>>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: WalletWrite,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+{
+    let triggers = match policy {
+        TrialDecryptionPolicy::AllScopes => None,
+        TrialDecryptionPolicy::ExternalWhenLinear(guarantee) => {
+            if guarantee
+                .transparent_history()
+                .covers(batch_end(from_height, limit))
+                && is_linear(&*data_db, from_height, guarantee.writes_issued_through)
+                    .map_err(Error::Wallet)?
+            {
+                linear_triggers(&*data_db, from_height, limit).map_err(Error::Wallet)?
+            } else {
+                None
+            }
+        }
+    };
+    scan_cached_blocks_in_mode(
+        params,
+        block_source,
+        data_db,
+        from_height,
+        from_state,
+        limit,
+        triggers,
+    )
+}
+
+/// Scans as [`scan_cached_blocks`] does, with external keys only plus an inline internal pass on
+/// the transactions `triggers` select, or with every scope when `triggers` is `None`.
+#[allow(clippy::type_complexity)]
+pub(crate) fn scan_cached_blocks_in_mode<ParamsT, DbT, BlockSourceT>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &mut DbT,
+    from_height: BlockHeight,
+    from_state: &ChainState,
+    limit: usize,
+    triggers: Option<InternalPassTriggers>,
+) -> Result<ScanSummary, Error<<DbT as WalletRead>::Error, BlockSourceT::Error>>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: WalletWrite,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+{
+    assert_eq!(from_height, from_state.block_height + 1);
+
+    let account_ufvks =
+        account_ufvks_for_range(&*data_db, from_height, limit).map_err(Error::Wallet)?;
+    let (scanning_keys, internal_keys) = match &triggers {
+        None => (ScanningKeys::from_account_ufvks(account_ufvks), None),
+        Some(_) => (
+            ScanningKeys::from_account_ufvks_with_scopes(account_ufvks.clone(), &[Scope::External]),
+            Some(ScanningKeys::from_account_ufvks_with_scopes(
+                account_ufvks,
+                &[Scope::Internal],
+            )),
+        ),
+    };
+    let internal_pass = internal_keys
+        .as_ref()
+        .zip(triggers.as_ref())
+        .map(|(keys, triggers)| InternalPass { keys, triggers });
+
+    let (scan_summary, scanned_blocks) = scan_blocks(
+        params,
+        block_source,
+        data_db,
+        from_height,
+        limit,
+        &scanning_keys,
+        internal_pass,
     )?;
 
     data_db
@@ -667,6 +891,13 @@ where
 ///
 /// Its work runs on the rayon thread pool that was current when it was started, so a
 /// caller can let it run while it writes the previous range.
+/// The internal-scope keys of a [`BlockDecryption`], with the triggers that select the
+/// transactions they are applied to.
+type InlinePass<AccountId> = (
+    ScanningKeys<AccountId, (AccountId, Scope)>,
+    InternalPassTriggers,
+);
+
 pub struct BlockDecryption<AccountId: Copy + Eq + std::hash::Hash + Send + Sync + 'static> {
     from_height: BlockHeight,
     limit: usize,
@@ -680,6 +911,10 @@ pub struct BlockDecryption<AccountId: Copy + Eq + std::hash::Hash + Send + Sync 
     encoded_ufvks: HashMap<AccountId, String>,
     scanning_keys: ScanningKeys<AccountId, (AccountId, Scope)>,
     runners: BatchRunners<(AccountId, Scope), (), (), ()>,
+    /// The internal-scope keys and the triggers that select the transactions they are applied
+    /// to, when the decryption was started with external keys only. `None` means the
+    /// decryption covers every scope, so no inline pass is needed.
+    internal_pass: Option<InlinePass<AccountId>>,
 }
 
 /// Starts trial decryption of at most `limit` cached blocks from `from_height` with the
@@ -711,10 +946,71 @@ where
     DbT: WalletRead,
     <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
 {
+    decrypt_cached_blocks_with_policy(
+        params,
+        block_source,
+        data_db,
+        from_height,
+        limit,
+        TrialDecryptionPolicy::AllScopes,
+    )
+}
+
+/// Starts trial decryption as [`decrypt_cached_blocks`] does, with the viewing-key scopes
+/// `policy` selects.
+///
+/// The scope choice is made here rather than in [`scan_decrypted_blocks`], because this is
+/// where the batch runners that do the decryption are built. A caller that prefetches must
+/// therefore pass the policy to this function; passing it only to the scan would have no
+/// effect.
+#[tracing::instrument(skip(params, block_source, data_db))]
+#[allow(clippy::type_complexity)]
+pub fn decrypt_cached_blocks_with_policy<ParamsT, DbT, BlockSourceT>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &DbT,
+    from_height: BlockHeight,
+    limit: usize,
+    policy: TrialDecryptionPolicy,
+) -> Result<
+    BlockDecryption<<DbT as WalletRead>::AccountId>,
+    Error<<DbT as WalletRead>::Error, BlockSourceT::Error>,
+>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: WalletRead,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+{
     let account_ufvks =
         account_ufvks_for_range(data_db, from_height, limit).map_err(Error::Wallet)?;
     let encoded_ufvks = encode_ufvks(params, &account_ufvks);
-    let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
+
+    let triggers = match policy {
+        TrialDecryptionPolicy::AllScopes => None,
+        TrialDecryptionPolicy::ExternalWhenLinear(guarantee) => {
+            if guarantee
+                .transparent_history()
+                .covers(batch_end(from_height, limit))
+                && is_linear(data_db, from_height, guarantee.writes_issued_through)
+                    .map_err(Error::Wallet)?
+            {
+                linear_triggers(data_db, from_height, limit).map_err(Error::Wallet)?
+            } else {
+                None
+            }
+        }
+    };
+    let (scanning_keys, internal_pass) = match triggers {
+        None => (ScanningKeys::from_account_ufvks(account_ufvks), None),
+        Some(triggers) => (
+            ScanningKeys::from_account_ufvks_with_scopes(account_ufvks.clone(), &[Scope::External]),
+            Some((
+                ScanningKeys::from_account_ufvks_with_scopes(account_ufvks, &[Scope::Internal]),
+                triggers,
+            )),
+        ),
+    };
     let mut runners = BatchRunners::<_, (), (), ()>::for_keys(100, &scanning_keys);
     let mut blocks = vec![];
     block_source.with_blocks::<_, <DbT as WalletRead>::Error>(
@@ -734,6 +1030,7 @@ where
         encoded_ufvks,
         scanning_keys,
         runners,
+        internal_pass,
     })
 }
 
@@ -788,8 +1085,12 @@ where
             blocks,
             scanning_keys,
             runners,
+            internal_pass,
             ..
         } = decryption;
+        let internal_pass = internal_pass
+            .as_ref()
+            .map(|(keys, triggers)| InternalPass { keys, triggers });
         scan_with_runners(
             params,
             block_source,
@@ -797,6 +1098,7 @@ where
             from_height,
             limit,
             &scanning_keys,
+            internal_pass,
             runners,
             Some(&blocks),
         )?
@@ -813,6 +1115,7 @@ where
             from_height,
             limit,
             &ScanningKeys::from_account_ufvks(current_ufvks),
+            None,
         )?,
     };
 
@@ -882,6 +1185,7 @@ fn scan_blocks<ParamsT, DbT, BlockSourceT, IvkTag>(
     from_height: BlockHeight,
     limit: usize,
     scanning_keys: &ScanningKeys<<DbT as WalletRead>::AccountId, IvkTag>,
+    internal_pass: Option<InternalPass<'_, <DbT as WalletRead>::AccountId, IvkTag>>,
 ) -> Result<
     (
         ScanSummary,
@@ -912,6 +1216,7 @@ where
         from_height,
         limit,
         scanning_keys,
+        internal_pass,
         runners,
         None,
     )? {
@@ -949,6 +1254,7 @@ fn scan_with_runners<ParamsT, DbT, BlockSourceT, IvkTag>(
     from_height: BlockHeight,
     limit: usize,
     scanning_keys: &ScanningKeys<<DbT as WalletRead>::AccountId, IvkTag>,
+    internal_pass: Option<InternalPass<'_, <DbT as WalletRead>::AccountId, IvkTag>>,
     mut runners: BatchRunners<IvkTag, (), (), ()>,
     decrypted_blocks: Option<&[DecryptedBlock]>,
 ) -> Result<
@@ -991,6 +1297,7 @@ where
                 block,
                 scanning_keys,
                 &nullifiers,
+                internal_pass.as_ref(),
                 prior_block_metadata.as_ref(),
                 Some(&mut runners),
             )
@@ -1034,6 +1341,73 @@ pub mod testing {
     use crate::proto::compact_formats::CompactBlock;
 
     use super::{BlockSource, error::Error};
+
+    use subtle::ConditionallySelectable;
+    use zcash_protocol::consensus;
+
+    use super::{
+        ChainState, ScanSummary, TrialDecryptionPolicy, scan_cached_blocks_in_mode,
+        scan_cached_blocks_with_policy,
+    };
+    use crate::{
+        data_api::{WalletRead, WalletWrite},
+        scanning::InternalPassTriggers,
+    };
+
+    /// A trial-decryption configuration forced on a scan, including one that is unsound.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum ForcedScanMode {
+        /// Every output is trial-decrypted with every scope.
+        AllScopes,
+        /// Outputs are trial-decrypted with external keys only. Unsound: no output paying an
+        /// internal receiver is ever found.
+        ExternalOnly,
+        /// The given policy, as [`super::scan_cached_blocks_with_policy`] applies it.
+        Policy(TrialDecryptionPolicy),
+    }
+
+    /// Scans as [`super::scan_cached_blocks`] does, in the given forced mode.
+    #[allow(clippy::type_complexity)]
+    pub fn scan_cached_blocks_forced<ParamsT, DbT, BlockSourceT>(
+        params: &ParamsT,
+        block_source: &BlockSourceT,
+        data_db: &mut DbT,
+        from_height: BlockHeight,
+        from_state: &ChainState,
+        limit: usize,
+        mode: ForcedScanMode,
+    ) -> Result<ScanSummary, Error<<DbT as WalletRead>::Error, BlockSourceT::Error>>
+    where
+        ParamsT: consensus::Parameters + Send + 'static,
+        BlockSourceT: BlockSource,
+        DbT: WalletWrite,
+        <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+    {
+        let triggers = match mode {
+            ForcedScanMode::AllScopes => None,
+            ForcedScanMode::ExternalOnly => Some(InternalPassTriggers::default()),
+            ForcedScanMode::Policy(policy) => {
+                return scan_cached_blocks_with_policy(
+                    params,
+                    block_source,
+                    data_db,
+                    from_height,
+                    from_state,
+                    limit,
+                    policy,
+                );
+            }
+        };
+        scan_cached_blocks_in_mode(
+            params,
+            block_source,
+            data_db,
+            from_height,
+            from_state,
+            limit,
+            triggers,
+        )
+    }
 
     pub struct MockBlockSource;
 

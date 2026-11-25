@@ -1734,6 +1734,13 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         wallet::get_tx_height(self.conn.borrow(), txid)
     }
 
+    fn get_txids_for_scan(
+        &self,
+        range: Range<BlockHeight>,
+    ) -> Result<Option<HashSet<TxId>>, Self::Error> {
+        wallet::get_txids_for_scan(self.conn.borrow(), range).map(Some)
+    }
+
     fn get_unified_full_viewing_keys(
         &self,
     ) -> Result<HashMap<Self::AccountId, UnifiedFullViewingKey>, Self::Error> {
