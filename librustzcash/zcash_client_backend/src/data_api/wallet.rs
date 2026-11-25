@@ -421,17 +421,43 @@ where
 ///
 /// See [`ZIP 315`] for details including the definitions of "trusted" and "untrusted" notes.
 ///
-/// An error indicating that a [`ConfirmationsPolicy`] could not be constructed because the
-/// trusted confirmation count exceeds the untrusted confirmation count.
+/// An error indicating that a [`ConfirmationsPolicy`] or its untrusted tiers are invalid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConfirmationsPolicyError;
 
 impl core::fmt::Display for ConfirmationsPolicyError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "Trusted confirmations must not exceed untrusted confirmations"
-        )
+        write!(f, "Invalid confirmations policy")
+    }
+}
+
+/// An amount-based confirmation threshold for untrusted transaction outputs.
+///
+/// Applies to untrusted transfers whose received value is strictly less than [`Self::below`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConfirmationTier {
+    below: Zatoshis,
+    confirmations: NonZeroU32,
+}
+
+impl ConfirmationTier {
+    /// Constructs a tier requiring `confirmations` for untrusted transfers with received value
+    /// strictly less than `below`.
+    pub const fn new(below: Zatoshis, confirmations: NonZeroU32) -> Self {
+        Self {
+            below,
+            confirmations,
+        }
+    }
+
+    /// Returns the exclusive upper bound on received transfer value for this tier.
+    pub const fn below(&self) -> Zatoshis {
+        self.below
+    }
+
+    /// Returns the minimum confirmations required for transfers in this tier.
+    pub const fn confirmations(&self) -> NonZeroU32 {
+        self.confirmations
     }
 }
 
@@ -440,6 +466,7 @@ impl core::fmt::Display for ConfirmationsPolicyError {
 pub struct ConfirmationsPolicy {
     trusted: NonZeroU32,
     untrusted: NonZeroU32,
+    untrusted_tiers: [Option<ConfirmationTier>; Self::MAX_UNTRUSTED_TIERS],
     #[cfg(feature = "transparent-inputs")]
     allow_zero_conf_shielding: bool,
 }
@@ -461,6 +488,7 @@ impl Default for ConfirmationsPolicy {
             trusted: NonZeroU32::MIN.saturating_add(2),
             // 10
             untrusted: NonZeroU32::MIN.saturating_add(9),
+            untrusted_tiers: [None; Self::MAX_UNTRUSTED_TIERS],
             #[cfg(feature = "transparent-inputs")]
             allow_zero_conf_shielding: true,
         }
@@ -468,12 +496,16 @@ impl Default for ConfirmationsPolicy {
 }
 
 impl ConfirmationsPolicy {
+    /// Maximum number of amount-based untrusted confirmation tiers supported on a policy.
+    pub const MAX_UNTRUSTED_TIERS: usize = 4;
+
     /// A policy to use the minimum number of confirmations possible: 1 confirmation for shielded
     /// notes irrespective of origin, and 0 confirmations for spends of transparent UTXOs in
     /// wallet-internal shielding transactions.
     pub const MIN: Self = ConfirmationsPolicy {
         trusted: NonZeroU32::MIN,
         untrusted: NonZeroU32::MIN,
+        untrusted_tiers: [None; Self::MAX_UNTRUSTED_TIERS],
         #[cfg(feature = "transparent-inputs")]
         allow_zero_conf_shielding: true,
     };
@@ -498,6 +530,7 @@ impl ConfirmationsPolicy {
             Ok(Self {
                 trusted,
                 untrusted,
+                untrusted_tiers: [None; Self::MAX_UNTRUSTED_TIERS],
                 #[cfg(feature = "transparent-inputs")]
                 allow_zero_conf_shielding,
             })
@@ -516,9 +549,70 @@ impl ConfirmationsPolicy {
         Self {
             trusted: min_confirmations,
             untrusted: min_confirmations,
+            untrusted_tiers: [None; Self::MAX_UNTRUSTED_TIERS],
             #[cfg(feature = "transparent-inputs")]
             allow_zero_conf_shielding,
         }
+    }
+
+    /// Attaches amount-based confirmation tiers for untrusted transfers.
+    ///
+    /// Tiers are evaluated in order: the first tier whose [`ConfirmationTier::below`] bound is
+    /// strictly greater than the transfer's received value determines the required confirmations.
+    /// Transfers at or above the highest tier's bound fall back to [`Self::untrusted`].
+    ///
+    /// Every tier must satisfy `self.trusted() <= tier.confirmations() <= self.untrusted()`, with
+    /// strictly increasing nonzero thresholds and non-decreasing confirmation counts.
+    pub fn with_untrusted_tiers(
+        mut self,
+        tiers: &[ConfirmationTier],
+    ) -> Result<Self, ConfirmationsPolicyError> {
+        if tiers.len() > Self::MAX_UNTRUSTED_TIERS {
+            return Err(ConfirmationsPolicyError);
+        }
+
+        let mut stored = [None; Self::MAX_UNTRUSTED_TIERS];
+        let mut prev_below = Zatoshis::ZERO;
+        let mut prev_confs = self.trusted;
+
+        for (slot, &tier) in stored.iter_mut().zip(tiers.iter()) {
+            if tier.below <= prev_below
+                || tier.confirmations < prev_confs
+                || tier.confirmations > self.untrusted
+            {
+                return Err(ConfirmationsPolicyError);
+            }
+            prev_below = tier.below;
+            prev_confs = tier.confirmations;
+            *slot = Some(tier);
+        }
+
+        self.untrusted_tiers = stored;
+        Ok(self)
+    }
+
+    /// Returns the configured amount-based untrusted confirmation tiers, in ascending threshold
+    /// order.
+    pub fn untrusted_tiers(&self) -> impl Iterator<Item = ConfirmationTier> + '_ {
+        self.untrusted_tiers.iter().flatten().copied()
+    }
+
+    /// Returns `true` if this policy defines any amount-based untrusted confirmation tiers.
+    pub const fn has_untrusted_tiers(&self) -> bool {
+        self.untrusted_tiers[0].is_some()
+    }
+
+    /// Returns the number of confirmations required for an untrusted transfer of `transfer_value`.
+    ///
+    /// When no tiers are configured, or when `transfer_value` is at or above all tier bounds, this
+    /// returns [`Self::untrusted`].
+    pub fn untrusted_for_value(&self, transfer_value: Zatoshis) -> NonZeroU32 {
+        for tier in self.untrusted_tiers.iter().flatten() {
+            if transfer_value < tier.below {
+                return tier.confirmations;
+            }
+        }
+        self.untrusted
     }
 
     /// Constructs a new `ConfirmationsPolicy` with `trusted` and `untrusted` fields set to the
@@ -631,12 +725,40 @@ impl ConfirmationsPolicy {
         max_shielding_input_height: Option<BlockHeight>,
         tx_shielding_inputs_trusted: bool,
     ) -> u32 {
+        self.confirmations_until_spendable_for_value(
+            target_height,
+            pool_type,
+            receiving_key_scope,
+            mined_height,
+            tx_trusted,
+            max_shielding_input_height,
+            tx_shielding_inputs_trusted,
+            Zatoshis::const_from_u64(zcash_protocol::value::MAX_MONEY),
+        )
+    }
+
+    /// Like [`Self::confirmations_until_spendable`], but applies any configured amount-based
+    /// untrusted confirmation tiers using `transfer_value` (the total value received by the
+    /// account in the originating transfer).
+    #[allow(clippy::too_many_arguments)]
+    pub fn confirmations_until_spendable_for_value(
+        &self,
+        target_height: TargetHeight,
+        pool_type: PoolType,
+        receiving_key_scope: Option<Scope>,
+        mined_height: Option<BlockHeight>,
+        tx_trusted: bool,
+        max_shielding_input_height: Option<BlockHeight>,
+        tx_shielding_inputs_trusted: bool,
+        transfer_value: Zatoshis,
+    ) -> u32 {
+        let untrusted = self.untrusted_for_value(transfer_value);
         // Trusted outputs of transactions mined at heights greater than `trusted_height` will not
         // be treated as spendable.
         let trusted_height = target_height.saturating_sub(u32::from(self.trusted));
         // Untrusted outputs of transactions mined at heights greater than `untrusted_height` will
         // not be treated as spendable.
-        let untrusted_height = target_height.saturating_sub(u32::from(self.untrusted));
+        let untrusted_height = target_height.saturating_sub(u32::from(untrusted));
 
         // Calculate the possible options for confirmations.
         // - If the output's tx is unmined, we are constantly waiting for the maximum number of
@@ -646,7 +768,7 @@ impl ConfirmationsPolicy {
         let confs_for_trusted =
             mined_height.map_or(u32::from(self.trusted), |h| h - trusted_height);
         let confs_for_untrusted =
-            mined_height.map_or(u32::from(self.untrusted), |h| h - untrusted_height);
+            mined_height.map_or(u32::from(untrusted), |h| h - untrusted_height);
         match pool_type {
             PoolType::Transparent => {
                 #[cfg(feature = "transparent-inputs")]
@@ -4031,6 +4153,104 @@ mod nu7_policy_tests {
     use super::*;
     #[cfg(feature = "pczt")]
     use zcash_protocol::consensus::{BranchId, NetworkUpgrade, Parameters, TEST_NETWORK};
+
+    #[test]
+    fn untrusted_tiers_validation_and_lookup() {
+        let zat = Zatoshis::const_from_u64;
+        let nz = |v| NonZeroU32::new(v).unwrap();
+        let (ten, thousand) = (zat(1_000_000_000), zat(100_000_000_000));
+        let policy = |t, u| {
+            ConfirmationsPolicy::new(
+                nz(t),
+                nz(u),
+                #[cfg(feature = "transparent-inputs")]
+                true,
+            )
+            .unwrap()
+        };
+
+        let base = policy(1, 6);
+        let tiered = base
+            .with_untrusted_tiers(&[
+                ConfirmationTier::new(ten, nz(2)),
+                ConfirmationTier::new(thousand, nz(4)),
+            ])
+            .unwrap();
+        assert!(tiered.has_untrusted_tiers());
+        assert_eq!(tiered.untrusted_tiers().count(), 2);
+
+        for (val, expected) in [
+            (Zatoshis::ZERO, 2),
+            (zat(999_999_999), 2),
+            (ten, 4),
+            (zat(99_999_999_999), 4),
+            (thousand, 6),
+        ] {
+            assert_eq!(tiered.untrusted_for_value(val), nz(expected));
+        }
+
+        let target = TargetHeight::from(BlockHeight::from_u32(102)); // 2 confs for block 100
+        let h100 = Some(BlockHeight::from_u32(100));
+        let h101 = Some(BlockHeight::from_u32(101));
+        let rem = |scope, mined, shield_in, val| {
+            tiered.confirmations_until_spendable_for_value(
+                target,
+                PoolType::SAPLING,
+                Some(scope),
+                mined,
+                false,
+                shield_in,
+                false,
+                val,
+            )
+        };
+        assert_eq!(rem(Scope::External, h100, None, zat(500_000_000)), 0);
+        assert_eq!(rem(Scope::External, h100, None, ten), 2);
+        assert_eq!(rem(Scope::External, h100, None, thousand), 4);
+        assert_eq!(rem(Scope::Internal, h101, h100, ten), 2); // shielding output
+        assert_eq!(rem(Scope::Internal, h101, None, thousand), 0); // internal change
+        assert_eq!(
+            tiered.confirmations_until_spendable(
+                target,
+                PoolType::SAPLING,
+                Some(Scope::External),
+                h100,
+                false,
+                None,
+                false
+            ),
+            4
+        );
+
+        for bad in [
+            vec![ConfirmationTier::new(Zatoshis::ZERO, nz(2))],
+            vec![
+                ConfirmationTier::new(thousand, nz(2)),
+                ConfirmationTier::new(ten, nz(4)),
+            ],
+            vec![
+                ConfirmationTier::new(ten, nz(2)),
+                ConfirmationTier::new(ten, nz(4)),
+            ],
+            vec![
+                ConfirmationTier::new(ten, nz(4)),
+                ConfirmationTier::new(thousand, nz(2)),
+            ],
+            vec![ConfirmationTier::new(ten, nz(7))],
+            (1..=5)
+                .map(|i| ConfirmationTier::new(zat(i), nz(i as u32)))
+                .collect(),
+        ] {
+            assert_eq!(
+                base.with_untrusted_tiers(&bad),
+                Err(ConfirmationsPolicyError)
+            );
+        }
+        assert_eq!(
+            policy(3, 6).with_untrusted_tiers(&[ConfirmationTier::new(ten, nz(2))]),
+            Err(ConfirmationsPolicyError)
+        );
+    }
 
     #[test]
     fn nu7_anchor_depth_is_from_tip_and_confirmations_stay_from_target() {

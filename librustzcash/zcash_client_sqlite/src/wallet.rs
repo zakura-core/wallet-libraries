@@ -2821,9 +2821,19 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
 
         let trusted_height =
             target_height.saturating_sub(u32::from(confirmations_policy.trusted()));
+        let untrusted_floor_height =
+            target_height.saturating_sub(u32::from(confirmations_policy.untrusted()));
 
         let any_spendable =
             anchor_height.map_or(Ok(false), |h| is_any_spendable(tx, h, table_prefix))?;
+
+        let tx_received_value = common::recent_tx_received_value_sql(
+            "t.id_tx",
+            "rn.account_id",
+            "t.mined_height",
+            "rn.witness_stabilized",
+            "rn.value",
+        );
 
         let mut stmt_select_notes = tx.prepare_cached(&format!(
             "SELECT accounts.uuid, rn.id, rn.value, rn.is_change, rn.recipient_key_scope,
@@ -2833,6 +2843,8 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
                     IFNULL(t.trust_status, 0) AS trust_status,
                     MAX(tt.mined_height) AS max_shielding_input_height,
                     MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust,
+                    {tx_received_value} AS tx_received_value,
+                    COALESCE(SUM(tro.value_zat), 0) AS shielding_inputs_value,
                     rn.lock_expiry_height
              FROM {table_prefix}_received_notes rn
              INNER JOIN accounts ON accounts.id = rn.account_id
@@ -2856,6 +2868,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
 
         let mut rows = stmt_select_notes.query(named_params![
             ":target_height": u32::from(target_height),
+            ":untrusted_floor_height": u32::from(untrusted_floor_height),
         ])?;
         while let Some(row) = rows.next()? {
             let account = AccountUuid(row.get::<_, Uuid>("uuid")?);
@@ -2903,6 +2916,12 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
 
             let witness_stabilized = row.get::<_, bool>("witness_stabilized")?;
 
+            let tx_received_value =
+                common::transfer_value_from_raw(row.get::<_, i64>("tx_received_value")?)?;
+            let shielding_inputs_value =
+                common::transfer_value_from_raw(row.get::<_, i64>("shielding_inputs_value")?)?;
+            let transfer_value = tx_received_value.max(shielding_inputs_value);
+
             let is_locked = locking::is_locked_at(
                 row.get::<_, Option<u32>>("lock_expiry_height")?,
                 target_height,
@@ -2922,7 +2941,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
                         .zip(anchor_height)
                         .is_some_and(|(received, anchor)| received <= anchor)
                     && max_priority <= ScanPriority::Scanned
-                    && confirmations_policy.confirmations_until_spendable(
+                    && confirmations_policy.confirmations_until_spendable_for_value(
                         target_height,
                         PoolType::Shielded(protocol),
                         recipient_key_scope.and_then(|k| zip32::Scope::try_from(k).ok()),
@@ -2930,6 +2949,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
                         tx_trusted,
                         max_shielding_input_height,
                         tx_shielding_inputs_trusted,
+                        transfer_value,
                     ) == 0);
 
             let is_pending_change =
@@ -6382,7 +6402,8 @@ pub(crate) fn get_received_outputs(
     target_height: TargetHeight,
     confirmations_policy: ConfirmationsPolicy,
 ) -> Result<Vec<ReceivedTransactionOutput>, SqliteClientError> {
-    let mut stmt_received_outputs = conn.prepare_cached(
+    let tx_received_value = common::tx_received_value_sql("vto.transaction_id", "to_acct.id");
+    let mut stmt_received_outputs = conn.prepare_cached(&format!(
         "SELECT
              vto.output_pool,
              vto.output_index,
@@ -6391,8 +6412,13 @@ pub(crate) fn get_received_outputs(
              vto.tx_mined_height,
              IFNULL(vto.tx_trust_status, 0) AS tx_trust_status,
              MAX(tt.mined_height) AS max_shielding_input_height,
-             MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust
+             MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust,
+             CASE WHEN to_acct.id IS NOT NULL THEN {tx_received_value} ELSE vto.value END
+                AS tx_received_value,
+             COALESCE(SUM(tro.value_zat), 0) AS shielding_inputs_value
          FROM v_tx_outputs vto
+         LEFT OUTER JOIN accounts to_acct
+            ON to_acct.uuid = vto.to_account_uuid
          LEFT OUTER JOIN transparent_received_output_spends ros
             ON ros.transaction_id = vto.transaction_id
          LEFT OUTER JOIN transparent_received_outputs tro
@@ -6400,8 +6426,8 @@ pub(crate) fn get_received_outputs(
          LEFT OUTER JOIN transactions tt
             ON tt.id_tx = tro.transaction_id
          WHERE vto.txid = :txid
-         GROUP BY vto.output_pool, vto.output_index",
-    )?;
+         GROUP BY vto.output_pool, vto.output_index"
+    ))?;
 
     let results = stmt_received_outputs
         .query_and_then::<_, SqliteClientError, _, _>(
@@ -6423,9 +6449,14 @@ pub(crate) fn get_received_outputs(
                     .map(KeyScope::decode)
                     .transpose()?;
                 let tx_trusted = row.get::<_, bool>("tx_trust_status")?;
+                let tx_received_value =
+                    common::transfer_value_from_raw(row.get::<_, i64>("tx_received_value")?)?;
+                let shielding_inputs_value =
+                    common::transfer_value_from_raw(row.get::<_, i64>("shielding_inputs_value")?)?;
+                let transfer_value = tx_received_value.max(shielding_inputs_value);
 
                 let confirmations_until_spendable = confirmations_policy
-                    .confirmations_until_spendable(
+                    .confirmations_until_spendable_for_value(
                         target_height,
                         pool_type,
                         key_scope.and_then(|s| zip32::Scope::try_from(s).ok()),
@@ -6433,6 +6464,7 @@ pub(crate) fn get_received_outputs(
                         tx_trusted,
                         max_shielding_input_height,
                         tx_shielding_inputs_trusted,
+                        transfer_value,
                     );
 
                 Ok(ReceivedTransactionOutput::from_parts(
@@ -9256,3 +9288,284 @@ mod request_lifecycle_tests;
 
 #[cfg(test)]
 mod rewind_floor_tests;
+
+#[cfg(test)]
+mod tiered_confirmations_tests {
+    use std::num::NonZeroU32;
+
+    use zcash_client_backend::data_api::{
+        Account as _, InputSource as _, MaxSpendMode, TargetValue, WalletRead as _,
+        testing::{AddressType, TestBuilder, pool::ShieldedPoolTester, sapling::SaplingPoolTester},
+        wallet::{
+            ConfirmationTier, ConfirmationsPolicy, TargetHeight,
+            input_selection::{LockFilter, LockedInputPolicy},
+        },
+    };
+    use zcash_primitives::{block::BlockHash, transaction::TxId};
+    use zcash_protocol::{ShieldedPool, value::Zatoshis};
+
+    use crate::testing::{BlockCache, db::TestDbFactory};
+
+    const TEN_ZEC: u64 = 1_000_000_000;
+    const THOUSAND_ZEC: u64 = 100_000_000_000;
+
+    fn tiered_policy(allow_zero_conf_shielding: bool) -> ConfirmationsPolicy {
+        let nz = |v| NonZeroU32::new(v).unwrap();
+        let _ = allow_zero_conf_shielding;
+        ConfirmationsPolicy::new(
+            nz(1),
+            nz(6),
+            #[cfg(feature = "transparent-inputs")]
+            allow_zero_conf_shielding,
+        )
+        .unwrap()
+        .with_untrusted_tiers(&[
+            ConfirmationTier::new(Zatoshis::const_from_u64(TEN_ZEC), nz(2)),
+            ConfirmationTier::new(Zatoshis::const_from_u64(THOUSAND_ZEC), nz(4)),
+        ])
+        .unwrap()
+    }
+
+    fn init_wallet() -> zcash_client_backend::data_api::testing::TestState<
+        BlockCache,
+        crate::testing::db::TestDb,
+        zcash_protocol::local_consensus::LocalNetwork,
+    > {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        for _ in 0..3 {
+            let (h, _) = st.generate_empty_block();
+            st.scan_cached_blocks(h, 1);
+        }
+        st
+    }
+
+    fn balance_pair(bal: &zcash_client_backend::data_api::Balance) -> (u64, u64) {
+        (
+            u64::from(bal.spendable_value()),
+            u64::from(bal.value_pending_spendability()),
+        )
+    }
+
+    #[test]
+    fn shielded_confirmations_depend_on_transfer_amount() {
+        let mut st = init_wallet();
+        let account = st.test_account().unwrap().id();
+        let dfvk = SaplingPoolTester::test_account_fvk(&st);
+        let policy = tiered_policy(true);
+        let lock = LockFilter::Policy(&LockedInputPolicy::Exclude);
+
+        let mut prior = 0u64;
+        for (amount, need) in [(TEN_ZEC - 1, 2u32), (TEN_ZEC, 4u32), (THOUSAND_ZEC, 6u32)] {
+            let (h, _, _) = st.generate_next_block(
+                &dfvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(amount),
+            );
+            st.scan_cached_blocks(h, 1);
+            let txid: TxId = st
+                .wallet()
+                .conn()
+                .query_row(
+                    "SELECT txid FROM transactions WHERE mined_height = ?1",
+                    [u32::from(h)],
+                    |r| {
+                        Ok(TxId::from_bytes(
+                            r.get::<_, Vec<u8>>(0)?.try_into().unwrap(),
+                        ))
+                    },
+                )
+                .unwrap();
+
+            for conf in 1..=need {
+                if conf > 1 {
+                    let (next_h, _) = st.generate_empty_block();
+                    st.scan_cached_blocks(next_h, 1);
+                }
+                let db = st.wallet().db();
+                let target = TargetHeight::from(db.chain_height().unwrap().unwrap() + 1);
+                let (exp_spend, exp_pend) = if conf >= need {
+                    (prior + amount, 0)
+                } else {
+                    (prior, amount)
+                };
+
+                let summary = db.get_wallet_summary(policy).unwrap().unwrap();
+                assert_eq!(
+                    balance_pair(summary.account_balances()[&account].sapling_balance()),
+                    (exp_spend, exp_pend)
+                );
+
+                for tv in [
+                    TargetValue::AllFunds(MaxSpendMode::MaxSpendable),
+                    TargetValue::AtLeast(Zatoshis::const_from_u64(prior + amount)),
+                ] {
+                    let sel = db
+                        .select_spendable_notes(
+                            account,
+                            tv,
+                            &[ShieldedPool::Sapling],
+                            target,
+                            policy,
+                            &[],
+                            lock,
+                        )
+                        .unwrap();
+                    assert_eq!(u64::from(sel.total_value().unwrap()), exp_spend);
+                }
+                let outs = db.get_received_outputs(txid, target, policy).unwrap();
+                assert_eq!(outs[0].confirmations_until_spendable(), need - conf);
+            }
+            prior += amount;
+        }
+    }
+
+    #[test]
+    fn split_notes_in_one_transaction_use_combined_transfer_value() {
+        let mut st = init_wallet();
+        let account = st.test_account().unwrap().id();
+        let dfvk = SaplingPoolTester::test_account_fvk(&st);
+        let policy = tiered_policy(true);
+        let six = 600_000_000u64;
+
+        let (h, _, _) = st.generate_next_block(
+            &dfvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(six),
+        );
+        st.scan_cached_blocks(h, 1);
+        let (tx_row, txid): (i64, TxId) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id_tx, txid FROM transactions WHERE mined_height = ?1",
+                [u32::from(h)],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        TxId::from_bytes(r.get::<_, Vec<u8>>(1)?.try_into().unwrap()),
+                    ))
+                },
+            )
+            .unwrap();
+
+        // Add a second 6 ZEC note to the same tx (12 ZEC total => 4 confirmations).
+        st.wallet()
+            .conn()
+            .execute(
+                "INSERT INTO sapling_received_notes (
+                 transaction_id, output_index, account_id, diversifier, value, rcm, nf,
+                 is_change, memo, commitment_tree_position, recipient_key_scope, address_id
+             )
+             SELECT transaction_id, output_index + 1, account_id, diversifier, value, rcm,
+                    X'0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20',
+                    is_change, memo, commitment_tree_position, recipient_key_scope, address_id
+             FROM sapling_received_notes WHERE transaction_id = ?1",
+                [tx_row],
+            )
+            .unwrap();
+
+        for conf in 1..=4u32 {
+            if conf > 1 {
+                let (next_h, _) = st.generate_empty_block();
+                st.scan_cached_blocks(next_h, 1);
+            }
+            let db = st.wallet().db();
+            let target = TargetHeight::from(db.chain_height().unwrap().unwrap() + 1);
+            let summary = db.get_wallet_summary(policy).unwrap().unwrap();
+            let expected = if conf < 4 { (0, six * 2) } else { (six * 2, 0) };
+            assert_eq!(
+                balance_pair(summary.account_balances()[&account].sapling_balance()),
+                expected
+            );
+
+            let outs = db.get_received_outputs(txid, target, policy).unwrap();
+            assert_eq!(outs.len(), 2);
+            assert!(
+                outs.iter()
+                    .all(|o| o.confirmations_until_spendable() == 4 - conf)
+            );
+        }
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    #[test]
+    fn transparent_confirmations_depend_on_transfer_amount_when_zero_conf_disabled() {
+        use transparent::bundle::{OutPoint, TxOut};
+        use zcash_client_backend::{
+            data_api::{CoinbaseFilter, WalletWrite as _},
+            wallet::WalletTransparentOutput,
+        };
+
+        let mut st = init_wallet();
+        let account = st.test_account().unwrap().id();
+        let taddr = *st
+            .wallet()
+            .db()
+            .get_transparent_receivers(account, true, false)
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap();
+        let policy = tiered_policy(false);
+        let base_h = st.wallet().db().chain_height().unwrap().unwrap();
+
+        let (small, split, large) = (500_000_000u64, 600_000_000u64, THOUSAND_ZEC);
+        for (id, idx, val) in [
+            ([1u8; 32], 0, small),
+            ([2; 32], 0, split),
+            ([2; 32], 1, split),
+            ([3; 32], 0, large),
+        ] {
+            let utxo = WalletTransparentOutput::from_parts(
+                OutPoint::new(id, idx),
+                TxOut::new(Zatoshis::const_from_u64(val), taddr.script().into()),
+                Some(base_h),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            st.wallet_mut()
+                .db_mut()
+                .put_received_transparent_utxo(&utxo)
+                .unwrap();
+        }
+
+        let total = small + split * 2 + large;
+        for conf in 1..=6u32 {
+            if conf > 1 {
+                let (h, _) = st.generate_empty_block();
+                st.scan_cached_blocks(h, 1);
+            }
+            let db = st.wallet().db();
+            let target = TargetHeight::from(db.chain_height().unwrap().unwrap() + 1);
+            let exp = match conf {
+                1 => 0,
+                2 | 3 => small,
+                4 | 5 => small + split * 2,
+                _ => total,
+            };
+
+            let summary = db.get_wallet_summary(policy).unwrap().unwrap();
+            assert_eq!(
+                balance_pair(summary.account_balances()[&account].unshielded_regular_balance()),
+                (exp, total - exp)
+            );
+
+            let utxos = db
+                .get_spendable_transparent_outputs(
+                    &taddr,
+                    target,
+                    policy,
+                    CoinbaseFilter::AllTransparentOutputs,
+                    LockFilter::Policy(&LockedInputPolicy::Exclude),
+                )
+                .unwrap();
+            assert_eq!(utxos.iter().map(|u| u64::from(u.value())).sum::<u64>(), exp);
+        }
+    }
+}

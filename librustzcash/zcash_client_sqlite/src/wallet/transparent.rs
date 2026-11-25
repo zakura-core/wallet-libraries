@@ -1331,6 +1331,47 @@ pub(crate) fn spent_utxos_clause(
     )
 }
 
+/// SQL expression evaluating the minimum confirmations required for a transparent output `output`
+/// created by transaction `tx`.
+///
+/// When zero-conf shielding is enabled or the policy defines no amount tiers, this evaluates to
+/// `:min_confirmations`. Otherwise it evaluates a `CASE` expression over the total value received
+/// by `{output}.account_id` in `{tx}.id_tx`, short-circuiting without subqueries once the
+/// transaction has at least the policy's maximum (`:min_confirmations`) confirmations.
+fn transparent_min_confirmations_expr(
+    confirmations_policy: ConfirmationsPolicy,
+    tx: &str,
+    output: &str,
+) -> String {
+    if confirmations_policy.allow_zero_conf_shielding()
+        || !confirmations_policy.has_untrusted_tiers()
+    {
+        return ":min_confirmations".to_string();
+    }
+
+    let tx_value = super::common::tx_received_value_sql(
+        &format!("{tx}.id_tx"),
+        &format!("{output}.account_id"),
+    );
+    let mut expr = format!(
+        "(CASE WHEN {tx}.mined_height IS NOT NULL \
+            AND :target_height - {tx}.mined_height >= :min_confirmations \
+          THEN :min_confirmations ELSE (CASE"
+    );
+    for tier in confirmations_policy.untrusted_tiers() {
+        use std::fmt::Write;
+        let _ = write!(
+            expr,
+            " WHEN {tx_value} < {} THEN {}",
+            u64::from(tier.below()),
+            u32::from(tier.confirmations()),
+        );
+    }
+    use std::fmt::Write;
+    let _ = write!(expr, " ELSE :min_confirmations END) END)");
+    expr
+}
+
 /// Generates an SQL condition that a transaction is mined with at least a required number of
 /// confirmations, or is unexpired if UTXOS are spendable with zero confirmations.
 ///
@@ -1339,13 +1380,13 @@ pub(crate) fn spent_utxos_clause(
 /// - The parent must provide `:target_height` as a named argument.
 /// - The parent must provide `:min_confirmations` as a named argument.
 /// - The parent is responsible for enclosing this condition in parentheses as appropriate.
-pub(crate) fn tx_unexpired_condition_minconf_0(tx: &str) -> String {
+pub(crate) fn tx_unexpired_condition_minconf_0(tx: &str, min_confirmations_expr: &str) -> String {
     format!(
         r#"
         -- tx is mined and has at least min_confirmations
         (
             {tx}.mined_height < :target_height -- tx is mined
-            AND :target_height - {tx}.mined_height >= :min_confirmations
+            AND :target_height - {tx}.mined_height >= {min_confirmations_expr}
         )
         -- or outputs may be spent with zero confirmations and the transaction is unexpired
         OR (
@@ -1738,10 +1779,12 @@ pub(crate) fn transparent_input_standing(
 /// with a lock-tier preference key.
 fn spendable_transparent_outputs_query(
     nu7_activation_height: Option<zcash_protocol::consensus::BlockHeight>,
+    confirmations_policy: ConfirmationsPolicy,
     address_predicate_sql: &str,
     lock_eligible_sql: &str,
     order_by_sql: &str,
 ) -> String {
+    let min_confirmations_expr = transparent_min_confirmations_expr(confirmations_policy, "t", "u");
     format!(
         "SELECT t.txid, u.output_index, u.script,
                 u.value_zat, addresses.key_scope,
@@ -1770,7 +1813,7 @@ fn spendable_transparent_outputs_query(
          AND ({}) -- exclude withdrawn ledger-only receives
          AND ({INPUT_AUTHORITY_CONDITION}) -- the transparent authority admits the output
          ORDER BY {order_by_sql}",
-        tx_unexpired_condition_minconf_0("t"),
+        tx_unexpired_condition_minconf_0("t", &min_confirmations_expr),
         spent_utxos_clause(nu7_activation_height,),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         excluding_immature_coinbase_outputs("t"),
@@ -1868,6 +1911,7 @@ pub(crate) fn get_spendable_transparent_outputs_for_addresses<P: consensus::Para
             params,
             zcash_protocol::consensus::NetworkUpgrade::Nu7,
         ),
+        confirmations_policy,
         "addresses.cached_transparent_receiver_address IN rarray(:addresses)",
         &output_eligible_condition(lock_filter, "u"),
         "addresses.cached_transparent_receiver_address, u.output_index",
@@ -1992,6 +2036,7 @@ pub(crate) fn select_spendable_transparent_outputs<P: consensus::Parameters>(
             params,
             zcash_protocol::consensus::NetworkUpgrade::Nu7,
         ),
+        confirmations_policy,
         "accounts.uuid = :account_uuid
          AND (
              :has_address_allow_list = 0
@@ -2113,6 +2158,8 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
 
     let mut result = HashMap::new();
 
+    let min_confirmations_expr = transparent_min_confirmations_expr(confirmations_policy, "t", "u");
+
     let mut stmt_address_balances = conn.prepare(&format!(
         "SELECT u.address, u.value_zat, u.lock_expiry_height, addresses.key_scope
          FROM transparent_received_outputs u
@@ -2125,7 +2172,7 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
          AND u.id NOT IN ({}) -- and the output is unspent
          AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
          AND ({}) -- exclude withdrawn ledger-only receives",
-        tx_unexpired_condition_minconf_0("t"),
+        tx_unexpired_condition_minconf_0("t", &min_confirmations_expr),
         spent_utxos_clause(zcash_protocol::consensus::Parameters::activation_height(params, zcash_protocol::consensus::NetworkUpgrade::Nu7), ),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         super::transparent_ledger::output_observation_condition("u"),
@@ -2173,21 +2220,11 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
              WHERE accounts.uuid = :account_uuid
              AND u.value_zat > 0
              -- the transaction that created the output is mined or is definitely unexpired
-             AND (
-                 -- the transaction that created the output is mined with not enough confirmations
-                (
-                    t.mined_height < :target_height
-                    AND :target_height - t.mined_height < :min_confirmations
-                )
-                -- or the tx is unmined but definitely not expired
-                OR (
-                    t.mined_height IS NULL
-                    AND (t.expiry_height = 0 OR t.expiry_height >= :target_height)
-                )
-             )
+             AND ({})
              AND u.id NOT IN ({}) -- and the output is unspent
              AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
              AND ({}) -- exclude withdrawn ledger-only receives",
+            tx_unconfirmed_condition("t", &min_confirmations_expr),
             spent_utxos_clause(zcash_protocol::consensus::Parameters::activation_height(
                 params,
                 zcash_protocol::consensus::NetworkUpgrade::Nu7
@@ -2239,13 +2276,13 @@ fn balance_min_confirmations(confirmations_policy: ConfirmationsPolicy) -> u32 {
 /// # Usage requirements
 /// - `tx` must be set to the SQL variable name for the transaction in the parent.
 /// - The parent must provide `:target_height` and `:min_confirmations` as named arguments.
-fn tx_unconfirmed_condition(tx: &str) -> String {
+fn tx_unconfirmed_condition(tx: &str, min_confirmations_expr: &str) -> String {
     format!(
         r#"
         -- the transaction that created the output is mined with not enough confirmations
         (
             {tx}.mined_height < :target_height
-            AND :target_height - {tx}.mined_height < :min_confirmations
+            AND :target_height - {tx}.mined_height < {min_confirmations_expr}
         )
         -- or the tx is unmined but definitely not expired
         OR (
@@ -2288,6 +2325,7 @@ pub(crate) fn transparent_balance_provenance(
     target_height: TargetHeight,
     confirmations_policy: ConfirmationsPolicy,
 ) -> Result<BalanceProvenance, SqliteClientError> {
+    let min_confirmations_expr = transparent_min_confirmations_expr(confirmations_policy, "t", "u");
     let (missing, local_only): (bool, bool) = conn.query_row(
         &format!(
             "WITH counted AS (
@@ -2318,8 +2356,8 @@ pub(crate) fn transparent_balance_provenance(
                          WHERE oo.output_id = c.id AND oo.origin = 0
                      )
                  )",
-            tx_unexpired_condition_minconf_0("t"),
-            tx_unconfirmed_condition("t"),
+            tx_unexpired_condition_minconf_0("t", &min_confirmations_expr),
+            tx_unconfirmed_condition("t", &min_confirmations_expr),
             spent_utxos_clause(nu7_activation_height, ),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
             super::transparent_ledger::output_observation_condition("u"),
@@ -2359,6 +2397,7 @@ pub(crate) fn add_transparent_account_balances(
     account_balances: &mut HashMap<AccountUuid, AccountBalance>,
 ) -> Result<(), SqliteClientError> {
     let min_confirmations = balance_min_confirmations(confirmations_policy);
+    let min_confirmations_expr = transparent_min_confirmations_expr(confirmations_policy, "t", "u");
 
     let mut stmt_account_spendable_balances = conn.prepare(&format!(
         "SELECT accounts.uuid, u.lock_expiry_height, SUM(u.value_zat),
@@ -2376,7 +2415,7 @@ pub(crate) fn add_transparent_account_balances(
          AND ({}) -- exclude withdrawn ledger-only receives
          AND (:account IS NULL OR accounts.uuid = :account)
          GROUP BY accounts.uuid, lock_expiry_height, is_coinbase, is_mature",
-        tx_unexpired_condition_minconf_0("t"),
+        tx_unexpired_condition_minconf_0("t", &min_confirmations_expr),
         spent_utxos_clause(nu7_activation_height,),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         LEDGER_ORIGIN_CONDITION,
@@ -2452,7 +2491,7 @@ pub(crate) fn add_transparent_account_balances(
              AND ({}) -- exclude withdrawn ledger-only receives
              AND (:account IS NULL OR accounts.uuid = :account)
          GROUP BY accounts.uuid, lock_expiry_height, is_coinbase",
-            tx_unconfirmed_condition("t"),
+            tx_unconfirmed_condition("t", &min_confirmations_expr),
             spent_utxos_clause(nu7_activation_height,),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
             LEDGER_ORIGIN_CONDITION,

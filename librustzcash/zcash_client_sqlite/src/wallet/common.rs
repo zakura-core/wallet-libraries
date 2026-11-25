@@ -522,6 +522,58 @@ where
     ))
 }
 
+/// SQL expression returning the total value (in zatoshis) received by `account_id_expr` in the
+/// transaction identified by `tx_id_expr` across all pools, excluding disputed one-time receipts.
+///
+/// Used to evaluate amount-tiered [`ConfirmationsPolicy`] thresholds at the transfer level rather
+/// than per individual note, so splitting one transfer across multiple outputs does not lower its
+/// confirmation requirement.
+pub(crate) fn tx_received_value_sql(tx_id_expr: &str, account_id_expr: &str) -> String {
+    format!(
+        "(COALESCE((SELECT SUM(value) FROM sapling_received_notes \
+            WHERE transaction_id = {tx_id_expr} AND account_id = {account_id_expr}), 0) \
+         + COALESCE((SELECT SUM(value) FROM orchard_received_notes \
+            WHERE transaction_id = {tx_id_expr} AND account_id = {account_id_expr}), 0) \
+         + COALESCE((SELECT SUM(value) FROM ironwood_received_notes \
+            WHERE transaction_id = {tx_id_expr} AND account_id = {account_id_expr} \
+              AND id NOT IN (SELECT note_id FROM ironwood_one_time_disputed_receipts)), 0) \
+         + COALESCE((SELECT SUM(value_zat) FROM transparent_received_outputs \
+            WHERE transaction_id = {tx_id_expr} AND account_id = {account_id_expr}), 0))"
+    )
+}
+
+/// SQL expression returning [`tx_received_value_sql`] for notes that are not stabilized and still
+/// within the policy's maximum untrusted confirmation window (`:untrusted_floor_height`), and
+/// `fallback_value_expr` for older or stabilized notes whose confirmations are already satisfied
+/// under every tier.
+pub(crate) fn recent_tx_received_value_sql(
+    tx_id_expr: &str,
+    account_id_expr: &str,
+    mined_height_expr: &str,
+    stabilized_expr: &str,
+    fallback_value_expr: &str,
+) -> String {
+    format!(
+        "CASE WHEN {stabilized_expr} = 0 \
+            AND ({mined_height_expr} IS NULL OR {mined_height_expr} > :untrusted_floor_height) \
+         THEN {} ELSE {fallback_value_expr} END",
+        tx_received_value_sql(tx_id_expr, account_id_expr),
+    )
+}
+
+/// Converts a SQL-computed received transfer sum (in zatoshis) to [`Zatoshis`], saturating at
+/// [`Zatoshis::const_from_u64(MAX_MONEY)`] only if a malformed multi-row sum ever exceeded
+/// `MAX_MONEY` while still rejecting negative values as corruption.
+pub(crate) fn transfer_value_from_raw(raw: i64) -> Result<Zatoshis, SqliteClientError> {
+    if raw < 0 {
+        return Err(SqliteClientError::CorruptedData(format!(
+            "Negative received transfer value: {raw}"
+        )));
+    }
+    Ok(Zatoshis::from_u64(raw as u64)
+        .unwrap_or(Zatoshis::const_from_u64(zcash_protocol::value::MAX_MONEY)))
+}
+
 /// Selects all the unspent notes with value greater than [`zip317::MARGINAL_FEE`] and for the
 /// specified shielded protocols from a given account, excepting any explicitly excluded note
 /// identifiers.
@@ -561,6 +613,13 @@ where
     } = table_constants::<SqliteClientError>(protocol)?;
 
     // Select all unspent notes belonging to the given account, ignoring dust notes.
+    let tx_received_value = recent_tx_received_value_sql(
+        "t.id_tx",
+        "rn.account_id",
+        "t.block",
+        "rn.witness_stabilized",
+        "rn.value",
+    );
     let mut stmt_select_notes = conn.prepare_cached(&format!(
         "SELECT
              rn.id AS id, t.txid, rn.{output_index_col},
@@ -571,7 +630,9 @@ where
              rn.witness_stabilized,
              IFNULL(t.trust_status, 0) AS trust_status,
              MAX(tt.mined_height) AS max_shielding_input_height,
-             MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust
+             MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust,
+             {tx_received_value} AS tx_received_value,
+             COALESCE(SUM(tro.value_zat), 0) AS shielding_inputs_value
          FROM {table_prefix}_received_notes rn
          INNER JOIN accounts ON accounts.id = rn.account_id
          INNER JOIN transactions t ON t.id_tx = rn.transaction_id
@@ -626,11 +687,14 @@ where
 
     let account_uuid = account.0;
     let target_height_arg = u32::from(target_height);
+    let untrusted_floor_height_arg =
+        u32::from(target_height.saturating_sub(u32::from(confirmations_policy.untrusted())));
     let min_value = u64::from(zip317::MARGINAL_FEE);
     let overridable_owners = overridable_owners_rarray(lock_filter);
     let mut sql_params: Vec<(&str, &dyn ToSql)> = vec![
         (":account_uuid", &account_uuid),
         (":target_height", &target_height_arg),
+        (":untrusted_floor_height", &untrusted_floor_height_arg),
         (":exclude", &excluded_ptr),
         (":min_value", &min_value),
     ];
@@ -644,6 +708,11 @@ where
             let witness_stabilized = row.get::<_, bool>("witness_stabilized")?;
             let tx_trust_status = row.get::<_, bool>("trust_status")?;
             let tx_shielding_inputs_trusted = row.get::<_, bool>("min_shielding_input_trust")?;
+            let tx_received_value =
+                transfer_value_from_raw(row.get::<_, i64>("tx_received_value")?)?;
+            let shielding_inputs_value =
+                transfer_value_from_raw(row.get::<_, i64>("shielding_inputs_value")?)?;
+            let transfer_value = tx_received_value.max(shielding_inputs_value);
             let shard_scan_priority = max_priority_raw
                 .map(|code| {
                     parse_priority_code(code).ok_or_else(|| {
@@ -660,6 +729,7 @@ where
                 shard_scan_priority,
                 tx_trust_status,
                 tx_shielding_inputs_trusted,
+                transfer_value,
             ))
         },
     )?;
@@ -672,6 +742,7 @@ where
                 max_shard_priority,
                 tx_trusted,
                 tx_shielding_inputs_trusted,
+                transfer_value,
             ) => {
                 let shard_witness_available = witness_stabilized
                     || max_shard_priority.is_some_and(|p| p <= ScanPriority::Scanned);
@@ -682,7 +753,7 @@ where
                     .is_some_and(|(h, ah)| h <= ah);
 
                 let has_confirmations = witness_stabilized
-                    || confirmations_policy.confirmations_until_spendable(
+                    || confirmations_policy.confirmations_until_spendable_for_value(
                         target_height,
                         PoolType::Shielded(protocol),
                         Some(note.spending_key_scope()),
@@ -690,6 +761,7 @@ where
                         tx_trusted,
                         note.max_shielding_input_height(),
                         tx_shielding_inputs_trusted,
+                        transfer_value,
                     ) == 0;
 
                 match (
@@ -828,7 +900,8 @@ where
                 diversifier, value, {note_reconstruction_cols}, commitment_tree_position,
                 ufvk, recipient_key_scope,
                 lock_tier, mined_height, witness_stabilized, trust_status,
-                max_shielding_input_height, min_shielding_input_trust"
+                max_shielding_input_height, min_shielding_input_trust,
+                tx_received_value, shielding_inputs_value"
     );
     // The `eligible` CTE is shared; only the selection over it differs by shape. Accumulation
     // takes every note below the running-sum threshold plus the threshold-crossing note;
@@ -857,6 +930,13 @@ where
         ),
     };
     let eligible_condition = output_eligible_condition(lock_filter, "rn");
+    let tx_received_value = recent_tx_received_value_sql(
+        "t.id_tx",
+        "rn.account_id",
+        "t.block",
+        "rn.witness_stabilized",
+        "rn.value",
+    );
     let mut stmt_select_notes = conn.prepare_cached(&format!(
         "WITH eligible AS (
              SELECT
@@ -870,7 +950,9 @@ where
                  rn.witness_stabilized,
                  IFNULL(t.trust_status, 0) AS trust_status,
                  MAX(tt.mined_height) AS max_shielding_input_height,
-                 MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust
+                 MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust,
+                 {tx_received_value} AS tx_received_value,
+                 COALESCE(SUM(tro.value_zat), 0) AS shielding_inputs_value
              FROM {table_prefix}_received_notes rn
              INNER JOIN accounts ON accounts.id = rn.account_id
              INNER JOIN transactions t ON t.id_tx = rn.transaction_id
@@ -925,6 +1007,8 @@ where
     let account_uuid = account.0;
     let anchor_height_arg = u32::from(anchor_height);
     let target_height_arg = u32::from(target_height);
+    let untrusted_floor_height_arg =
+        u32::from(target_height.saturating_sub(u32::from(confirmations_policy.untrusted())));
     let target_value_arg = u64::from(target_value);
     let scanned_priority = priority_code(&ScanPriority::Scanned);
     let tip_unscanned_arg = i64::from(tip_unscanned);
@@ -934,6 +1018,7 @@ where
         (":account_uuid", &account_uuid),
         (":anchor_height", &anchor_height_arg),
         (":target_height", &target_height_arg),
+        (":untrusted_floor_height", &untrusted_floor_height_arg),
         (":exclude", &excluded_ptr),
         (":scanned_priority", &scanned_priority),
         (":tip_unscanned", &tip_unscanned_arg),
@@ -990,6 +1075,10 @@ where
         let tx_shielding_inputs_trusted = row.get::<_, bool>("min_shielding_input_trust")?;
         let witness_stabilized = row.get::<_, bool>("witness_stabilized")?;
         let value = Zatoshis::from_nonnegative_i64(row.get("value")?)?;
+        let tx_received_value = transfer_value_from_raw(row.get::<_, i64>("tx_received_value")?)?;
+        let shielding_inputs_value =
+            transfer_value_from_raw(row.get::<_, i64>("shielding_inputs_value")?)?;
+        let transfer_value = tx_received_value.max(shielding_inputs_value);
         let lock_tier = row.get::<_, i64>("lock_tier")?;
         let note = to_spendable_note(params, protocol, row)?;
 
@@ -1002,6 +1091,7 @@ where
                 max_shielding_input_height,
                 tx_shielding_inputs_trusted,
                 witness_stabilized,
+                transfer_value,
             )
         }))
     })?;
@@ -1019,6 +1109,7 @@ where
             max_shielding_input_height,
             tx_shielding_inputs_trusted,
             witness_stabilized,
+            transfer_value,
         )) = result_maybe_note?
         else {
             continue;
@@ -1027,7 +1118,7 @@ where
         // A stabilized note was confirmed well beyond any reasonable confirmations policy at
         // stabilization time, so the confirmations check is trivially satisfied.
         let has_confirmations = witness_stabilized
-            || confirmations_policy.confirmations_until_spendable(
+            || confirmations_policy.confirmations_until_spendable_for_value(
                 target_height,
                 PoolType::Shielded(protocol),
                 Some(note.spending_key_scope()),
@@ -1035,6 +1126,7 @@ where
                 tx_trusted,
                 max_shielding_input_height,
                 tx_shielding_inputs_trusted,
+                transfer_value,
             ) == 0;
 
         if has_confirmations {
