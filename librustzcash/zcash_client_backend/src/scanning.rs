@@ -8,6 +8,7 @@ use core::{
     fmt::{self, Debug},
 };
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     hash::Hash,
 };
@@ -577,10 +578,11 @@ impl<AccountId: Copy> Nullifiers<AccountId> {
     /// to updating the wallet's state (after which [`Self::unspent`] would produce the
     /// same set).
     ///
-    /// - Notes spent by the wallet in this block will have their nullifiers removed from
-    ///   the set, so we don't bother .
-    /// - Notes received by the wallet in this block will have their nullifiers added to
-    ///   the set, enabling spend detection in subsequent blocks.
+    /// - The set gets the nullifiers of the notes that the wallet received in this block.
+    ///   Then it can find the spends of these notes in later blocks.
+    /// - The set loses the nullifiers of the notes that the wallet spent in this block.
+    ///   Then it does not find these notes again. A note that one block receives and
+    ///   spends does not stay in the set.
     pub fn update_with(&mut self, scanned_block: &ScannedBlock<AccountId>) {
         let sapling_spent_nf: Vec<&sapling::Nullifier> = scanned_block
             .transactions()
@@ -588,12 +590,13 @@ impl<AccountId: Copy> Nullifiers<AccountId> {
             .flat_map(|tx| tx.sapling_spends().iter().map(|spend| spend.nf()))
             .collect();
 
-        self.retain_sapling(|(_, nf)| !sapling_spent_nf.contains(&nf));
         self.extend_sapling(scanned_block.transactions().iter().flat_map(|tx| {
             tx.sapling_outputs()
                 .iter()
                 .flat_map(|out| out.nf().into_iter().map(|nf| (*out.account_id(), *nf)))
         }));
+
+        self.retain_sapling(|(_, nf)| !sapling_spent_nf.contains(&nf));
 
         #[cfg(feature = "orchard")]
         {
@@ -603,12 +606,13 @@ impl<AccountId: Copy> Nullifiers<AccountId> {
                 .flat_map(|tx| tx.orchard_spends().iter().map(|spend| spend.nf()))
                 .collect();
 
-            self.retain_orchard(|(_, nf)| !orchard_spent_nf.contains(&nf));
             self.extend_orchard(scanned_block.transactions().iter().flat_map(|tx| {
                 tx.orchard_outputs()
                     .iter()
                     .flat_map(|out| out.nf().into_iter().map(|nf| (*out.account_id(), *nf)))
             }));
+
+            self.retain_orchard(|(_, nf)| !orchard_spent_nf.contains(&nf));
 
             let ironwood_spent_nf: Vec<&IronwoodNullifier> = scanned_block
                 .transactions()
@@ -616,13 +620,115 @@ impl<AccountId: Copy> Nullifiers<AccountId> {
                 .flat_map(|tx| tx.ironwood_spends().iter().map(|spend| spend.nf()))
                 .collect();
 
-            self.retain_ironwood(|(_, nf)| !ironwood_spent_nf.contains(&nf));
             self.extend_ironwood(scanned_block.transactions().iter().flat_map(|tx| {
                 tx.ironwood_outputs()
                     .iter()
                     .flat_map(|out| out.nf().into_iter().map(|nf| (*out.account_id(), *nf)))
             }));
+
+            self.retain_ironwood(|(_, nf)| !ironwood_spent_nf.contains(&nf));
         }
+    }
+}
+
+/// The nullifiers of the notes that earlier transactions of one block paid to the wallet.
+///
+/// A block scan gets the nullifiers that the wallet held before the block. Thus it can find a
+/// spend of a note that the same block received only with this set.
+pub(crate) struct BlockLocalNullifiers<AccountId> {
+    sapling: Vec<(AccountId, sapling::Nullifier)>,
+    #[cfg(feature = "orchard")]
+    orchard: Vec<(AccountId, orchard::note::Nullifier)>,
+    #[cfg(feature = "orchard")]
+    ironwood: Vec<(AccountId, IronwoodNullifier)>,
+}
+
+/// Gives `tracked` and then `block_local`. Borrows `tracked` if `block_local` is empty.
+fn with_block_local<'a, T: Clone>(tracked: &'a [T], block_local: &[T]) -> Cow<'a, [T]> {
+    if block_local.is_empty() {
+        Cow::Borrowed(tracked)
+    } else {
+        Cow::Owned([tracked, block_local].concat())
+    }
+}
+
+/// Adds the nullifiers that the wallet can calculate for `outputs`, with their accounts.
+fn record_nullifiers<Note, Nf: Copy, AccountId: Copy>(
+    into: &mut Vec<(AccountId, Nf)>,
+    outputs: &[WalletOutput<Note, Nf, AccountId>],
+) {
+    into.extend(
+        outputs
+            .iter()
+            .filter_map(|out| out.nf().map(|nf| (*out.account_id(), *nf))),
+    );
+}
+
+impl<AccountId: Copy> BlockLocalNullifiers<AccountId> {
+    /// Makes the empty set that a block scan starts with.
+    pub(crate) fn new() -> Self {
+        Self {
+            sapling: vec![],
+            #[cfg(feature = "orchard")]
+            orchard: vec![],
+            #[cfg(feature = "orchard")]
+            ironwood: vec![],
+        }
+    }
+
+    /// The Sapling nullifiers to match spends against: those in `tracked`, then these.
+    pub(crate) fn sapling<'a>(
+        &self,
+        tracked: &'a Nullifiers<AccountId>,
+    ) -> Cow<'a, [(AccountId, sapling::Nullifier)]> {
+        with_block_local(&tracked.sapling, &self.sapling)
+    }
+
+    /// The Orchard nullifiers to match spends against: those in `tracked`, then these.
+    #[cfg(feature = "orchard")]
+    pub(crate) fn orchard<'a>(
+        &self,
+        tracked: &'a Nullifiers<AccountId>,
+    ) -> Cow<'a, [(AccountId, orchard::note::Nullifier)]> {
+        with_block_local(&tracked.orchard, &self.orchard)
+    }
+
+    /// The Ironwood nullifiers to match spends against: those in `tracked`, then these.
+    #[cfg(feature = "orchard")]
+    pub(crate) fn ironwood<'a>(
+        &self,
+        tracked: &'a Nullifiers<AccountId>,
+    ) -> Cow<'a, [(AccountId, IronwoodNullifier)]> {
+        with_block_local(&tracked.ironwood, &self.ironwood)
+    }
+
+    /// Records the Sapling wallet outputs of one transaction. Then a later transaction of the
+    /// block that spends them shows the spend.
+    pub(crate) fn record_sapling<Note>(
+        &mut self,
+        outputs: &[WalletOutput<Note, sapling::Nullifier, AccountId>],
+    ) {
+        record_nullifiers(&mut self.sapling, outputs);
+    }
+
+    /// Records the Orchard wallet outputs of one transaction. Then a later transaction of the
+    /// block that spends them shows the spend.
+    #[cfg(feature = "orchard")]
+    pub(crate) fn record_orchard<Note>(
+        &mut self,
+        outputs: &[WalletOutput<Note, orchard::note::Nullifier, AccountId>],
+    ) {
+        record_nullifiers(&mut self.orchard, outputs);
+    }
+
+    /// Records the Ironwood wallet outputs of one transaction. Then a later transaction of the
+    /// block that spends them shows the spend.
+    #[cfg(feature = "orchard")]
+    pub(crate) fn record_ironwood<Note>(
+        &mut self,
+        outputs: &[WalletOutput<Note, IronwoodNullifier, AccountId>],
+    ) {
+        record_nullifiers(&mut self.ironwood, outputs);
     }
 }
 

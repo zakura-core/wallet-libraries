@@ -7234,6 +7234,31 @@ pub fn scan_cached_blocks_finds_change_notes<T: ShieldedPoolTester, Dsf>(
     );
 }
 
+/// One block can hold a transaction that pays the wallet and a later transaction that spends
+/// that output. The scan of the block must find the spend, because no later scan can: the
+/// wallet writes the spend map of a block after it links the notes of that same block.
+pub fn scan_cached_blocks_detects_same_block_spend<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
+{
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
+
+    let account = st.test_account().cloned().unwrap();
+    let dfvk = T::test_account_fvk(&st);
+
+    let received = Zatoshis::const_from_u64(50000);
+    let change = Zatoshis::const_from_u64(20000);
+    let (height, _) = st.generate_next_block_with_same_block_spend(&dfvk, received, change);
+    st.scan_cached_blocks(height, 1);
+
+    // Only the change is spendable. A scan that does not find the spend keeps the first note
+    // as unspent, and the balance is then `received` and `change` together.
+    assert_eq!(st.get_total_balance(account.id()), change);
+}
+
 pub fn scan_cached_blocks_detects_spends_out_of_order<T: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,

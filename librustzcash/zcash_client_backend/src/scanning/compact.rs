@@ -12,7 +12,10 @@ use zcash_protocol::{
     consensus::{self, BlockHeight, NetworkUpgrade, TxIndex},
 };
 
-use super::{Nullifiers, PositionTracker, ScanError, ScanningKeys, find_received, find_spent};
+use super::{
+    BlockLocalNullifiers, Nullifiers, PositionTracker, ScanError, ScanningKeys, find_received,
+    find_spent,
+};
 use crate::{
     data_api::{BlockMetadata, ScannedBlock, ScannedBundles},
     proto::compact_formats::{ChainMetadata, CompactBlock, CompactTx},
@@ -310,6 +313,8 @@ where
     #[cfg(feature = "orchard")]
     let mut ironwood_note_commitments: Vec<(MerkleHashOrchard, Retention<BlockHeight>)> = vec![];
 
+    let mut block_local = BlockLocalNullifiers::new();
+
     for tx in block.vtx.into_iter() {
         let txid = tx.txid();
         let tx_index =
@@ -333,7 +338,7 @@ where
             .collect::<Result<Vec<_>, _>>()?;
         let (sapling_spends, sapling_unlinked_nullifiers) = find_spent(
             &sapling_spend_nfs,
-            &nullifiers.sapling,
+            &block_local.sapling(nullifiers),
             |nf| *nf,
             WalletSpend::from_parts,
         );
@@ -357,7 +362,7 @@ where
                 .collect::<Result<Vec<_>, _>>()?;
             let (orchard_spends, orchard_unlinked_nullifiers) = find_spent(
                 &orchard_spend_nfs,
-                &nullifiers.orchard,
+                &block_local.orchard(nullifiers),
                 |nf| *nf,
                 WalletSpend::from_parts,
             );
@@ -382,7 +387,7 @@ where
                 .collect::<Result<Vec<_>, _>>()?;
             let (ironwood_spends, ironwood_unlinked_nullifiers) = find_spent(
                 &ironwood_spend_nfs,
-                &nullifiers.ironwood,
+                &block_local.ironwood(nullifiers),
                 |nf| *nf,
                 WalletSpend::from_parts,
             );
@@ -574,6 +579,14 @@ where
         let has_ironwood = !(ironwood_spends.is_empty() && ironwood_outputs.is_empty());
         #[cfg(not(feature = "orchard"))]
         let has_ironwood = false;
+
+        // Give the nullifiers of this transaction to the set. Then a later transaction of the
+        // block that spends these outputs shows the spend.
+        block_local.record_sapling(&sapling_outputs);
+        #[cfg(feature = "orchard")]
+        block_local.record_orchard(&orchard_outputs);
+        #[cfg(feature = "orchard")]
+        block_local.record_ironwood(&ironwood_outputs);
 
         if has_sapling || has_orchard || has_ironwood {
             let wallet_tx = WalletTx::new(

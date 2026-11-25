@@ -583,6 +583,17 @@ mod tests {
     }
 
     #[test]
+    fn scan_cached_blocks_detects_same_block_spend_sapling() {
+        testing::pool::scan_cached_blocks_detects_same_block_spend::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn scan_cached_blocks_detects_same_block_spend_orchard() {
+        testing::pool::scan_cached_blocks_detects_same_block_spend::<OrchardPoolTester>()
+    }
+
+    #[test]
     fn scan_cached_blocks_detects_spends_out_of_order_sapling() {
         testing::pool::scan_cached_blocks_detects_spends_out_of_order::<SaplingPoolTester>()
     }

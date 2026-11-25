@@ -7,6 +7,13 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Fixed
+- A block scan now finds a spend of a note that an earlier transaction of the
+  same block paid to the wallet. Before, the scan matched spends only against
+  the nullifiers that the wallet held before the block, and no later scan could
+  find such a spend. The wallet kept the note as unspent and counted its value
+  with the change of the spend.
+
 ## [0.1.0-rc9.8] - 2026-11-11
 
 ### Fixed

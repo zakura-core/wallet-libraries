@@ -1048,6 +1048,73 @@ where
         (height, res)
     }
 
+    /// Adds a block in which one transaction pays `received` to `fvk`, and a later transaction
+    /// of the same block spends that note and returns `change` to `fvk`.
+    ///
+    /// A scan must find the spend. If it does not, the wallet keeps the note as unspent and
+    /// counts `received` and `change` together.
+    pub fn generate_next_block_with_same_block_spend<Fvk: TestFvk>(
+        &mut self,
+        fvk: &Fvk,
+        received: Zatoshis,
+        change: Zatoshis,
+    ) -> (BlockHeight, Cache::InsertResult) {
+        let prior_cached_block = self
+            .latest_cached_block()
+            .cloned()
+            .unwrap_or_else(|| CachedBlock::none(self.sapling_activation_height() - 1));
+        let height = prior_cached_block.height() + 1;
+
+        // The wallet keys a transaction by its index in the block, so the two indexes differ.
+        let mut received_tx = fake_compact_tx(&mut self.rng);
+        received_tx.index = 0;
+        let nf = fvk.add_output(
+            &mut received_tx,
+            &self.network,
+            height,
+            None,
+            AddressType::DefaultExternal,
+            received,
+            prior_cached_block.sapling_end_size,
+            &mut self.rng,
+        );
+
+        // The change note comes after the outputs of the first transaction, so the tree is
+        // larger by that count. The size decides the position, and thus the nullifier.
+        let sapling_tree_size = prior_cached_block.sapling_end_size
+            + u32::try_from(received_tx.outputs.len()).expect("a block holds few outputs");
+
+        let mut spending_tx = fake_compact_tx(&mut self.rng);
+        spending_tx.index = 1;
+        fvk.add_logical_action(
+            &mut spending_tx,
+            &self.network,
+            height,
+            nf,
+            Some(&fvk.to_ovk(zip32::Scope::Internal)),
+            AddressType::Internal,
+            change,
+            sapling_tree_size,
+            &mut self.rng,
+        );
+
+        let cb = fake_compact_block_from_compact_tx(
+            [received_tx, spending_tx],
+            height,
+            prior_cached_block.chain_state.block_hash(),
+            prior_cached_block.sapling_end_size,
+            prior_cached_block.orchard_end_size,
+            prior_cached_block.ironwood_end_size,
+            &mut self.rng,
+        );
+        assert_eq!(cb.height(), height);
+
+        let res = self.cache_block(&prior_cached_block, cb);
+        self.latest_block_height = Some(height);
+
+        (height, res)
+    }
+
     /// Creates a fake block at the expected next height containing only the wallet
     /// transaction with the given txid, and inserts it into the cache.
     ///
@@ -2983,7 +3050,7 @@ fn fake_compact_block<P: consensus::Parameters, Fvk: TestFvk>(
     }
 
     let cb = fake_compact_block_from_compact_tx(
-        ctx,
+        [ctx],
         height,
         prev_hash,
         initial_sapling_tree_size,
@@ -3038,7 +3105,7 @@ fn fake_compact_block_from_tx(
     }
 
     fake_compact_block_from_compact_tx(
-        ctx,
+        [ctx],
         height,
         prev_hash,
         initial_sapling_tree_size,
@@ -3143,7 +3210,7 @@ fn fake_compact_block_spending<P: consensus::Parameters, Fvk: TestFvk>(
     }
 
     fake_compact_block_from_compact_tx(
-        ctx,
+        [ctx],
         height,
         prev_hash,
         initial_sapling_tree_size,
@@ -3154,7 +3221,7 @@ fn fake_compact_block_spending<P: consensus::Parameters, Fvk: TestFvk>(
 }
 
 fn fake_compact_block_from_compact_tx(
-    ctx: CompactTx,
+    txs: impl IntoIterator<Item = CompactTx>,
     height: BlockHeight,
     prev_hash: BlockHash,
     initial_sapling_tree_size: u32,
@@ -3172,7 +3239,7 @@ fn fake_compact_block_from_compact_tx(
         ..Default::default()
     };
     cb.prev_hash.extend_from_slice(&prev_hash.0);
-    cb.vtx.push(ctx);
+    cb.vtx.extend(txs);
     cb.chain_metadata = Some(compact_formats::ChainMetadata {
         sapling_commitment_tree_size: initial_sapling_tree_size
             + cb.vtx.iter().map(|tx| tx.outputs.len() as u32).sum::<u32>(),
