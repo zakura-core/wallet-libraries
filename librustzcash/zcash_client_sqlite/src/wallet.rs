@@ -2834,6 +2834,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             "rn.witness_stabilized",
             "rn.value",
         );
+        let shielding_origin_value = common::shielding_origin_value_sql(true);
 
         let mut stmt_select_notes = tx.prepare_cached(&format!(
             "SELECT accounts.uuid, rn.id, rn.value, rn.is_change, rn.recipient_key_scope,
@@ -2845,6 +2846,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
                     MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust,
                     {tx_received_value} AS tx_received_value,
                     COALESCE(SUM(tro.value_zat), 0) AS shielding_inputs_value,
+                    {shielding_origin_value} AS shielding_origin_value,
                     rn.lock_expiry_height
              FROM {table_prefix}_received_notes rn
              INNER JOIN accounts ON accounts.id = rn.account_id
@@ -2920,7 +2922,12 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
                 common::transfer_value_from_raw(row.get::<_, i64>("tx_received_value")?)?;
             let shielding_inputs_value =
                 common::transfer_value_from_raw(row.get::<_, i64>("shielding_inputs_value")?)?;
-            let transfer_value = tx_received_value.max(shielding_inputs_value);
+            let shielding_origin_value =
+                common::transfer_value_from_raw(row.get::<_, i64>("shielding_origin_value")?)?;
+            let transfer_value = tx_received_value
+                .max(value)
+                .max(shielding_inputs_value)
+                .max(shielding_origin_value);
 
             let is_locked = locking::is_locked_at(
                 row.get::<_, Option<u32>>("lock_expiry_height")?,
@@ -6403,6 +6410,7 @@ pub(crate) fn get_received_outputs(
     confirmations_policy: ConfirmationsPolicy,
 ) -> Result<Vec<ReceivedTransactionOutput>, SqliteClientError> {
     let tx_received_value = common::tx_received_value_sql("vto.transaction_id", "to_acct.id");
+    let shielding_origin_value = common::shielding_origin_value_sql(false);
     let mut stmt_received_outputs = conn.prepare_cached(&format!(
         "SELECT
              vto.output_pool,
@@ -6415,7 +6423,8 @@ pub(crate) fn get_received_outputs(
              MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust,
              CASE WHEN to_acct.id IS NOT NULL THEN {tx_received_value} ELSE vto.value END
                 AS tx_received_value,
-             COALESCE(SUM(tro.value_zat), 0) AS shielding_inputs_value
+             COALESCE(SUM(tro.value_zat), 0) AS shielding_inputs_value,
+             {shielding_origin_value} AS shielding_origin_value
          FROM v_tx_outputs vto
          LEFT OUTER JOIN accounts to_acct
             ON to_acct.uuid = vto.to_account_uuid
@@ -6453,7 +6462,12 @@ pub(crate) fn get_received_outputs(
                     common::transfer_value_from_raw(row.get::<_, i64>("tx_received_value")?)?;
                 let shielding_inputs_value =
                     common::transfer_value_from_raw(row.get::<_, i64>("shielding_inputs_value")?)?;
-                let transfer_value = tx_received_value.max(shielding_inputs_value);
+                let shielding_origin_value =
+                    common::transfer_value_from_raw(row.get::<_, i64>("shielding_origin_value")?)?;
+                let transfer_value = tx_received_value
+                    .max(value)
+                    .max(shielding_inputs_value)
+                    .max(shielding_origin_value);
 
                 let confirmations_until_spendable = confirmations_policy
                     .confirmations_until_spendable_for_value(

@@ -559,7 +559,8 @@ impl ConfirmationsPolicy {
     ///
     /// Tiers are evaluated in order: the first tier whose [`ConfirmationTier::below`] bound is
     /// strictly greater than the transfer's received value determines the required confirmations.
-    /// Transfers at or above the highest tier's bound fall back to [`Self::untrusted`].
+    /// Transfers at or above the highest tier's bound fall back to [`Self::untrusted`]. Tiers are
+    /// evaluated against the outputs currently recorded by the wallet for a transaction.
     ///
     /// Every tier must satisfy `self.trusted() <= tier.confirmations() <= self.untrusted()`, with
     /// strictly increasing nonzero thresholds and non-decreasing confirmation counts.
