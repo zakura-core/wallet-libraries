@@ -151,14 +151,17 @@
 //! # }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use incrementalmerkletree::frontier::Frontier;
 use sapling::note_encryption::Zip212Enforcement;
 use subtle::ConditionallySelectable;
 use zcash_keys::keys::UnifiedFullViewingKey;
-use zcash_primitives::{block::BlockHash, transaction::components::sapling::zip212_enforcement};
+use zcash_primitives::{
+    block::BlockHash,
+    transaction::{TxId, components::sapling::zip212_enforcement},
+};
 use zcash_protocol::consensus::{self, BlockHeight};
 use zip32::Scope;
 
@@ -675,6 +678,9 @@ where
 pub enum TransparentHistory {
     /// Every transaction that involves a transparent address of the wallet and is mined at or
     /// below the given height is already stored in the wallet.
+    ///
+    /// Calling `forget_transparent_ledger` revokes this guarantee because it deletes TPIR-only
+    /// `transactions` rows while leaving `blocks` intact.
     SyncedTo(BlockHeight),
     /// The caller gives no such guarantee.
     Unsynced,
@@ -690,11 +696,95 @@ impl TransparentHistory {
     }
 }
 
+/// Monotone ownership evidence that a backend supplies for an external-only linear scan.
+///
+/// Every entry records a monotone ownership fact ("the wallet stored this txid" or "the wallet
+/// stored a note with this nullifier"), never status-filtered belief. The scanner uses these sets
+/// only to decide whether to run the inline internal-key pass on a transaction; spend recording
+/// continues to use [`WalletRead::get_sapling_nullifiers`] and its pool counterparts with
+/// [`NullifierQuery::Unspent`].
+///
+/// [`NullifierQuery::Unspent`]: crate::data_api::NullifierQuery::Unspent
+#[derive(Clone, Debug)]
+pub struct LinearScanEvidence {
+    known_txids: HashSet<TxId>,
+    sapling_nullifiers: HashSet<[u8; 32]>,
+    #[cfg(feature = "orchard")]
+    orchard_nullifiers: HashSet<[u8; 32]>,
+    #[cfg(feature = "orchard")]
+    ironwood_nullifiers: HashSet<[u8; 32]>,
+}
+
+impl LinearScanEvidence {
+    /// Constructs linear-scan trigger evidence from the wallet's stored txids and nullifiers.
+    pub fn new(
+        known_txids: HashSet<TxId>,
+        sapling_nullifiers: impl IntoIterator<Item = sapling::Nullifier>,
+        #[cfg(feature = "orchard")] orchard_nullifiers: impl IntoIterator<
+            Item = orchard::note::Nullifier,
+        >,
+        #[cfg(feature = "orchard")] ironwood_nullifiers: impl IntoIterator<
+            Item = orchard::note::Nullifier,
+        >,
+    ) -> Self {
+        Self {
+            known_txids,
+            sapling_nullifiers: sapling_nullifiers.into_iter().map(|nf| nf.0).collect(),
+            #[cfg(feature = "orchard")]
+            orchard_nullifiers: orchard_nullifiers
+                .into_iter()
+                .map(|nf| nf.to_bytes())
+                .collect(),
+            #[cfg(feature = "orchard")]
+            ironwood_nullifiers: ironwood_nullifiers
+                .into_iter()
+                .map(|nf| nf.to_bytes())
+                .collect(),
+        }
+    }
+
+    /// Returns all txids stored in the wallet.
+    pub fn known_txids(&self) -> &HashSet<TxId> {
+        &self.known_txids
+    }
+
+    /// Returns whether `nf` is among the wallet's stored Sapling nullifiers.
+    pub fn contains_sapling_nullifier(&self, nf: &sapling::Nullifier) -> bool {
+        self.sapling_nullifiers.contains(&nf.0)
+    }
+
+    /// Returns whether `nf` is among the wallet's stored Orchard nullifiers.
+    #[cfg(feature = "orchard")]
+    pub fn contains_orchard_nullifier(&self, nf: &orchard::note::Nullifier) -> bool {
+        self.orchard_nullifiers.contains(&nf.to_bytes())
+    }
+
+    /// Returns whether `nf` is among the wallet's stored Ironwood nullifiers.
+    #[cfg(feature = "orchard")]
+    pub fn contains_ironwood_nullifier(&self, nf: &orchard::note::Nullifier) -> bool {
+        self.ironwood_nullifiers.contains(&nf.to_bytes())
+    }
+
+    fn into_triggers(self) -> InternalPassTriggers {
+        InternalPassTriggers {
+            wallet_spend: true,
+            known_txids: self.known_txids,
+            known_sapling_nullifiers: self.sapling_nullifiers,
+            #[cfg(feature = "orchard")]
+            known_orchard_nullifiers: self.orchard_nullifiers,
+            #[cfg(feature = "orchard")]
+            known_ironwood_nullifiers: self.ironwood_nullifiers,
+            transparent_inputs_or_coinbase: true,
+        }
+    }
+}
+
 /// What a caller guarantees about the blocks that precede a scan.
 ///
-/// A driver that writes the result of one batch while it decrypts the next leaves the wallet's
-/// own frontier behind the batch it is about to scan. `writes_issued_through` lets such a driver
-/// declare the batches it has issued, so that the scan is still recognized as linear.
+/// A pipelined driver that decrypts batch N+1 while batch N writes are still in flight leaves the
+/// wallet's stored frontier behind batch N+1. Passing [`Self::with_writes_issued_through`] to
+/// [`decrypt_cached_blocks_with_policy`] lets prediction select external-only decryption; at scan
+/// time, [`scan_decrypted_blocks`] verifies linearity against the stored frontier alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LinearScanGuarantee {
     transparent_history: TransparentHistory,
@@ -710,13 +800,14 @@ impl LinearScanGuarantee {
         }
     }
 
-    /// Declares that every block up to and including `height` has been scanned, and that its
-    /// writes have been issued to the wallet in block order.
+    /// Declares that every block up to and including `height` has been scanned and its writes
+    /// issued in block order.
     ///
-    /// The declaration is a precondition the scan cannot check. A caller that declares a block
-    /// whose writes it has not issued, or that issues writes out of block order, makes the scan
-    /// treat a gap as linear, and an output paying an internal receiver within that gap is not
-    /// found.
+    /// A pipelined driver must pass `with_writes_issued_through(end - 1)` when prefetching the
+    /// next batch with [`decrypt_cached_blocks_with_policy`], so prediction selects external-only
+    /// keys before the prior batch commits. At scan time, [`scan_decrypted_blocks`] and
+    /// [`scan_cached_blocks_with_policy`] re-check linearity against the stored frontier alone;
+    /// a misdeclared height falls back safely to all scopes rather than missing outputs.
     pub const fn with_writes_issued_through(self, height: BlockHeight) -> Self {
         Self {
             writes_issued_through: Some(height),
@@ -736,10 +827,13 @@ pub enum TrialDecryptionPolicy {
     /// Every output is trial-decrypted with the external and internal viewing keys of every
     /// account: the behaviour of [`scan_cached_blocks`].
     AllScopes,
-    /// When the scan is linear and the guarantee covers every block the scan may reach, outputs
-    /// are trial-decrypted with external keys only, and the outputs of the wallet's own
-    /// transactions are also trial-decrypted with internal keys; otherwise this behaves as
-    /// [`Self::AllScopes`].
+    /// When the scan is linear, the range contains no previously stored blocks, and the guarantee
+    /// covers every block the scan may reach, outputs are trial-decrypted with external keys only
+    /// and transactions selected by monotone wallet triggers also run internal keys; otherwise
+    /// this behaves as [`Self::AllScopes`].
+    ///
+    /// Premise: only an account's own spending key pays its internal receiver. Rescans of
+    /// already-stored blocks always use [`Self::AllScopes`].
     ExternalWhenLinear(LinearScanGuarantee),
 }
 
@@ -747,6 +841,13 @@ pub enum TrialDecryptionPolicy {
 fn batch_end(from_height: BlockHeight, limit: usize) -> BlockHeight {
     let limit = u32::try_from(limit).unwrap_or(u32::MAX);
     BlockHeight::from(u32::from(from_height).saturating_add(limit.saturating_sub(1)))
+}
+
+/// Returns the half-open block range for a scan of at most `limit` blocks from `from_height`.
+fn batch_range(from_height: BlockHeight, limit: usize) -> Range<BlockHeight> {
+    let limit = u32::try_from(limit).unwrap_or(u32::MAX);
+    let end = BlockHeight::from(u32::from(from_height).saturating_add(limit));
+    from_height..end
 }
 
 /// Returns whether every block from the wallet's birthday up to `from_height` has been scanned.
@@ -767,22 +868,26 @@ fn is_linear<DbT: WalletRead>(
     Ok(frontier.is_some_and(|frontier| from_height <= frontier))
 }
 
-/// The triggers of the external-only mode, or `None` if the wallet cannot enumerate the
-/// transactions it stores.
-fn linear_triggers<DbT: WalletRead>(
+/// Evaluates the scan-time gate against the stored frontier alone and loads monotone evidence.
+///
+/// Returns `Ok(None)` when the guarantee does not cover the batch, when the stored frontier has
+/// a gap before `from_height`, or when the backend vetoes the range (for example, on a rescan).
+fn external_only_triggers<DbT: WalletRead>(
     db: &DbT,
     from_height: BlockHeight,
     limit: usize,
+    guarantee: LinearScanGuarantee,
 ) -> Result<Option<InternalPassTriggers>, DbT::Error> {
-    let limit = u32::try_from(limit).unwrap_or(u32::MAX);
-    let end = BlockHeight::from(u32::from(from_height).saturating_add(limit));
+    if !guarantee
+        .transparent_history()
+        .covers(batch_end(from_height, limit))
+        || !is_linear(db, from_height, None)?
+    {
+        return Ok(None);
+    }
     Ok(db
-        .get_txids_for_scan(from_height..end)?
-        .map(|known_txids| InternalPassTriggers {
-            wallet_spend: true,
-            known_txids,
-            transparent_inputs_or_coinbase: true,
-        }))
+        .linear_scan_evidence(batch_range(from_height, limit))?
+        .map(LinearScanEvidence::into_triggers))
 }
 
 /// Scans as [`scan_cached_blocks`] does, trial-decrypting with the scopes `policy` selects.
@@ -810,16 +915,8 @@ where
     let triggers = match policy {
         TrialDecryptionPolicy::AllScopes => None,
         TrialDecryptionPolicy::ExternalWhenLinear(guarantee) => {
-            if guarantee
-                .transparent_history()
-                .covers(batch_end(from_height, limit))
-                && is_linear(&*data_db, from_height, guarantee.writes_issued_through)
-                    .map_err(Error::Wallet)?
-            {
-                linear_triggers(&*data_db, from_height, limit).map_err(Error::Wallet)?
-            } else {
-                None
-            }
+            external_only_triggers(&*data_db, from_height, limit, guarantee)
+                .map_err(Error::Wallet)?
         }
     };
     scan_cached_blocks_in_mode(
@@ -891,11 +988,13 @@ where
 ///
 /// Its work runs on the rayon thread pool that was current when it was started, so a
 /// caller can let it run while it writes the previous range.
-/// The internal-scope keys of a [`BlockDecryption`], with the triggers that select the
-/// transactions they are applied to.
+/// The internal-scope keys of a [`BlockDecryption`] and the caller's guarantee.
+///
+/// Trigger evidence and the stored-frontier gate are not frozen here; [`scan_decrypted_blocks`]
+/// evaluates them at scan time.
 type InlinePass<AccountId> = (
     ScanningKeys<AccountId, (AccountId, Scope)>,
-    InternalPassTriggers,
+    LinearScanGuarantee,
 );
 
 pub struct BlockDecryption<AccountId: Copy + Eq + std::hash::Hash + Send + Sync + 'static> {
@@ -986,28 +1085,35 @@ where
         account_ufvks_for_range(data_db, from_height, limit).map_err(Error::Wallet)?;
     let encoded_ufvks = encode_ufvks(params, &account_ufvks);
 
-    let triggers = match policy {
+    let predicted_guarantee = match policy {
         TrialDecryptionPolicy::AllScopes => None,
         TrialDecryptionPolicy::ExternalWhenLinear(guarantee) => {
+            // Predict whether the scan-time gate will accept external-only keys, including the
+            // backend's stored-block rescan veto, without freezing trigger evidence in
+            // `BlockDecryption`.
             if guarantee
                 .transparent_history()
                 .covers(batch_end(from_height, limit))
                 && is_linear(data_db, from_height, guarantee.writes_issued_through)
                     .map_err(Error::Wallet)?
+                && data_db
+                    .linear_scan_evidence(batch_range(from_height, limit))
+                    .map_err(Error::Wallet)?
+                    .is_some()
             {
-                linear_triggers(data_db, from_height, limit).map_err(Error::Wallet)?
+                Some(guarantee)
             } else {
                 None
             }
         }
     };
-    let (scanning_keys, internal_pass) = match triggers {
+    let (scanning_keys, internal_pass) = match predicted_guarantee {
         None => (ScanningKeys::from_account_ufvks(account_ufvks), None),
-        Some(triggers) => (
+        Some(guarantee) => (
             ScanningKeys::from_account_ufvks_with_scopes(account_ufvks.clone(), &[Scope::External]),
             Some((
                 ScanningKeys::from_account_ufvks_with_scopes(account_ufvks, &[Scope::Internal]),
-                triggers,
+                guarantee,
             )),
         ),
     };
@@ -1088,20 +1194,36 @@ where
             internal_pass,
             ..
         } = decryption;
-        let internal_pass = internal_pass
-            .as_ref()
-            .map(|(keys, triggers)| InternalPass { keys, triggers });
-        scan_with_runners(
-            params,
-            block_source,
-            data_db,
-            from_height,
-            limit,
-            &scanning_keys,
-            internal_pass,
-            runners,
-            Some(&blocks),
-        )?
+        let resolved_internal = match internal_pass {
+            None => Some(None),
+            Some((keys, guarantee)) => {
+                // Re-check linearity against the stored frontier and reload monotone evidence at
+                // scan time. Any veto makes the external-only prefetch stale and falls back to all
+                // scopes.
+                external_only_triggers(&*data_db, from_height, limit, guarantee)
+                    .map_err(Error::Wallet)?
+                    .map(|triggers| Some((keys, triggers)))
+            }
+        };
+        match resolved_internal {
+            None => ScanPass::Stale,
+            Some(inline) => {
+                let internal_pass = inline
+                    .as_ref()
+                    .map(|(keys, triggers)| InternalPass { keys, triggers });
+                scan_with_runners(
+                    params,
+                    block_source,
+                    data_db,
+                    from_height,
+                    limit,
+                    &scanning_keys,
+                    internal_pass,
+                    runners,
+                    Some(&blocks),
+                )?
+            }
+        }
     } else {
         ScanPass::Stale
     };

@@ -14,7 +14,8 @@ and this library adheres to Rust's notion of
   - `TrialDecryptionPolicy`
   - `TransparentHistory`
   - `LinearScanGuarantee`
-- `zcash_client_backend::data_api::WalletRead::get_txids_for_scan`, which has a
+  - `LinearScanEvidence`
+- `zcash_client_backend::data_api::WalletRead::linear_scan_evidence`, which has a
   default returning `Ok(None)`.
 
 ### Changed

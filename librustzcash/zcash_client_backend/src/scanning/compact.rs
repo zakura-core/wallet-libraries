@@ -344,7 +344,7 @@ where
         sapling_nullifier_map.push((tx_index, txid, sapling_unlinked_nullifiers));
 
         #[cfg(feature = "orchard")]
-        let orchard_spends = {
+        let (orchard_spends, orchard_spend_nfs) = {
             let orchard_spend_nfs = tx
                 .actions
                 .iter()
@@ -365,11 +365,11 @@ where
                 WalletSpend::from_parts,
             );
             orchard_nullifier_map.push((tx_index, txid, orchard_unlinked_nullifiers));
-            orchard_spends
+            (orchard_spends, orchard_spend_nfs)
         };
 
         #[cfg(feature = "orchard")]
-        let ironwood_spends = {
+        let (ironwood_spends, ironwood_spend_nfs) = {
             let ironwood_spend_nfs = tx
                 .ironwood_actions
                 .iter()
@@ -390,7 +390,7 @@ where
                 WalletSpend::from_parts,
             );
             ironwood_nullifier_map.push((tx_index, txid, ironwood_unlinked_nullifiers));
-            ironwood_spends
+            (ironwood_spends, ironwood_spend_nfs)
         };
 
         // Collect the set of accounts that were spent from in this transaction
@@ -410,9 +410,25 @@ where
         #[cfg(feature = "orchard")]
         let has_shielded_outputs = has_shielded_outputs || !tx.ironwood_actions.is_empty();
         let inline_keys = internal_pass.filter(|pass| {
+            let spends_known_nullifier = sapling_spend_nfs
+                .iter()
+                .any(|nf| pass.triggers.known_sapling_nullifiers.contains(&nf.0));
+            #[cfg(feature = "orchard")]
+            let spends_known_nullifier = spends_known_nullifier
+                || orchard_spend_nfs.iter().any(|nf| {
+                    pass.triggers
+                        .known_orchard_nullifiers
+                        .contains(&nf.to_bytes())
+                })
+                || ironwood_spend_nfs.iter().any(|nf| {
+                    pass.triggers
+                        .known_ironwood_nullifiers
+                        .contains(&nf.to_bytes())
+                });
             pass.triggers.fire(
                 &txid,
                 !spent_from_accounts.is_empty(),
+                spends_known_nullifier,
                 !tx.vin.is_empty() || tx.index == 0,
                 has_shielded_outputs,
             )

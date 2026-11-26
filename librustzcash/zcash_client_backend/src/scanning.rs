@@ -914,6 +914,14 @@ pub(crate) struct InternalPassTriggers {
     pub(crate) wallet_spend: bool,
     /// A transaction whose txid is in this set.
     pub(crate) known_txids: HashSet<TxId>,
+    /// A transaction that reveals a stored Sapling nullifier of the wallet.
+    pub(crate) known_sapling_nullifiers: HashSet<[u8; 32]>,
+    /// A transaction that reveals a stored Orchard nullifier of the wallet.
+    #[cfg(feature = "orchard")]
+    pub(crate) known_orchard_nullifiers: HashSet<[u8; 32]>,
+    /// A transaction that reveals a stored Ironwood nullifier of the wallet.
+    #[cfg(feature = "orchard")]
+    pub(crate) known_ironwood_nullifiers: HashSet<[u8; 32]>,
     /// A transaction with at least one shielded output that either has a transparent input or is
     /// a coinbase transaction (whose null input compact blocks omit).
     pub(crate) transparent_inputs_or_coinbase: bool,
@@ -925,10 +933,12 @@ impl InternalPassTriggers {
         &self,
         txid: &TxId,
         spends_wallet_funds: bool,
+        spends_known_nullifier: bool,
         has_transparent_inputs_or_is_coinbase: bool,
         has_shielded_outputs: bool,
     ) -> bool {
         (self.wallet_spend && spends_wallet_funds)
+            || spends_known_nullifier
             || self.known_txids.contains(txid)
             || (self.transparent_inputs_or_coinbase
                 && has_transparent_inputs_or_is_coinbase

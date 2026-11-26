@@ -1734,11 +1734,12 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         wallet::get_tx_height(self.conn.borrow(), txid)
     }
 
-    fn get_txids_for_scan(
+    fn linear_scan_evidence(
         &self,
         range: Range<BlockHeight>,
-    ) -> Result<Option<HashSet<TxId>>, Self::Error> {
-        wallet::get_txids_for_scan(self.conn.borrow(), range).map(Some)
+    ) -> Result<Option<zcash_client_backend::data_api::chain::LinearScanEvidence>, Self::Error>
+    {
+        wallet::linear_scan_evidence(self.conn.borrow(), range)
     }
 
     fn get_unified_full_viewing_keys(

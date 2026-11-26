@@ -287,16 +287,15 @@ fn a_gap_before_the_batch_falls_back_to_all_scopes() {
 }
 
 #[test]
-fn writes_issued_through_opens_the_gate_over_a_gap() {
+fn writes_issued_through_falls_back_to_all_scopes_over_a_gap() {
     let (shield, spend) = original_history();
     let (_, _, shielded_at, _) = restored(&shield, &spend);
     let at = spend_height(shielded_at);
 
-    // The caller declares the batches it has issued, which the wallet's own frontier does not
-    // show. The scan is then linear and takes the external-only mode, so the change of the spend
-    // is missed. Missing it is what proves the declaration opened the gate: the same batch under
-    // `a_gap_before_the_batch_falls_back_to_all_scopes` finds it.
-    let missed = balance_after_scanning_the_spend_alone(
+    // At scan time, linearity is verified against the stored frontier alone; `writes_issued_through`
+    // is a prefetch prediction hint only. Over a real gap the scan falls back to all scopes and
+    // finds the spend's internal change instead of missing it.
+    let found = balance_after_scanning_the_spend_alone(
         &shield,
         &spend,
         ForcedScanMode::Policy(TrialDecryptionPolicy::ExternalWhenLinear(
@@ -307,5 +306,165 @@ fn writes_issued_through_opens_the_gate_over_a_gap() {
         )),
     );
 
-    assert_eq!(missed, Zatoshis::ZERO);
+    assert!(found > Zatoshis::ZERO);
+}
+
+#[test]
+fn prefetch_falls_back_to_all_scopes_when_frontier_is_misdeclared() {
+    use zcash_client_backend::data_api::chain::decrypt_cached_blocks_with_policy;
+
+    let (shield, spend) = original_history();
+    let (mut st, account, shielded_at, _) = restored(&shield, &spend);
+    let at = spend_height(shielded_at);
+
+    // Prefetch predicts external-only using the misdeclared frontier; scan_decrypted_blocks checks
+    // the stored frontier, marks the decryption stale, and rescans with all scopes.
+    let network = *st.network();
+    let decryption = decrypt_cached_blocks_with_policy(
+        &network,
+        st.cache(),
+        st.wallet(),
+        at,
+        1,
+        TrialDecryptionPolicy::ExternalWhenLinear(
+            LinearScanGuarantee::new(TransparentHistory::SyncedTo(BlockHeight::from_u32(
+                u32::MAX,
+            )))
+            .with_writes_issued_through(at - 1),
+        ),
+    )
+    .unwrap();
+    st.scan_decrypted_blocks(at, 1, decryption);
+
+    assert!(st.get_total_balance(account) > Zatoshis::ZERO);
+}
+
+#[test]
+fn prefetch_external_only_stays_external_when_prior_batch_commits_and_falls_back_on_gap() {
+    use zcash_client_backend::data_api::chain::decrypt_cached_blocks_with_policy;
+
+    let canary_value = Zatoshis::const_from_u64(50_000);
+    let foreign_nf = |seed: u8| ::orchard::note::Nullifier::from_bytes(&[seed; 32]).unwrap();
+    let policy_at = |issued_through: BlockHeight| {
+        TrialDecryptionPolicy::ExternalWhenLinear(
+            LinearScanGuarantee::new(TransparentHistory::SyncedTo(BlockHeight::from_u32(
+                u32::MAX,
+            )))
+            .with_writes_issued_through(issued_through),
+        )
+    };
+
+    // Case 1 (control): pipelined prefetch of block 2 while block 1 has not committed yet. Once
+    // block 1 commits before scan_decrypted_blocks(2), block 2 stays external-only and misses the
+    // foreign payment to the account's internal receiver (canary).
+    {
+        let (mut st, account) = wallet();
+        let fvk = OrchardPoolTester::test_account_fvk(&st);
+        let (h1, _) = st.generate_empty_block();
+        // Put the canary at tx_index = 1 (non-coinbase) paying an internal receiver with no wallet
+        // spend so no trigger fires.
+        let (h2, _, _) = st.generate_next_block_spending_to_internal(
+            &fvk,
+            (foreign_nf(1), canary_value),
+            &fvk,
+            canary_value,
+        );
+        st.wallet_mut().update_chain_tip(h2).unwrap();
+
+        let network = *st.network();
+        let decryption = decrypt_cached_blocks_with_policy(
+            &network,
+            st.cache(),
+            st.wallet(),
+            h2,
+            1,
+            policy_at(h1),
+        )
+        .unwrap();
+        // Commit batch 1 before scanning batch 2.
+        st.scan_cached_blocks(h1, 1);
+        st.scan_decrypted_blocks(h2, 1, decryption);
+        assert_eq!(
+            st.get_total_balance(account),
+            Zatoshis::ZERO,
+            "pipelined external-only decryption was used and missed the internal-receiver canary"
+        );
+    }
+
+    // Case 2: prefetch block 2 linearly, then introduce a gap before scanning it -> Rule 3 marks
+    // the decryption stale and all-scopes finds the canary.
+    {
+        let (mut st, account) = wallet();
+        let fvk = OrchardPoolTester::test_account_fvk(&st);
+        let (h1, _) = st.generate_empty_block();
+        let (h2, _, _) = st.generate_next_block_spending_to_internal(
+            &fvk,
+            (foreign_nf(2), canary_value),
+            &fvk,
+            canary_value,
+        );
+        st.wallet_mut().update_chain_tip(h2).unwrap();
+        st.scan_cached_blocks(h1, 1);
+
+        let network = *st.network();
+        let decryption = decrypt_cached_blocks_with_policy(
+            &network,
+            st.cache(),
+            st.wallet(),
+            h2,
+            1,
+            policy_at(h1),
+        )
+        .unwrap();
+        // Truncate back below h1 so a gap now exists before h2.
+        st.wallet_mut().truncate_to_height(h1 - 1).unwrap();
+        st.scan_decrypted_blocks(h2, 1, decryption);
+        assert_eq!(
+            st.get_total_balance(account),
+            canary_value,
+            "scan-time linearity check fell back to all scopes after a gap opened"
+        );
+    }
+}
+
+#[test]
+fn rescan_of_stored_blocks_always_uses_all_scopes() {
+    let canary_value = Zatoshis::const_from_u64(50_000);
+    let foreign_nf = |seed: u8| ::orchard::note::Nullifier::from_bytes(&[seed; 32]).unwrap();
+    let pol = TrialDecryptionPolicy::ExternalWhenLinear(LinearScanGuarantee::new(
+        TransparentHistory::SyncedTo(BlockHeight::from_u32(u32::MAX)),
+    ));
+
+    // Control + single-block rescan: first scan runs external-only and misses the internal canary;
+    // rescanning a batch straddling stored block h2 and fresh block h3 under the same policy vetoes
+    // the fast path (Rule 2) and finds both canaries.
+    let (mut st, account) = wallet();
+    let fvk = OrchardPoolTester::test_account_fvk(&st);
+    let (h1, _) = st.generate_empty_block();
+    let (h2, _, _) = st.generate_next_block_spending_to_internal(
+        &fvk,
+        (foreign_nf(3), canary_value),
+        &fvk,
+        canary_value,
+    );
+    let (h3, _, _) = st.generate_next_block_spending_to_internal(
+        &fvk,
+        (foreign_nf(4), canary_value),
+        &fvk,
+        canary_value,
+    );
+    st.wallet_mut().update_chain_tip(h3).unwrap();
+
+    // First scan of h1..=h2 runs external-only: canary at h2 is missed.
+    st.scan_cached_blocks_with_policy(h1, 2, pol);
+    assert_eq!(st.get_total_balance(account), Zatoshis::ZERO);
+
+    // Rescan a batch straddling stored block h2 and fresh block h3 under the same policy:
+    // Rule 2 vetoes the fast path because h2 is already stored, so all scopes run and BOTH
+    // canaries (h2 and h3) are found.
+    st.scan_cached_blocks_with_policy(h2, 2, pol);
+    assert_eq!(
+        st.get_total_balance(account),
+        (canary_value + canary_value).unwrap()
+    );
 }
