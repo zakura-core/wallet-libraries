@@ -416,15 +416,15 @@ pub(crate) fn get_subtree_root<H: HashSer>(
     table_prefix: &'static str,
     index: u64,
 ) -> Result<Option<H>, Error> {
-    conn.query_row(
-        &format!(
-            "SELECT root_hash
-             FROM {table_prefix}_tree_shards
-             WHERE shard_index = :shard_index"
-        ),
-        named_params![":shard_index": index],
-        |row| row.get::<_, Option<Vec<u8>>>(0),
-    )
+    conn.prepare_cached(&format!(
+        "SELECT root_hash
+         FROM {table_prefix}_tree_shards
+         WHERE shard_index = :shard_index"
+    ))
+    .map_err(Error::Query)?
+    .query_row(named_params![":shard_index": index], |row| {
+        row.get::<_, Option<Vec<u8>>>(0)
+    })
     .optional()
     .map_err(Error::Query)?
     .flatten()
@@ -437,12 +437,13 @@ pub(crate) fn get_shard<H: HashSer>(
     table_prefix: &'static str,
     shard_root_addr: Address,
 ) -> Result<Option<LocatedPrunableTree<H>>, Error> {
-    conn.query_row(
-        &format!(
-            "SELECT shard_data, root_hash
-             FROM {table_prefix}_tree_shards
-             WHERE shard_index = :shard_index"
-        ),
+    conn.prepare_cached(&format!(
+        "SELECT shard_data, root_hash
+         FROM {table_prefix}_tree_shards
+         WHERE shard_index = :shard_index"
+    ))
+    .map_err(Error::Query)?
+    .query_row(
         named_params![":shard_index": shard_root_addr.index()],
         |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
     )
@@ -472,20 +473,18 @@ pub(crate) fn last_shard<H: HashSer>(
     table_prefix: &'static str,
     shard_root_level: Level,
 ) -> Result<Option<LocatedPrunableTree<H>>, Error> {
-    conn.query_row(
-        &format!(
-            "SELECT shard_index, shard_data
-             FROM {table_prefix}_tree_shards
-             ORDER BY shard_index DESC
-             LIMIT 1"
-        ),
-        [],
-        |row| {
-            let shard_index: u64 = row.get(0)?;
-            let shard_data: Vec<u8> = row.get(1)?;
-            Ok((shard_index, shard_data))
-        },
-    )
+    conn.prepare_cached(&format!(
+        "SELECT shard_index, shard_data
+         FROM {table_prefix}_tree_shards
+         ORDER BY shard_index DESC
+         LIMIT 1"
+    ))
+    .map_err(Error::Query)?
+    .query_row([], |row| {
+        let shard_index: u64 = row.get(0)?;
+        let shard_data: Vec<u8> = row.get(1)?;
+        Ok((shard_index, shard_data))
+    })
     .optional()
     .map_err(Error::Query)?
     .map(|(shard_index, shard_data)| {
@@ -511,15 +510,16 @@ fn check_shard_discontinuity(
     proposed_insertion_range: Range<u64>,
 ) -> Result<(), Error> {
     if let Ok((Some(stored_min), Some(stored_max))) = conn
-        .query_row(
-            &format!("SELECT MIN(shard_index), MAX(shard_index) FROM {table_prefix}_tree_shards"),
-            [],
-            |row| {
+        .prepare_cached(&format!(
+            "SELECT MIN(shard_index), MAX(shard_index) FROM {table_prefix}_tree_shards"
+        ))
+        .and_then(|mut stmt| {
+            stmt.query_row([], |row| {
                 let min = row.get::<_, Option<u64>>(0)?;
                 let max = row.get::<_, Option<u64>>(1)?;
                 Ok((min, max))
-            },
-        )
+            })
+        })
         .map_err(Error::Query)
     {
         // If the ranges overlap, or are directly adjacent, then we aren't creating a
@@ -594,7 +594,7 @@ pub(crate) fn get_shard_roots(
     shard_root_level: Level,
 ) -> Result<Vec<Address>, Error> {
     let mut stmt = conn
-        .prepare(&format!(
+        .prepare_cached(&format!(
             "SELECT shard_index FROM {table_prefix}_tree_shards ORDER BY shard_index"
         ))
         .map_err(Error::Query)?;
@@ -615,10 +615,11 @@ pub(crate) fn truncate_shards(
     table_prefix: &'static str,
     shard_index: u64,
 ) -> Result<(), Error> {
-    conn.execute(
-        &format!("DELETE FROM {table_prefix}_tree_shards WHERE shard_index >= ?"),
-        [shard_index],
-    )
+    conn.prepare_cached(&format!(
+        "DELETE FROM {table_prefix}_tree_shards WHERE shard_index >= ?"
+    ))
+    .map_err(Error::Query)?
+    .execute([shard_index])
     .map_err(Error::Query)
     .map(|_| ())
 }
@@ -628,17 +629,15 @@ pub(crate) fn get_cap<H: HashSer>(
     conn: &rusqlite::Connection,
     table_prefix: &'static str,
 ) -> Result<PrunableTree<H>, Error> {
-    conn.query_row(
-        &format!("SELECT cap_data FROM {table_prefix}_tree_cap"),
-        [],
-        |row| row.get::<_, Vec<u8>>(0),
-    )
-    .optional()
-    .map_err(Error::Query)?
-    .map_or_else(
-        || Ok(PrunableTree::empty()),
-        |cap_data| read_shard(&mut Cursor::new(cap_data)).map_err(Error::Serialization),
-    )
+    conn.prepare_cached(&format!("SELECT cap_data FROM {table_prefix}_tree_cap"))
+        .map_err(Error::Query)?
+        .query_row([], |row| row.get::<_, Vec<u8>>(0))
+        .optional()
+        .map_err(Error::Query)?
+        .map_or_else(
+            || Ok(PrunableTree::empty()),
+            |cap_data| read_shard(&mut Cursor::new(cap_data)).map_err(Error::Serialization),
+        )
 }
 
 #[tracing::instrument(skip(conn, cap))]
@@ -667,14 +666,14 @@ pub(crate) fn min_checkpoint_id(
     conn: &rusqlite::Connection,
     table_prefix: &'static str,
 ) -> Result<Option<BlockHeight>, Error> {
-    conn.query_row(
-        &format!("SELECT MIN(checkpoint_id) FROM {table_prefix}_tree_checkpoints"),
-        [],
-        |row| {
-            row.get::<_, Option<u32>>(0)
-                .map(|opt| opt.map(BlockHeight::from))
-        },
-    )
+    conn.prepare_cached(&format!(
+        "SELECT MIN(checkpoint_id) FROM {table_prefix}_tree_checkpoints"
+    ))
+    .map_err(Error::Query)?
+    .query_row([], |row| {
+        row.get::<_, Option<u32>>(0)
+            .map(|opt| opt.map(BlockHeight::from))
+    })
     .map_err(Error::Query)
 }
 
@@ -682,14 +681,14 @@ pub(crate) fn max_checkpoint_id(
     conn: &rusqlite::Connection,
     table_prefix: &'static str,
 ) -> Result<Option<BlockHeight>, Error> {
-    conn.query_row(
-        &format!("SELECT MAX(checkpoint_id) FROM {table_prefix}_tree_checkpoints"),
-        [],
-        |row| {
-            row.get::<_, Option<u32>>(0)
-                .map(|opt| opt.map(BlockHeight::from))
-        },
-    )
+    conn.prepare_cached(&format!(
+        "SELECT MAX(checkpoint_id) FROM {table_prefix}_tree_checkpoints"
+    ))
+    .map_err(Error::Query)?
+    .query_row([], |row| {
+        row.get::<_, Option<u32>>(0)
+            .map(|opt| opt.map(BlockHeight::from))
+    })
     .map_err(Error::Query)
 }
 
@@ -700,17 +699,15 @@ pub(crate) fn min_checkpoint_id_at_or_above(
     table_prefix: &'static str,
     floor: BlockHeight,
 ) -> Result<Option<BlockHeight>, Error> {
-    conn.query_row(
-        &format!(
-            "SELECT MIN(checkpoint_id) FROM {table_prefix}_tree_checkpoints
-             WHERE checkpoint_id >= :floor"
-        ),
-        named_params![":floor": u32::from(floor)],
-        |row| {
-            row.get::<_, Option<u32>>(0)
-                .map(|opt| opt.map(BlockHeight::from))
-        },
-    )
+    conn.prepare_cached(&format!(
+        "SELECT MIN(checkpoint_id) FROM {table_prefix}_tree_checkpoints
+         WHERE checkpoint_id >= :floor"
+    ))
+    .map_err(Error::Query)?
+    .query_row(named_params![":floor": u32::from(floor)], |row| {
+        row.get::<_, Option<u32>>(0)
+            .map(|opt| opt.map(BlockHeight::from))
+    })
     .map_err(Error::Query)
 }
 
@@ -800,10 +797,11 @@ pub(crate) fn add_checkpoint(
     checkpoint: Checkpoint,
 ) -> Result<(), Error> {
     let extant_tree_state = conn
+        .prepare_cached(&format!(
+            "SELECT position FROM {table_prefix}_tree_checkpoints WHERE checkpoint_id = :checkpoint_id"
+        ))
+        .map_err(Error::Query)?
         .query_row(
-            &format!(
-                "SELECT position FROM {table_prefix}_tree_checkpoints WHERE checkpoint_id = :checkpoint_id"
-            ),
             named_params![":checkpoint_id": u32::from(checkpoint_id),],
             |row| {
                 row.get::<_, Option<u64>>(0).map(|opt| {
@@ -885,11 +883,11 @@ pub(crate) fn checkpoint_count(
     conn: &rusqlite::Connection,
     table_prefix: &'static str,
 ) -> Result<usize, Error> {
-    conn.query_row(
-        &format!("SELECT COUNT(*) FROM {table_prefix}_tree_checkpoints"),
-        [],
-        |row| row.get::<_, usize>(0),
-    )
+    conn.prepare_cached(&format!(
+        "SELECT COUNT(*) FROM {table_prefix}_tree_checkpoints"
+    ))
+    .map_err(Error::Query)?
+    .query_row([], |row| row.get::<_, usize>(0))
     .map_err(Error::Query)
 }
 
@@ -921,18 +919,16 @@ pub(crate) fn get_checkpoint(
     checkpoint_id: BlockHeight,
 ) -> Result<Option<Checkpoint>, Error> {
     let checkpoint_position = conn
-        .query_row(
-            &format!(
-                "SELECT position
-                 FROM {table_prefix}_tree_checkpoints
-                 WHERE checkpoint_id = ?"
-            ),
-            [u32::from(checkpoint_id)],
-            |row| {
-                row.get::<_, Option<u64>>(0)
-                    .map(|opt| opt.map(Position::from))
-            },
-        )
+        .prepare_cached(&format!(
+            "SELECT position
+             FROM {table_prefix}_tree_checkpoints
+             WHERE checkpoint_id = ?"
+        ))
+        .map_err(Error::Query)?
+        .query_row([u32::from(checkpoint_id)], |row| {
+            row.get::<_, Option<u64>>(0)
+                .map(|opt| opt.map(Position::from))
+        })
         .optional()
         .map_err(Error::Query)?;
 
@@ -961,14 +957,14 @@ pub(crate) fn get_max_checkpointed_height(
 
     // We exclude from consideration all checkpoints having heights greater than the maximum
     // checkpoint height. The checkpoint depth is the number of excluded checkpoints + 1.
-    conn.query_row(
-        &format!(
-            "SELECT checkpoint_id
-             FROM {table_prefix}_tree_checkpoints
-             WHERE checkpoint_id <= :max_checkpoint_height
-             ORDER BY checkpoint_id DESC
-             LIMIT 1",
-        ),
+    conn.prepare_cached(&format!(
+        "SELECT checkpoint_id
+         FROM {table_prefix}_tree_checkpoints
+         WHERE checkpoint_id <= :max_checkpoint_height
+         ORDER BY checkpoint_id DESC
+         LIMIT 1",
+    ))?
+    .query_row(
         named_params![":max_checkpoint_height": u32::from(max_checkpoint_height)],
         |row| row.get::<_, u32>(0).map(BlockHeight::from),
     )
@@ -982,24 +978,21 @@ pub(crate) fn get_checkpoint_at_depth(
     checkpoint_depth: usize,
 ) -> Result<Option<(BlockHeight, Checkpoint)>, rusqlite::Error> {
     let checkpoint_parts = conn
-        .query_row(
-            &format!(
-                "SELECT checkpoint_id, position
-                FROM {table_prefix}_tree_checkpoints
-                ORDER BY checkpoint_id DESC
-                LIMIT 1
-                OFFSET :offset",
-            ),
-            named_params![":offset": checkpoint_depth],
-            |row| {
-                let checkpoint_id: u32 = row.get(0)?;
-                let position: Option<u64> = row.get(1)?;
-                Ok((
-                    BlockHeight::from(checkpoint_id),
-                    position.map(Position::from),
-                ))
-            },
-        )
+        .prepare_cached(&format!(
+            "SELECT checkpoint_id, position
+            FROM {table_prefix}_tree_checkpoints
+            ORDER BY checkpoint_id DESC
+            LIMIT 1
+            OFFSET :offset",
+        ))?
+        .query_row(named_params![":offset": checkpoint_depth], |row| {
+            let checkpoint_id: u32 = row.get(0)?;
+            let position: Option<u64> = row.get(1)?;
+            Ok((
+                BlockHeight::from(checkpoint_id),
+                position.map(Position::from),
+            ))
+        })
         .optional()?;
 
     checkpoint_parts
@@ -1163,11 +1156,9 @@ pub(crate) fn retained_checkpoints(
     // set rather than failing on the missing table.
     let table_name = format!("{table_prefix}_tree_retained_checkpoints");
     let table_exists = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = :table_name",
-            named_params![":table_name": table_name],
-            |_| Ok(()),
-        )
+        .prepare_cached("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = :table_name")
+        .map_err(Error::Query)?
+        .query_row(named_params![":table_name": table_name], |_| Ok(()))
         .optional()
         .map_err(Error::Query)?
         .is_some();
@@ -1192,19 +1183,19 @@ pub(crate) fn truncate_checkpoints_retaining(
 ) -> Result<(), Error> {
     // cascading delete here obviates the need to manually delete from
     // `<protocol>_tree_checkpoint_marks_removed`
-    conn.execute(
-        &format!("DELETE FROM {table_prefix}_tree_checkpoints WHERE checkpoint_id > ?"),
-        [u32::from(checkpoint_id)],
-    )
+    conn.prepare_cached(&format!(
+        "DELETE FROM {table_prefix}_tree_checkpoints WHERE checkpoint_id > ?"
+    ))
+    .map_err(Error::Query)?
+    .execute([u32::from(checkpoint_id)])
     .map_err(Error::Query)?;
 
     // we do however need to manually delete any marks associated with the retained checkpoint
-    conn.execute(
-        &format!(
-            "DELETE FROM {table_prefix}_tree_checkpoint_marks_removed WHERE checkpoint_id = ?"
-        ),
-        [u32::from(checkpoint_id)],
-    )
+    conn.prepare_cached(&format!(
+        "DELETE FROM {table_prefix}_tree_checkpoint_marks_removed WHERE checkpoint_id = ?"
+    ))
+    .map_err(Error::Query)?
+    .execute([u32::from(checkpoint_id)])
     .map_err(Error::Query)?;
 
     Ok(())

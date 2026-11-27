@@ -209,11 +209,10 @@ pub(crate) fn replace_queue_entries<E: WalletError>(
 
     if let Some(tree) = to_create {
         let ends_ptr = Rc::new(to_delete_ends);
-        conn.execute(
-            "DELETE FROM scan_queue WHERE block_range_end IN rarray(:ends)",
-            named_params![":ends": ends_ptr],
-        )
-        .map_err(E::db_error)?;
+        conn.prepare_cached("DELETE FROM scan_queue WHERE block_range_end IN rarray(:ends)")
+            .map_err(E::db_error)?
+            .execute(named_params![":ends": ends_ptr])
+            .map_err(E::db_error)?;
 
         let scan_ranges = tree.into_vec();
         insert_queue_entries(conn, scan_ranges.iter()).map_err(E::db_error)?;
@@ -321,10 +320,8 @@ pub(crate) fn prune_scan_queue_below(
         return Ok(0);
     }
 
-    conn.execute(
-        "DELETE FROM scan_queue WHERE block_range_start < :height",
-        named_params![":height": u32::from(height)],
-    )?;
+    conn.prepare_cached("DELETE FROM scan_queue WHERE block_range_start < :height")?
+        .execute(named_params![":height": u32::from(height)])?;
     insert_queue_entries(conn, replacement.iter())?;
 
     Ok(existing
@@ -565,10 +562,10 @@ pub(crate) fn mark_stabilized_notes<P: consensus::Parameters>(
                      )
                )",
         );
-        conn.execute(
-            &sql,
-            named_params![":pruning_floor": pruning_floor, ":shard_height": shard_height],
-        )?;
+        conn.prepare_cached(&sql)?.execute(named_params![
+            ":pruning_floor": pruning_floor,
+            ":shard_height": shard_height
+        ])?;
         Ok(())
     }
 
@@ -589,11 +586,12 @@ fn tip_shard_end_height(
     protocol: ShieldedPool,
 ) -> Result<Option<BlockHeight>, SqliteClientError> {
     let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(protocol)?;
-    conn.query_row(
-        &format!("SELECT MAX(subtree_end_height) FROM {table_prefix}_tree_shards"),
-        [],
-        |row| Ok(row.get::<_, Option<u32>>(0)?.map(BlockHeight::from)),
-    )
+    conn.prepare_cached(&format!(
+        "SELECT MAX(subtree_end_height) FROM {table_prefix}_tree_shards"
+    ))?
+    .query_row([], |row| {
+        Ok(row.get::<_, Option<u32>>(0)?.map(BlockHeight::from))
+    })
     .map_err(SqliteClientError::from)
 }
 
