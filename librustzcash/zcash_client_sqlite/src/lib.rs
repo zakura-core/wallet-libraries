@@ -3147,7 +3147,14 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         // 2. If `put_blocks` left > 4 MiB of dead freelist pages on an `auto_vacuum = INCREMENTAL`
         //    database, drain `PRAGMA incremental_vacuum` rows to return freed pages to the OS.
         let conn = self.conn.borrow_mut();
-        wallet::bulk_prune_nullifier_map_truncate(conn, &self.params, PRUNING_DEPTH)?;
+        if let Err(err) =
+            wallet::bulk_prune_nullifier_map_truncate(conn, &self.params, PRUNING_DEPTH)
+        {
+            tracing::warn!(
+                ?err,
+                "Post-commit nullifier bulk prune failed; will retry on next put_blocks"
+            );
+        }
         let freelist_pages: i64 = conn
             .query_row("PRAGMA freelist_count", [], |row| row.get(0))
             .unwrap_or(0);
