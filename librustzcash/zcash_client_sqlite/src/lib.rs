@@ -3132,7 +3132,33 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<<Self as WalletRead>::AccountId>>,
     ) -> Result<(), <Self as WalletRead>::Error> {
-        self.transactionally(|wdb| wdb.put_blocks(from_state, blocks))
+        self.transactionally(|wdb| wdb.put_blocks(from_state, blocks))?;
+        // 1. If `prune_nullifier_map` deferred a large post-restore backlog (> 10k rows),
+        //    reclaim it outside the scan transaction via SQLite's O(pages) `OP_Clear` truncate.
+        // 2. If `put_blocks` left > 4 MiB of dead freelist pages on an `auto_vacuum = INCREMENTAL`
+        //    database, drain `PRAGMA incremental_vacuum` rows to return freed pages to the OS.
+        let conn = self.conn.borrow_mut();
+        if let Some(meta) = wallet::block_fully_scanned(conn, &self.params)? {
+            let cutoff = meta.block_height().saturating_sub(100);
+            wallet::bulk_prune_nullifier_map_truncate(conn, cutoff)?;
+        }
+        let freelist_pages: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+            .unwrap_or(0);
+        if freelist_pages > 1024 {
+            let auto_vacuum: i64 = conn
+                .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+                .unwrap_or(0);
+            if auto_vacuum == 2 {
+                if let Ok(mut stmt) = conn.prepare("PRAGMA incremental_vacuum") {
+                    if let Ok(mut rows) = stmt.query([]) {
+                        while let Ok(Some(_)) = rows.next() {}
+                    }
+                }
+                let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+            }
+        }
+        Ok(())
     }
 
     fn put_received_transparent_utxo(

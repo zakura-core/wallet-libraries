@@ -603,11 +603,6 @@ where
         }
     }
 
-    // Prune the nullifier map of entries we no longer need.
-    wallet_db
-        .prune_tracked_nullifiers(PRUNING_DEPTH)
-        .map_err(PutBlocksError::Storage)?;
-
     Ok(PutBlocksRows {
         sapling_commitments,
         #[cfg(feature = "orchard")]
@@ -913,6 +908,14 @@ where
                 },
                 &note_positions,
             )
+            .map_err(PutBlocksError::Storage)?;
+
+        // Prune the nullifier map AFTER `notify_scan_complete` updates `scan_queue`,
+        // so the final historic batch of a cold restore observes the newly contiguous
+        // `fully_scanned_height` and prunes immediately instead of deferring a multi-second
+        // mass delete to the first warm app-open.
+        wallet_db
+            .prune_tracked_nullifiers(PRUNING_DEPTH)
             .map_err(PutBlocksError::Storage)?;
     }
 

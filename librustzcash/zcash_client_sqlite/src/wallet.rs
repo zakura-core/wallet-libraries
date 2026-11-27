@@ -6310,18 +6310,137 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
 
 /// Deletes from the nullifier map any entries with a locator referencing a block height
 /// lower than the pruning height.
+/// Threshold above which `prune_nullifier_map` defers to `bulk_prune_nullifier_map_truncate`
+/// (which runs outside the scan transaction with `OP_Clear` truncate optimization).
+pub(crate) const BULK_NULLIFIER_PRUNE_THRESHOLD: i64 = 10_000;
+
 pub(crate) fn prune_nullifier_map(
     conn: &rusqlite::Transaction<'_>,
     block_height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
+    // Check if there is a massive post-restore backlog (> 10k rows). If so, defer to
+    // `bulk_prune_nullifier_map_truncate` right after `put_blocks` commits so SQLite can
+    // use its O(pages) `OP_Clear` B-tree truncate instead of millions of random index deletes.
+    let mut stmt_count = conn.prepare_cached(
+        "SELECT count(*) FROM (
+            SELECT 1 FROM nullifier_map
+            WHERE block_height < :block_height
+            LIMIT :limit
+        )",
+    )?;
+    let stale_rows: i64 = stmt_count.query_row(
+        named_params![
+            ":block_height": u32::from(block_height),
+            ":limit": BULK_NULLIFIER_PRUNE_THRESHOLD + 1,
+        ],
+        |row| row.get(0),
+    )?;
+    if stale_rows > BULK_NULLIFIER_PRUNE_THRESHOLD {
+        return Ok(());
+    }
+
+    // Delete from `nullifier_map` directly via `nf_map_locator_idx(block_height, tx_index)`
+    // before deleting from `tx_locator_map`, avoiding row-by-row `ON DELETE CASCADE` probes.
+    let mut stmt_delete_nullifiers = conn.prepare_cached(
+        "DELETE FROM nullifier_map
+        WHERE block_height < :block_height",
+    )?;
+    stmt_delete_nullifiers.execute(named_params![":block_height": u32::from(block_height)])?;
+
     let mut stmt_delete_locators = conn.prepare_cached(
         "DELETE FROM tx_locator_map
         WHERE block_height < :block_height",
     )?;
-
     stmt_delete_locators.execute(named_params![":block_height": u32::from(block_height)])?;
 
     Ok(())
+}
+
+/// Fast post-commit bulk prune for large post-restore `nullifier_map` backlogs.
+///
+/// Copies the small surviving `[block_height..]` window (~100 blocks), temporarily disables
+/// `foreign_keys` outside the transaction so SQLite compiles `DELETE FROM nullifier_map` and
+/// `DELETE FROM tx_locator_map` to `OP_Clear` B-tree truncates (~30x faster than deleting
+/// millions of rows through random-hash unique indexes), and re-inserts the surviving rows
+/// atomically before restoring `foreign_keys`.
+pub(crate) fn bulk_prune_nullifier_map_truncate(
+    conn: &mut rusqlite::Connection,
+    block_height: BlockHeight,
+) -> Result<bool, SqliteClientError> {
+    let cutoff = u32::from(block_height);
+    let has_stale: bool = conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM nullifier_map WHERE block_height < :block_height LIMIT 1)",
+        )?
+        .query_row(named_params![":block_height": cutoff], |row| row.get(0))?;
+    if !has_stale {
+        return Ok(false);
+    }
+
+    let prev_fk: i64 = conn
+        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+        .unwrap_or(0);
+    if prev_fk != 0 {
+        conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    }
+
+    let result = (|| -> Result<(), SqliteClientError> {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let keep_txl: Vec<(u32, u32, Vec<u8>)> = {
+            let mut stmt = tx.prepare_cached(
+                "SELECT block_height, tx_index, txid
+                FROM tx_locator_map
+                WHERE block_height >= :block_height",
+            )?;
+            let rows = stmt.query_map(named_params![":block_height": cutoff], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let keep_nf: Vec<(i64, Vec<u8>, u32, u32)> = {
+            let mut stmt = tx.prepare_cached(
+                "SELECT spend_pool, nf, block_height, tx_index
+                FROM nullifier_map
+                WHERE block_height >= :block_height",
+            )?;
+            let rows = stmt.query_map(named_params![":block_height": cutoff], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        tx.execute("DELETE FROM nullifier_map", [])?;
+        tx.execute("DELETE FROM tx_locator_map", [])?;
+
+        {
+            let mut ins_txl = tx.prepare_cached(
+                "INSERT INTO tx_locator_map (block_height, tx_index, txid)
+                VALUES (?1, ?2, ?3)",
+            )?;
+            for (h, idx, txid) in &keep_txl {
+                ins_txl.execute(rusqlite::params![h, idx, txid])?;
+            }
+        }
+        {
+            let mut ins_nf = tx.prepare_cached(
+                "INSERT INTO nullifier_map (spend_pool, nf, block_height, tx_index)
+                VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (pool, nf, h, idx) in &keep_nf {
+                ins_nf.execute(rusqlite::params![pool, nf, h, idx])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
+    })();
+
+    if prev_fk != 0 {
+        let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
+    }
+
+    result?;
+    Ok(true)
 }
 
 pub(crate) fn get_block_range(

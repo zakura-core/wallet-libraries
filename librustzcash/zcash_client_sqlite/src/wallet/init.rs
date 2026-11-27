@@ -646,6 +646,29 @@ fn init_wallet_db_internal<
         .execute_batch("PRAGMA foreign_keys = OFF;")
         .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
 
+    // On a brand-new empty database (even if the caller already set `journal_mode = WAL`,
+    // which allocates page 1 with zero schema objects), enable incremental auto_vacuum
+    // before creating the first table so large post-restore `nullifier_map` prunes can
+    // return freed pages to the OS without stranding hundreds of MB of dead freelist space.
+    let schema_objects: i64 = wdb
+        .conn
+        .borrow()
+        .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
+        .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
+    if schema_objects == 0 {
+        let auto_vacuum: i64 = wdb
+            .conn
+            .borrow()
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
+        if auto_vacuum != 2 {
+            wdb.conn
+                .borrow()
+                .execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;")
+                .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
+        }
+    }
+
     let result = (|| {
         // Temporarily take ownership of the connection in a wrapper to perform the initial migration
         // table setup. This extra adapter creation could be omitted if `RusqliteAdapter` provided an
