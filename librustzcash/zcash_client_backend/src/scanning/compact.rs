@@ -439,6 +439,56 @@ where
         // only provisional: PIR shape flags may reveal an omitted bundle.
         // The compact source must include every shielded pool, not filter to Ironwood.
         let ironwood_pir_eligible = is_ironwood_pir_candidate(&tx);
+
+        #[cfg(feature = "orchard")]
+        let (ironwood_outputs, mut ironwood_nc) = find_received(
+            cur_height,
+            pos_tracker.compact_tx_contains_last_ironwood_actions_in_block(&tx),
+            txid,
+            |output_idx| pos_tracker.ironwood_note_position(output_idx),
+            &scanning_keys.ironwood,
+            inline_keys.map(|pass| &pass.keys.ironwood),
+            &spent_from_accounts,
+            &tx.ironwood_actions
+                .iter()
+                .enumerate()
+                .map(|(i, action)| {
+                    let action = CompactAction::try_from(action).map_err(|_| {
+                        ScanError::EncodingInvalid {
+                            at_height: cur_height,
+                            txid,
+                            pool_type: ShieldedPool::Ironwood,
+                            index: i,
+                        }
+                    })?;
+                    Ok((IronwoodDomain::for_compact_action(&action), action))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            batch_runners
+                .as_mut()
+                .map(|runners| |txid| runners.ironwood.collect_results(cur_hash, txid)),
+            |ivks, outputs| {
+                batch::try_compact_note_decryption(ivks, outputs)
+                    .into_iter()
+                    .map(|opt| opt.map(|((note, recipient), i)| ((note, recipient, ()), i)))
+                    .collect()
+            },
+            |output| MerkleHashOrchard::from_cmx(&output.cmx()),
+            |note| (note, orchard::ValuePool::Ironwood),
+        );
+        #[cfg(feature = "orchard")]
+        ironwood_note_commitments.append(&mut ironwood_nc);
+
+        // If a recovering account's batch internal Ironwood key recognized an output (such as a
+        // one-time spend's marker) on a transaction that pre-output triggers did not select, run
+        // the inline internal pass for Sapling and Orchard on this transaction as well.
+        #[cfg(feature = "orchard")]
+        let inline_keys = if inline_keys.is_none() && !ironwood_outputs.is_empty() {
+            internal_pass
+        } else {
+            inline_keys
+        };
+
         let (sapling_outputs, mut sapling_nc) = find_received(
             cur_height,
             pos_tracker.compact_tx_contains_last_sapling_outputs_in_block(&tx),
@@ -517,45 +567,6 @@ where
         );
         #[cfg(feature = "orchard")]
         orchard_note_commitments.append(&mut orchard_nc);
-
-        #[cfg(feature = "orchard")]
-        let (ironwood_outputs, mut ironwood_nc) = find_received(
-            cur_height,
-            pos_tracker.compact_tx_contains_last_ironwood_actions_in_block(&tx),
-            txid,
-            |output_idx| pos_tracker.ironwood_note_position(output_idx),
-            &scanning_keys.ironwood,
-            inline_keys.map(|pass| &pass.keys.ironwood),
-            &spent_from_accounts,
-            &tx.ironwood_actions
-                .iter()
-                .enumerate()
-                .map(|(i, action)| {
-                    let action = CompactAction::try_from(action).map_err(|_| {
-                        ScanError::EncodingInvalid {
-                            at_height: cur_height,
-                            txid,
-                            pool_type: ShieldedPool::Ironwood,
-                            index: i,
-                        }
-                    })?;
-                    Ok((IronwoodDomain::for_compact_action(&action), action))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            batch_runners
-                .as_mut()
-                .map(|runners| |txid| runners.ironwood.collect_results(cur_hash, txid)),
-            |ivks, outputs| {
-                batch::try_compact_note_decryption(ivks, outputs)
-                    .into_iter()
-                    .map(|opt| opt.map(|((note, recipient), i)| ((note, recipient, ()), i)))
-                    .collect()
-            },
-            |output| MerkleHashOrchard::from_cmx(&output.cmx()),
-            |note| (note, orchard::ValuePool::Ironwood),
-        );
-        #[cfg(feature = "orchard")]
-        ironwood_note_commitments.append(&mut ironwood_nc);
 
         // Same-account change uses the internal OVK, which outgoing recovery does not
         // hold; its memo is handled by incoming decryption. Other received outputs still

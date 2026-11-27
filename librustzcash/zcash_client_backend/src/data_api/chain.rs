@@ -842,8 +842,10 @@ pub enum TrialDecryptionPolicy {
     /// and transactions selected by monotone wallet triggers also run internal keys; otherwise
     /// this behaves as [`Self::AllScopes`].
     ///
-    /// Premise: only an account's own spending key pays its internal receiver. Rescans of
-    /// already-stored blocks always use [`Self::AllScopes`].
+    /// Premise: only transactions selected by the triggers above pay an internal receiver; an
+    /// independent payment sent directly to an account's internal receiver (for example by an
+    /// FVK holder) will be missed. Rescans of already-stored blocks always use
+    /// [`Self::AllScopes`].
     ExternalWhenLinear(LinearScanGuarantee),
 }
 

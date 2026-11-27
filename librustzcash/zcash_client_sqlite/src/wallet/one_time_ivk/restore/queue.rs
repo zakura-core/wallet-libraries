@@ -2126,6 +2126,7 @@ fn rescan_uncovered(
     if next < end {
         gaps.push(next..end);
     }
+    let mut earliest_finished_gap: Option<u32> = None;
     for gap in gaps {
         // Only a stretch the scan finished; one still queued is covered when it is scanned.
         let finished: bool = conn.query_row(
@@ -2135,9 +2136,30 @@ fn rescan_uncovered(
             |r| r.get(0),
         )?;
         if finished {
+            earliest_finished_gap = Some(gap.start);
+            break;
+        }
+    }
+    if let Some(rescan_start) = earliest_finished_gap {
+        // Rescan every already-scanned stretch from the earliest finished gap through
+        // `through.height + 1` (including any covered suffix) so ordinary internal change
+        // discovered in the gap has its later spends linked linearly even after `nullifier_map`
+        // pruning.
+        let scanned_stretches: Vec<(u32, u32)> = conn
+            .prepare_cached(
+                "SELECT block_range_start, block_range_end FROM scan_queue
+                 WHERE priority = ?3 AND block_range_start < ?2 AND block_range_end > ?1
+                 ORDER BY block_range_start",
+            )?
+            .query_map(
+                params![rescan_start, end, priority_code(&ScanPriority::Scanned)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
+            .collect::<Result<_, _>>()?;
+        for (start, stop) in scanned_stretches {
             crate::wallet::one_time_ivk::queue_rescan(
                 conn,
-                BlockHeight::from(gap.start)..BlockHeight::from(gap.end),
+                BlockHeight::from(start.max(rescan_start))..BlockHeight::from(stop.min(end)),
             )?;
         }
     }

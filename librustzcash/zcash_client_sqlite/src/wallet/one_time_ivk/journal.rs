@@ -140,9 +140,11 @@ fn collect_unlinked_spends(
                         txid: *txid,
                         nf: *nf,
                     });
-                    if accounts
-                        .iter()
-                        .any(|a| !block.scanned_accounts().contains(a))
+                    let tx_recognized = block.transactions().iter().any(|t| t.txid() == *txid);
+                    if !tx_recognized
+                        || accounts
+                            .iter()
+                            .any(|a| !block.scanned_accounts().contains(a))
                     {
                         earliest_uncovered = Some(
                             earliest_uncovered.map_or(block.height(), |m| m.min(block.height())),
