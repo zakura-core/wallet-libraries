@@ -1,6 +1,13 @@
 use std::cell::Cell;
 
-use zcash_client_backend::data_api::chain::scan_cached_blocks;
+use zcash_client_backend::data_api::{
+    chain::{
+        LinearScanGuarantee, TransparentHistory, TrialDecryptionPolicy, scan_cached_blocks,
+        scan_cached_blocks_with_policy,
+    },
+    scanning::ScanPriority,
+    wallet::ConfirmationsPolicy,
+};
 
 use super::{scanning::DuringScan, *};
 use crate::wallet::one_time_ivk::restore::tests::discovery::{
@@ -264,4 +271,308 @@ fn a_note_admitted_during_a_batch_is_spent_by_it() {
     scan_cached_blocks(&network, &source, &mut scanning_db, height, &prior, 1).unwrap();
     assert_eq!(source.reads.get(), 2);
     assert_eq!(one_time_notes(&st), [(100_000, true)]);
+}
+
+/// Under `ExternalWhenLinear`, a note admitted after `Nullifiers::unspent` whose spend lands in
+/// the current batch is linked immediately so it never displays unspent, and `[hit, batch_end + 1)`
+/// is queued for an all-scopes rescan that recovers chained internal change (`N -> C2 -> C3`).
+#[test]
+fn a_note_admitted_during_an_external_only_batch_is_spent_and_queued_for_rescan() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    recover(st.wallet_mut().db_mut(), account, key8(), candidate.height);
+    let publication = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.begin_one_time_recovery(account, publication, false)
+            .unwrap()
+    );
+    let work = work_of(&st, key8());
+    let records = history(work.work.receiver, &[&candidate]);
+    let page = whole_at(&st, publication, records, publication.end);
+    let prior = st.latest_cached_block().unwrap().chain_state().clone();
+    let note = candidate
+        .encrypted_note
+        .decrypt(&parent(&st), key8())
+        .unwrap();
+    let spender = IronwoodFvk(parent(&st));
+    let (h_spend, _, c2_nf) = st.generate_next_block_spending_to_internal(
+        &spender,
+        (*note.nullifier(), Zatoshis::const_from_u64(100_000)),
+        &spender,
+        Zatoshis::const_from_u64(80_000),
+    );
+    let (h_next, _, _) = st.generate_next_block_spending_to_internal(
+        &spender,
+        (c2_nf, Zatoshis::const_from_u64(80_000)),
+        &spender,
+        Zatoshis::const_from_u64(60_000),
+    );
+
+    let network = *st.network();
+    let path_to_db = st.wallet().data_file_path();
+    let mut scanning_db =
+        WalletDb::for_path(path_to_db, network, test_clock(), test_rng()).unwrap();
+    let source = DuringScan {
+        inner: st.cache(),
+        at: 1,
+        reads: Cell::new(0),
+        run: || {
+            let mut db = WalletDb::for_path(path_to_db, network, test_clock(), test_rng()).unwrap();
+            assert!(
+                db.record_one_time_lookup(account, &work, &page, clock_now())
+                    .unwrap()
+            );
+        },
+    };
+    let policy = TrialDecryptionPolicy::ExternalWhenLinear(LinearScanGuarantee::new(
+        TransparentHistory::SyncedTo(h_next),
+    ));
+    scan_cached_blocks_with_policy(
+        &network,
+        &source,
+        &mut scanning_db,
+        h_spend,
+        &prior,
+        2,
+        policy,
+    )
+    .unwrap();
+    assert_eq!(source.reads.get(), 2);
+
+    // The guard linked the spend immediately so the admitted note never appears unspent.
+    assert_eq!(one_time_notes(&st), [(100_000, true)]);
+    // Mode canary: the initial batch ran external-only Ironwood, so coverage stopped before
+    // `h_spend` and the internal change chain (`C2`, `C3`) was not decrypted yet.
+    assert!(
+        coverage(&st)
+            .iter()
+            .all(|&(_, end)| end <= u32::from(h_spend))
+    );
+    assert_eq!(st.get_total_balance(account), Zatoshis::ZERO);
+
+    // The guard queued `[h_spend, h_next + 1)` as `Historic`.
+    let queued = st.wallet().suggest_scan_ranges().unwrap();
+    assert!(
+        queued.iter().any(|r| {
+            r.priority() == ScanPriority::Historic
+                && r.block_range().start <= h_spend
+                && r.block_range().end > h_next
+        }),
+        "expected Historic rescan covering {}..{}, got {queued:?}",
+        h_spend,
+        h_next + 1
+    );
+
+    // Scanning the queued range under the same policy vetoes external-only (Rule 2) and recovers
+    // the full change chain `N -> C2 -> C3`.
+    scanning_db.update_chain_tip(h_next).unwrap();
+    scan_cached_blocks_with_policy(
+        &network,
+        st.cache(),
+        &mut scanning_db,
+        h_spend,
+        &prior,
+        2,
+        policy,
+    )
+    .unwrap();
+    assert_eq!(one_time_notes(&st), [(100_000, true)]);
+    assert_eq!(
+        st.get_total_balance(account),
+        Zatoshis::const_from_u64(60_000)
+    );
+    assert!(
+        coverage(&st)
+            .iter()
+            .any(|&(start, end)| start <= u32::from(h_spend) && end > u32::from(h_next))
+    );
+    // Mine one confirmation block past `h_next` so `C3` is also spendable at `MIN` confirmations.
+    let h_confirm = st.generate_and_scan_empty_blocks(1);
+    assert_eq!(
+        st.get_spendable_balance(account, ConfirmationsPolicy::MIN),
+        Zatoshis::const_from_u64(60_000)
+    );
+    assert_eq!(notes(&st, h_confirm).len(), 1);
+}
+
+/// A failure midway through the concurrent-admission guard rolls back the entire `put_blocks`
+/// transaction atomically, leaving blocks, transaction metadata, spend links, and the scan queue
+/// unchanged.
+#[test]
+fn concurrent_admission_guard_rolls_back_atomically_on_failure() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    recover(st.wallet_mut().db_mut(), account, key8(), candidate.height);
+    let publication = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.begin_one_time_recovery(account, publication, false)
+            .unwrap()
+    );
+    let work = work_of(&st, key8());
+    let records = history(work.work.receiver, &[&candidate]);
+    let page = whole_at(&st, publication, records, publication.end);
+    let prior = st.latest_cached_block().unwrap().chain_state().clone();
+    let note = candidate
+        .encrypted_note
+        .decrypt(&parent(&st), key8())
+        .unwrap();
+    let spender = IronwoodFvk(parent(&st));
+    let (h_spend, _, _) = st.generate_next_block_spending_to_internal(
+        &spender,
+        (*note.nullifier(), Zatoshis::const_from_u64(100_000)),
+        &spender,
+        Zatoshis::const_from_u64(80_000),
+    );
+
+    let network = *st.network();
+    let path_to_db = st.wallet().data_file_path();
+    let mut scanning_db =
+        WalletDb::for_path(path_to_db, network, test_clock(), test_rng()).unwrap();
+    // Fail only when `queue_rescan` writes `ScanPriority::Historic` (20), after `put_blocks`,
+    // `put_tx_meta_by_id`, and `mark_ironwood_note_spent` have all run in the same transaction.
+    scanning_db
+        .conn
+        .execute_batch(
+            "CREATE TEMP TRIGGER fail_historic_queue
+             BEFORE INSERT ON scan_queue
+             WHEN NEW.priority = 20
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected scan_queue failure');
+             END;",
+        )
+        .unwrap();
+
+    let source = DuringScan {
+        inner: st.cache(),
+        at: 1,
+        reads: Cell::new(0),
+        run: || {
+            let mut db = WalletDb::for_path(path_to_db, network, test_clock(), test_rng()).unwrap();
+            assert!(
+                db.record_one_time_lookup(account, &work, &page, clock_now())
+                    .unwrap()
+            );
+        },
+    };
+    let policy = TrialDecryptionPolicy::ExternalWhenLinear(LinearScanGuarantee::new(
+        TransparentHistory::SyncedTo(h_spend),
+    ));
+    assert!(
+        scan_cached_blocks_with_policy(
+            &network,
+            &source,
+            &mut scanning_db,
+            h_spend,
+            &prior,
+            1,
+            policy,
+        )
+        .is_err()
+    );
+
+    // Nothing from the aborted batch committed: the block is absent, no spending tx exists at
+    // `h_spend`, the admitted note remains unspent, and no Historic rescan was queued.
+    let block_stored: bool = value(
+        &st.wallet().db().conn,
+        "SELECT EXISTS(SELECT 1 FROM blocks WHERE height = ?1)",
+        [u32::from(h_spend)],
+    );
+    assert!(!block_stored);
+    let tx_stored: bool = value(
+        &st.wallet().db().conn,
+        "SELECT EXISTS(SELECT 1 FROM transactions WHERE mined_height = ?1)",
+        [u32::from(h_spend)],
+    );
+    assert!(!tx_stored);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    assert!(
+        st.wallet()
+            .suggest_scan_ranges()
+            .unwrap()
+            .iter()
+            .all(|r| r.priority() != ScanPriority::Historic)
+    );
+}
+
+/// On a live-synced wallet scanning under `ExternalWhenLinear`, a one-time payment discovered by
+/// PIR past external-only blocks hits `Uncovered` and queues a single rescan; scanning that range
+/// under the same policy vetoes external-only via Rule 2, writes coverage, and admits the payment
+/// with no remaining rescans.
+#[test]
+fn live_external_only_one_time_payment_admits_after_single_rule2_rescan() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    recover(st.wallet_mut().db_mut(), account, key8(), candidate.height);
+
+    // Advance live sync past the payment under `ExternalWhenLinear` (external-only Ironwood).
+    let (h_after, _) = st.generate_empty_block();
+    st.wallet_mut().update_chain_tip(h_after).unwrap();
+    let policy = TrialDecryptionPolicy::ExternalWhenLinear(LinearScanGuarantee::new(
+        TransparentHistory::SyncedTo(h_after),
+    ));
+    st.scan_cached_blocks_with_policy(h_after, 1, policy);
+
+    // Mode canary: external-only left `h_after` uncovered in the Ironwood journal.
+    assert!(
+        coverage(&st)
+            .iter()
+            .all(|&(_, end)| end <= u32::from(h_after))
+    );
+
+    // PIR returns the payment at tip `h_after`: admission defers (`Uncovered`) and queues a
+    // `Historic` rescan covering `h_after`.
+    let publication = publication_at(&st, h_after);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, false)
+            .unwrap()
+    );
+    let work = work_of(&st, key8());
+    let records = history(work.work.receiver, &[&candidate]);
+    let page = whole_at(&st, publication, records, publication.end);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_one_time_lookup(account, &work, &page, clock_now())
+            .unwrap()
+    );
+    assert!(one_time_notes(&st).is_empty());
+    let rescan = st
+        .wallet()
+        .suggest_scan_ranges()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.priority() == ScanPriority::Historic)
+        .expect("uncovered one-time payment should queue a Historic rescan");
+    assert!(rescan.block_range().contains(&h_after));
+
+    // Scanning the queued range under the same `ExternalWhenLinear` policy vetoes external-only
+    // (Rule 2), writes coverage, admits the payment, and clears the rescan queue in one pass.
+    let range = rescan.block_range();
+    let len = usize::try_from(u32::from(range.end) - u32::from(range.start)).unwrap();
+    st.scan_cached_blocks_with_policy(range.start, len, policy);
+
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    assert_eq!(
+        st.get_total_balance(account),
+        Zatoshis::const_from_u64(100_000)
+    );
+    assert!(
+        coverage(&st)
+            .iter()
+            .any(|&(start, end)| start <= u32::from(candidate.height) && end > u32::from(h_after))
+    );
+    assert!(
+        st.wallet()
+            .suggest_scan_ranges()
+            .unwrap()
+            .iter()
+            .all(|r| r.priority() != ScanPriority::Historic)
+    );
 }

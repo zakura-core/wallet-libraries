@@ -1740,6 +1740,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         wallet::get_tx_height(self.conn.borrow(), txid)
     }
 
+    fn linear_scan_evidence(
+        &self,
+        range: Range<BlockHeight>,
+    ) -> Result<
+        Option<zcash_client_backend::data_api::chain::LinearScanEvidence<Self::AccountId>>,
+        Self::Error,
+    > {
+        wallet::linear_scan_evidence(self.conn.borrow(), range)
+    }
+
     fn get_unified_full_viewing_keys(
         &self,
     ) -> Result<HashMap<Self::AccountId, UnifiedFullViewingKey>, Self::Error> {
@@ -3396,7 +3406,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             .map(|block| (block.height(), block.block_hash()))
             .collect();
         #[cfg(feature = "orchard")]
-        let journal = wallet::one_time_ivk::journal::collect(&blocks);
+        let journal = wallet::one_time_ivk::journal::collect(self.conn.0, &blocks)?;
         // A refund memo stored before its block, or mined again by a reorg's replacement
         // chain, is accepted once these blocks are stored.
         #[cfg(feature = "orchard")]

@@ -8,13 +8,18 @@
 //! that could spend one of the account's one-time notes. See
 //! `wallet::one_time_rewind::truncate` for rewinds.
 
-use std::ops::Range;
+use std::{collections::HashMap, ops::Range};
 
-use rusqlite::{Connection, named_params};
-use zcash_client_backend::data_api::ScannedBlock;
-use zcash_protocol::consensus::BlockHeight;
+use orchard::note::Nullifier;
+use rusqlite::{Connection, named_params, params};
+use zcash_client_backend::data_api::{ScannedBlock, scanning::ScanPriority};
+use zcash_primitives::transaction::TxId;
+use zcash_protocol::{
+    ShieldedPool,
+    consensus::{BlockHeight, TxIndex},
+};
 
-use crate::{AccountUuid, error::SqliteClientError};
+use crate::{AccountUuid, error::SqliteClientError, wallet, wallet::scanning::priority_code};
 
 /// One recognized transaction, taken from a scanned block before storage consumes it.
 pub(crate) struct Entry {
@@ -24,17 +29,31 @@ pub(crate) struct Entry {
     nullifiers: Vec<[u8; 32]>,
 }
 
-/// What a batch of scanned blocks adds to the journal: its recognized transactions, and
-/// the ranges it covers for each account that scanned them.
+/// An unlinked Ironwood nullifier in the batch matching an already-stored unspent note.
+struct UnlinkedSpend {
+    height: BlockHeight,
+    tx_index: TxIndex,
+    txid: TxId,
+    nf: Nullifier,
+}
+
+/// What a batch of scanned blocks adds to the journal: its recognized transactions, the ranges
+/// it covers for each account, and any spends of concurrently admitted Ironwood notes.
 pub(crate) struct Batch {
     entries: Vec<Entry>,
     coverage: Vec<(AccountUuid, Range<BlockHeight>)>,
+    unlinked_spends: Vec<UnlinkedSpend>,
+    rescan_range: Option<Range<BlockHeight>>,
+    suffix_rescan: Option<Range<BlockHeight>>,
 }
 
-/// Collects the journal entries and coverage of `blocks`, a contiguous batch. A
-/// transaction without Ironwood nullifiers can't spend a one-time note, so it gets no
-/// entry, though its block is still covered.
-pub(crate) fn collect(blocks: &[ScannedBlock<AccountUuid>]) -> Batch {
+/// Collects journal entries, coverage, and any unlinked spends of notes admitted after the scan
+/// loaded `Nullifiers::unspent`. Runs inside `put_blocks`'s write transaction before batch rows
+/// are inserted.
+pub(crate) fn collect(
+    conn: &Connection,
+    blocks: &[ScannedBlock<AccountUuid>],
+) -> Result<Batch, SqliteClientError> {
     let entries = blocks
         .iter()
         .flat_map(|block| {
@@ -64,7 +83,134 @@ pub(crate) fn collect(blocks: &[ScannedBlock<AccountUuid>]) -> Batch {
             }
         }
     }
-    Batch { entries, coverage }
+    let (unlinked_spends, rescan_range) = collect_unlinked_spends(conn, blocks)?;
+    let suffix_rescan = collect_rescan_discovered_note_suffix(conn, blocks)?;
+    Ok(Batch {
+        entries,
+        coverage,
+        unlinked_spends,
+        rescan_range,
+        suffix_rescan,
+    })
+}
+
+/// If `blocks` is a rescan of previously stored blocks that discovered a new Ironwood note while
+/// later blocks are already stored, returns `(batch_end + 1)..(stored_tip + 1)` so any already-
+/// scanned suffix is rescanned linearly with the new note's nullifier tracked (even after
+/// `nullifier_map` pruning).
+fn collect_rescan_discovered_note_suffix(
+    conn: &Connection,
+    blocks: &[ScannedBlock<AccountUuid>],
+) -> Result<Option<Range<BlockHeight>>, SqliteClientError> {
+    let (Some(batch_start), Some(batch_end)) = (
+        blocks.iter().map(ScannedBlock::height).min(),
+        blocks.iter().map(ScannedBlock::height).max(),
+    ) else {
+        return Ok(None);
+    };
+    let mut output_nfs = blocks
+        .iter()
+        .flat_map(|b| b.transactions().iter())
+        .flat_map(|tx| tx.ironwood_outputs().iter())
+        .filter_map(|out| out.nf())
+        .peekable();
+    if output_nfs.peek().is_none() {
+        return Ok(None);
+    }
+    let Some(stored_tip) = conn
+        .query_row("SELECT MAX(height) FROM blocks", [], |r| {
+            r.get::<_, Option<u32>>(0)
+        })?
+        .map(BlockHeight::from)
+    else {
+        return Ok(None);
+    };
+    if stored_tip <= batch_end {
+        return Ok(None);
+    }
+    let is_rescan: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM blocks WHERE height >= ?1 AND height <= ?2)",
+        params![u32::from(batch_start), u32::from(batch_end)],
+        |r| r.get(0),
+    )?;
+    if !is_rescan {
+        return Ok(None);
+    }
+    let mut known =
+        conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM ironwood_received_notes WHERE nf = ?1)")?;
+    for nf in output_nfs {
+        let already_known: bool = known.query_row([nf.to_bytes()], |r| r.get(0))?;
+        if !already_known {
+            return Ok(Some((batch_end + 1)..(stored_tip + 1)));
+        }
+    }
+    Ok(None)
+}
+
+/// Intersects `blocks`' unlinked Ironwood nullifier maps with currently unspent stored notes.
+/// Because `nullifier_map` omits nullifiers matched during the scan, hits are notes admitted
+/// concurrently after `Nullifiers::unspent`.
+fn collect_unlinked_spends(
+    conn: &Connection,
+    blocks: &[ScannedBlock<AccountUuid>],
+) -> Result<(Vec<UnlinkedSpend>, Option<Range<BlockHeight>>), SqliteClientError> {
+    let Some(batch_end) = blocks.iter().map(ScannedBlock::height).max() else {
+        return Ok((vec![], None));
+    };
+    if !blocks.iter().any(|b| {
+        b.ironwood()
+            .nullifier_map()
+            .iter()
+            .any(|(_, _, nfs)| !nfs.is_empty())
+    }) {
+        return Ok((vec![], None));
+    }
+    let mut stmt = conn.prepare_cached(
+        "SELECT a.uuid, rn.nf FROM ironwood_received_notes rn
+         JOIN accounts a ON a.id = rn.account_id
+         WHERE rn.nf IS NOT NULL AND NOT EXISTS (
+             SELECT 1 FROM ironwood_received_note_spends s
+             JOIN transactions t ON t.id_tx = s.transaction_id
+             WHERE s.ironwood_received_note_id = rn.id AND t.mined_height IS NOT NULL)",
+    )?;
+    let mut unspent: HashMap<[u8; 32], Vec<AccountUuid>> = HashMap::new();
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        unspent
+            .entry(row.get(1)?)
+            .or_default()
+            .push(AccountUuid(row.get(0)?));
+    }
+    if unspent.is_empty() {
+        return Ok((vec![], None));
+    }
+    let mut hits = vec![];
+    let mut earliest_uncovered: Option<BlockHeight> = None;
+    for block in blocks {
+        for (tx_index, txid, nfs) in block.ironwood().nullifier_map() {
+            for nf in nfs {
+                if let Some(accounts) = unspent.get(&nf.to_bytes()) {
+                    hits.push(UnlinkedSpend {
+                        height: block.height(),
+                        tx_index: *tx_index,
+                        txid: *txid,
+                        nf: *nf,
+                    });
+                    let tx_recognized = block.transactions().iter().any(|t| t.txid() == *txid);
+                    if !tx_recognized
+                        || accounts
+                            .iter()
+                            .any(|a| !block.scanned_accounts().contains(a))
+                    {
+                        earliest_uncovered = Some(
+                            earliest_uncovered.map_or(block.height(), |m| m.min(block.height())),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok((hits, earliest_uncovered.map(|start| start..(batch_end + 1))))
 }
 
 /// Records `batch` after its blocks are stored, in the same database transaction, and links
@@ -89,6 +235,42 @@ pub(crate) fn record(
             (block_height, tx_index, action_index, nf)
          VALUES (:height, :tx_index, :action_index, :nf)",
     )?;
+    for hit in batch.unlinked_spends {
+        let tx_ref =
+            wallet::put_tx_meta_by_id(conn, tpir_session, hit.txid, hit.tx_index, hit.height)?;
+        let inserted = wallet::orchard::mark_ironwood_note_spent(conn, tx_ref, &hit.nf)?;
+        wallet::ironwood_hooks::put_received_note_spend(
+            conn,
+            tpir_session,
+            ShieldedPool::Ironwood,
+            tx_ref,
+            usize::from(inserted),
+        )?;
+    }
+    if let Some(range) = batch.rescan_range {
+        super::queue_rescan(conn, range)?;
+    }
+    if let Some(suffix) = batch.suffix_rescan {
+        let start = u32::from(suffix.start);
+        let end = u32::from(suffix.end);
+        let scanned_stretches: Vec<(u32, u32)> = conn
+            .prepare_cached(
+                "SELECT block_range_start, block_range_end FROM scan_queue
+                 WHERE priority = ?3 AND block_range_start < ?2 AND block_range_end > ?1
+                 ORDER BY block_range_start",
+            )?
+            .query_map(
+                params![start, end, priority_code(&ScanPriority::Scanned)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
+            .collect::<Result<_, _>>()?;
+        for (s, e) in scanned_stretches {
+            super::queue_rescan(
+                conn,
+                BlockHeight::from(s.max(start))..BlockHeight::from(e.min(end)),
+            )?;
+        }
+    }
     for e in batch.entries {
         link_spends(conn, tpir_session, &e)?;
         let height = u32::from(e.height);

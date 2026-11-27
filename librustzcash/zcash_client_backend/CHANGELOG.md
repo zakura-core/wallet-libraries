@@ -7,6 +7,17 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Added
+- `zcash_client_backend::data_api::chain`:
+  - `scan_cached_blocks_with_policy`
+  - `decrypt_cached_blocks_with_policy`
+  - `TrialDecryptionPolicy`
+  - `TransparentHistory`
+  - `LinearScanGuarantee`
+  - `LinearScanEvidence`
+- `zcash_client_backend::data_api::WalletRead::linear_scan_evidence`, which has a
+  default returning `Ok(None)`.
+
 ### Changed
 - The `shardtree` dependency is now the `zcashlabs-shardtree` package, at
   `0.7.2`. `shardtree::error::ShardTreeError` appears in this crate's public

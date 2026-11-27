@@ -1048,6 +1048,80 @@ where
         (height, res)
     }
 
+    /// Adds a block at the next height containing a transaction that spends `note` with
+    /// `spend_fvk`'s key and pays `change_value` to `change_fvk`'s internal receiver, and inserts
+    /// it into the cache.
+    ///
+    /// The two keys may belong to different pools, so that the spent note and the change it
+    /// returns lie in different pools. The transaction is placed behind a placeholder occupying
+    /// the coinbase position. Returns the height of the block and the nullifier of the change
+    /// note, so that a test can spend it in turn.
+    pub fn generate_next_block_spending_to_internal<SpendFvk, ChangeFvk>(
+        &mut self,
+        spend_fvk: &SpendFvk,
+        note: (SpendFvk::Nullifier, Zatoshis),
+        change_fvk: &ChangeFvk,
+        change_value: Zatoshis,
+    ) -> (BlockHeight, Cache::InsertResult, ChangeFvk::Nullifier)
+    where
+        SpendFvk: TestFvk,
+        ChangeFvk: TestFvk,
+    {
+        let pre_activation_block = CachedBlock::none(self.sapling_activation_height() - 1);
+        let prior_cached_block = self
+            .latest_cached_block()
+            .unwrap_or(&pre_activation_block)
+            .clone();
+        let height = prior_cached_block.height() + 1;
+
+        let mut coinbase = fake_compact_tx(&mut self.rng);
+        coinbase.index = 0;
+
+        let mut ctx = fake_compact_tx(&mut self.rng);
+        ctx.index = 1;
+        spend_fvk.add_spend(&mut ctx, note.0, &mut self.rng);
+        let internal_ovk = change_fvk.to_ovk(zip32::Scope::Internal);
+        let change_nf = change_fvk.add_output(
+            &mut ctx,
+            &self.network,
+            height,
+            Some(&internal_ovk),
+            AddressType::Internal,
+            change_value,
+            prior_cached_block.sapling_end_size,
+            &mut self.rng,
+        );
+
+        let mut cb = CompactBlock {
+            hash: {
+                let mut hash = vec![0; 32];
+                self.rng.fill_bytes(&mut hash);
+                hash
+            },
+            height: height.into(),
+            ..Default::default()
+        };
+        cb.prev_hash
+            .extend_from_slice(&prior_cached_block.chain_state.block_hash().0);
+        cb.vtx.push(coinbase);
+        cb.vtx.push(ctx);
+        cb.chain_metadata = Some(compact_formats::ChainMetadata {
+            sapling_commitment_tree_size: prior_cached_block.sapling_end_size
+                + cb.vtx.iter().map(|tx| tx.outputs.len() as u32).sum::<u32>(),
+            orchard_commitment_tree_size: prior_cached_block.orchard_end_size
+                + cb.vtx.iter().map(|tx| tx.actions.len() as u32).sum::<u32>(),
+            ironwood_commitment_tree_size: prior_cached_block.ironwood_end_size
+                + cb.vtx
+                    .iter()
+                    .map(|tx| tx.ironwood_actions.len() as u32)
+                    .sum::<u32>(),
+        });
+
+        let res = self.cache_block(&prior_cached_block, cb);
+        self.latest_block_height = Some(height);
+
+        (height, res, change_nf)
+    }
     /// Creates a fake block at the expected next height containing only the wallet
     /// transaction with the given txid, and inserts it into the cache.
     ///
@@ -1134,6 +1208,60 @@ where
     /// Invokes [`scan_cached_blocks`] with the given arguments, expecting success.
     pub fn scan_cached_blocks(&mut self, from_height: BlockHeight, limit: usize) -> ScanSummary {
         let result = self.try_scan_cached_blocks(from_height, limit);
+        assert_matches!(result, Ok(_));
+        result.unwrap()
+    }
+
+    /// Invokes [`scan_cached_blocks_forced`] with the given arguments, expecting success.
+    ///
+    /// [`scan_cached_blocks_forced`]: super::chain::testing::scan_cached_blocks_forced
+    pub fn scan_cached_blocks_forced(
+        &mut self,
+        from_height: BlockHeight,
+        limit: usize,
+        mode: super::chain::testing::ForcedScanMode,
+    ) -> ScanSummary {
+        let prior_cached_block = self
+            .latest_cached_block_below_height(from_height)
+            .cloned()
+            .unwrap_or_else(|| CachedBlock::none(from_height - 1));
+
+        let result = super::chain::testing::scan_cached_blocks_forced(
+            &self.network,
+            self.cache.block_source(),
+            &mut self.wallet_data,
+            from_height,
+            &prior_cached_block.chain_state,
+            limit,
+            mode,
+        );
+        assert_matches!(result, Ok(_));
+        result.unwrap()
+    }
+
+    /// Invokes [`scan_cached_blocks_with_policy`] with the given arguments, expecting success.
+    ///
+    /// [`scan_cached_blocks_with_policy`]: super::chain::scan_cached_blocks_with_policy
+    pub fn scan_cached_blocks_with_policy(
+        &mut self,
+        from_height: BlockHeight,
+        limit: usize,
+        policy: super::chain::TrialDecryptionPolicy,
+    ) -> ScanSummary {
+        let prior_cached_block = self
+            .latest_cached_block_below_height(from_height)
+            .cloned()
+            .unwrap_or_else(|| CachedBlock::none(from_height - 1));
+
+        let result = super::chain::scan_cached_blocks_with_policy(
+            &self.network,
+            self.cache.block_source(),
+            &mut self.wallet_data,
+            from_height,
+            &prior_cached_block.chain_state,
+            limit,
+            policy,
+        );
         assert_matches!(result, Ok(_));
         result.unwrap()
     }

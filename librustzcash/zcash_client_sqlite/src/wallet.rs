@@ -109,11 +109,11 @@ use zcash_client_backend::{
     DecryptedOutput,
     data_api::{
         Account as _, AccountBalance, AccountBirthday, AccountPurpose, AccountSource, AddressInfo,
-        AddressSource, BlockMetadata, Progress, Ratio, ReceivedTransactionOutput,
+        AddressSource, BlockMetadata, NullifierQuery, Progress, Ratio, ReceivedTransactionOutput,
         SAPLING_SHARD_HEIGHT, SentTransaction, SentTransactionOutput, TransactionStatus,
         WalletSummary, Zip32Derivation,
         anchor_retention::AnchorRetentionInterval,
-        chain::ChainState,
+        chain::{ChainState, LinearScanEvidence},
         defaults::address_receiver_matches_ua,
         error::{FindAccountForAddressError, RewindError},
         scanning::{ScanPriority, ScanRange},
@@ -3652,6 +3652,74 @@ pub(crate) fn get_tx_height(
     Ok(tx_height.filter(|h| h <= &chain_tip_height))
 }
 
+/// Returns monotone trigger evidence for a linear external-only scan of `range`, or `Ok(None)`
+/// when `range` already has stored blocks (so rescans always run with all scopes).
+pub(crate) fn linear_scan_evidence(
+    conn: &rusqlite::Connection,
+    range: core::ops::Range<BlockHeight>,
+) -> Result<Option<LinearScanEvidence<AccountUuid>>, SqliteClientError> {
+    let has_stored_blocks: bool = conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM blocks WHERE height >= :start AND height < :end)",
+        )?
+        .query_row(
+            named_params![
+                ":start": u32::from(range.start),
+                ":end": u32::from(range.end),
+            ],
+            |row| row.get(0),
+        )?;
+    if has_stored_blocks {
+        return Ok(None);
+    }
+
+    let mut stmt = conn.prepare_cached("SELECT txid FROM transactions")?;
+    let known_txids: HashSet<TxId> = stmt
+        .query_map([], |row| row.get::<_, [u8; 32]>(0).map(TxId::from_bytes))?
+        .collect::<Result<_, _>>()?;
+
+    let sapling_nullifiers = sapling::get_sapling_nullifiers(conn, NullifierQuery::All)?
+        .into_iter()
+        .map(|(_, nf)| nf);
+
+    #[cfg(feature = "orchard")]
+    let orchard_nullifiers = orchard::get_orchard_nullifiers(conn, NullifierQuery::All)?
+        .into_iter()
+        .map(|(_, nf)| nf);
+
+    #[cfg(feature = "orchard")]
+    let ironwood_nullifiers = orchard::get_ironwood_nullifiers(conn, NullifierQuery::All)?
+        .into_iter()
+        .map(|(_, nf)| nf);
+
+    #[cfg(feature = "orchard")]
+    let recovering: HashSet<AccountUuid> = {
+        let mut stmt = conn.prepare_cached(
+            "SELECT uuid
+             FROM accounts
+             WHERE recover_until_height IS NOT NULL
+               AND recover_until_height >= :start",
+        )?;
+        stmt.query_map(named_params![":start": u32::from(range.start)], |row| {
+            Ok(AccountUuid(row.get(0)?))
+        })?
+        .collect::<Result<_, _>>()?
+    };
+
+    let evidence = LinearScanEvidence::new(
+        known_txids,
+        sapling_nullifiers,
+        #[cfg(feature = "orchard")]
+        orchard_nullifiers,
+        #[cfg(feature = "orchard")]
+        ironwood_nullifiers,
+    );
+    #[cfg(feature = "orchard")]
+    let evidence = evidence.with_ironwood_recovery_accounts(recovering);
+
+    Ok(Some(evidence))
+}
+
 /// Returns the block hash for the block at the specified height,
 /// if any.
 pub(crate) fn get_block_hash(
@@ -5429,6 +5497,17 @@ pub(crate) fn put_tx_meta(
     tx: &WalletTx<AccountUuid>,
     height: BlockHeight,
 ) -> Result<TxRef, SqliteClientError> {
+    put_tx_meta_by_id(conn, tpir_session, tx.txid(), tx.block_index(), height)
+}
+
+/// Inserts or updates a mined transaction header identified by `txid` and `block_index`.
+pub(crate) fn put_tx_meta_by_id(
+    conn: &rusqlite::Connection,
+    tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
+    txid: TxId,
+    block_index: TxIndex,
+    height: BlockHeight,
+) -> Result<TxRef, SqliteClientError> {
     // It isn't there, so insert our transaction into the database.
     let mut stmt_upsert_tx_meta = conn.prepare_cached(
         "INSERT INTO transactions (txid, block, mined_height, tx_index, min_observed_height)
@@ -5442,15 +5521,14 @@ pub(crate) fn put_tx_meta(
         RETURNING id_tx",
     )?;
 
-    let txid_bytes = tx.txid();
     let tx_params = named_params![
-        ":txid": &txid_bytes.as_ref()[..],
+        ":txid": &txid.as_ref()[..],
         ":block": u32::from(height),
-        ":tx_index": u16::from(tx.block_index()),
+        ":tx_index": u16::from(block_index),
     ];
 
     let tx_ref = stmt_upsert_tx_meta.query_row(tx_params, |row| row.get::<_, i64>(0).map(TxRef))?;
-    transparent_ledger::details::enqueue_mined_route_two(conn, tpir_session, &txid_bytes)?;
+    transparent_ledger::details::enqueue_mined_route_two(conn, tpir_session, &txid)?;
     Ok(tx_ref)
 }
 

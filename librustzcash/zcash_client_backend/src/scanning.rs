@@ -384,6 +384,37 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
     pub fn from_account_ufvks(
         ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
     ) -> Self {
+        Self::from_account_ufvks_with_scopes(ufvks, &[Scope::External, Scope::Internal])
+    }
+
+    /// Splits `ufvks` into batch keys (external, plus internal Ironwood for
+    /// `batch_internal_ironwood`) and inline keys (the remaining internal keys).
+    pub(crate) fn for_external_only_batch(
+        ufvks: HashMap<AccountId, UnifiedFullViewingKey>,
+        #[cfg(feature = "orchard")] batch_internal_ironwood: &HashSet<AccountId>,
+    ) -> (Self, Self) {
+        #[cfg_attr(not(feature = "orchard"), allow(unused_mut))]
+        let mut batch = Self::from_account_ufvks_with_scopes(
+            ufvks.iter().map(|(&id, k)| (id, k.clone())),
+            &[Scope::External],
+        );
+        #[cfg_attr(not(feature = "orchard"), allow(unused_mut))]
+        let mut inline = Self::from_account_ufvks_with_scopes(ufvks, &[Scope::Internal]);
+        #[cfg(feature = "orchard")]
+        for &account_id in batch_internal_ironwood {
+            if let Some(key) = inline.ironwood.remove(&(account_id, Scope::Internal)) {
+                batch.ironwood.insert((account_id, Scope::Internal), key);
+            }
+        }
+        (batch, inline)
+    }
+
+    /// Constructs a [`ScanningKeys`] holding, for each of the given UFVKs, only the keys of the
+    /// given scopes.
+    pub(crate) fn from_account_ufvks_with_scopes(
+        ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
+        scopes: &[Scope],
+    ) -> Self {
         #![allow(clippy::type_complexity)]
 
         let mut sapling: HashMap<
@@ -407,7 +438,7 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
 
         for (account_id, ufvk) in ufvks {
             if let Some(dfvk) = ufvk.sapling() {
-                for scope in [Scope::External, Scope::Internal] {
+                for &scope in scopes {
                     sapling.insert(
                         (account_id, scope),
                         Box::new(ScanningKey {
@@ -422,7 +453,7 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
 
             #[cfg(feature = "orchard")]
             if let Some(fvk) = ufvk.orchard() {
-                for scope in [Scope::External, Scope::Internal] {
+                for &scope in scopes {
                     orchard.insert(
                         (account_id, scope),
                         Box::new(ScanningKey {
@@ -436,7 +467,7 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
 
                 // Ironwood outputs are decrypted with the same Orchard viewing keys, but are
                 // tracked as a separate pool.
-                for scope in [Scope::External, Scope::Internal] {
+                for &scope in scopes {
                     ironwood.insert(
                         (account_id, scope),
                         Box::new(ScanningKey {
@@ -803,6 +834,7 @@ where
         block,
         scanning_keys,
         nullifiers,
+        None,
         prior_block_metadata,
         None,
     )
@@ -896,6 +928,55 @@ where
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
+/// The conditions under which a block scan trial-decrypts a transaction's outputs with the
+/// keys of an [`InternalPass`], in addition to the keys its batch was decrypted with.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct InternalPassTriggers {
+    /// A transaction that spends a note the scan recognizes as the wallet's.
+    pub(crate) wallet_spend: bool,
+    /// A transaction whose txid is in this set.
+    pub(crate) known_txids: HashSet<TxId>,
+    /// A transaction that reveals a stored Sapling nullifier of the wallet.
+    pub(crate) known_sapling_nullifiers: HashSet<[u8; 32]>,
+    /// A transaction that reveals a stored Orchard nullifier of the wallet.
+    #[cfg(feature = "orchard")]
+    pub(crate) known_orchard_nullifiers: HashSet<[u8; 32]>,
+    /// A transaction that reveals a stored Ironwood nullifier of the wallet.
+    #[cfg(feature = "orchard")]
+    pub(crate) known_ironwood_nullifiers: HashSet<[u8; 32]>,
+    /// A transaction with at least one shielded output that either has a transparent input or is
+    /// a coinbase transaction (whose null input compact blocks omit).
+    pub(crate) transparent_inputs_or_coinbase: bool,
+}
+
+impl InternalPassTriggers {
+    /// Returns whether a transaction with the given properties triggers the pass.
+    pub(crate) fn fire(
+        &self,
+        txid: &TxId,
+        spends_wallet_funds: bool,
+        spends_known_nullifier: bool,
+        has_transparent_inputs_or_is_coinbase: bool,
+        has_shielded_outputs: bool,
+    ) -> bool {
+        (self.wallet_spend && spends_wallet_funds)
+            || spends_known_nullifier
+            || self.known_txids.contains(txid)
+            || (self.transparent_inputs_or_coinbase
+                && has_transparent_inputs_or_is_coinbase
+                && has_shielded_outputs)
+    }
+}
+
+/// Keys with which a block scan trial-decrypts, inline, the outputs of the transactions its
+/// [`InternalPassTriggers`] select, in addition to the keys the batch was decrypted with.
+pub(crate) struct InternalPass<'a, AccountId, IvkTag> {
+    pub(crate) keys: &'a ScanningKeys<AccountId, IvkTag>,
+    pub(crate) triggers: &'a InternalPassTriggers,
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 fn find_received<
     AccountId: Copy + Eq + Hash,
     D: BatchDomain,
@@ -913,10 +994,11 @@ fn find_received<
     txid: TxId,
     note_position: impl Fn(usize) -> Position,
     keys: &HashMap<IvkTag, SK>,
+    inline_keys: Option<&HashMap<IvkTag, SK>>,
     spent_from_accounts: &HashSet<AccountId>,
     decoded: &[(D, Output)],
     batch_results: Option<impl FnOnce(TxId) -> HashMap<usize, DecryptedOutput<IvkTag, D, M>>>,
-    decrypt_inline: impl FnOnce(
+    decrypt_inline: impl Fn(
         &[D::IncomingViewingKey],
         &[(D, Output)],
     ) -> Vec<Option<((D::Note, D::Recipient, M), usize)>>,
@@ -926,8 +1008,22 @@ fn find_received<
     Vec<WalletOutput<Note, Nf, AccountId>>,
     Vec<(NoteCommitment, Retention<BlockHeight>)>,
 ) {
+    // Trial-decrypts `decoded` inline with the given keys.
+    let decrypt_with = |keys: &HashMap<IvkTag, SK>| {
+        let mut ivks = Vec::with_capacity(keys.len());
+        let mut ivk_lookup = Vec::with_capacity(keys.len());
+        for (key_id, key) in keys.iter() {
+            ivks.push(key.prepare());
+            ivk_lookup.push(*key_id);
+        }
+        decrypt_inline(&ivks, decoded)
+            .into_iter()
+            .map(|v| v.map(|((note, _, _), ivk_idx)| (ivk_lookup[ivk_idx], note)))
+            .collect::<Vec<_>>()
+    };
+
     // Check for incoming notes while incrementing tree and witnesses
-    let (decrypted_opts, decrypted_len) = if let Some(collect_results) = batch_results {
+    let (mut decrypted_opts, mut decrypted_len) = if let Some(collect_results) = batch_results {
         let mut decrypted = collect_results(txid);
         let decrypted_len = decrypted.len();
         (
@@ -941,27 +1037,23 @@ fn find_received<
             decrypted_len,
         )
     } else {
-        let mut ivks = Vec::with_capacity(keys.len());
-        let mut ivk_lookup = Vec::with_capacity(keys.len());
-        for (key_id, key) in keys.iter() {
-            ivks.push(key.prepare());
-            ivk_lookup.push(key_id);
-        }
-
-        let mut decrypted_len = 0;
-        (
-            decrypt_inline(&ivks, decoded)
-                .into_iter()
-                .map(|v| {
-                    v.map(|((note, _, _), ivk_idx)| {
-                        decrypted_len += 1;
-                        (*ivk_lookup[ivk_idx], note)
-                    })
-                })
-                .collect::<Vec<_>>(),
-            decrypted_len,
-        )
+        let decrypted = decrypt_with(keys);
+        let decrypted_len = decrypted.iter().filter(|d| d.is_some()).count();
+        (decrypted, decrypted_len)
     };
+
+    // Outputs that `keys` did not decrypt are tried with `inline_keys`, before any note
+    // commitment's retention is decided, so that a note found either way is marked.
+    if let Some(inline_keys) = inline_keys.filter(|k| !k.is_empty())
+        && decrypted_opts.iter().any(Option::is_none)
+    {
+        for (slot, found) in decrypted_opts.iter_mut().zip(decrypt_with(inline_keys)) {
+            if slot.is_none() && found.is_some() {
+                *slot = found;
+                decrypted_len += 1;
+            }
+        }
+    }
 
     let mut shielded_outputs = Vec::with_capacity(decrypted_len);
     let mut note_commitments = Vec::with_capacity(decoded.len());
@@ -988,6 +1080,7 @@ fn find_received<
         if let Some((key_id, note)) = decrypted_note {
             let key = keys
                 .get(&key_id)
+                .or_else(|| inline_keys.and_then(|k| k.get(&key_id)))
                 .expect("Key is available for decrypted output");
 
             // A note is marked as "change" if the account that received it

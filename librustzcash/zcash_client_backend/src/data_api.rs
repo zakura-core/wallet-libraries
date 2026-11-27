@@ -2275,6 +2275,17 @@ pub trait WalletRead {
     /// transaction is not known to the wallet or not in the main chain.
     fn get_tx_height(&self, txid: TxId) -> Result<Option<BlockHeight>, Self::Error>;
 
+    /// Returns monotone ownership evidence for an external-only linear scan of `range`.
+    ///
+    /// Returns `Ok(None)` when the backend cannot vouch for `range` or when `range` already has
+    /// stored blocks, in which case the scan uses all viewing-key scopes.
+    fn linear_scan_evidence(
+        &self,
+        _range: core::ops::Range<BlockHeight>,
+    ) -> Result<Option<chain::LinearScanEvidence<Self::AccountId>>, Self::Error> {
+        Ok(None)
+    }
+
     /// Returns all unified full viewing keys known to this wallet.
     fn get_unified_full_viewing_keys(
         &self,

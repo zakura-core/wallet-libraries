@@ -512,6 +512,16 @@ impl WalletRead for TestDb {
         self.wallet_db.get_tx_height(txid)
     }
 
+    fn linear_scan_evidence(
+        &self,
+        range: core::ops::Range<BlockHeight>,
+    ) -> Result<
+        Option<zcash_client_backend::data_api::chain::LinearScanEvidence<Self::AccountId>>,
+        Self::Error,
+    > {
+        self.wallet_db.linear_scan_evidence(range)
+    }
+
     fn get_unified_full_viewing_keys(
         &self,
     ) -> Result<HashMap<Self::AccountId, UnifiedFullViewingKey>, Self::Error> {

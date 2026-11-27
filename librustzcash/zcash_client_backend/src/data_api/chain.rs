@@ -151,14 +151,17 @@
 //! # }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use incrementalmerkletree::frontier::Frontier;
 use sapling::note_encryption::Zip212Enforcement;
 use subtle::ConditionallySelectable;
 use zcash_keys::keys::UnifiedFullViewingKey;
-use zcash_primitives::{block::BlockHash, transaction::components::sapling::zip212_enforcement};
+use zcash_primitives::{
+    block::BlockHash,
+    transaction::{TxId, components::sapling::zip212_enforcement},
+};
 use zcash_protocol::consensus::{self, BlockHeight};
 use zip32::Scope;
 
@@ -180,6 +183,7 @@ pub mod error;
 use error::Error;
 
 use super::WalletRead;
+use crate::scanning::{InternalPass, InternalPassTriggers};
 
 /// A struct containing metadata about a subtree root of the note commitment tree.
 ///
@@ -654,6 +658,345 @@ where
         from_height,
         limit,
         &scanning_keys,
+        None,
+    )?;
+
+    data_db
+        .put_blocks(from_state, scanned_blocks)
+        .map_err(Error::Wallet)?;
+    Ok(scan_summary)
+}
+
+/// How far a caller has retrieved and stored the transactions that involve the wallet's
+/// transparent addresses.
+///
+/// A compact block carries the transparent inputs of its transactions only when the client asks
+/// the server for the transparent pool, which no current light wallet does. A transaction that
+/// shields transparent funds into an account's internal receiver is therefore indistinguishable,
+/// in compact data alone, from a payment to a third party.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransparentHistory {
+    /// Every transaction that involves a transparent address of the wallet and is mined at or
+    /// below the given height is already stored in the wallet.
+    ///
+    /// Calling `forget_transparent_ledger` revokes this guarantee because it deletes TPIR-only
+    /// `transactions` rows while leaving `blocks` intact.
+    SyncedTo(BlockHeight),
+    /// The caller gives no such guarantee.
+    Unsynced,
+}
+
+impl TransparentHistory {
+    /// Whether the guarantee extends to `height`.
+    fn covers(&self, height: BlockHeight) -> bool {
+        match self {
+            Self::SyncedTo(synced) => height <= *synced,
+            Self::Unsynced => false,
+        }
+    }
+}
+
+/// Monotone ownership evidence for inline internal-pass triggers during linear external-only scans.
+///
+/// Entries record stored txids and all stored nullifiers (`NullifierQuery::All`), never
+/// status-filtered spendability. Spend matching continues to use `NullifierQuery::Unspent`.
+#[derive(Clone, Debug)]
+pub struct LinearScanEvidence<AccountId> {
+    known_txids: HashSet<TxId>,
+    sapling_nullifiers: HashSet<[u8; 32]>,
+    #[cfg(feature = "orchard")]
+    orchard_nullifiers: HashSet<[u8; 32]>,
+    #[cfg(feature = "orchard")]
+    ironwood_nullifiers: HashSet<[u8; 32]>,
+    #[cfg(feature = "orchard")]
+    ironwood_recovering: HashSet<AccountId>,
+    #[cfg(not(feature = "orchard"))]
+    _account_id: core::marker::PhantomData<AccountId>,
+}
+
+impl<AccountId: Eq + std::hash::Hash> LinearScanEvidence<AccountId> {
+    /// Constructs monotone trigger evidence from stored txids and nullifiers.
+    pub fn new(
+        known_txids: HashSet<TxId>,
+        sapling_nullifiers: impl IntoIterator<Item = sapling::Nullifier>,
+        #[cfg(feature = "orchard")] orchard_nullifiers: impl IntoIterator<
+            Item = orchard::note::Nullifier,
+        >,
+        #[cfg(feature = "orchard")] ironwood_nullifiers: impl IntoIterator<
+            Item = orchard::note::Nullifier,
+        >,
+    ) -> Self {
+        Self {
+            known_txids,
+            sapling_nullifiers: sapling_nullifiers.into_iter().map(|nf| nf.0).collect(),
+            #[cfg(feature = "orchard")]
+            orchard_nullifiers: orchard_nullifiers
+                .into_iter()
+                .map(|nf| nf.to_bytes())
+                .collect(),
+            #[cfg(feature = "orchard")]
+            ironwood_nullifiers: ironwood_nullifiers
+                .into_iter()
+                .map(|nf| nf.to_bytes())
+                .collect(),
+            #[cfg(feature = "orchard")]
+            ironwood_recovering: HashSet::new(),
+            #[cfg(not(feature = "orchard"))]
+            _account_id: core::marker::PhantomData,
+        }
+    }
+
+    /// Sets accounts still within `recover_until_height` so they keep internal Ironwood keys in
+    /// the main batch at or above NU6.3 activation.
+    #[cfg(feature = "orchard")]
+    pub fn with_ironwood_recovery_accounts(mut self, recovering: HashSet<AccountId>) -> Self {
+        self.ironwood_recovering = recovering;
+        self
+    }
+
+    #[cfg(feature = "orchard")]
+    fn batch_internal_ironwood_accounts<ParamsT: consensus::Parameters>(
+        &self,
+        params: &ParamsT,
+        from_height: BlockHeight,
+        limit: usize,
+    ) -> HashSet<AccountId>
+    where
+        AccountId: Copy,
+    {
+        let reaches_nu6_3 = limit > 0
+            && params
+                .activation_height(consensus::NetworkUpgrade::Nu6_3)
+                .is_some_and(|nu6_3| batch_end(from_height, limit) >= nu6_3);
+        if reaches_nu6_3 {
+            self.ironwood_recovering.clone()
+        } else {
+            HashSet::new()
+        }
+    }
+
+    fn into_triggers(self) -> InternalPassTriggers {
+        InternalPassTriggers {
+            wallet_spend: true,
+            known_txids: self.known_txids,
+            known_sapling_nullifiers: self.sapling_nullifiers,
+            #[cfg(feature = "orchard")]
+            known_orchard_nullifiers: self.orchard_nullifiers,
+            #[cfg(feature = "orchard")]
+            known_ironwood_nullifiers: self.ironwood_nullifiers,
+            transparent_inputs_or_coinbase: true,
+        }
+    }
+}
+
+/// What a caller guarantees about the blocks that precede a scan.
+///
+/// A pipelined driver that decrypts batch N+1 while batch N writes are still in flight leaves the
+/// wallet's stored frontier behind batch N+1. Passing [`Self::with_writes_issued_through`] to
+/// [`decrypt_cached_blocks_with_policy`] lets prediction select external-only decryption; at scan
+/// time, [`scan_decrypted_blocks`] verifies linearity against the stored frontier alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinearScanGuarantee {
+    transparent_history: TransparentHistory,
+    writes_issued_through: Option<BlockHeight>,
+}
+
+impl LinearScanGuarantee {
+    /// A guarantee that rests on the wallet's stored state alone.
+    pub const fn new(transparent_history: TransparentHistory) -> Self {
+        Self {
+            transparent_history,
+            writes_issued_through: None,
+        }
+    }
+
+    /// Declares that every block up to and including `height` has been scanned and its writes
+    /// issued in block order.
+    ///
+    /// A pipelined driver must pass `with_writes_issued_through(end - 1)` when prefetching the
+    /// next batch with [`decrypt_cached_blocks_with_policy`], so prediction selects external-only
+    /// keys before the prior batch commits. At scan time, [`scan_decrypted_blocks`] and
+    /// [`scan_cached_blocks_with_policy`] re-check linearity against the stored frontier alone;
+    /// a misdeclared height falls back safely to all scopes rather than missing outputs.
+    pub const fn with_writes_issued_through(self, height: BlockHeight) -> Self {
+        Self {
+            writes_issued_through: Some(height),
+            ..self
+        }
+    }
+
+    /// The caller's transparent-history guarantee.
+    pub const fn transparent_history(&self) -> TransparentHistory {
+        self.transparent_history
+    }
+}
+
+/// How [`scan_cached_blocks_with_policy`] chooses the viewing-key scopes it trial-decrypts with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrialDecryptionPolicy {
+    /// Every output is trial-decrypted with the external and internal viewing keys of every
+    /// account: the behaviour of [`scan_cached_blocks`].
+    AllScopes,
+    /// When the scan is linear, the range contains no previously stored blocks, and the guarantee
+    /// covers every block the scan may reach, outputs are trial-decrypted with external keys only
+    /// and transactions selected by monotone wallet triggers also run internal keys; otherwise
+    /// this behaves as [`Self::AllScopes`].
+    ///
+    /// Premise: only transactions selected by the triggers above pay an internal receiver; an
+    /// independent payment sent directly to an account's internal receiver (for example by an
+    /// FVK holder) will be missed. Rescans of already-stored blocks always use
+    /// [`Self::AllScopes`].
+    ExternalWhenLinear(LinearScanGuarantee),
+}
+
+/// Returns the greatest height a scan of at most `limit` blocks from `from_height` can reach.
+fn batch_end(from_height: BlockHeight, limit: usize) -> BlockHeight {
+    let limit = u32::try_from(limit).unwrap_or(u32::MAX);
+    BlockHeight::from(u32::from(from_height).saturating_add(limit.saturating_sub(1)))
+}
+
+/// Returns the half-open block range for a scan of at most `limit` blocks from `from_height`.
+fn batch_range(from_height: BlockHeight, limit: usize) -> Range<BlockHeight> {
+    let limit = u32::try_from(limit).unwrap_or(u32::MAX);
+    let end = BlockHeight::from(u32::from(from_height).saturating_add(limit));
+    from_height..end
+}
+
+/// Returns whether every block from the wallet's birthday up to `from_height` has been scanned.
+fn is_linear<DbT: WalletRead>(
+    db: &DbT,
+    from_height: BlockHeight,
+    writes_issued_through: Option<BlockHeight>,
+) -> Result<bool, DbT::Error> {
+    let stored = match db.block_fully_scanned()? {
+        Some(meta) => Some(meta.block_height() + 1),
+        None => db.get_wallet_birthday()?,
+    };
+    let declared = writes_issued_through.map(|height| height + 1);
+    let frontier = match (stored, declared) {
+        (Some(stored), Some(declared)) => Some(std::cmp::max(stored, declared)),
+        (frontier, None) | (None, frontier) => frontier,
+    };
+    Ok(frontier.is_some_and(|frontier| from_height <= frontier))
+}
+
+/// Evaluates the linearity gate and loads monotone evidence, returning `Ok(None)` on any veto.
+///
+/// Pass `writes_issued_through = None` at scan time (checks stored frontier alone) and
+/// `guarantee.writes_issued_through` at prefetch prediction time.
+fn external_only_evidence<DbT: WalletRead>(
+    db: &DbT,
+    from_height: BlockHeight,
+    limit: usize,
+    guarantee: LinearScanGuarantee,
+    writes_issued_through: Option<BlockHeight>,
+) -> Result<Option<LinearScanEvidence<<DbT as WalletRead>::AccountId>>, DbT::Error> {
+    if !guarantee
+        .transparent_history()
+        .covers(batch_end(from_height, limit))
+        || !is_linear(db, from_height, writes_issued_through)?
+    {
+        return Ok(None);
+    }
+    db.linear_scan_evidence(batch_range(from_height, limit))
+}
+
+/// Scans as [`scan_cached_blocks`] does, trial-decrypting with the scopes `policy` selects.
+///
+/// ## Panics
+///
+/// This method will panic if `from_height != from_state.block_height() + 1`.
+#[tracing::instrument(skip(params, block_source, data_db, from_state))]
+#[allow(clippy::type_complexity)]
+pub fn scan_cached_blocks_with_policy<ParamsT, DbT, BlockSourceT>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &mut DbT,
+    from_height: BlockHeight,
+    from_state: &ChainState,
+    limit: usize,
+    policy: TrialDecryptionPolicy,
+) -> Result<ScanSummary, Error<<DbT as WalletRead>::Error, BlockSourceT::Error>>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: WalletWrite,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+{
+    let evidence = match policy {
+        TrialDecryptionPolicy::AllScopes => None,
+        TrialDecryptionPolicy::ExternalWhenLinear(guarantee) => {
+            external_only_evidence(&*data_db, from_height, limit, guarantee, None)
+                .map_err(Error::Wallet)?
+        }
+    };
+    #[cfg(feature = "orchard")]
+    let batch_internal_ironwood = evidence
+        .as_ref()
+        .map(|ev| ev.batch_internal_ironwood_accounts(params, from_height, limit))
+        .unwrap_or_default();
+    let triggers = evidence.map(LinearScanEvidence::into_triggers);
+    scan_cached_blocks_in_mode(
+        params,
+        block_source,
+        data_db,
+        from_height,
+        from_state,
+        limit,
+        triggers,
+        #[cfg(feature = "orchard")]
+        &batch_internal_ironwood,
+    )
+}
+
+/// Scans as [`scan_cached_blocks`] does, with external keys only plus an inline internal pass on
+/// the transactions `triggers` select, or with every scope when `triggers` is `None`.
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn scan_cached_blocks_in_mode<ParamsT, DbT, BlockSourceT>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &mut DbT,
+    from_height: BlockHeight,
+    from_state: &ChainState,
+    limit: usize,
+    triggers: Option<InternalPassTriggers>,
+    #[cfg(feature = "orchard")] batch_internal_ironwood: &HashSet<<DbT as WalletRead>::AccountId>,
+) -> Result<ScanSummary, Error<<DbT as WalletRead>::Error, BlockSourceT::Error>>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: WalletWrite,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+{
+    assert_eq!(from_height, from_state.block_height + 1);
+
+    let account_ufvks =
+        account_ufvks_for_range(&*data_db, from_height, limit).map_err(Error::Wallet)?;
+    let (scanning_keys, internal_keys) = match &triggers {
+        None => (ScanningKeys::from_account_ufvks(account_ufvks), None),
+        Some(_) => {
+            let (batch, inline) = ScanningKeys::for_external_only_batch(
+                account_ufvks,
+                #[cfg(feature = "orchard")]
+                batch_internal_ironwood,
+            );
+            (batch, Some(inline))
+        }
+    };
+    let internal_pass = internal_keys
+        .as_ref()
+        .zip(triggers.as_ref())
+        .map(|(keys, triggers)| InternalPass { keys, triggers });
+
+    let (scan_summary, scanned_blocks) = scan_blocks(
+        params,
+        block_source,
+        data_db,
+        from_height,
+        limit,
+        &scanning_keys,
+        internal_pass,
     )?;
 
     data_db
@@ -667,6 +1010,15 @@ where
 ///
 /// Its work runs on the rayon thread pool that was current when it was started, so a
 /// caller can let it run while it writes the previous range.
+/// The internal-scope keys of a [`BlockDecryption`] and the caller's guarantee.
+///
+/// Trigger evidence and the stored-frontier gate are not frozen here; [`scan_decrypted_blocks`]
+/// evaluates them at scan time.
+type InlinePass<AccountId> = (
+    ScanningKeys<AccountId, (AccountId, Scope)>,
+    LinearScanGuarantee,
+);
+
 pub struct BlockDecryption<AccountId: Copy + Eq + std::hash::Hash + Send + Sync + 'static> {
     from_height: BlockHeight,
     limit: usize,
@@ -680,6 +1032,10 @@ pub struct BlockDecryption<AccountId: Copy + Eq + std::hash::Hash + Send + Sync 
     encoded_ufvks: HashMap<AccountId, String>,
     scanning_keys: ScanningKeys<AccountId, (AccountId, Scope)>,
     runners: BatchRunners<(AccountId, Scope), (), (), ()>,
+    /// The internal-scope keys and the triggers that select the transactions they are applied
+    /// to, when the decryption was started with external keys only. `None` means the
+    /// decryption covers every scope, so no inline pass is needed.
+    internal_pass: Option<InlinePass<AccountId>>,
 }
 
 /// Starts trial decryption of at most `limit` cached blocks from `from_height` with the
@@ -711,10 +1067,73 @@ where
     DbT: WalletRead,
     <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
 {
+    decrypt_cached_blocks_with_policy(
+        params,
+        block_source,
+        data_db,
+        from_height,
+        limit,
+        TrialDecryptionPolicy::AllScopes,
+    )
+}
+
+/// Starts trial decryption as [`decrypt_cached_blocks`] does, with the viewing-key scopes
+/// `policy` selects.
+///
+/// The scope choice is made here rather than in [`scan_decrypted_blocks`], because this is
+/// where the batch runners that do the decryption are built. A caller that prefetches must
+/// therefore pass the policy to this function; passing it only to the scan would have no
+/// effect.
+#[tracing::instrument(skip(params, block_source, data_db))]
+#[allow(clippy::type_complexity)]
+pub fn decrypt_cached_blocks_with_policy<ParamsT, DbT, BlockSourceT>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &DbT,
+    from_height: BlockHeight,
+    limit: usize,
+    policy: TrialDecryptionPolicy,
+) -> Result<
+    BlockDecryption<<DbT as WalletRead>::AccountId>,
+    Error<<DbT as WalletRead>::Error, BlockSourceT::Error>,
+>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: WalletRead,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+{
     let account_ufvks =
         account_ufvks_for_range(data_db, from_height, limit).map_err(Error::Wallet)?;
     let encoded_ufvks = encode_ufvks(params, &account_ufvks);
-    let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
+
+    let predicted = match policy {
+        TrialDecryptionPolicy::AllScopes => None,
+        TrialDecryptionPolicy::ExternalWhenLinear(guarantee) => external_only_evidence(
+            data_db,
+            from_height,
+            limit,
+            guarantee,
+            guarantee.writes_issued_through,
+        )
+        .map_err(Error::Wallet)?
+        .map(|ev| (ev, guarantee)),
+    };
+    let (scanning_keys, internal_pass) = match predicted {
+        None => (ScanningKeys::from_account_ufvks(account_ufvks), None),
+        #[allow(unused_variables)]
+        Some((ev, guarantee)) => {
+            #[cfg(feature = "orchard")]
+            let batch_internal_ironwood =
+                ev.batch_internal_ironwood_accounts(params, from_height, limit);
+            let (batch, inline) = ScanningKeys::for_external_only_batch(
+                account_ufvks,
+                #[cfg(feature = "orchard")]
+                &batch_internal_ironwood,
+            );
+            (batch, Some((inline, guarantee)))
+        }
+    };
     let mut runners = BatchRunners::<_, (), (), ()>::for_keys(100, &scanning_keys);
     let mut blocks = vec![];
     block_source.with_blocks::<_, <DbT as WalletRead>::Error>(
@@ -734,6 +1153,7 @@ where
         encoded_ufvks,
         scanning_keys,
         runners,
+        internal_pass,
     })
 }
 
@@ -788,18 +1208,67 @@ where
             blocks,
             scanning_keys,
             runners,
+            internal_pass,
             ..
         } = decryption;
-        scan_with_runners(
-            params,
-            block_source,
-            data_db,
-            from_height,
-            limit,
-            &scanning_keys,
-            runners,
-            Some(&blocks),
-        )?
+        let resolved_internal = match internal_pass {
+            None => Some(None),
+            Some((keys, guarantee)) => {
+                // Re-check linearity against the stored frontier and reload monotone evidence at
+                // scan time. Any veto — or an account that now needs its internal Ironwood key in
+                // the main batch but lacked it at prefetch — falls back to all scopes.
+                match external_only_evidence(&*data_db, from_height, limit, guarantee, None)
+                    .map_err(Error::Wallet)?
+                {
+                    None => None,
+                    Some(evidence) => {
+                        #[cfg(feature = "orchard")]
+                        let missing_internal_ironwood = {
+                            let required = evidence.batch_internal_ironwood_accounts(
+                                params,
+                                from_height,
+                                limit,
+                            );
+                            let decrypted_internal = scanning_keys.ordinary_ironwood_accounts();
+                            required.iter().any(|account| {
+                                current_ufvks
+                                    .get(account)
+                                    .and_then(|ufvk| ufvk.orchard())
+                                    .is_some()
+                                    && !decrypted_internal.contains(account)
+                            })
+                        };
+                        #[cfg(not(feature = "orchard"))]
+                        let missing_internal_ironwood = false;
+
+                        if missing_internal_ironwood {
+                            None
+                        } else {
+                            Some(Some((keys, evidence.into_triggers())))
+                        }
+                    }
+                }
+            }
+        };
+        match resolved_internal {
+            None => ScanPass::Stale,
+            Some(inline) => {
+                let internal_pass = inline
+                    .as_ref()
+                    .map(|(keys, triggers)| InternalPass { keys, triggers });
+                scan_with_runners(
+                    params,
+                    block_source,
+                    data_db,
+                    from_height,
+                    limit,
+                    &scanning_keys,
+                    internal_pass,
+                    runners,
+                    Some(&blocks),
+                )?
+            }
+        }
     } else {
         ScanPass::Stale
     };
@@ -813,6 +1282,7 @@ where
             from_height,
             limit,
             &ScanningKeys::from_account_ufvks(current_ufvks),
+            None,
         )?,
     };
 
@@ -882,6 +1352,7 @@ fn scan_blocks<ParamsT, DbT, BlockSourceT, IvkTag>(
     from_height: BlockHeight,
     limit: usize,
     scanning_keys: &ScanningKeys<<DbT as WalletRead>::AccountId, IvkTag>,
+    internal_pass: Option<InternalPass<'_, <DbT as WalletRead>::AccountId, IvkTag>>,
 ) -> Result<
     (
         ScanSummary,
@@ -912,6 +1383,7 @@ where
         from_height,
         limit,
         scanning_keys,
+        internal_pass,
         runners,
         None,
     )? {
@@ -949,6 +1421,7 @@ fn scan_with_runners<ParamsT, DbT, BlockSourceT, IvkTag>(
     from_height: BlockHeight,
     limit: usize,
     scanning_keys: &ScanningKeys<<DbT as WalletRead>::AccountId, IvkTag>,
+    internal_pass: Option<InternalPass<'_, <DbT as WalletRead>::AccountId, IvkTag>>,
     mut runners: BatchRunners<IvkTag, (), (), ()>,
     decrypted_blocks: Option<&[DecryptedBlock]>,
 ) -> Result<
@@ -991,6 +1464,7 @@ where
                 block,
                 scanning_keys,
                 &nullifiers,
+                internal_pass.as_ref(),
                 prior_block_metadata.as_ref(),
                 Some(&mut runners),
             )
@@ -1026,7 +1500,7 @@ where
     Ok(ScanPass::Scanned(scan_summary, scanned_blocks))
 }
 
-#[cfg(feature = "test-dependencies")]
+#[cfg(any(test, feature = "test-dependencies"))]
 pub mod testing {
     use std::convert::Infallible;
     use zcash_protocol::consensus::BlockHeight;
@@ -1034,6 +1508,75 @@ pub mod testing {
     use crate::proto::compact_formats::CompactBlock;
 
     use super::{BlockSource, error::Error};
+
+    use subtle::ConditionallySelectable;
+    use zcash_protocol::consensus;
+
+    use super::{
+        ChainState, ScanSummary, TrialDecryptionPolicy, scan_cached_blocks_in_mode,
+        scan_cached_blocks_with_policy,
+    };
+    use crate::{
+        data_api::{WalletRead, WalletWrite},
+        scanning::InternalPassTriggers,
+    };
+
+    /// A trial-decryption configuration forced on a scan, including one that is unsound.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum ForcedScanMode {
+        /// Every output is trial-decrypted with every scope.
+        AllScopes,
+        /// Outputs are trial-decrypted with external keys only. Unsound: no output paying an
+        /// internal receiver is ever found.
+        ExternalOnly,
+        /// The given policy, as [`super::scan_cached_blocks_with_policy`] applies it.
+        Policy(TrialDecryptionPolicy),
+    }
+
+    /// Scans as [`super::scan_cached_blocks`] does, in the given forced mode.
+    #[allow(clippy::type_complexity)]
+    pub fn scan_cached_blocks_forced<ParamsT, DbT, BlockSourceT>(
+        params: &ParamsT,
+        block_source: &BlockSourceT,
+        data_db: &mut DbT,
+        from_height: BlockHeight,
+        from_state: &ChainState,
+        limit: usize,
+        mode: ForcedScanMode,
+    ) -> Result<ScanSummary, Error<<DbT as WalletRead>::Error, BlockSourceT::Error>>
+    where
+        ParamsT: consensus::Parameters + Send + 'static,
+        BlockSourceT: BlockSource,
+        DbT: WalletWrite,
+        <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+    {
+        let triggers = match mode {
+            ForcedScanMode::AllScopes => None,
+            ForcedScanMode::ExternalOnly => Some(InternalPassTriggers::default()),
+            ForcedScanMode::Policy(policy) => {
+                return scan_cached_blocks_with_policy(
+                    params,
+                    block_source,
+                    data_db,
+                    from_height,
+                    from_state,
+                    limit,
+                    policy,
+                );
+            }
+        };
+        scan_cached_blocks_in_mode(
+            params,
+            block_source,
+            data_db,
+            from_height,
+            from_state,
+            limit,
+            triggers,
+            #[cfg(feature = "orchard")]
+            &std::collections::HashSet::new(),
+        )
+    }
 
     pub struct MockBlockSource;
 
@@ -1051,5 +1594,44 @@ pub mod testing {
         {
             Ok(())
         }
+    }
+}
+
+#[cfg(all(test, feature = "orchard"))]
+mod tests {
+    use std::collections::HashSet;
+
+    use zcash_protocol::consensus::{Network, NetworkUpgrade, Parameters};
+
+    use super::LinearScanEvidence;
+
+    #[test]
+    fn batch_internal_ironwood_accounts_gates_on_nu6_3_activation() {
+        let params = Network::MainNetwork;
+        let nu6_3 = params.activation_height(NetworkUpgrade::Nu6_3).unwrap();
+        let recovering: HashSet<u32> = [1, 2].into_iter().collect();
+        let evidence = LinearScanEvidence::new(
+            HashSet::new(),
+            std::iter::empty(),
+            std::iter::empty(),
+            std::iter::empty(),
+        )
+        .with_ironwood_recovery_accounts(recovering.clone());
+
+        // Strictly below NU6.3 activation: no account needs an internal Ironwood key.
+        assert!(
+            evidence
+                .batch_internal_ironwood_accounts(&params, nu6_3 - 10, 10)
+                .is_empty()
+        );
+        // Reaching NU6.3 activation: all recovering accounts keep their internal Ironwood key.
+        assert_eq!(
+            evidence.batch_internal_ironwood_accounts(&params, nu6_3 - 10, 11),
+            recovering
+        );
+        assert_eq!(
+            evidence.batch_internal_ironwood_accounts(&params, nu6_3, 1),
+            recovering
+        );
     }
 }
