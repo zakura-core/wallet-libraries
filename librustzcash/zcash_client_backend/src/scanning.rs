@@ -387,6 +387,28 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
         Self::from_account_ufvks_with_scopes(ufvks, &[Scope::External, Scope::Internal])
     }
 
+    /// Splits `ufvks` into batch keys (external, plus internal Ironwood for
+    /// `batch_internal_ironwood`) and inline keys (the remaining internal keys).
+    pub(crate) fn for_external_only_batch(
+        ufvks: HashMap<AccountId, UnifiedFullViewingKey>,
+        #[cfg(feature = "orchard")] batch_internal_ironwood: &HashSet<AccountId>,
+    ) -> (Self, Self) {
+        #[cfg_attr(not(feature = "orchard"), allow(unused_mut))]
+        let mut batch = Self::from_account_ufvks_with_scopes(
+            ufvks.iter().map(|(&id, k)| (id, k.clone())),
+            &[Scope::External],
+        );
+        #[cfg_attr(not(feature = "orchard"), allow(unused_mut))]
+        let mut inline = Self::from_account_ufvks_with_scopes(ufvks, &[Scope::Internal]);
+        #[cfg(feature = "orchard")]
+        for &account_id in batch_internal_ironwood {
+            if let Some(key) = inline.ironwood.remove(&(account_id, Scope::Internal)) {
+                batch.ironwood.insert((account_id, Scope::Internal), key);
+            }
+        }
+        (batch, inline)
+    }
+
     /// Constructs a [`ScanningKeys`] holding, for each of the given UFVKs, only the keys of the
     /// given scopes.
     pub(crate) fn from_account_ufvks_with_scopes(

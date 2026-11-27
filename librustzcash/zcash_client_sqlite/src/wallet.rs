@@ -3657,7 +3657,7 @@ pub(crate) fn get_tx_height(
 pub(crate) fn linear_scan_evidence(
     conn: &rusqlite::Connection,
     range: core::ops::Range<BlockHeight>,
-) -> Result<Option<LinearScanEvidence>, SqliteClientError> {
+) -> Result<Option<LinearScanEvidence<AccountUuid>>, SqliteClientError> {
     let has_stored_blocks: bool = conn
         .prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM blocks WHERE height >= :start AND height < :end)",
@@ -3692,14 +3692,32 @@ pub(crate) fn linear_scan_evidence(
         .into_iter()
         .map(|(_, nf)| nf);
 
-    Ok(Some(LinearScanEvidence::new(
+    #[cfg(feature = "orchard")]
+    let recovering: HashSet<AccountUuid> = {
+        let mut stmt = conn.prepare_cached(
+            "SELECT uuid
+             FROM accounts
+             WHERE recover_until_height IS NOT NULL
+               AND recover_until_height >= :start",
+        )?;
+        stmt.query_map(named_params![":start": u32::from(range.start)], |row| {
+            Ok(AccountUuid(row.get(0)?))
+        })?
+        .collect::<Result<_, _>>()?
+    };
+
+    let evidence = LinearScanEvidence::new(
         known_txids,
         sapling_nullifiers,
         #[cfg(feature = "orchard")]
         orchard_nullifiers,
         #[cfg(feature = "orchard")]
         ironwood_nullifiers,
-    )))
+    );
+    #[cfg(feature = "orchard")]
+    let evidence = evidence.with_ironwood_recovery_accounts(recovering);
+
+    Ok(Some(evidence))
 }
 
 /// Returns the block hash for the block at the specified height,

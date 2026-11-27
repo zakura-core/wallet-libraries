@@ -2282,7 +2282,7 @@ pub trait WalletRead {
     fn linear_scan_evidence(
         &self,
         _range: core::ops::Range<BlockHeight>,
-    ) -> Result<Option<chain::LinearScanEvidence>, Self::Error> {
+    ) -> Result<Option<chain::LinearScanEvidence<Self::AccountId>>, Self::Error> {
         Ok(None)
     }
 

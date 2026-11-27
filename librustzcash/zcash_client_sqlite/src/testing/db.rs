@@ -515,8 +515,10 @@ impl WalletRead for TestDb {
     fn linear_scan_evidence(
         &self,
         range: core::ops::Range<BlockHeight>,
-    ) -> Result<Option<zcash_client_backend::data_api::chain::LinearScanEvidence>, Self::Error>
-    {
+    ) -> Result<
+        Option<zcash_client_backend::data_api::chain::LinearScanEvidence<Self::AccountId>>,
+        Self::Error,
+    > {
         self.wallet_db.linear_scan_evidence(range)
     }
 

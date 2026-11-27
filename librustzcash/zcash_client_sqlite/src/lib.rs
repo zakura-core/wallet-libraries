@@ -1737,8 +1737,10 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
     fn linear_scan_evidence(
         &self,
         range: Range<BlockHeight>,
-    ) -> Result<Option<zcash_client_backend::data_api::chain::LinearScanEvidence>, Self::Error>
-    {
+    ) -> Result<
+        Option<zcash_client_backend::data_api::chain::LinearScanEvidence<Self::AccountId>>,
+        Self::Error,
+    > {
         wallet::linear_scan_evidence(self.conn.borrow(), range)
     }
 

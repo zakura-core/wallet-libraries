@@ -232,3 +232,76 @@ fn coinbase_output_to_an_internal_receiver_is_found() {
     scan_one_batch(&mut st, height, 1);
     assert_eq!(st.get_total_balance(account), FUNDING);
 }
+
+/// Verifies that internal Ironwood keys stay in the main batch while an account is within
+/// `recover_until_height` (regardless of PIR recovery state) and drop to external-only once
+/// recovery finishes or on fresh accounts, while Orchard remains external-only throughout.
+#[test]
+fn internal_ironwood_keys_are_scoped_to_recovery_window() {
+    let change = (FUNDING - SENT).unwrap();
+    let foreign_nf = |seed: u8| ::orchard::note::Nullifier::from_bytes(&[seed; 32]).unwrap();
+    let policy = TrialDecryptionPolicy::ExternalWhenLinear(LinearScanGuarantee::new(
+        TransparentHistory::SyncedTo(BlockHeight::from_u32(u32::MAX)),
+    ));
+
+    // Helper: creates a wallet with an Ironwood internal-receiver spend at h2 (and an Orchard
+    // internal-receiver spend at h3) using foreign nullifiers so no trigger fires.
+    let run_case = |recover_until_offset: Option<i32>, enable_pir: bool| -> (Zatoshis, Zatoshis) {
+        let (mut st, account) = wallet();
+        let iw_fvk = ironwood_fvk(&st);
+        let orch_fvk = OrchardPoolTester::test_account_fvk(&st);
+        let (h1, _) = st.generate_empty_block();
+        let (h2, _, _) = st.generate_next_block_spending_to_internal(
+            &iw_fvk,
+            (foreign_nf(10), FUNDING),
+            &iw_fvk,
+            change,
+        );
+        let (h3, _, _) = st.generate_next_block_spending_to_internal(
+            &orch_fvk,
+            (foreign_nf(11), FUNDING),
+            &orch_fvk,
+            change,
+        );
+        if let Some(offset) = recover_until_offset {
+            let until = if offset >= 0 {
+                u32::from(h2) + (offset as u32)
+            } else {
+                u32::from(h2) - ((-offset) as u32)
+            };
+            st.wallet_mut()
+                .conn_mut()
+                .execute("UPDATE accounts SET recover_until_height = ?1", [until])
+                .unwrap();
+        }
+        if enable_pir {
+            st.wallet_mut()
+                .db_mut()
+                .enable_one_time_recovery(account)
+                .unwrap();
+        }
+        st.wallet_mut().update_chain_tip(h3).unwrap();
+        st.scan_cached_blocks_with_policy(h1, 1, policy);
+        st.scan_cached_blocks_with_policy(h2, 1, policy);
+        let after_iw = st.get_total_balance(account);
+        st.scan_cached_blocks_with_policy(h3, 1, policy);
+        let after_orch = st.get_total_balance(account);
+        (after_iw, after_orch)
+    };
+
+    // 1. Fresh account (recover_until_height IS NULL): external-only Ironwood & Orchard.
+    assert_eq!(run_case(None, false), (Zatoshis::ZERO, Zatoshis::ZERO));
+
+    // 2. Restored account within recover_until_height (PIR disabled): internal Ironwood key stays
+    // in batch (Ironwood canary found), while Orchard stays external-only (Orchard missed).
+    assert_eq!(run_case(Some(1), false), (change, change));
+
+    // 3. Restored account within recover_until_height (PIR enabled): internal Ironwood key still
+    // stays in batch so journal coverage is written throughout restore; Orchard stays external.
+    assert_eq!(run_case(Some(1), true), (change, change));
+
+    // 4. Restored account PAST recover_until_height (recover_until_height < h2): external-only
+    // Ironwood resumes once recovery finishes.
+    assert_eq!(run_case(Some(-1), false), (Zatoshis::ZERO, Zatoshis::ZERO));
+    assert_eq!(run_case(Some(-1), true), (Zatoshis::ZERO, Zatoshis::ZERO));
+}
