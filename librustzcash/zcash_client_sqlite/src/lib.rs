@@ -3400,7 +3400,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             .map(|block| (block.height(), block.block_hash()))
             .collect();
         #[cfg(feature = "orchard")]
-        let journal = wallet::one_time_ivk::journal::collect(&blocks);
+        let journal = wallet::one_time_ivk::journal::collect(self.conn.0, &blocks)?;
         // A refund memo stored before its block, or mined again by a reorg's replacement
         // chain, is accepted once these blocks are stored.
         #[cfg(feature = "orchard")]

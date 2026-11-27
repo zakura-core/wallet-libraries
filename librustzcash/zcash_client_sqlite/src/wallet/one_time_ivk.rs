@@ -220,7 +220,7 @@ fn register<P: Parameters>(
 }
 
 /// Queues `range` for a forced rescan with historic priority.
-fn queue_rescan(
+pub(crate) fn queue_rescan(
     conn: &rusqlite::Transaction<'_>,
     range: Range<BlockHeight>,
 ) -> Result<(), SqliteClientError> {

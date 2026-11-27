@@ -5500,6 +5500,17 @@ pub(crate) fn put_tx_meta(
     tx: &WalletTx<AccountUuid>,
     height: BlockHeight,
 ) -> Result<TxRef, SqliteClientError> {
+    put_tx_meta_by_id(conn, tpir_session, tx.txid(), tx.block_index(), height)
+}
+
+/// Inserts or updates a mined transaction header identified by `txid` and `block_index`.
+pub(crate) fn put_tx_meta_by_id(
+    conn: &rusqlite::Connection,
+    tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
+    txid: TxId,
+    block_index: TxIndex,
+    height: BlockHeight,
+) -> Result<TxRef, SqliteClientError> {
     // It isn't there, so insert our transaction into the database.
     let mut stmt_upsert_tx_meta = conn.prepare_cached(
         "INSERT INTO transactions (txid, block, mined_height, tx_index, min_observed_height)
@@ -5513,15 +5524,14 @@ pub(crate) fn put_tx_meta(
         RETURNING id_tx",
     )?;
 
-    let txid_bytes = tx.txid();
     let tx_params = named_params![
-        ":txid": &txid_bytes.as_ref()[..],
+        ":txid": &txid.as_ref()[..],
         ":block": u32::from(height),
-        ":tx_index": u16::from(tx.block_index()),
+        ":tx_index": u16::from(block_index),
     ];
 
     let tx_ref = stmt_upsert_tx_meta.query_row(tx_params, |row| row.get::<_, i64>(0).map(TxRef))?;
-    transparent_ledger::details::enqueue_mined_route_two(conn, tpir_session, &txid_bytes)?;
+    transparent_ledger::details::enqueue_mined_route_two(conn, tpir_session, &txid)?;
     Ok(tx_ref)
 }
 
