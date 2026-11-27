@@ -646,6 +646,35 @@ fn init_wallet_db_internal<
         .execute_batch("PRAGMA foreign_keys = OFF;")
         .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
 
+    // On a brand-new empty database (even if the caller already set `journal_mode = WAL`,
+    // which allocates page 1 with zero schema objects), enable incremental auto_vacuum
+    // before creating the first table so large post-restore `nullifier_map` prunes can
+    // return freed pages to the OS without stranding hundreds of MB of dead freelist space.
+    let schema_objects: i64 = wdb
+        .conn
+        .borrow()
+        .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
+        .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
+    if schema_objects == 0 {
+        let auto_vacuum: i64 = wdb
+            .conn
+            .borrow()
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
+        if auto_vacuum != 2 {
+            if let Err(err) = wdb
+                .conn
+                .borrow()
+                .execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;")
+            {
+                tracing::warn!(
+                    ?err,
+                    "Failed to enable incremental auto_vacuum on empty wallet DB; continuing"
+                );
+            }
+        }
+    }
+
     let result = (|| {
         // Temporarily take ownership of the connection in a wrapper to perform the initial migration
         // table setup. This extra adapter creation could be omitted if `RusqliteAdapter` provided an
@@ -1830,5 +1859,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn init_wallet_db_enables_incremental_auto_vacuum_after_wal() {
+        let data_file = NamedTempFile::new().unwrap();
+        let conn = Connection::open(data_file.path()).unwrap();
+        // Enable WAL before initializing the wallet schema, which allocates page 1
+        // with `auto_vacuum = NONE` and zero schema objects.
+        conn.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
+        let pre_av: i64 = conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(pre_av, 0);
+
+        let mut db_data =
+            WalletDb::from_connection(conn, Network::TestNetwork, test_clock(), test_rng());
+        init_wallet_db(&mut db_data, None).unwrap();
+
+        let post_av: i64 = db_data
+            .conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            post_av, 2,
+            "fresh database must be initialized with auto_vacuum = INCREMENTAL (2)"
+        );
+
+        // Simulate an existing non-empty legacy wallet with `auto_vacuum = NONE` and verify
+        // that re-running `init_wallet_db` does not rewrite it with a blocking full VACUUM.
+        db_data
+            .conn
+            .execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;")
+            .unwrap();
+        let legacy_av: i64 = db_data
+            .conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(legacy_av, 0);
+
+        init_wallet_db(&mut db_data, None).unwrap();
+        let after_reinit_av: i64 = db_data
+            .conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            after_reinit_av, 0,
+            "existing non-empty database must not have auto_vacuum altered"
+        );
     }
 }

@@ -334,6 +334,7 @@ pub struct WalletDb<C, P, CL, R> {
     transparent_ledger_mode: Option<TransparentLedgerMode>,
     #[cfg(feature = "transparent-inputs")]
     gap_limits: GapLimits,
+    defer_bulk_nullifier_prune: bool,
 }
 
 /// Explicit disclosure modes for every lane supported by a wallet handle.
@@ -570,6 +571,7 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
                 enhancement_mode: None,
                 #[cfg(feature = "transparent-inputs")]
                 gap_limits: GapLimits::default(),
+                defer_bulk_nullifier_prune: false,
             })
         })
     }
@@ -791,6 +793,7 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             enhancement_mode: None,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: GapLimits::default(),
+            defer_bulk_nullifier_prune: false,
         }
     }
 }
@@ -849,6 +852,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
                 enhancement_mode: self.enhancement_mode,
                 #[cfg(feature = "transparent-inputs")]
                 gap_limits: self.gap_limits,
+                defer_bulk_nullifier_prune: false,
             };
             f(&wdb)
         };
@@ -894,6 +898,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             enhancement_mode: self.enhancement_mode,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: self.gap_limits,
+            defer_bulk_nullifier_prune: false,
         };
         let result = f(&mut wdb)?;
         tx.commit()?;
@@ -965,6 +970,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             enhancement_mode: self.enhancement_mode,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: self.gap_limits,
+            defer_bulk_nullifier_prune: false,
         };
         // Both handles hold shared references to the same transaction, so aliasing is fine.
         let ext = ExtensionTransaction { conn: &tx };
@@ -3138,7 +3144,68 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<<Self as WalletRead>::AccountId>>,
     ) -> Result<(), <Self as WalletRead>::Error> {
-        self.transactionally(|wdb| wdb.put_blocks(from_state, blocks))
+        self.transactionally(|wdb| {
+            wdb.defer_bulk_nullifier_prune = true;
+            wdb.put_blocks(from_state, blocks)
+        })?;
+        // 1. If `prune_nullifier_map` deferred a large post-restore backlog (> 10k rows),
+        //    reclaim it outside the scan transaction via SQLite's O(pages) `OP_Clear` truncate.
+        // 2. If `put_blocks` left > 4 MiB of dead freelist pages on an `auto_vacuum = INCREMENTAL`
+        //    database, drain `PRAGMA incremental_vacuum` rows to return freed pages to the OS.
+        let conn = self.conn.borrow_mut();
+        if let Err(err) =
+            wallet::bulk_prune_nullifier_map_truncate(conn, &self.params, PRUNING_DEPTH)
+        {
+            tracing::warn!(
+                ?err,
+                "Post-commit nullifier bulk prune failed; will retry on next put_blocks"
+            );
+        }
+        let freelist_pages: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+            .unwrap_or(0);
+        if freelist_pages > 1024 {
+            let auto_vacuum: i64 = conn
+                .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+                .unwrap_or(0);
+            if auto_vacuum == 2 {
+                if let Ok(mut stmt) = conn.prepare("PRAGMA incremental_vacuum") {
+                    if let Ok(mut rows) = stmt.query([]) {
+                        while let Ok(Some(_)) = rows.next() {}
+                    }
+                }
+                // Temporarily cap `busy_timeout` to 100 ms around `wal_checkpoint(TRUNCATE)`
+                // so reclaiming WAL space never blocks a concurrent reader holding a snapshot.
+                struct RestoreBusyTimeout<'a> {
+                    conn: &'a mut rusqlite::Connection,
+                    prev_timeout_ms: Option<u64>,
+                }
+
+                impl Drop for RestoreBusyTimeout<'_> {
+                    fn drop(&mut self) {
+                        if let Some(ms) = self.prev_timeout_ms {
+                            let _ = self.conn.busy_timeout(std::time::Duration::from_millis(ms));
+                        }
+                    }
+                }
+
+                let prev_timeout_ms: Option<u64> = conn
+                    .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                    .ok()
+                    .and_then(|ms| u64::try_from(ms).ok())
+                    .filter(|&ms| ms > 100);
+                if prev_timeout_ms.is_some() {
+                    let _ = conn.busy_timeout(std::time::Duration::from_millis(100));
+                }
+                let guard = RestoreBusyTimeout {
+                    conn,
+                    prev_timeout_ms,
+                };
+                let _ = guard.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+                drop(guard);
+            }
+        }
+        Ok(())
     }
 
     fn put_received_transparent_utxo(
@@ -4410,6 +4477,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             wallet::prune_nullifier_map(
                 self.conn.borrow(),
                 meta.block_height().saturating_sub(pruning_depth),
+                self.defer_bulk_nullifier_prune,
             )?;
         }
 

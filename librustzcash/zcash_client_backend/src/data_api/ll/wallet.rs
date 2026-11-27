@@ -281,12 +281,15 @@ pub struct PutBlocksRows {
 /// the `transparent-inputs` feature is enabled — transparent gap address maintenance for the
 /// involved accounts.
 ///
-/// This is the first stage of [`put_blocks`], which is equivalent to `put_blocks_rows` followed
+/// This is the first stage of [`put_blocks`], which persists the same row-level data followed
 /// by the note commitment tree updates (see [`build_subtrees`] and [`update_tree`]) and
-/// [`LowLevelWalletWrite::notify_scan_complete`]. It is exposed so that wallet stores that
-/// maintain their note commitment trees by other means can reuse the row-writing logic through
-/// the [`LowLevelWalletWrite`] interface without also taking on the [`WalletCommitmentTrees`]
-/// requirement.
+/// [`LowLevelWalletWrite::notify_scan_complete`]. Unlike [`put_blocks`], which defers
+/// `prune_nullifier_map` until after [`LowLevelWalletWrite::notify_scan_complete`] so a batch
+/// that closes a historic scan gap prunes immediately in the same call, direct callers of
+/// `put_blocks_rows` prune against the pre-scan `block_fully_scanned` height during stage 1.
+/// It is exposed so that wallet stores that maintain their note commitment trees by other means
+/// can reuse the row-writing logic through the [`LowLevelWalletWrite`] interface without also
+/// taking on the [`WalletCommitmentTrees`] requirement.
 ///
 /// The `TE` type parameter is unconstrained here (the row stage cannot produce a tree error);
 /// it exists so that errors propagate directly as the [`PutBlocksError`] of the enclosing
@@ -321,6 +324,27 @@ pub fn put_blocks_rows<DbT, SE, TE>(
     #[cfg(feature = "transparent-inputs")] gap_limits: GapLimits,
     from_state: &ChainState,
     blocks: Vec<ScannedBlock<<DbT as LowLevelWalletRead>::AccountId>>,
+) -> Result<PutBlocksRows, PutBlocksError<SE, TE>>
+where
+    DbT: PutBlocksRowsDbT<SE, <DbT as LowLevelWalletRead>::AccountRef>,
+    DbT::TxRef: Eq + Hash,
+{
+    put_blocks_rows_inner(
+        wallet_db,
+        #[cfg(feature = "transparent-inputs")]
+        gap_limits,
+        from_state,
+        blocks,
+        true,
+    )
+}
+
+fn put_blocks_rows_inner<DbT, SE, TE>(
+    wallet_db: &mut DbT,
+    #[cfg(feature = "transparent-inputs")] gap_limits: GapLimits,
+    from_state: &ChainState,
+    blocks: Vec<ScannedBlock<<DbT as LowLevelWalletRead>::AccountId>>,
+    prune_nullifiers: bool,
 ) -> Result<PutBlocksRows, PutBlocksError<SE, TE>>
 where
     DbT: PutBlocksRowsDbT<SE, <DbT as LowLevelWalletRead>::AccountRef>,
@@ -603,10 +627,12 @@ where
         }
     }
 
-    // Prune the nullifier map of entries we no longer need.
-    wallet_db
-        .prune_tracked_nullifiers(PRUNING_DEPTH)
-        .map_err(PutBlocksError::Storage)?;
+    if prune_nullifiers {
+        // Prune the nullifier map of entries we no longer need.
+        wallet_db
+            .prune_tracked_nullifiers(PRUNING_DEPTH)
+            .map_err(PutBlocksError::Storage)?;
+    }
 
     Ok(PutBlocksRows {
         sapling_commitments,
@@ -621,8 +647,10 @@ where
 
 /// Adds information about a sequence of scanned blocks to the provided data store.
 ///
-/// This is equivalent to persisting the row-level data via [`put_blocks_rows`] and then
-/// updating the note commitment trees with the returned commitments.
+/// Persists the row-level data (as in [`put_blocks_rows`]), updates the note commitment trees
+/// with the returned commitments, calls [`LowLevelWalletWrite::notify_scan_complete`], and then
+/// prunes `nullifier_map` against the updated `block_fully_scanned` frontier so a batch that
+/// closes a historic scan gap reclaims stale nullifiers in the same call.
 ///
 /// # Parameters
 /// - `wallet_db`: A handle to the underlying data store.
@@ -651,12 +679,13 @@ where
     DbT: PutBlocksDbT<SE, TE, <DbT as LowLevelWalletRead>::AccountRef>,
     DbT::TxRef: Eq + Hash,
 {
-    let rows = put_blocks_rows(
+    let rows = put_blocks_rows_inner(
         wallet_db,
         #[cfg(feature = "transparent-inputs")]
         gap_limits,
         from_state,
         blocks,
+        false,
     )?;
 
     let mut sapling_commitments = rows.sapling_commitments;
@@ -913,6 +942,14 @@ where
                 },
                 &note_positions,
             )
+            .map_err(PutBlocksError::Storage)?;
+
+        // Prune the nullifier map AFTER `notify_scan_complete` updates `scan_queue`,
+        // so the final historic batch of a cold restore observes the newly contiguous
+        // `fully_scanned_height` and prunes immediately instead of deferring a multi-second
+        // mass delete to the first warm app-open.
+        wallet_db
+            .prune_tracked_nullifiers(PRUNING_DEPTH)
             .map_err(PutBlocksError::Storage)?;
     }
 

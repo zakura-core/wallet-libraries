@@ -223,6 +223,7 @@ fn truncate_to_height<P: consensus::Parameters>(
             transparent_ledger_mode: None,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: *gap_limits,
+            defer_bulk_nullifier_prune: false,
         };
         wdb.with_sapling_tree_mut(|tree| {
             tree.truncate_to_checkpoint(&truncation_height)?;
