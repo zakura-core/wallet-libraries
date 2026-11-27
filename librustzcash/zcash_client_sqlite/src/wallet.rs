@@ -2803,16 +2803,16 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             anchor_height: BlockHeight,
             table_prefix: &'static str,
         ) -> Result<bool, SqliteClientError> {
-            conn.query_row(
-                &format!(
-                    "SELECT NOT EXISTS(
-                         SELECT 1 FROM v_{table_prefix}_shard_unscanned_ranges
-                         WHERE :anchor_height
-                            BETWEEN subtree_start_height
-                            AND IFNULL(subtree_end_height, :anchor_height)
-                         AND block_range_start <= :anchor_height
-                     )"
-                ),
+            let mut stmt = conn.prepare_cached(&format!(
+                "SELECT NOT EXISTS(
+                     SELECT 1 FROM v_{table_prefix}_shard_unscanned_ranges
+                     WHERE :anchor_height
+                        BETWEEN subtree_start_height
+                        AND IFNULL(subtree_end_height, :anchor_height)
+                     AND block_range_start <= :anchor_height
+                 )"
+            ))?;
+            stmt.query_row(
                 named_params![":anchor_height": u32::from(anchor_height)],
                 |row| row.get::<_, bool>(0),
             )
@@ -5225,11 +5225,8 @@ pub(crate) fn put_block(
     #[cfg(feature = "orchard")] ironwood_action_count: u32,
 ) -> Result<(), SqliteClientError> {
     let block_hash_data = conn
-        .query_row(
-            "SELECT hash FROM blocks WHERE height = ?",
-            [u32::from(block_height)],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
+        .prepare_cached("SELECT hash FROM blocks WHERE height = ?")?
+        .query_row([u32::from(block_height)], |row| row.get::<_, Vec<u8>>(0))
         .optional()?;
 
     // Ensure that in the case of an upsert, we don't overwrite block data

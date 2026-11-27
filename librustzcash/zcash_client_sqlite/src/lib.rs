@@ -552,6 +552,9 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
     ) -> Result<Self, rusqlite::Error> {
         rusqlite::Connection::open(path).and_then(move |conn| {
             rusqlite::vtab::array::load_module(&conn)?;
+            // Default rusqlite LRU cache capacity (16) thrashes across 3 shielded pools
+            // (Sapling, Orchard, Ironwood) + blocks/nullifiers during scanning.
+            conn.set_prepared_statement_cache_capacity(128);
             Ok(WalletDb {
                 conn,
                 params,
@@ -770,6 +773,9 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// `set_transparent_ledger_mode`. Modes are not persisted; reopened handles must be
     /// configured again.
     pub fn from_connection(conn: C, params: P, clock: CL, rng: R) -> Self {
+        // Default rusqlite LRU statement cache capacity (16) thrashes across
+        // Sapling, Orchard, Ironwood, blocks, and nullifier queries during scans.
+        conn.borrow().set_prepared_statement_cache_capacity(128);
         WalletDb {
             conn,
             params,
