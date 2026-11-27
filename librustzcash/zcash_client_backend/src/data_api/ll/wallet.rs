@@ -281,12 +281,15 @@ pub struct PutBlocksRows {
 /// the `transparent-inputs` feature is enabled — transparent gap address maintenance for the
 /// involved accounts.
 ///
-/// This is the first stage of [`put_blocks`], which is equivalent to `put_blocks_rows` followed
+/// This is the first stage of [`put_blocks`], which persists the same row-level data followed
 /// by the note commitment tree updates (see [`build_subtrees`] and [`update_tree`]) and
-/// [`LowLevelWalletWrite::notify_scan_complete`]. It is exposed so that wallet stores that
-/// maintain their note commitment trees by other means can reuse the row-writing logic through
-/// the [`LowLevelWalletWrite`] interface without also taking on the [`WalletCommitmentTrees`]
-/// requirement.
+/// [`LowLevelWalletWrite::notify_scan_complete`]. Unlike [`put_blocks`], which defers
+/// `prune_nullifier_map` until after [`LowLevelWalletWrite::notify_scan_complete`] so a batch
+/// that closes a historic scan gap prunes immediately in the same call, direct callers of
+/// `put_blocks_rows` prune against the pre-scan `block_fully_scanned` height during stage 1.
+/// It is exposed so that wallet stores that maintain their note commitment trees by other means
+/// can reuse the row-writing logic through the [`LowLevelWalletWrite`] interface without also
+/// taking on the [`WalletCommitmentTrees`] requirement.
 ///
 /// The `TE` type parameter is unconstrained here (the row stage cannot produce a tree error);
 /// it exists so that errors propagate directly as the [`PutBlocksError`] of the enclosing
@@ -644,8 +647,10 @@ where
 
 /// Adds information about a sequence of scanned blocks to the provided data store.
 ///
-/// This is equivalent to persisting the row-level data via [`put_blocks_rows`] and then
-/// updating the note commitment trees with the returned commitments.
+/// Persists the row-level data (as in [`put_blocks_rows`]), updates the note commitment trees
+/// with the returned commitments, calls [`LowLevelWalletWrite::notify_scan_complete`], and then
+/// prunes `nullifier_map` against the updated `block_fully_scanned` frontier so a batch that
+/// closes a historic scan gap reclaims stale nullifiers in the same call.
 ///
 /// # Parameters
 /// - `wallet_db`: A handle to the underlying data store.

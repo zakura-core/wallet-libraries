@@ -6422,7 +6422,24 @@ pub(crate) fn bulk_prune_nullifier_map_truncate<P: consensus::Parameters>(
     impl Drop for RestoreForeignKeys<'_> {
         fn drop(&mut self) {
             if self.restore {
-                let _ = self.conn.execute_batch("PRAGMA foreign_keys = ON;");
+                if let Err(err) = self.conn.execute_batch("PRAGMA foreign_keys = ON;") {
+                    tracing::error!(?err, "Failed to restore PRAGMA foreign_keys = ON");
+                    return;
+                }
+                match self
+                    .conn
+                    .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+                {
+                    Ok(1) => {}
+                    Ok(val) => tracing::error!(
+                        foreign_keys = val,
+                        "PRAGMA foreign_keys did not re-enable after bulk nullifier prune"
+                    ),
+                    Err(err) => tracing::error!(
+                        ?err,
+                        "Failed to verify PRAGMA foreign_keys after bulk nullifier prune"
+                    ),
+                }
             }
         }
     }
@@ -9662,6 +9679,100 @@ mod tests {
             .query_row("SELECT count(*) FROM nullifier_map", [], |row| row.get(0))
             .unwrap();
         assert_eq!(remaining_after_inline, i64::from(many_keep_count));
+    }
+
+    #[test]
+    fn put_blocks_closes_gap_and_runs_post_commit_bulk_prune() {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let activation = st.sapling_activation_height();
+        let total_blocks = (crate::PRUNING_DEPTH + 5) as usize;
+        let mut tip = activation;
+        for _ in 0..total_blocks {
+            let (h, _) = st.generate_empty_block();
+            tip = h;
+        }
+
+        // Scan everything after `activation` first (leaving a 1-block historic gap at
+        // `activation`, simulating recent-first restore).
+        st.scan_cached_blocks(activation + 1, total_blocks - 1);
+        assert!(st.wallet().block_fully_scanned().unwrap().is_none());
+
+        // Seed >10k stale nullifier rows below `tip - PRUNING_DEPTH` and a small surviving
+        // window at `tip - PRUNING_DEPTH`.
+        let cutoff = tip.saturating_sub(crate::PRUNING_DEPTH);
+        let stale_height = u32::from(cutoff) - 1;
+        let keep_height = u32::from(cutoff);
+        let stale_count: u32 = (super::BULK_NULLIFIER_PRUNE_THRESHOLD as u32) + 10;
+        let keep_count: u32 = 20;
+        {
+            let conn = st.wallet_mut().conn_mut();
+            conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+            let tx = conn.transaction().unwrap();
+            {
+                let mut ins_txl = tx
+                    .prepare(
+                        "INSERT INTO tx_locator_map (block_height, tx_index, txid)
+                         VALUES (?1, ?2, ?3)",
+                    )
+                    .unwrap();
+                let mut ins_nf = tx
+                    .prepare(
+                        "INSERT INTO nullifier_map (spend_pool, nf, block_height, tx_index)
+                         VALUES (?1, ?2, ?3, ?4)",
+                    )
+                    .unwrap();
+                for idx in 0..stale_count {
+                    let mut bytes = [0u8; 32];
+                    bytes[..4].copy_from_slice(&idx.to_le_bytes());
+                    bytes[4] = 5;
+                    ins_txl
+                        .execute(rusqlite::params![stale_height, idx, &bytes[..]])
+                        .unwrap();
+                    ins_nf
+                        .execute(rusqlite::params![2_i64, &bytes[..], stale_height, idx])
+                        .unwrap();
+                }
+                for idx in 0..keep_count {
+                    let mut bytes = [0u8; 32];
+                    bytes[..4].copy_from_slice(&idx.to_le_bytes());
+                    bytes[4] = 6;
+                    ins_txl
+                        .execute(rusqlite::params![keep_height, idx, &bytes[..]])
+                        .unwrap();
+                    ins_nf
+                        .execute(rusqlite::params![2_i64, &bytes[..], keep_height, idx])
+                        .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+
+        // Closing the 1-block gap via `WalletWrite::put_blocks` advances `block_fully_scanned`
+        // to `tip`, defers the >10k prune out of the scan tx, and reclaims it post-commit.
+        st.scan_cached_blocks(activation, 1);
+
+        let conn = st.wallet_mut().conn_mut();
+        let stale_remaining: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM nullifier_map WHERE block_height < ?1",
+                [u32::from(cutoff)],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let total_remaining: i64 = conn
+            .query_row("SELECT count(*) FROM nullifier_map", [], |row| row.get(0))
+            .unwrap();
+        let fk_enabled: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stale_remaining, 0);
+        assert_eq!(total_remaining, i64::from(keep_count));
+        assert_eq!(fk_enabled, 1);
     }
 }
 

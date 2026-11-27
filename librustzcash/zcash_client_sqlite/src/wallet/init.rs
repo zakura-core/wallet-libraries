@@ -662,10 +662,16 @@ fn init_wallet_db_internal<
             .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
             .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
         if auto_vacuum != 2 {
-            wdb.conn
+            if let Err(err) = wdb
+                .conn
                 .borrow()
                 .execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;")
-                .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
+            {
+                tracing::warn!(
+                    ?err,
+                    "Failed to enable incremental auto_vacuum on empty wallet DB; continuing"
+                );
+            }
         }
     }
 
