@@ -751,6 +751,11 @@ where
             CHUNK_SIZE,
             &sapling_stored.left_out,
         );
+        count_stored_root_mismatches::<_, SAPLING_SHARD_HEIGHT>(
+            &sapling_subtrees,
+            &sapling_stored.audited,
+            &STORED_ROOT_MISMATCHES,
+        );
 
         #[cfg(feature = "orchard")]
         let orchard_subtrees = build_subtrees_except::<_, ORCHARD_SHARD_HEIGHT>(
@@ -758,6 +763,12 @@ where
             &mut orchard_commitments,
             CHUNK_SIZE,
             &orchard_stored.left_out,
+        );
+        #[cfg(feature = "orchard")]
+        count_stored_root_mismatches::<_, ORCHARD_SHARD_HEIGHT>(
+            &orchard_subtrees,
+            &orchard_stored.audited,
+            &STORED_ROOT_MISMATCHES,
         );
 
         // The Ironwood note commitment tree is Orchard-shaped and so uses the Orchard shard
@@ -768,6 +779,12 @@ where
             &mut ironwood_commitments,
             CHUNK_SIZE,
             &ironwood_stored.left_out,
+        );
+        #[cfg(feature = "orchard")]
+        count_stored_root_mismatches::<_, ORCHARD_SHARD_HEIGHT>(
+            &ironwood_subtrees,
+            &ironwood_stored.audited,
+            &STORED_ROOT_MISMATCHES,
         );
 
         // Ensure that we have the same set of checkpoints across all trees. Each tree must gain a
@@ -885,27 +902,6 @@ where
                     block_range: from_state.block_height()..(last_scanned_height + 1),
                     error,
                 })
-            })?;
-        }
-
-        // Check the stored roots of the shards built in place of being left out.
-        wallet_db.with_sapling_tree_mut(|tree| {
-            count_stored_root_mismatches(tree, &sapling_stored.audited, &STORED_ROOT_MISMATCHES)
-                .map_err(PutBlocksError::ShardTree)
-        })?;
-        #[cfg(feature = "orchard")]
-        {
-            wallet_db.with_orchard_tree_mut(|tree| {
-                count_stored_root_mismatches(tree, &orchard_stored.audited, &STORED_ROOT_MISMATCHES)
-                    .map_err(PutBlocksError::ShardTree)
-            })?;
-            wallet_db.with_ironwood_tree_mut(|tree| {
-                count_stored_root_mismatches(
-                    tree,
-                    &ironwood_stored.audited,
-                    &STORED_ROOT_MISMATCHES,
-                )
-                .map_err(PutBlocksError::ShardTree)
             })?;
         }
 

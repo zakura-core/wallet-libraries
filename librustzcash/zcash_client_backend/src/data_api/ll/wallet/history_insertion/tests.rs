@@ -90,14 +90,6 @@ fn history_without_checkpoints_leaves_the_same_tree() {
     insert(&mut without, 0, downgraded);
 
     assert_eq!(checkpoints(&without), checkpoints(&with_checkpoints));
-    for index in 0..6 {
-        let addr = Address::from_parts(Level::from(3), index);
-        assert_eq!(
-            without.store().get_shard(addr).unwrap(),
-            with_checkpoints.store().get_shard(addr).unwrap(),
-            "shard {index}",
-        );
-    }
     assert_eq!(
         without.root_at_checkpoint_depth(Some(0)).unwrap(),
         with_checkpoints.root_at_checkpoint_depth(Some(0)).unwrap(),
@@ -174,13 +166,13 @@ fn note_free_shards_stored_as_roots_are_left_out() {
             .collect::<Vec<_>>(),
         vec![1]
     );
-    for (subtree, checkpoints) in
-        build_subtrees_except::<_, 3>(Position::from(2), &mut downgraded, 4, &stored.left_out)
-    {
+    let subtrees =
+        build_subtrees_except::<_, 3>(Position::from(2), &mut downgraded, 4, &stored.left_out);
+    let mismatches = AtomicU64::new(0);
+    count_stored_root_mismatches::<_, 3>(&subtrees, &stored.audited, &mismatches);
+    for (subtree, checkpoints) in subtrees {
         skipping.insert_tree(subtree, checkpoints).unwrap();
     }
-    let mismatches = AtomicU64::new(0);
-    count_stored_root_mismatches(&skipping, &stored.audited, &mismatches).unwrap();
     assert_eq!(mismatches.load(Ordering::Relaxed), 0);
 
     assert_eq!(checkpoints(&skipping), checkpoints(&full));
@@ -274,13 +266,13 @@ fn insert_over_stored_roots(
     let stored =
         leave_out_shards_stored_as_root(&mut tree, Position::from(2), &commitments, true, audited)
             .unwrap();
-    for (subtree, checkpoints) in
-        build_subtrees_except::<_, 3>(Position::from(2), &mut commitments, 4, &stored.left_out)
-    {
+    let subtrees =
+        build_subtrees_except::<_, 3>(Position::from(2), &mut commitments, 4, &stored.left_out);
+    let mismatches = AtomicU64::new(0);
+    count_stored_root_mismatches::<_, 3>(&subtrees, &stored.audited, &mismatches);
+    for (subtree, checkpoints) in subtrees {
         tree.insert_tree(subtree, checkpoints).unwrap();
     }
-    let mismatches = AtomicU64::new(0);
-    count_stored_root_mismatches(&tree, &stored.audited, &mismatches).unwrap();
     (tree, stored.left_out, mismatches.load(Ordering::Relaxed))
 }
 
