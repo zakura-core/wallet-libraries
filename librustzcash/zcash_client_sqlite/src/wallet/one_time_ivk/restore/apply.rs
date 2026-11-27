@@ -290,7 +290,16 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     if conflict || contradicted {
         return Ok(Admission::Rejected);
     }
-    if !covered(conn, account, candidate.height, through.height)? {
+    // Check coverage and the spend journal through the highest stored block, even if a suffix
+    // above `through.height` is currently queued as `Historic` for rescan, so a spend already
+    // recorded in that suffix is never omitted from admission.
+    let spend_through = conn
+        .query_row("SELECT MAX(height) FROM blocks", [], |r| {
+            r.get::<_, Option<u32>>(0)
+        })?
+        .map(BlockHeight::from)
+        .map_or(through.height, |h| h.max(through.height));
+    if !covered(conn, account, candidate.height, spend_through)? {
         return Ok(Admission::Uncovered);
     }
     // Tree material the scan stored only as roots, or left without checkpoints, can make
@@ -319,7 +328,7 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
             params![
                 recovered.nullifier().to_bytes(),
                 u32::from(candidate.height),
-                u32::from(through.height)
+                u32::from(spend_through)
             ],
             |r| r.get(0).map(crate::TxRef),
         )

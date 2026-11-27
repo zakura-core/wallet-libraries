@@ -11,15 +11,15 @@
 use std::{collections::HashMap, ops::Range};
 
 use orchard::note::Nullifier;
-use rusqlite::{Connection, named_params};
-use zcash_client_backend::data_api::ScannedBlock;
+use rusqlite::{Connection, named_params, params};
+use zcash_client_backend::data_api::{ScannedBlock, scanning::ScanPriority};
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{
     ShieldedPool,
     consensus::{BlockHeight, TxIndex},
 };
 
-use crate::{AccountUuid, error::SqliteClientError, wallet};
+use crate::{AccountUuid, error::SqliteClientError, wallet, wallet::scanning::priority_code};
 
 /// One recognized transaction, taken from a scanned block before storage consumes it.
 pub(crate) struct Entry {
@@ -44,6 +44,7 @@ pub(crate) struct Batch {
     coverage: Vec<(AccountUuid, Range<BlockHeight>)>,
     unlinked_spends: Vec<UnlinkedSpend>,
     rescan_range: Option<Range<BlockHeight>>,
+    suffix_rescan: Option<Range<BlockHeight>>,
 }
 
 /// Collects journal entries, coverage, and any unlinked spends of notes admitted after the scan
@@ -83,12 +84,67 @@ pub(crate) fn collect(
         }
     }
     let (unlinked_spends, rescan_range) = collect_unlinked_spends(conn, blocks)?;
+    let suffix_rescan = collect_rescan_discovered_note_suffix(conn, blocks)?;
     Ok(Batch {
         entries,
         coverage,
         unlinked_spends,
         rescan_range,
+        suffix_rescan,
     })
+}
+
+/// If `blocks` is a rescan of previously stored blocks that discovered a new Ironwood note while
+/// later blocks are already stored, returns `(batch_end + 1)..(stored_tip + 1)` so any already-
+/// scanned suffix is rescanned linearly with the new note's nullifier tracked (even after
+/// `nullifier_map` pruning).
+fn collect_rescan_discovered_note_suffix(
+    conn: &Connection,
+    blocks: &[ScannedBlock<AccountUuid>],
+) -> Result<Option<Range<BlockHeight>>, SqliteClientError> {
+    let (Some(batch_start), Some(batch_end)) = (
+        blocks.iter().map(ScannedBlock::height).min(),
+        blocks.iter().map(ScannedBlock::height).max(),
+    ) else {
+        return Ok(None);
+    };
+    let mut output_nfs = blocks
+        .iter()
+        .flat_map(|b| b.transactions().iter())
+        .flat_map(|tx| tx.ironwood_outputs().iter())
+        .filter_map(|out| out.nf())
+        .peekable();
+    if output_nfs.peek().is_none() {
+        return Ok(None);
+    }
+    let Some(stored_tip) = conn
+        .query_row("SELECT MAX(height) FROM blocks", [], |r| {
+            r.get::<_, Option<u32>>(0)
+        })?
+        .map(BlockHeight::from)
+    else {
+        return Ok(None);
+    };
+    if stored_tip <= batch_end {
+        return Ok(None);
+    }
+    let is_rescan: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM blocks WHERE height >= ?1 AND height <= ?2)",
+        params![u32::from(batch_start), u32::from(batch_end)],
+        |r| r.get(0),
+    )?;
+    if !is_rescan {
+        return Ok(None);
+    }
+    let mut known =
+        conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM ironwood_received_notes WHERE nf = ?1)")?;
+    for nf in output_nfs {
+        let already_known: bool = known.query_row([nf.to_bytes()], |r| r.get(0))?;
+        if !already_known {
+            return Ok(Some((batch_end + 1)..(stored_tip + 1)));
+        }
+    }
+    Ok(None)
 }
 
 /// Intersects `blocks`' unlinked Ironwood nullifier maps with currently unspent stored notes.
@@ -193,6 +249,27 @@ pub(crate) fn record(
     }
     if let Some(range) = batch.rescan_range {
         super::queue_rescan(conn, range)?;
+    }
+    if let Some(suffix) = batch.suffix_rescan {
+        let start = u32::from(suffix.start);
+        let end = u32::from(suffix.end);
+        let scanned_stretches: Vec<(u32, u32)> = conn
+            .prepare_cached(
+                "SELECT block_range_start, block_range_end FROM scan_queue
+                 WHERE priority = ?3 AND block_range_start < ?2 AND block_range_end > ?1
+                 ORDER BY block_range_start",
+            )?
+            .query_map(
+                params![start, end, priority_code(&ScanPriority::Scanned)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
+            .collect::<Result<_, _>>()?;
+        for (s, e) in scanned_stretches {
+            super::queue_rescan(
+                conn,
+                BlockHeight::from(s.max(start))..BlockHeight::from(e.min(end)),
+            )?;
+        }
     }
     for e in batch.entries {
         link_spends(conn, tpir_session, &e)?;
