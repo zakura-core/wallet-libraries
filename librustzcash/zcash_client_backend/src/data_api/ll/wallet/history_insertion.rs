@@ -223,31 +223,53 @@ where
     Ok((left_out, checked))
 }
 
-/// Compares each shard's root, computed from the commitments just inserted, with the root that was
+/// Compares each shard's root, computed from the freshly built `subtrees`, with the root that was
 /// stored for it, and counts a mismatch in `mismatches`.
 ///
-/// Insertion keeps a stored root as the annotation of a shard that does not collapse to a leaf, so
-/// the root is computed without it.
-pub(super) fn count_stored_root_mismatches<S, const DEPTH: u8, const SHARD_HEIGHT: u8>(
-    tree: &ShardTree<S, DEPTH, SHARD_HEIGHT>,
-    shards: &[(u64, S::H)],
+/// Computed directly from `subtrees` rather than reading back from the store after insertion: when
+/// a note-free shard collapses to a leaf during insertion, `shardtree` reuses the existing stored
+/// root annotation instead of rehashing its children, which would hide a wrong stored root.
+pub(super) fn count_stored_root_mismatches<H, const SHARD_HEIGHT: u8>(
+    subtrees: &[(LocatedPrunableTree<H>, BTreeMap<BlockHeight, Position>)],
+    shards: &[(u64, H)],
     mismatches: &AtomicU64,
-) -> Result<(), ShardTreeError<S::Error>>
-where
-    S: ShardStore<CheckpointId = BlockHeight>,
-    S::H: Clone + PartialEq + Hashable,
+) where
+    H: Clone + PartialEq + Hashable,
 {
+    if shards.is_empty() {
+        return;
+    }
+
+    let shard_level = Level::from(SHARD_HEIGHT);
+    let mut accs: BTreeMap<u64, LocatedPrunableTree<H>> = shards
+        .iter()
+        .map(|(index, _)| {
+            let addr = Address::from_parts(shard_level, *index);
+            (*index, LocatedPrunableTree::empty(addr))
+        })
+        .collect();
+
+    for (subtree, _) in subtrees {
+        let first_shard = u64::from(subtree.root_addr().position_range_start()) >> SHARD_HEIGHT;
+        let last_shard =
+            u64::from(subtree.root_addr().position_range_end()).saturating_sub(1) >> SHARD_HEIGHT;
+        if accs.range(first_shard..=last_shard).next().is_none() {
+            continue;
+        }
+        for piece in subtree.clone().decompose_to_level(shard_level) {
+            let index = u64::from(piece.root_addr().position_range_start()) >> SHARD_HEIGHT;
+            if let Some(acc) = accs.get_mut(&index)
+                && let Ok((updated, _)) = acc.insert_subtree(piece, false)
+            {
+                *acc = updated;
+            }
+        }
+    }
+
     for (index, stored_root) in shards {
-        let shard = tree
-            .store()
-            .get_shard(Address::from_parts(Level::from(SHARD_HEIGHT), *index))
-            .map_err(ShardTreeError::Storage)?;
-        let computed = shard.and_then(|shard| {
-            shard
-                .reannotate_root(None)
-                .root_hash(Position::from((index + 1) << SHARD_HEIGHT))
-                .ok()
-        });
+        let computed = accs
+            .get(index)
+            .and_then(|acc| acc.root_hash(acc.root_addr().position_range_end()).ok());
         if computed.is_some_and(|computed| &computed != stored_root) {
             mismatches.fetch_add(1, Ordering::Relaxed);
             warn!(
@@ -256,7 +278,6 @@ where
             );
         }
     }
-    Ok(())
 }
 
 /// [`build_subtrees`] for the commitments outside the shards in `left_out`: ascending indices of
