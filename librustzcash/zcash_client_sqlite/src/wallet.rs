@@ -6315,33 +6315,92 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
 /// (which runs outside the scan transaction with `OP_Clear` truncate optimization).
 pub(crate) const BULK_NULLIFIER_PRUNE_THRESHOLD: i64 = 10_000;
 
-pub(crate) fn prune_nullifier_map(
-    conn: &rusqlite::Transaction<'_>,
-    block_height: BlockHeight,
-    defer_bulk: bool,
-) -> Result<(), SqliteClientError> {
-    // Check if there is a massive post-restore backlog (> 10k rows). When called from
-    // `WalletDb<C: BorrowMut<Connection>>::put_blocks` (`defer_bulk == true`), defer to
-    // `bulk_prune_nullifier_map_truncate` right after `put_blocks` commits so SQLite can
-    // use its O(pages) `OP_Clear` B-tree truncate instead of millions of random index deletes.
-    if defer_bulk {
-        let mut stmt_count = conn.prepare_cached(
+/// Returns `true` when `nullifier_map` has more than [`BULK_NULLIFIER_PRUNE_THRESHOLD`]
+/// stale rows (`block_height < cutoff`) and strictly more stale rows than surviving rows
+/// (`block_height >= cutoff`), so copying surviving rows and using SQLite's `OP_Clear`
+/// truncate beats indexed `DELETE WHERE block_height < cutoff`.
+fn should_bulk_truncate_nullifier_map(
+    conn: &rusqlite::Connection,
+    cutoff: u32,
+) -> Result<bool, SqliteClientError> {
+    let probe_limit = BULK_NULLIFIER_PRUNE_THRESHOLD + 1;
+    let stale_probe: i64 = conn
+        .prepare_cached(
             "SELECT count(*) FROM (
                 SELECT 1 FROM nullifier_map
                 WHERE block_height < :block_height
                 LIMIT :limit
             )",
-        )?;
-        let stale_rows: i64 = stmt_count.query_row(
+        )?
+        .query_row(
             named_params![
-                ":block_height": u32::from(block_height),
-                ":limit": BULK_NULLIFIER_PRUNE_THRESHOLD + 1,
+                ":block_height": cutoff,
+                ":limit": probe_limit,
             ],
             |row| row.get(0),
         )?;
-        if stale_rows > BULK_NULLIFIER_PRUNE_THRESHOLD {
-            return Ok(());
-        }
+    if stale_probe <= BULK_NULLIFIER_PRUNE_THRESHOLD {
+        return Ok(false);
+    }
+
+    let keep_probe: i64 = conn
+        .prepare_cached(
+            "SELECT count(*) FROM (
+                SELECT 1 FROM nullifier_map
+                WHERE block_height >= :block_height
+                LIMIT :limit
+            )",
+        )?
+        .query_row(
+            named_params![
+                ":block_height": cutoff,
+                ":limit": probe_limit,
+            ],
+            |row| row.get(0),
+        )?;
+    if keep_probe <= BULK_NULLIFIER_PRUNE_THRESHOLD {
+        return Ok(true);
+    }
+
+    // Both partitions exceed the threshold (e.g. an early historic batch during
+    // out-of-order restore while a large recent range is still retained above `cutoff`).
+    // Only truncate when stale rows strictly outnumber surviving rows.
+    let stale_count: i64 = conn
+        .prepare_cached(
+            "SELECT count(*) FROM nullifier_map
+            WHERE block_height < :block_height",
+        )?
+        .query_row(named_params![":block_height": cutoff], |row| row.get(0))?;
+    let keep_capped: i64 = conn
+        .prepare_cached(
+            "SELECT count(*) FROM (
+                SELECT 1 FROM nullifier_map
+                WHERE block_height >= :block_height
+                LIMIT :limit
+            )",
+        )?
+        .query_row(
+            named_params![
+                ":block_height": cutoff,
+                ":limit": stale_count,
+            ],
+            |row| row.get(0),
+        )?;
+    Ok(keep_capped < stale_count)
+}
+
+pub(crate) fn prune_nullifier_map(
+    conn: &rusqlite::Transaction<'_>,
+    block_height: BlockHeight,
+    defer_bulk: bool,
+) -> Result<(), SqliteClientError> {
+    // Check if there is a massive post-restore backlog (> 10k stale rows and more stale
+    // rows than surviving rows). When called from
+    // `WalletDb<C: BorrowMut<Connection>>::put_blocks` (`defer_bulk == true`), defer to
+    // `bulk_prune_nullifier_map_truncate` right after `put_blocks` commits so SQLite can
+    // use its O(pages) `OP_Clear` B-tree truncate instead of millions of random index deletes.
+    if defer_bulk && should_bulk_truncate_nullifier_map(conn, u32::from(block_height))? {
+        return Ok(());
     }
 
     // Delete from `nullifier_map` directly via `nf_map_locator_idx(block_height, tx_index)`
@@ -6379,14 +6438,7 @@ pub(crate) fn bulk_prune_nullifier_map_truncate<P: consensus::Parameters>(
         return Ok(false);
     };
     let initial_cutoff = u32::from(meta.block_height().saturating_sub(pruning_depth));
-    let has_stale: bool = conn
-        .prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM nullifier_map WHERE block_height < :block_height LIMIT 1)",
-        )?
-        .query_row(named_params![":block_height": initial_cutoff], |row| {
-            row.get(0)
-        })?;
-    if !has_stale {
+    if !should_bulk_truncate_nullifier_map(conn, initial_cutoff)? {
         return Ok(false);
     }
 
@@ -6422,12 +6474,7 @@ pub(crate) fn bulk_prune_nullifier_map_truncate<P: consensus::Parameters>(
             return Ok(false);
         };
         let cutoff = u32::from(meta.block_height().saturating_sub(pruning_depth));
-        let has_stale: bool = tx
-            .prepare_cached(
-                "SELECT EXISTS(SELECT 1 FROM nullifier_map WHERE block_height < :block_height LIMIT 1)",
-            )?
-            .query_row(named_params![":block_height": cutoff], |row| row.get(0))?;
-        if !has_stale {
+        if !should_bulk_truncate_nullifier_map(&tx, cutoff)? {
             return Ok(false);
         }
 
@@ -9581,6 +9628,66 @@ mod tests {
             .query_row("SELECT count(*) FROM nullifier_map", [], |row| row.get(0))
             .unwrap();
         assert_eq!(inline_remaining, i64::from(keep_count));
+
+        // When surviving rows >= stale rows (e.g. an early historic batch during out-of-order
+        // restore while a large recent tail is retained above `cutoff`), copy-and-truncate must
+        // be skipped and `prune_nullifier_map(..., defer_bulk = true)` must delete inline.
+        conn.execute("DELETE FROM nullifier_map", []).unwrap();
+        conn.execute("DELETE FROM tx_locator_map", []).unwrap();
+        let many_keep_count: u32 = stale_count + 50;
+        {
+            let tx = conn.transaction().unwrap();
+            {
+                let mut ins_txl = tx
+                    .prepare(
+                        "INSERT INTO tx_locator_map (block_height, tx_index, txid)
+                         VALUES (?1, ?2, ?3)",
+                    )
+                    .unwrap();
+                let mut ins_nf = tx
+                    .prepare(
+                        "INSERT INTO nullifier_map (spend_pool, nf, block_height, tx_index)
+                         VALUES (?1, ?2, ?3, ?4)",
+                    )
+                    .unwrap();
+                for idx in 0..stale_count {
+                    let mut bytes = [0u8; 32];
+                    bytes[..4].copy_from_slice(&idx.to_le_bytes());
+                    bytes[4] = 3;
+                    ins_txl
+                        .execute(rusqlite::params![stale_height, idx, &bytes[..]])
+                        .unwrap();
+                    ins_nf
+                        .execute(rusqlite::params![2_i64, &bytes[..], stale_height, idx])
+                        .unwrap();
+                }
+                for idx in 0..many_keep_count {
+                    let mut bytes = [0u8; 32];
+                    bytes[..4].copy_from_slice(&idx.to_le_bytes());
+                    bytes[4] = 4;
+                    ins_txl
+                        .execute(rusqlite::params![keep_height, idx, &bytes[..]])
+                        .unwrap();
+                    ins_nf
+                        .execute(rusqlite::params![2_i64, &bytes[..], keep_height, idx])
+                        .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+        assert!(
+            !super::bulk_prune_nullifier_map_truncate(conn, &params, pruning_depth).unwrap(),
+            "bulk truncate must not copy-and-reinsert when surviving rows >= stale rows"
+        );
+        {
+            let tx = conn.transaction().unwrap();
+            super::prune_nullifier_map(&tx, cutoff, true).unwrap();
+            tx.commit().unwrap();
+        }
+        let remaining_after_inline: i64 = conn
+            .query_row("SELECT count(*) FROM nullifier_map", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining_after_inline, i64::from(many_keep_count));
     }
 }
 
