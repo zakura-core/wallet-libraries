@@ -6316,9 +6316,9 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
 pub(crate) const BULK_NULLIFIER_PRUNE_THRESHOLD: i64 = 10_000;
 
 /// Returns `true` when `nullifier_map` has more than [`BULK_NULLIFIER_PRUNE_THRESHOLD`]
-/// stale rows (`block_height < cutoff`) and strictly more stale rows than surviving rows
-/// (`block_height >= cutoff`), so copying surviving rows and using SQLite's `OP_Clear`
-/// truncate beats indexed `DELETE WHERE block_height < cutoff`.
+/// stale rows (`block_height < cutoff`) and at most [`BULK_NULLIFIER_PRUNE_THRESHOLD`]
+/// surviving rows (`block_height >= cutoff`), keeping the in-memory copy-and-reinsert
+/// bounded while letting SQLite's `OP_Clear` truncate reclaim large stale backlogs.
 fn should_bulk_truncate_nullifier_map(
     conn: &rusqlite::Connection,
     cutoff: u32,
@@ -6358,35 +6358,7 @@ fn should_bulk_truncate_nullifier_map(
             ],
             |row| row.get(0),
         )?;
-    if keep_probe <= BULK_NULLIFIER_PRUNE_THRESHOLD {
-        return Ok(true);
-    }
-
-    // Both partitions exceed the threshold (e.g. an early historic batch during
-    // out-of-order restore while a large recent range is still retained above `cutoff`).
-    // Only truncate when stale rows strictly outnumber surviving rows.
-    let stale_count: i64 = conn
-        .prepare_cached(
-            "SELECT count(*) FROM nullifier_map
-            WHERE block_height < :block_height",
-        )?
-        .query_row(named_params![":block_height": cutoff], |row| row.get(0))?;
-    let keep_capped: i64 = conn
-        .prepare_cached(
-            "SELECT count(*) FROM (
-                SELECT 1 FROM nullifier_map
-                WHERE block_height >= :block_height
-                LIMIT :limit
-            )",
-        )?
-        .query_row(
-            named_params![
-                ":block_height": cutoff,
-                ":limit": stale_count,
-            ],
-            |row| row.get(0),
-        )?;
-    Ok(keep_capped < stale_count)
+    Ok(keep_probe <= BULK_NULLIFIER_PRUNE_THRESHOLD)
 }
 
 pub(crate) fn prune_nullifier_map(
@@ -6394,8 +6366,8 @@ pub(crate) fn prune_nullifier_map(
     block_height: BlockHeight,
     defer_bulk: bool,
 ) -> Result<(), SqliteClientError> {
-    // Check if there is a massive post-restore backlog (> 10k stale rows and more stale
-    // rows than surviving rows). When called from
+    // Check if there is a massive post-restore backlog (> 10k stale rows and <= 10k
+    // surviving rows). When called from
     // `WalletDb<C: BorrowMut<Connection>>::put_blocks` (`defer_bulk == true`), defer to
     // `bulk_prune_nullifier_map_truncate` right after `put_blocks` commits so SQLite can
     // use its O(pages) `OP_Clear` B-tree truncate instead of millions of random index deletes.
@@ -9629,12 +9601,14 @@ mod tests {
             .unwrap();
         assert_eq!(inline_remaining, i64::from(keep_count));
 
-        // When surviving rows >= stale rows (e.g. an early historic batch during out-of-order
-        // restore while a large recent tail is retained above `cutoff`), copy-and-truncate must
-        // be skipped and `prune_nullifier_map(..., defer_bulk = true)` must delete inline.
+        // When surviving rows exceed `BULK_NULLIFIER_PRUNE_THRESHOLD` (even if stale rows
+        // still outnumber surviving rows), copy-and-truncate must be skipped to keep the
+        // in-memory survivor buffer bounded, and `prune_nullifier_map(..., defer_bulk = true)`
+        // must delete inline.
         conn.execute("DELETE FROM nullifier_map", []).unwrap();
         conn.execute("DELETE FROM tx_locator_map", []).unwrap();
-        let many_keep_count: u32 = stale_count + 50;
+        let many_stale_count: u32 = stale_count + 50;
+        let many_keep_count: u32 = stale_count;
         {
             let tx = conn.transaction().unwrap();
             {
@@ -9650,7 +9624,7 @@ mod tests {
                          VALUES (?1, ?2, ?3, ?4)",
                     )
                     .unwrap();
-                for idx in 0..stale_count {
+                for idx in 0..many_stale_count {
                     let mut bytes = [0u8; 32];
                     bytes[..4].copy_from_slice(&idx.to_le_bytes());
                     bytes[4] = 3;
@@ -9677,7 +9651,7 @@ mod tests {
         }
         assert!(
             !super::bulk_prune_nullifier_map_truncate(conn, &params, pruning_depth).unwrap(),
-            "bulk truncate must not copy-and-reinsert when surviving rows >= stale rows"
+            "bulk truncate must skip copy-and-reinsert when surviving rows exceed threshold"
         );
         {
             let tx = conn.transaction().unwrap();
