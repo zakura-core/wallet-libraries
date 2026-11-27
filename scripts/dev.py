@@ -53,6 +53,14 @@ CONFIGS = {
     "service-config": (["-p", "zakura-service-config"], []),
     # Wallet PIR config profile and its validation CLI.
     "pir-config": (["-p", "zakura-pir-config"], []),
+    # The post-quantum crates are their own workspace, on a Common 5 git pin: see
+    # zakura/transparent-pq/Cargo.toml for why they cannot share this one's graph.
+    # Unpublished deterministic PQ key lifecycle, without transaction integration.
+    "transparent-pq-keys": (["--manifest-path", "zakura/transparent-pq/Cargo.toml", "-p", "transparent-pq-keys"], []),
+    # Unpublished PQ key pool: issuance window, replenishment and restore.
+    "transparent-pq-pool": (["--manifest-path", "zakura/transparent-pq/Cargo.toml", "-p", "transparent-pq-pool"], []),
+    # Unpublished PQ outputs, their address receiver and signed spends.
+    "transparent-pq-wallet": (["--manifest-path", "zakura/transparent-pq/Cargo.toml", "-p", "transparent-pq-wallet"], []),
     # Role lanes cover formats and server-only helpers independently.
     "pir-protocol": (["-p", "zakura-pir-protocol"], ["enhance", "status", "transparent-inputs", "receiver-crypto", "native", "http-endpoint"]),
     "pir-server": (["-p", "zakura-pir-server-core", "-p", "zakura-pir-publisher", "-p", "zakura-pir-query-server"], ["enhance", "status", "transparent", "receiver", "receiver-crypto"]),
