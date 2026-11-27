@@ -522,6 +522,75 @@ where
     ))
 }
 
+/// SQL expression returning the total value (in zatoshis) received by `account_id_expr` in the
+/// transaction identified by `tx_id_expr` across all pools, excluding disputed one-time receipts.
+///
+/// Used to evaluate amount-tiered [`ConfirmationsPolicy`] thresholds at the transfer level rather
+/// than per individual note, so splitting one transfer across multiple outputs does not lower its
+/// confirmation requirement.
+pub(crate) fn tx_received_value_sql(tx_id_expr: &str, account_id_expr: &str) -> String {
+    format!(
+        "(COALESCE((SELECT SUM(value) FROM sapling_received_notes \
+            WHERE transaction_id = {tx_id_expr} AND account_id = {account_id_expr}), 0) \
+         + COALESCE((SELECT SUM(value) FROM orchard_received_notes \
+            WHERE transaction_id = {tx_id_expr} AND account_id = {account_id_expr}), 0) \
+         + COALESCE((SELECT SUM(value) FROM ironwood_received_notes \
+            WHERE transaction_id = {tx_id_expr} AND account_id = {account_id_expr} \
+              AND id NOT IN (SELECT note_id FROM ironwood_one_time_disputed_receipts)), 0) \
+         + COALESCE((SELECT SUM(value_zat) FROM transparent_received_outputs \
+            WHERE transaction_id = {tx_id_expr} AND account_id = {account_id_expr}), 0))"
+    )
+}
+
+/// SQL expression returning [`tx_received_value_sql`] for notes that are not stabilized and still
+/// within the policy's maximum untrusted confirmation window (`:untrusted_floor_height`), and
+/// `fallback_value_expr` for older or stabilized notes whose confirmations are already satisfied
+/// under every tier.
+pub(crate) fn recent_tx_received_value_sql(
+    tx_id_expr: &str,
+    account_id_expr: &str,
+    mined_height_expr: &str,
+    stabilized_expr: &str,
+    fallback_value_expr: &str,
+) -> String {
+    format!(
+        "CASE WHEN {stabilized_expr} = 0 \
+            AND ({mined_height_expr} IS NULL OR {mined_height_expr} > :untrusted_floor_height) \
+         THEN {} ELSE {fallback_value_expr} END",
+        tx_received_value_sql(tx_id_expr, account_id_expr),
+    )
+}
+
+/// SQL expression returning the largest originating transfer value among transparent inputs
+/// consumed by a shielding transaction (`tro` / `tt`). When `recent_only` is true, only inputs
+/// without a confirmed height below `:untrusted_floor_height` are evaluated so old confirmed
+/// inputs neither run subqueries nor inflate a newer input's tier.
+pub(crate) fn shielding_origin_value_sql(recent_only: bool) -> String {
+    let origin_value = tx_received_value_sql("tro.transaction_id", "tro.account_id");
+    if recent_only {
+        format!(
+            "COALESCE(MAX(CASE WHEN tro.id IS NOT NULL \
+                AND (tt.mined_height IS NULL OR tt.mined_height > :untrusted_floor_height) \
+             THEN {origin_value} ELSE 0 END), 0)"
+        )
+    } else {
+        format!("COALESCE(MAX(CASE WHEN tro.id IS NOT NULL THEN {origin_value} ELSE 0 END), 0)")
+    }
+}
+
+/// Converts a SQL-computed received transfer sum (in zatoshis) to [`Zatoshis`], saturating at
+/// [`Zatoshis::const_from_u64(MAX_MONEY)`] only if a malformed multi-row sum ever exceeded
+/// `MAX_MONEY` while still rejecting negative values as corruption.
+pub(crate) fn transfer_value_from_raw(raw: i64) -> Result<Zatoshis, SqliteClientError> {
+    if raw < 0 {
+        return Err(SqliteClientError::CorruptedData(format!(
+            "Negative received transfer value: {raw}"
+        )));
+    }
+    Ok(Zatoshis::from_u64(raw as u64)
+        .unwrap_or(Zatoshis::const_from_u64(zcash_protocol::value::MAX_MONEY)))
+}
+
 /// Selects all the unspent notes with value greater than [`zip317::MARGINAL_FEE`] and for the
 /// specified shielded protocols from a given account, excepting any explicitly excluded note
 /// identifiers.
@@ -561,6 +630,14 @@ where
     } = table_constants::<SqliteClientError>(protocol)?;
 
     // Select all unspent notes belonging to the given account, ignoring dust notes.
+    let tx_received_value = recent_tx_received_value_sql(
+        "t.id_tx",
+        "rn.account_id",
+        "t.block",
+        "rn.witness_stabilized",
+        "rn.value",
+    );
+    let shielding_origin_value = shielding_origin_value_sql(true);
     let mut stmt_select_notes = conn.prepare_cached(&format!(
         "SELECT
              rn.id AS id, t.txid, rn.{output_index_col},
@@ -571,7 +648,10 @@ where
              rn.witness_stabilized,
              IFNULL(t.trust_status, 0) AS trust_status,
              MAX(tt.mined_height) AS max_shielding_input_height,
-             MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust
+             MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust,
+             {tx_received_value} AS tx_received_value,
+             COALESCE(SUM(tro.value_zat), 0) AS shielding_inputs_value,
+             {shielding_origin_value} AS shielding_origin_value
          FROM {table_prefix}_received_notes rn
          INNER JOIN accounts ON accounts.id = rn.account_id
          INNER JOIN transactions t ON t.id_tx = rn.transaction_id
@@ -626,11 +706,14 @@ where
 
     let account_uuid = account.0;
     let target_height_arg = u32::from(target_height);
+    let untrusted_floor_height_arg =
+        u32::from(target_height.saturating_sub(u32::from(confirmations_policy.untrusted())));
     let min_value = u64::from(zip317::MARGINAL_FEE);
     let overridable_owners = overridable_owners_rarray(lock_filter);
     let mut sql_params: Vec<(&str, &dyn ToSql)> = vec![
         (":account_uuid", &account_uuid),
         (":target_height", &target_height_arg),
+        (":untrusted_floor_height", &untrusted_floor_height_arg),
         (":exclude", &excluded_ptr),
         (":min_value", &min_value),
     ];
@@ -644,6 +727,17 @@ where
             let witness_stabilized = row.get::<_, bool>("witness_stabilized")?;
             let tx_trust_status = row.get::<_, bool>("trust_status")?;
             let tx_shielding_inputs_trusted = row.get::<_, bool>("min_shielding_input_trust")?;
+            let tx_received_value =
+                transfer_value_from_raw(row.get::<_, i64>("tx_received_value")?)?;
+            let shielding_inputs_value =
+                transfer_value_from_raw(row.get::<_, i64>("shielding_inputs_value")?)?;
+            let shielding_origin_value =
+                transfer_value_from_raw(row.get::<_, i64>("shielding_origin_value")?)?;
+            let value = Zatoshis::from_nonnegative_i64(row.get("value")?)?;
+            let transfer_value = tx_received_value
+                .max(value)
+                .max(shielding_inputs_value)
+                .max(shielding_origin_value);
             let shard_scan_priority = max_priority_raw
                 .map(|code| {
                     parse_priority_code(code).ok_or_else(|| {
@@ -660,6 +754,7 @@ where
                 shard_scan_priority,
                 tx_trust_status,
                 tx_shielding_inputs_trusted,
+                transfer_value,
             ))
         },
     )?;
@@ -672,6 +767,7 @@ where
                 max_shard_priority,
                 tx_trusted,
                 tx_shielding_inputs_trusted,
+                transfer_value,
             ) => {
                 let shard_witness_available = witness_stabilized
                     || max_shard_priority.is_some_and(|p| p <= ScanPriority::Scanned);
@@ -682,7 +778,7 @@ where
                     .is_some_and(|(h, ah)| h <= ah);
 
                 let has_confirmations = witness_stabilized
-                    || confirmations_policy.confirmations_until_spendable(
+                    || confirmations_policy.confirmations_until_spendable_for_value(
                         target_height,
                         PoolType::Shielded(protocol),
                         Some(note.spending_key_scope()),
@@ -690,6 +786,7 @@ where
                         tx_trusted,
                         note.max_shielding_input_height(),
                         tx_shielding_inputs_trusted,
+                        transfer_value,
                     ) == 0;
 
                 match (
@@ -769,21 +866,6 @@ where
     // not be reliably constructable. The selection query will use this to filter out such notes.
     let tip_unscanned = unscanned_tip_exists(conn, anchor_height, table_prefix)?;
 
-    // The goal of this SQL statement is to select the oldest notes until the required
-    // value has been reached.
-    // 1) Use a window function to create a view of all notes, ordered from oldest to
-    //    newest, with an additional column containing a running sum:
-    //    - Unspent notes accumulate the values of all unspent notes in that note's
-    //      account, up to itself.
-    //    - Spent notes accumulate the values of all notes in the transaction they were
-    //      spent in, up to itself.
-    //
-    // 2) Select all unspent notes in the desired account, along with their running sum.
-    //
-    // 3) Select all notes for which the running sum was less than the required value, as
-    //    well as a single note for which the sum was greater than or equal to the
-    //    required value, bringing the sum of all selected notes across the threshold.
-    //
     // AGE is the note's commitment tree position: positions are assigned in strict chain
     // order, so ordering by position is ordering by the age of the note on chain. The row
     // id is NOT a usable proxy for age — ids are assigned in SCAN order, and priority
@@ -791,33 +873,15 @@ where
     // newest notes carry its lowest ids.
     //
     // A `LockFilter::Policy` that prefers one lock tier (`PreferUnlocked`/`PreferLocked`)
-    // accumulates the running sum in tier order (via the leading window `ORDER BY` key) so
-    // that the preferred tier is drawn upon first; age order is retained as the secondary
-    // key so that within each tier the oldest notes are still selected first. Because the
-    // window order need not match the CTE's physical output order, the threshold-crossing
-    // note is chosen as the note with the smallest running sum at or above the target
-    // (`ORDER BY so_far`).
+    // orders by lock tier first and age second so the preferred tier is drawn upon first.
+    // Target truncation happens in Rust after per-note confirmation filtering so notes that
+    // pass the anchor check but still await higher untrusted confirmations never crowd out
+    // newer notes that have already met their tier.
     let tier = locked_tier_expr(lock_filter, "rn");
-    let window_frame = match &tier {
-        Some((expr, direction)) => format!(
-            "ORDER BY {expr} {direction}, rn.commitment_tree_position, rn.id ROWS UNBOUNDED PRECEDING"
-        ),
-        None => "ORDER BY rn.commitment_tree_position, rn.id ROWS UNBOUNDED PRECEDING".to_string(),
-    };
-    let so_far = match selection {
-        ValueSelection::Accumulate => format!("SUM(value) OVER ({window_frame})"),
-        ValueSelection::LargestFirst | ValueSelection::SmallestFirst { .. } => "0".to_string(),
-    };
-    // The single-covering tail selects FROM the CTE, where `rn` is out of scope, so the tier
-    // expression is materialized as a CTE column with the direction applied at the ordering
-    // site; a constant stands in when the lock filter admits only one tier and no preference
-    // applies.
     let (tier_column, tier_direction) = tier
         .as_ref()
         .map(|(expr, direction)| (expr.as_str(), *direction))
         .unwrap_or(("0", "ASC"));
-    let crossing_note_subquery =
-        "SELECT * from eligible WHERE so_far >= :target_value ORDER BY so_far LIMIT 1";
     let one_time_first = if protocol == ShieldedPool::Ironwood {
         "one_time_key_id IS NOT NULL DESC, "
     } else {
@@ -828,22 +892,14 @@ where
                 diversifier, value, {note_reconstruction_cols}, commitment_tree_position,
                 ufvk, recipient_key_scope,
                 lock_tier, mined_height, witness_stabilized, trust_status,
-                max_shielding_input_height, min_shielding_input_trust"
+                max_shielding_input_height, min_shielding_input_trust,
+                tx_received_value, shielding_inputs_value, shielding_origin_value"
     );
-    // The `eligible` CTE is shared; only the selection over it differs by shape. Accumulation
-    // takes every note below the running-sum threshold plus the threshold-crossing note;
-    // single-covering takes the individually sufficient notes ordered by lock tier first and
-    // age second — the same key order the accumulation window uses, so a `PreferUnlocked` or
-    // `PreferLocked` caller draws its preferred tier before an older note of the other tier —
-    // and relies on the caller to take the head (the Rust-side confirmations filter below may
-    // drop leading rows, so the limit cannot be applied in SQL).
     let selection_tail = match selection {
         ValueSelection::Accumulate => format!(
             "SELECT {result_columns}
-         FROM eligible WHERE so_far < :target_value
-         UNION
-         SELECT {result_columns}
-         FROM ({crossing_note_subquery})"
+         FROM eligible
+         ORDER BY lock_tier {tier_direction}, commitment_tree_position, id"
         ),
         ValueSelection::LargestFirst => format!(
             "SELECT {result_columns}
@@ -857,6 +913,14 @@ where
         ),
     };
     let eligible_condition = output_eligible_condition(lock_filter, "rn");
+    let tx_received_value = recent_tx_received_value_sql(
+        "t.id_tx",
+        "rn.account_id",
+        "t.block",
+        "rn.witness_stabilized",
+        "rn.value",
+    );
+    let shielding_origin_value = shielding_origin_value_sql(true);
     let mut stmt_select_notes = conn.prepare_cached(&format!(
         "WITH eligible AS (
              SELECT
@@ -864,13 +928,15 @@ where
                  rn.diversifier, rn.value,
                  {note_reconstruction_cols}, rn.commitment_tree_position,
                  {tier_column} AS lock_tier,
-                 {so_far} AS so_far,
                  accounts.ufvk as ufvk, rn.recipient_key_scope,
                  t.block AS mined_height,
                  rn.witness_stabilized,
                  IFNULL(t.trust_status, 0) AS trust_status,
                  MAX(tt.mined_height) AS max_shielding_input_height,
-                 MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust
+                 MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust,
+                 {tx_received_value} AS tx_received_value,
+                 COALESCE(SUM(tro.value_zat), 0) AS shielding_inputs_value,
+                 {shielding_origin_value} AS shielding_origin_value
              FROM {table_prefix}_received_notes rn
              INNER JOIN accounts ON accounts.id = rn.account_id
              INNER JOIN transactions t ON t.id_tx = rn.transaction_id
@@ -925,7 +991,8 @@ where
     let account_uuid = account.0;
     let anchor_height_arg = u32::from(anchor_height);
     let target_height_arg = u32::from(target_height);
-    let target_value_arg = u64::from(target_value);
+    let untrusted_floor_height_arg =
+        u32::from(target_height.saturating_sub(u32::from(confirmations_policy.untrusted())));
     let scanned_priority = priority_code(&ScanPriority::Scanned);
     let tip_unscanned_arg = i64::from(tip_unscanned);
     let min_value = u64::from(zip317::MARGINAL_FEE);
@@ -934,14 +1001,12 @@ where
         (":account_uuid", &account_uuid),
         (":anchor_height", &anchor_height_arg),
         (":target_height", &target_height_arg),
+        (":untrusted_floor_height", &untrusted_floor_height_arg),
         (":exclude", &excluded_ptr),
         (":scanned_priority", &scanned_priority),
         (":tip_unscanned", &tip_unscanned_arg),
         (":min_value", &min_value),
     ];
-    if selection == ValueSelection::Accumulate {
-        sql_params.push((":target_value", &target_value_arg));
-    }
     let selected_lock_tier = match selection {
         ValueSelection::SmallestFirst { lock_tier, .. } => Some(lock_tier),
         _ => None,
@@ -990,6 +1055,15 @@ where
         let tx_shielding_inputs_trusted = row.get::<_, bool>("min_shielding_input_trust")?;
         let witness_stabilized = row.get::<_, bool>("witness_stabilized")?;
         let value = Zatoshis::from_nonnegative_i64(row.get("value")?)?;
+        let tx_received_value = transfer_value_from_raw(row.get::<_, i64>("tx_received_value")?)?;
+        let shielding_inputs_value =
+            transfer_value_from_raw(row.get::<_, i64>("shielding_inputs_value")?)?;
+        let shielding_origin_value =
+            transfer_value_from_raw(row.get::<_, i64>("shielding_origin_value")?)?;
+        let transfer_value = tx_received_value
+            .max(value)
+            .max(shielding_inputs_value)
+            .max(shielding_origin_value);
         let lock_tier = row.get::<_, i64>("lock_tier")?;
         let note = to_spendable_note(params, protocol, row)?;
 
@@ -1002,6 +1076,7 @@ where
                 max_shielding_input_height,
                 tx_shielding_inputs_trusted,
                 witness_stabilized,
+                transfer_value,
             )
         }))
     })?;
@@ -1019,6 +1094,7 @@ where
             max_shielding_input_height,
             tx_shielding_inputs_trusted,
             witness_stabilized,
+            transfer_value,
         )) = result_maybe_note?
         else {
             continue;
@@ -1027,7 +1103,7 @@ where
         // A stabilized note was confirmed well beyond any reasonable confirmations policy at
         // stabilization time, so the confirmations check is trivially satisfied.
         let has_confirmations = witness_stabilized
-            || confirmations_policy.confirmations_until_spendable(
+            || confirmations_policy.confirmations_until_spendable_for_value(
                 target_height,
                 PoolType::Shielded(protocol),
                 Some(note.spending_key_scope()),
@@ -1035,6 +1111,7 @@ where
                 tx_trusted,
                 max_shielding_input_height,
                 tx_shielding_inputs_trusted,
+                transfer_value,
             ) == 0;
 
         if has_confirmations {
@@ -1076,6 +1153,12 @@ where
                 lock_tier,
             });
             match selection {
+                ValueSelection::Accumulate => {
+                    selected_value = (selected_value + value).ok_or(BalanceError::Overflow)?;
+                    if selected_value >= target_value {
+                        break;
+                    }
+                }
                 ValueSelection::LargestFirst => {
                     selected_value = (selected_value + value).ok_or(BalanceError::Overflow)?;
                     if selected_value >= target_value {
