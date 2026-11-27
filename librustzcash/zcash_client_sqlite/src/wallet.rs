@@ -4513,6 +4513,7 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
             enhancement_mode: None,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: *gap_limits,
+            defer_bulk_nullifier_prune: false,
         };
         match plan_tree_truncation(
             conn,
@@ -6317,26 +6318,30 @@ pub(crate) const BULK_NULLIFIER_PRUNE_THRESHOLD: i64 = 10_000;
 pub(crate) fn prune_nullifier_map(
     conn: &rusqlite::Transaction<'_>,
     block_height: BlockHeight,
+    defer_bulk: bool,
 ) -> Result<(), SqliteClientError> {
-    // Check if there is a massive post-restore backlog (> 10k rows). If so, defer to
+    // Check if there is a massive post-restore backlog (> 10k rows). When called from
+    // `WalletDb<C: BorrowMut<Connection>>::put_blocks` (`defer_bulk == true`), defer to
     // `bulk_prune_nullifier_map_truncate` right after `put_blocks` commits so SQLite can
     // use its O(pages) `OP_Clear` B-tree truncate instead of millions of random index deletes.
-    let mut stmt_count = conn.prepare_cached(
-        "SELECT count(*) FROM (
-            SELECT 1 FROM nullifier_map
-            WHERE block_height < :block_height
-            LIMIT :limit
-        )",
-    )?;
-    let stale_rows: i64 = stmt_count.query_row(
-        named_params![
-            ":block_height": u32::from(block_height),
-            ":limit": BULK_NULLIFIER_PRUNE_THRESHOLD + 1,
-        ],
-        |row| row.get(0),
-    )?;
-    if stale_rows > BULK_NULLIFIER_PRUNE_THRESHOLD {
-        return Ok(());
+    if defer_bulk {
+        let mut stmt_count = conn.prepare_cached(
+            "SELECT count(*) FROM (
+                SELECT 1 FROM nullifier_map
+                WHERE block_height < :block_height
+                LIMIT :limit
+            )",
+        )?;
+        let stale_rows: i64 = stmt_count.query_row(
+            named_params![
+                ":block_height": u32::from(block_height),
+                ":limit": BULK_NULLIFIER_PRUNE_THRESHOLD + 1,
+            ],
+            |row| row.get(0),
+        )?;
+        if stale_rows > BULK_NULLIFIER_PRUNE_THRESHOLD {
+            return Ok(());
+        }
     }
 
     // Delete from `nullifier_map` directly via `nf_map_locator_idx(block_height, tx_index)`
@@ -6358,23 +6363,44 @@ pub(crate) fn prune_nullifier_map(
 
 /// Fast post-commit bulk prune for large post-restore `nullifier_map` backlogs.
 ///
-/// Copies the small surviving `[block_height..]` window (~100 blocks), temporarily disables
-/// `foreign_keys` outside the transaction so SQLite compiles `DELETE FROM nullifier_map` and
+/// Re-reads `block_fully_scanned` inside `BEGIN IMMEDIATE` so a concurrent writer cannot rewind
+/// between computing the pruning cutoff and clearing the tables. Copies the small surviving
+/// `[cutoff..]` window (~100 blocks), temporarily disables `foreign_keys` outside the transaction
+/// (restored via an unwind-safe `Drop` guard) so SQLite compiles `DELETE FROM nullifier_map` and
 /// `DELETE FROM tx_locator_map` to `OP_Clear` B-tree truncates (~30x faster than deleting
 /// millions of rows through random-hash unique indexes), and re-inserts the surviving rows
-/// atomically before restoring `foreign_keys`.
-pub(crate) fn bulk_prune_nullifier_map_truncate(
+/// atomically before committing.
+pub(crate) fn bulk_prune_nullifier_map_truncate<P: consensus::Parameters>(
     conn: &mut rusqlite::Connection,
-    block_height: BlockHeight,
+    params: &P,
+    pruning_depth: u32,
 ) -> Result<bool, SqliteClientError> {
-    let cutoff = u32::from(block_height);
+    let Some(meta) = block_fully_scanned(conn, params)? else {
+        return Ok(false);
+    };
+    let initial_cutoff = u32::from(meta.block_height().saturating_sub(pruning_depth));
     let has_stale: bool = conn
         .prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM nullifier_map WHERE block_height < :block_height LIMIT 1)",
         )?
-        .query_row(named_params![":block_height": cutoff], |row| row.get(0))?;
+        .query_row(named_params![":block_height": initial_cutoff], |row| {
+            row.get(0)
+        })?;
     if !has_stale {
         return Ok(false);
+    }
+
+    struct RestoreForeignKeys<'a> {
+        conn: &'a mut rusqlite::Connection,
+        restore: bool,
+    }
+
+    impl Drop for RestoreForeignKeys<'_> {
+        fn drop(&mut self) {
+            if self.restore {
+                let _ = self.conn.execute_batch("PRAGMA foreign_keys = ON;");
+            }
+        }
     }
 
     let prev_fk: i64 = conn
@@ -6383,9 +6409,28 @@ pub(crate) fn bulk_prune_nullifier_map_truncate(
     if prev_fk != 0 {
         conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
     }
+    let fk_guard = RestoreForeignKeys {
+        conn,
+        restore: prev_fk != 0,
+    };
 
-    let result = (|| -> Result<(), SqliteClientError> {
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let pruned = {
+        let tx = fk_guard
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(meta) = block_fully_scanned(&tx, params)? else {
+            return Ok(false);
+        };
+        let cutoff = u32::from(meta.block_height().saturating_sub(pruning_depth));
+        let has_stale: bool = tx
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM nullifier_map WHERE block_height < :block_height LIMIT 1)",
+            )?
+            .query_row(named_params![":block_height": cutoff], |row| row.get(0))?;
+        if !has_stale {
+            return Ok(false);
+        }
+
         let keep_txl: Vec<(u32, u32, Vec<u8>)> = {
             let mut stmt = tx.prepare_cached(
                 "SELECT block_height, tx_index, txid
@@ -6432,15 +6477,11 @@ pub(crate) fn bulk_prune_nullifier_map_truncate(
         }
 
         tx.commit()?;
-        Ok(())
-    })();
+        true
+    };
 
-    if prev_fk != 0 {
-        let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
-    }
-
-    result?;
-    Ok(true)
+    drop(fk_guard);
+    Ok(pruned)
 }
 
 pub(crate) fn get_block_range(
@@ -9367,6 +9408,179 @@ mod tests {
             !is_change(&tx, pool),
             "an external-scope note must not be reclassified as change"
         );
+    }
+
+    #[test]
+    fn bulk_prune_nullifier_map_truncate_preserves_window_and_reclaims_pages() {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let tip = st.sapling_activation_height();
+        st.generate_block_at::<::sapling::zip32::DiversifiableFullViewingKey>(
+            tip,
+            BlockHash([0; 32]),
+            &[],
+            0,
+            0,
+            0,
+            false,
+        );
+        st.scan_cached_blocks(tip, 1);
+
+        let pruning_depth = u32::from(tip).saturating_sub(1).min(crate::PRUNING_DEPTH);
+        let cutoff = tip.saturating_sub(pruning_depth);
+        let stale_height = u32::from(cutoff) - 1;
+        let keep_height = u32::from(cutoff);
+
+        let stale_count: u32 = (super::BULK_NULLIFIER_PRUNE_THRESHOLD as u32) + 10;
+        let keep_count: u32 = 20;
+
+        let seed_rows = |conn: &mut Connection| {
+            let tx = conn.transaction().unwrap();
+            {
+                let mut ins_txl = tx
+                    .prepare(
+                        "INSERT INTO tx_locator_map (block_height, tx_index, txid)
+                         VALUES (?1, ?2, ?3)",
+                    )
+                    .unwrap();
+                let mut ins_nf = tx
+                    .prepare(
+                        "INSERT INTO nullifier_map (spend_pool, nf, block_height, tx_index)
+                         VALUES (?1, ?2, ?3, ?4)",
+                    )
+                    .unwrap();
+                for idx in 0..stale_count {
+                    let mut bytes = [0u8; 32];
+                    bytes[..4].copy_from_slice(&idx.to_le_bytes());
+                    bytes[4] = 1;
+                    ins_txl
+                        .execute(rusqlite::params![stale_height, idx, &bytes[..]])
+                        .unwrap();
+                    ins_nf
+                        .execute(rusqlite::params![2_i64, &bytes[..], stale_height, idx])
+                        .unwrap();
+                }
+                for idx in 0..keep_count {
+                    let mut bytes = [0u8; 32];
+                    bytes[..4].copy_from_slice(&idx.to_le_bytes());
+                    bytes[4] = 2;
+                    ins_txl
+                        .execute(rusqlite::params![keep_height, idx, &bytes[..]])
+                        .unwrap();
+                    ins_nf
+                        .execute(rusqlite::params![2_i64, &bytes[..], keep_height, idx])
+                        .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        };
+
+        let params = *st.network();
+        let conn = st.wallet_mut().conn_mut();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        let baseline_nf: i64 = conn
+            .query_row("SELECT count(*) FROM nullifier_map", [], |row| row.get(0))
+            .unwrap();
+        let baseline_txl: i64 = conn
+            .query_row("SELECT count(*) FROM tx_locator_map", [], |row| row.get(0))
+            .unwrap();
+        seed_rows(conn);
+
+        // With `defer_bulk = true`, >10k stale rows are deferred to post-commit bulk prune.
+        {
+            let tx = conn.transaction().unwrap();
+            super::prune_nullifier_map(&tx, cutoff, true).unwrap();
+            tx.commit().unwrap();
+        }
+        let after_defer: i64 = conn
+            .query_row("SELECT count(*) FROM nullifier_map", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            after_defer,
+            baseline_nf + i64::from(stale_count + keep_count)
+        );
+
+        let pages_before: i64 = conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap();
+
+        let pruned =
+            super::bulk_prune_nullifier_map_truncate(conn, &params, pruning_depth).unwrap();
+        assert!(pruned, "first bulk prune should reclaim stale rows");
+
+        // Foreign keys must be restored and intact.
+        let fk_enabled: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(fk_enabled, 1, "PRAGMA foreign_keys must be restored to ON");
+
+        let fk_violations: usize = {
+            let mut stmt = conn
+                .prepare("PRAGMA foreign_key_check(nullifier_map)")
+                .unwrap();
+            stmt.query_map([], |_| Ok(())).unwrap().count()
+        };
+        assert_eq!(fk_violations, 0);
+
+        let nf_remaining: i64 = conn
+            .query_row("SELECT count(*) FROM nullifier_map", [], |row| row.get(0))
+            .unwrap();
+        let nf_stale_remaining: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM nullifier_map WHERE block_height < ?1",
+                [u32::from(cutoff)],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let txl_remaining: i64 = conn
+            .query_row("SELECT count(*) FROM tx_locator_map", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(nf_stale_remaining, 0);
+        assert_eq!(nf_remaining, baseline_nf + i64::from(keep_count));
+        assert_eq!(txl_remaining, baseline_txl + i64::from(keep_count));
+
+        // Second call is a no-op once stale rows are gone.
+        assert!(!super::bulk_prune_nullifier_map_truncate(conn, &params, pruning_depth).unwrap());
+
+        // Incremental auto_vacuum must reclaim freed pages when drained.
+        let auto_vacuum: i64 = conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(auto_vacuum, 2);
+        {
+            let mut stmt = conn.prepare("PRAGMA incremental_vacuum").unwrap();
+            let mut rows = stmt.query([]).unwrap();
+            while let Some(_) = rows.next().unwrap() {}
+        }
+        let freelist_after: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+            .unwrap();
+        let pages_after: i64 = conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(freelist_after, 0);
+        assert!(
+            pages_after < pages_before,
+            "expected incremental_vacuum to shrink page_count ({pages_after} < {pages_before})"
+        );
+
+        // With `defer_bulk = false` (direct `SqlTransaction` caller), even >10k rows prune inline.
+        conn.execute("DELETE FROM nullifier_map", []).unwrap();
+        conn.execute("DELETE FROM tx_locator_map", []).unwrap();
+        seed_rows(conn);
+        {
+            let tx = conn.transaction().unwrap();
+            super::prune_nullifier_map(&tx, cutoff, false).unwrap();
+            tx.commit().unwrap();
+        }
+        let inline_remaining: i64 = conn
+            .query_row("SELECT count(*) FROM nullifier_map", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(inline_remaining, i64::from(keep_count));
     }
 }
 

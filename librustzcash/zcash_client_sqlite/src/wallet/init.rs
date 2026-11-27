@@ -1854,4 +1854,52 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn init_wallet_db_enables_incremental_auto_vacuum_after_wal() {
+        let data_file = NamedTempFile::new().unwrap();
+        let conn = Connection::open(data_file.path()).unwrap();
+        // Enable WAL before initializing the wallet schema, which allocates page 1
+        // with `auto_vacuum = NONE` and zero schema objects.
+        conn.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
+        let pre_av: i64 = conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(pre_av, 0);
+
+        let mut db_data =
+            WalletDb::from_connection(conn, Network::TestNetwork, test_clock(), test_rng());
+        init_wallet_db(&mut db_data, None).unwrap();
+
+        let post_av: i64 = db_data
+            .conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            post_av, 2,
+            "fresh database must be initialized with auto_vacuum = INCREMENTAL (2)"
+        );
+
+        // Simulate an existing non-empty legacy wallet with `auto_vacuum = NONE` and verify
+        // that re-running `init_wallet_db` does not rewrite it with a blocking full VACUUM.
+        db_data
+            .conn
+            .execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;")
+            .unwrap();
+        let legacy_av: i64 = db_data
+            .conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(legacy_av, 0);
+
+        init_wallet_db(&mut db_data, None).unwrap();
+        let after_reinit_av: i64 = db_data
+            .conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            after_reinit_av, 0,
+            "existing non-empty database must not have auto_vacuum altered"
+        );
+    }
 }
