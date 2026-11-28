@@ -24,7 +24,7 @@ use super::ironwood_received_notes;
 /// Adds Ironwood received notes to the `v_received_outputs` and `v_received_output_spends` views.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xa6ef40c7_050a_43c6_a4e2_2f034168c979);
 
-const DEPENDENCIES: &[Uuid] = &[ironwood_received_notes::MIGRATION_ID];
+pub(super) const DEPENDENCIES: &[Uuid] = &[ironwood_received_notes::MIGRATION_ID];
 
 pub(super) struct Migration;
 
@@ -176,7 +176,7 @@ mod tests {
         secrecy::Secret,
         tempfile::NamedTempFile,
         zcash_keys::keys::UnifiedSpendingKey,
-        zcash_protocol::consensus::Network,
+        zcash_protocol::{consensus::Network},
     };
 
     #[test]
@@ -224,8 +224,8 @@ mod tests {
                     )
                     .unwrap();
                     let ufvk = usk.to_unified_full_viewing_key();
-                    let ufvk_str = ufvk.encode(&network);
-                    let uivk_str = ufvk.to_unified_incoming_viewing_key().encode(&network);
+                    let ufvk_str = ufvk.encode(&network).unwrap();
+                    let uivk_str = ufvk.to_unified_incoming_viewing_key().encode(&network).unwrap();
                     db_data
                         .conn
                         .execute(
